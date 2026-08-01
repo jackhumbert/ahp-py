@@ -61,6 +61,11 @@ def _parse_args() -> argparse.Namespace:
         help="advertise a demo plugin/agent/skill/instruction/hook/MCP tree, named AHS*",
     )
     parser.add_argument(
+        "--elicit",
+        action="store_true",
+        help="make the echo agent stop and ask a question mid-turn (ADR 0005)",
+    )
+    parser.add_argument(
         "--sequence-file",
         metavar="PATH",
         help=(
@@ -89,6 +94,7 @@ async def _run() -> None:
             display_name=args.agent_name,
             model_name=args.model_name,
             customizations=args.customizations,
+            elicit=args.elicit,
         ),
         LoopbackSingleUserPolicy(),
         info=HostInfo(name="agent-host-server (demo)"),

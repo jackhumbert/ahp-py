@@ -23,6 +23,9 @@ __all__ = [
     "AgentSession",
     "AgentSessionContext",
     "DescribesSession",
+    "InputOutcome",
+    "InputQuestion",
+    "InputRequest",
     "ResumableAgentProvider",
     "SessionDescription",
     "TurnSink",
@@ -66,6 +69,51 @@ class UserMessage:
 
 
 @dataclass(frozen=True)
+class InputQuestion:
+    """One question in an :class:`InputRequest`.
+
+    ``kind`` is the protocol's own vocabulary -- ``text``, ``number``,
+    ``integer``, ``boolean``, ``single-select``, ``multi-select`` -- because
+    inventing a parallel one would only have to be mapped back. ``options`` is
+    required by the two select kinds and ignored otherwise.
+    """
+
+    id: str
+    kind: str
+    message: str
+    options: Sequence[Mapping[str, Any]] = ()
+    extra: Mapping[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class InputRequest:
+    """The agent needs a human before it can continue.
+
+    Either ``questions``, or a ``url`` for the user to review, or both.
+    """
+
+    message: str | None = None
+    url: str | None = None
+    questions: Sequence[InputQuestion] = ()
+
+
+@dataclass(frozen=True)
+class InputOutcome:
+    """How the user answered. Neutral by ADR 0003 -- not a wire action.
+
+    ``response`` is ``"accept"``, ``"decline"`` or ``"cancel"``. ``answers`` maps
+    a question id to its final answer, and is empty for anything but an accept.
+    """
+
+    response: str
+    answers: Mapping[str, Any] = field(default_factory=dict)
+
+    @property
+    def accepted(self) -> bool:
+        return self.response == "accept"
+
+
+@dataclass(frozen=True)
 class AgentSessionContext:
     session_uri: str
     chat_uri: str
@@ -97,6 +145,23 @@ class TurnSink(Protocol):
     async def tool_call_completed(self, call_id: str, result: Any = None) -> None: ...
 
     async def turn_failed(self, message: str) -> None: ...
+
+    async def request_input(self, request: InputRequest) -> InputOutcome:
+        """Ask a human, and **wait**. See ADR 0005.
+
+        The only method here that suspends. The answer arrives on whichever
+        connection the user happened to use -- not the one that started the turn
+        -- so it cannot be a return value from anything the caller controls.
+
+        Raises ``asyncio.CancelledError`` if the turn ends first, which is the
+        same way ordinary turn cancellation reaches a provider. An adapter that
+        already handles cancellation needs no new code for this.
+
+        A provider that awaits input nobody is watching will block its own turn
+        until it is cancelled. That is a real failure mode; it is bounded by the
+        turn, and `session/inputNeeded` makes it visible while it happens.
+        """
+        ...
 
 
 @runtime_checkable

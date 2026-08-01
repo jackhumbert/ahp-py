@@ -23,6 +23,7 @@ from typing import Any, Final
 from agent_host_server.core import errors
 from agent_host_server.core.channels import ROOT_URI
 from agent_host_server.core.connection import Connection
+from agent_host_server.core.pending import PendingRequests, RequestOutcome
 from agent_host_server.core.policy import Policy
 from agent_host_server.core.seq import FileSequence
 from agent_host_server.core.sequencer import Sequencer
@@ -73,6 +74,34 @@ _MAX_PAGE = 200
 _WORKING_DIRECTORY_ACTIONS: Final = frozenset(
     {"session/workingDirectorySet", "session/workingDirectoryRemoved"}
 )
+
+#: Client-dispatchable, and both name a request the host is suspended on.
+#: Upstream states their rejection rules in prose ("servers SHOULD reject...")
+#: and the reducers enforce none of them.
+_INPUT_ACTIONS: Final = frozenset({"chat/inputAnswerChanged", "chat/inputCompleted"})
+
+
+def _answers_of(state: Any, request_id: str) -> Mapping[str, Any]:
+    """The final answers on an input-request part, read from the reduced state.
+
+    The part is "both the live interaction and its durable record": drafts land
+    on it while the request is open and `chat/inputCompleted` overlays its own
+    answers onto them. Reading it after the reducer runs is the only way to see
+    the merge without re-implementing it.
+    """
+    if not isinstance(state, Mapping):
+        return {}
+    active = state.get("activeTurn")
+    parts = active.get("responseParts") if isinstance(active, Mapping) else None
+    for part in parts if isinstance(parts, list) else ():
+        if not isinstance(part, Mapping) or part.get("kind") != "inputRequest":
+            continue
+        request = part.get("request")
+        if not isinstance(request, Mapping) or request.get("id") != request_id:
+            continue
+        answers = request.get("answers")
+        return answers if isinstance(answers, Mapping) else {}
+    return {}
 
 
 def _encode_cursor(summary: Mapping[str, Any]) -> str:
@@ -161,6 +190,10 @@ class Host:
         self.sequencer = Sequencer(
             allocator=FileSequence(sequence_file) if sequence_file is not None else None
         )
+        #: Every provider request suspended on a client. ADR 0005 -- one
+        #: registry, so elicitation, tool confirmation and auth step-up cannot
+        #: each grow their own lifetime and cancellation rules.
+        self.pending = PendingRequests()
         self._sessions: dict[str, _Session] = {}
         self._connections: set[Connection] = set()
         self._background: set[asyncio.Task[None]] = set()
@@ -839,6 +872,14 @@ class Host:
                 return "no active turn to cancel"
             if action_type == "chat/turnStarted" and state.get("activeTurn") is not None:
                 return "a turn is already active"
+            if action_type in _INPUT_ACTIONS and not self.pending.is_open(action.get("requestId")):
+                # "Servers SHOULD reject client-dispatched input actions when no
+                # unresolved input-request part has the matching requestId."
+                # The reducers deliberately do not check this -- upstream states
+                # the rule in prose and leaves it to the host -- and without it a
+                # peer can answer a request that was never asked, or answer one
+                # twice and resolve a future the second time round.
+                return "no open input request with that id"
         return None
 
     async def _react(self, channel: str, action: Mapping[str, Any]) -> None:
@@ -848,12 +889,33 @@ class Host:
         if session is None:
             return
         if action_type == "chat/turnStarted":
-            runner = TurnRunner(self.sequencer, channel)
+            runner = TurnRunner(self.sequencer, channel, self.pending)
             session.turn = asyncio.create_task(self._run_turn(session, runner, action))
         elif action_type == "chat/turnCancelled" and session.turn is not None:
             session.turn.cancel()
             if session.agent_session is not None:
                 await session.agent_session.cancel("client cancelled")
+        elif action_type == "chat/inputCompleted":
+            # Resolved AFTER the reducer has applied the action (ADR 0005), so
+            # the provider and the state every client can see never disagree
+            # about whether the request was answered.
+            request_id = action.get("requestId")
+            if isinstance(request_id, str):
+                response = action.get("response")
+                self.pending.resolve(
+                    request_id,
+                    RequestOutcome(
+                        response=response if isinstance(response, str) else "cancel",
+                        # Read back out of state rather than off the action. The
+                        # reducer has already overlaid the action's `answers`
+                        # onto the drafts clients synchronised while the request
+                        # was open -- "a user can answer one question on client A
+                        # and another on client B" -- so the part now holds the
+                        # merged result and re-deriving it here could only get it
+                        # wrong.
+                        payload=_answers_of(self.sequencer.state_of(channel), request_id),
+                    ),
+                )
 
     async def _run_turn(
         self, session: _Session, runner: TurnRunner, action: Mapping[str, Any]

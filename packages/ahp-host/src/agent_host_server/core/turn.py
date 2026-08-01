@@ -17,19 +17,42 @@ import uuid
 from collections.abc import Mapping
 from typing import Any
 
+from agent_host_server.core.pending import PendingRequests
 from agent_host_server.core.sequencer import Sequencer
-from agent_host_server.provider.base import AgentSession, UserMessage
+from agent_host_server.provider.base import (
+    AgentSession,
+    InputOutcome,
+    InputRequest,
+    UserMessage,
+)
 
-__all__ = ["ActionTurnSink", "TurnRunner"]
+__all__ = ["ActionTurnSink", "TurnRunner", "turn_scope"]
+
+
+def turn_scope(channel: str, turn_id: str) -> str:
+    """The lifetime a suspended request is bound to (ADR 0005).
+
+    The turn, not the session and not the connection: a cancelled turn must free
+    everything waiting under it, and the connection that started the turn is
+    frequently not the one that answers.
+    """
+    return f"{channel}#{turn_id}"
 
 
 class ActionTurnSink:
     """A :class:`~agent_host_server.provider.base.TurnSink` that publishes actions."""
 
-    def __init__(self, sequencer: Sequencer, channel: str, turn_id: str) -> None:
+    def __init__(
+        self,
+        sequencer: Sequencer,
+        channel: str,
+        turn_id: str,
+        pending: PendingRequests | None = None,
+    ) -> None:
         self._sequencer = sequencer
         self._channel = channel
         self._turn_id = turn_id
+        self._pending = pending if pending is not None else PendingRequests()
         self._markdown_part_id: str | None = None
         self._reasoning_part_id: str | None = None
 
@@ -121,19 +144,61 @@ class ActionTurnSink:
             },
         )
 
+    async def request_input(self, request: InputRequest) -> InputOutcome:
+        """Publish an input request and suspend until a client resolves it.
+
+        The id is minted by the registry, never by the provider (ADR 0005) --
+        the provider names its questions, the host names the request.
+
+        Note the request is *parked before it is published*. Publishing first
+        would open a window where a very fast client could dispatch
+        `chat/inputCompleted` against a request the registry does not know
+        about yet, and the host would drop the answer.
+        """
+        parked = self._pending.open(turn_scope(self._channel, self._turn_id), "input")
+
+        wire: dict[str, Any] = {"id": parked.id}
+        if request.message is not None:
+            wire["message"] = request.message
+        if request.url is not None:
+            wire["url"] = request.url
+        if request.questions:
+            wire["questions"] = [
+                {
+                    **question.extra,
+                    "kind": question.kind,
+                    "id": question.id,
+                    "message": question.message,
+                    **({"options": list(question.options)} if question.options else {}),
+                }
+                for question in request.questions
+            ]
+
+        await self._sequencer.publish(
+            self._channel,
+            {"type": "chat/inputRequested", "turnId": self._turn_id, "request": wire},
+        )
+
+        outcome = await parked.future
+        answers = outcome.payload if isinstance(outcome.payload, Mapping) else {}
+        return InputOutcome(response=outcome.response, answers=answers)
+
 
 class TurnRunner:
     """Runs one turn: hand the message to the agent, publish what comes back."""
 
-    def __init__(self, sequencer: Sequencer, channel: str) -> None:
+    def __init__(
+        self, sequencer: Sequencer, channel: str, pending: PendingRequests | None = None
+    ) -> None:
         self._sequencer = sequencer
         self._channel = channel
+        self._pending = pending if pending is not None else PendingRequests()
 
     async def run(self, agent_session: AgentSession | None, started: Mapping[str, Any]) -> None:
         turn_id = started.get("turnId")
         if not isinstance(turn_id, str):
             return
-        sink = ActionTurnSink(self._sequencer, self._channel, turn_id)
+        sink = ActionTurnSink(self._sequencer, self._channel, turn_id, self._pending)
 
         if agent_session is None:
             await sink.turn_failed("no agent session")
@@ -150,6 +215,12 @@ class TurnRunner:
             if self._is_active(turn_id):
                 await sink.turn_failed(f"{type(exc).__name__}: {exc}")
             return
+        finally:
+            # ADR 0005: the turn is the scope. However this turn ended -- return,
+            # raise or cancellation -- nothing may still be parked under it, or
+            # the provider stays blocked on a future nobody will ever resolve
+            # and the chat sits in `InputNeeded` until the session is disposed.
+            self._pending.cancel_scope(turn_scope(self._channel, turn_id), "turn ended")
 
         # A provider that returns normally after being cancelled would otherwise
         # complete a turn a client already ended. The reducer would no-op on it,

@@ -15,6 +15,8 @@ from typing import Any
 from agent_host_server.provider.base import (
     AgentInfo,
     AgentSessionContext,
+    InputQuestion,
+    InputRequest,
     SessionDescription,
     TurnSink,
     UserMessage,
@@ -27,13 +29,31 @@ from agent_host_server.provider.demo_customizations import (
 __all__ = ["EchoProvider", "EchoSession"]
 
 
+def _selected(answer: Any) -> str | None:
+    """The chosen option id out of a `single-select` answer, or None.
+
+    Read defensively: the answer came off a client-dispatched action, and the
+    reducer stores whatever it was sent.
+    """
+    if not isinstance(answer, Mapping):
+        return None
+    value = answer.get("value")
+    return value if isinstance(value, str) else None
+
+
 class EchoSession:
     def __init__(
-        self, context: AgentSessionContext, *, delay: float = 0.0, customizations: bool = False
+        self,
+        context: AgentSessionContext,
+        *,
+        delay: float = 0.0,
+        customizations: bool = False,
+        elicit: bool = False,
     ) -> None:
         self.context = context
         self._delay = delay
         self._customizations = customizations
+        self._elicit = elicit
         self._cancelled = False
 
     async def describe(self) -> SessionDescription:
@@ -50,6 +70,34 @@ class EchoSession:
 
     async def send_user_message(self, message: UserMessage, sink: TurnSink) -> None:
         self._cancelled = False
+        if self._elicit:
+            # ADR 0005: the one sink method that suspends. The answer arrives on
+            # whichever client the user used, which may not be the one that sent
+            # this message -- so an adapter never sees a connection here.
+            outcome = await sink.request_input(
+                InputRequest(
+                    message="Echo it back how?",
+                    questions=[
+                        InputQuestion(
+                            id="style",
+                            kind="single-select",
+                            message="Style",
+                            options=[
+                                {"id": "plain", "label": "Plain"},
+                                {"id": "shout", "label": "SHOUTING"},
+                            ],
+                        )
+                    ],
+                )
+            )
+            if not outcome.accepted:
+                await sink.text_delta("(cancelled)")
+                return
+            style = _selected(outcome.answers.get("style"))
+            text = message.text.upper() if style == "shout" else message.text
+            await sink.text_delta(f"You said: {text}")
+            return
+
         for chunk in ("You said: ", message.text):
             if self._cancelled:
                 return
@@ -76,10 +124,12 @@ class EchoProvider:
         model_name: str = "Echo Model v1",
         delay: float = 0.0,
         customizations: bool = False,
+        elicit: bool = False,
         capabilities: Mapping[str, Any] | None = None,
     ) -> None:
         self._delay = delay
         self._customizations = customizations
+        self._elicit = elicit
         # `display_name` is what a client labels the agent with; `models` become
         # entries in VS Code's chat model picker (AgentHostLanguageModelProvider
         # reads them straight out of root state). They are deliberately different
@@ -102,4 +152,9 @@ class EchoProvider:
         return self._info
 
     async def create_session(self, context: AgentSessionContext) -> EchoSession:
-        return EchoSession(context, delay=self._delay, customizations=self._customizations)
+        return EchoSession(
+            context,
+            delay=self._delay,
+            customizations=self._customizations,
+            elicit=self._elicit,
+        )
