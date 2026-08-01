@@ -23,31 +23,23 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
-from agent_host_server.types.protocol import session_status_flags
+from agent_host_server.types.protocol import SessionStatus, session_status_flags
 from agent_host_server.types.wire import coalesce
 
 __all__ = ["session_reducer"]
 
 # ─── Status bits ─────────────────────────────────────────────────────────────
 #
-# Transcribed from `SessionStatus` in `channels-session/state.ts`. Deliberately
-# NOT bound to `types.protocol.SessionStatus`: its member names are rotated by
-# one position against upstream (it calls 1 `IN_PROGRESS`, 8 `ERROR`, 24
-# `IS_READ`, 32 `IS_ARCHIVED`, 64 `INPUT_NEEDED`, where upstream has 1 = Idle,
-# 2 = Error, 8 = InProgress, 24 = InputNeeded, 32 = IsRead, 64 = IsArchived).
-# The numbers below are the ones the reducer arithmetic depends on; only
-# `session_status_flags`, which is name-free, is imported from there.
+# `SessionStatus` is a bitset, not an enum. Note `INPUT_NEEDED` is a combination
+# -- `InProgress | (1 << 4)` -- so a session awaiting input is still in
+# progress, and the two cannot be compared by equality.
 
-#: `SessionStatus.InProgress` -- 1 << 3.
-_IN_PROGRESS = 1 << 3
-#: `SessionStatus.InputNeeded` -- (1 << 3) | (1 << 4). Implies `InProgress`.
-_INPUT_NEEDED = (1 << 3) | (1 << 4)
-#: `SessionStatus.IsRead` -- 1 << 5.
-_IS_READ = 1 << 5
-#: `SessionStatus.IsArchived` -- 1 << 6.
-_IS_ARCHIVED = 1 << 6
+_IN_PROGRESS = SessionStatus.IN_PROGRESS
+_INPUT_NEEDED = SessionStatus.INPUT_NEEDED
+_IS_READ = SessionStatus.IS_READ
+_IS_ARCHIVED = SessionStatus.IS_ARCHIVED
 #: Bitmask covering the mutually-exclusive activity bits (bits 0-4).
-_STATUS_ACTIVITY_MASK = (1 << 5) - 1
+_STATUS_ACTIVITY_MASK = SessionStatus.ACTIVITY_MASK
 
 _MCP_SERVER = "mcpServer"
 

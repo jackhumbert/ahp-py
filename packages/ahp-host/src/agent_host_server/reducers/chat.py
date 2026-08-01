@@ -25,7 +25,7 @@ from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
 from agent_host_server.reducers.clock import now_iso
-from agent_host_server.types.protocol import session_status_flags
+from agent_host_server.types.protocol import SessionStatus, session_status_flags
 from agent_host_server.types.wire import coalesce
 
 __all__ = ["chat_reducer"]
@@ -61,19 +61,16 @@ _TURN_ERROR = "error"
 
 _PENDING_MESSAGE_STEERING = "steering"
 
-# SessionStatus is a bitset, not an enum. Values from
-# `types/channels-session/state.ts`. Deliberately re-declared here: the named
-# constants on `types.protocol.SessionStatus` are rotated by one position
-# relative to upstream (IN_PROGRESS = 1 there, Idle = 1 upstream), so binding to
-# them would encode that discrepancy into the reducer.
-_STATUS_IDLE = 1
-_STATUS_ERROR = 1 << 1
-_STATUS_IN_PROGRESS = 1 << 3
-_STATUS_INPUT_NEEDED = (1 << 3) | (1 << 4)
-_STATUS_IS_READ = 1 << 5
+# SessionStatus is a bitset, not an enum. `INPUT_NEEDED` is a combination --
+# `InProgress | (1 << 4)` -- so a turn awaiting input is still in progress.
+_STATUS_IDLE = SessionStatus.IDLE
+_STATUS_ERROR = SessionStatus.ERROR
+_STATUS_IN_PROGRESS = SessionStatus.IN_PROGRESS
+_STATUS_INPUT_NEEDED = SessionStatus.INPUT_NEEDED
+_STATUS_IS_READ = SessionStatus.IS_READ
 
 #: Bitmask covering the mutually-exclusive activity bits (0-4).
-_STATUS_ACTIVITY_MASK = (1 << 5) - 1
+_STATUS_ACTIVITY_MASK = SessionStatus.ACTIVITY_MASK
 
 _NON_TERMINAL_BLOCKING = frozenset(
     {_PENDING_CONFIRMATION, _PENDING_RESULT_CONFIRMATION, _AUTH_REQUIRED}
