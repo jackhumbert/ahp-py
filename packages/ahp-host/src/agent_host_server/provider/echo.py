@@ -75,6 +75,8 @@ class EchoSession:
         self._confirm_tools = confirm_tools
         self._client_tools = client_tools
         self._cancelled = False
+        #: What a client has toggled, for tests and for the demo host's log.
+        self.toggled: dict[str, bool] = {}
 
     async def describe(self) -> SessionDescription:
         """Contribute a fully-populated customization tree, when asked to.
@@ -185,6 +187,15 @@ class EchoSession:
             )
         )
         await sink.text_delta(f"The client said: {result.value}")
+
+    async def customization_toggled(self, customization_id: str, enabled: bool) -> None:
+        """A client switched a customization on or off.
+
+        The reducer already updated state; this is how the AGENT finds out, so
+        a disabled skill actually stops being used. Recorded rather than acted
+        on here, because the echo agent has no behaviour to change.
+        """
+        self.toggled[customization_id] = enabled
 
     async def cancel(self, reason: str | None = None) -> None:
         self._cancelled = True

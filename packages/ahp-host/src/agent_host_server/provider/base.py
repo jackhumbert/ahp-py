@@ -28,11 +28,13 @@ __all__ = [
     "ConfigValue",
     "ConfiguresSessions",
     "DescribesSession",
+    "HandlesCustomizations",
     "InputOutcome",
     "InputQuestion",
     "InputRequest",
     "ResumableAgentProvider",
     "SessionDescription",
+    "SessionPublisher",
     "ToolConfirmation",
     "ToolConfirmationOutcome",
     "ToolResult",
@@ -183,6 +185,9 @@ class AgentSessionContext:
     model: str | None = None
     config: Mapping[str, Any] = field(default_factory=dict)
     resume_state: Mapping[str, Any] | None = None
+    #: Out-of-turn updates -- customizations, activity, bring-up progress. The
+    #: host supplies it; a provider may hold it for the life of the session.
+    publisher: SessionPublisher | None = None
     #: The client that created the session, if it published itself via
     #: `createSession.activeClient`. Only a starting point: clients come and go
     #: over the life of a session, and the authoritative list is
@@ -192,6 +197,52 @@ class AgentSessionContext:
     #: the client's process, so they are the one tool surface that needs no
     #: filesystem API on the host at all.
     client_tools: Sequence[Mapping[str, Any]] = ()
+
+
+@runtime_checkable
+class SessionPublisher(Protocol):
+    """Out-of-turn updates: things true of the *session*, not of one turn.
+
+    :class:`TurnSink` covers what an agent does while answering. This covers
+    what changes when it is not: a plugin was installed, an MCP server came up,
+    bring-up is still cloning a repository. A provider gets one on its
+    :class:`AgentSessionContext` and may call it at any time, including before
+    the first turn and after the last.
+    """
+
+    async def customizations_changed(
+        self,
+        customizations: Sequence[Mapping[str, Any]],
+        server_tools: Sequence[Mapping[str, Any]] | None = None,
+    ) -> None:
+        """Republish the session's customization tree. Full replacement."""
+        ...
+
+    async def activity_changed(self, activity: str | None) -> None:
+        """ "Human-readable description of what the session is currently doing."\""""
+        ...
+
+    async def progress(
+        self, progress: float, total: float | None = None, message: str | None = None
+    ) -> None:
+        """Report progress against the client's `createSession.progressToken`.
+
+        Ephemeral and never replayed. A no-op when the client supplied no token,
+        which is most of them -- so a provider can call it unconditionally.
+        """
+        ...
+
+
+@runtime_checkable
+class HandlesCustomizations(Protocol):
+    """An agent session that reacts to a client toggling a customization.
+
+    The reducer already flips `enabled` in state, so a client's toggle is
+    visible without this. What it cannot do is make the *agent* stop using a
+    disabled skill -- only the provider can, and only if it is told.
+    """
+
+    async def customization_toggled(self, customization_id: str, enabled: bool) -> None: ...
 
 
 @runtime_checkable

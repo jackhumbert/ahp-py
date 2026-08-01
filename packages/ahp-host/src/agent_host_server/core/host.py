@@ -38,6 +38,8 @@ from agent_host_server.provider.base import (
     ConfigRequest,
     ConfiguresSessions,
     DescribesSession,
+    HandlesCustomizations,
+    SessionPublisher,
 )
 from agent_host_server.reducers.clock import now_iso
 from agent_host_server.transport.base import Transport
@@ -157,6 +159,63 @@ def _decode_cursor(cursor: str) -> tuple[str, str]:
         raise errors.invalid_params("unrecognised pagination cursor") from None
 
 
+class _Publisher:
+    """The host's `SessionPublisher`: out-of-turn state, mapped to actions.
+
+    Held by the provider for the life of the session, so every method has to
+    tolerate the session having been disposed underneath it. `Sequencer.publish`
+    already answers `None` for a channel that no longer exists, so this is
+    naturally safe -- but `root/progress` goes through `notify`, which does not
+    reduce anything, so it is guarded by the token instead.
+    """
+
+    def __init__(self, host: Host, session: _Session, progress_token: str | None) -> None:
+        self._host = host
+        self._session = session
+        self._progress_token = progress_token
+
+    async def customizations_changed(
+        self,
+        customizations: Sequence[Mapping[str, Any]],
+        server_tools: Sequence[Mapping[str, Any]] | None = None,
+    ) -> None:
+        await self._host.sequencer.publish(
+            self._session.uri,
+            {"type": "session/customizationsChanged", "customizations": list(customizations)},
+        )
+        if server_tools is not None:
+            await self._host.sequencer.publish(
+                self._session.uri,
+                {"type": "session/serverToolsChanged", "tools": list(server_tools)},
+            )
+
+    async def activity_changed(self, activity: str | None) -> None:
+        action: dict[str, Any] = {"type": "session/activityChanged"}
+        if activity is not None:
+            action["activity"] = activity
+        await self._host.sequencer.publish(self._session.uri, action)
+        await self._host._mirror_summary(self._session)
+
+    async def progress(
+        self, progress: float, total: float | None = None, message: str | None = None
+    ) -> None:
+        # "Echoes the `progressToken` the client supplied on the originating
+        # request" -- with no token there is nothing to correlate to, so there is
+        # nothing to send. A provider may therefore call this unconditionally.
+        if self._progress_token is None:
+            return
+        params: dict[str, Any] = {
+            "channel": ROOT_URI,
+            "progressToken": self._progress_token,
+            "progress": progress,
+        }
+        if total is not None:
+            params["total"] = total
+        if message is not None:
+            params["message"] = message
+        await self._host.sequencer.notify(ROOT_URI, "root/progress", params)
+
+
 @dataclass(frozen=True)
 class HostInfo:
     """`InitializeResult.serverInfo`. Informational only; never feature-detect on it."""
@@ -181,6 +240,9 @@ class _Session:
     #: The summary the root channel was last told about. `root/sessionSummaryChanged`
     #: carries only fields that changed, so the host has to remember what it sent.
     published_summary: dict[str, Any] = field(default_factory=dict)
+    #: Handed to the provider, and kept here so the host can publish on the
+    #: session's behalf too.
+    publisher: SessionPublisher | None = None
 
     @property
     def annotations_uri(self) -> str:
@@ -865,6 +927,8 @@ class Host:
             title="New Session",
             created_at=created_at,
         )
+        token = params.get("progressToken")
+        session.publisher = _Publisher(self, session, token if isinstance(token, str) else None)
         self._sessions[channel] = session
 
         session_state: dict[str, Any] = {
@@ -925,6 +989,7 @@ class Host:
         try:
             active_client = _active_clients(params.get("activeClient"))
             context = AgentSessionContext(
+                publisher=session.publisher,
                 session_uri=session.uri,
                 chat_uri=session.chat_uri,
                 provider_id=session.provider_id,
@@ -1144,6 +1209,9 @@ class Host:
     async def _react(self, channel: str, action: Mapping[str, Any]) -> None:
         """Side effects a client action triggers on the agent."""
         action_type = action.get("type")
+        if action_type == "session/customizationToggled":
+            await self._react_to_toggle(channel, action)
+            return
         session = next((s for s in self._sessions.values() if s.chat_uri == channel), None)
         if session is None:
             return
@@ -1216,6 +1284,24 @@ class Host:
         for request_id in request_ids:
             with contextlib.suppress(Exception):
                 await self._retract_input_needed(session, request_id)
+
+    async def _react_to_toggle(self, channel: str, action: Mapping[str, Any]) -> None:
+        """Tell the provider a customization was switched on or off.
+
+        The reducer has already flipped `enabled` in state, so clients agree
+        without this. What they cannot do is stop the *agent* using a disabled
+        skill -- only the provider can, and only if it is told.
+        """
+        session = self._sessions.get(channel)
+        if session is None or not isinstance(session.agent_session, HandlesCustomizations):
+            return
+        customization_id = action.get("id")
+        if not isinstance(customization_id, str):
+            return
+        with contextlib.suppress(Exception):
+            await session.agent_session.customization_toggled(
+                customization_id, bool(action.get("enabled"))
+            )
 
     async def _run_turn(
         self, session: _Session, runner: TurnRunner, action: Mapping[str, Any]

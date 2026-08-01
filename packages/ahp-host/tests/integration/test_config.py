@@ -303,3 +303,104 @@ class TestSessionConfig:
         state = (await client.request("subscribe", {"channel": uri}))["result"]["snapshot"]["state"]
         assert state["config"]["values"]["prefix"] == "Heard:"
         assert state["config"]["values"].get("style") != "shout"
+
+
+class TestCustomizationsAndProgress:
+    """Session state that changes while nobody is taking a turn."""
+
+    async def test_a_toggle_reaches_the_agent(self) -> None:
+        """The reducer flips `enabled` in state on its own, so clients agree
+        without any host code. What they cannot do is stop the AGENT using a
+        disabled skill -- only the provider can, and only if it is told."""
+        host = Host(EchoProvider(customizations=True), LoopbackSingleUserPolicy())
+        try:
+            client = await _attach(host)
+            uri = "echo:/toggle-1"
+            await client.request("createSession", {"channel": uri, "provider": "echo"})
+            await client.collect(seconds=0.3)
+            await client.request("subscribe", {"channel": uri})
+
+            await client.notify(
+                "dispatchAction",
+                {
+                    "channel": uri,
+                    "clientSeq": 1,
+                    "action": {
+                        "type": "session/customizationToggled",
+                        "id": "ahs-skill-hotel",
+                        "enabled": False,
+                    },
+                },
+            )
+            await client.collect(seconds=0.4)
+
+            agent = host._sessions[uri].agent_session
+            assert getattr(agent, "toggled", {}) == {"ahs-skill-hotel": False}
+        finally:
+            await host.aclose()
+
+    async def test_a_provider_can_republish_customizations_out_of_turn(self) -> None:
+        host = Host(EchoProvider(), LoopbackSingleUserPolicy())
+        try:
+            client = await _attach(host)
+            uri = "echo:/publish-1"
+            await client.request("createSession", {"channel": uri, "provider": "echo"})
+            await client.collect(seconds=0.3)
+            await client.request("subscribe", {"channel": uri})
+
+            publisher = host._sessions[uri].publisher
+            assert publisher is not None
+            await publisher.customizations_changed(
+                [{"type": "plugin", "id": "late", "name": "Installed later"}]
+            )
+            await publisher.activity_changed("indexing")
+            await client.collect(seconds=0.3)
+
+            state = (await client.request("subscribe", {"channel": uri}))["result"]["snapshot"][
+                "state"
+            ]
+            assert [c["id"] for c in state["customizations"]] == ["late"]
+            assert state["activity"] == "indexing"
+        finally:
+            await host.aclose()
+
+    async def test_progress_is_correlated_to_the_clients_token(self) -> None:
+        host = Host(EchoProvider(), LoopbackSingleUserPolicy())
+        try:
+            client = await _attach(host)
+            uri = "echo:/progress-1"
+            await client.request(
+                "createSession",
+                {"channel": uri, "provider": "echo", "progressToken": "tok-7"},
+            )
+            await client.collect(seconds=0.3)
+            publisher = host._sessions[uri].publisher
+            assert publisher is not None
+            await publisher.progress(3, total=10, message="cloning")
+            await client.collect(seconds=0.3)
+
+            frames = [
+                n["params"] for n in client.notifications if n.get("method") == "root/progress"
+            ]
+            assert frames, "progress was never delivered"
+            assert frames[-1]["progressToken"] == "tok-7"
+            assert frames[-1]["progress"] == 3
+            assert frames[-1]["total"] == 10
+        finally:
+            await host.aclose()
+
+    async def test_progress_without_a_token_is_a_silent_no_op(self) -> None:
+        """Most clients send no token. A provider should not have to check."""
+        host = Host(EchoProvider(), LoopbackSingleUserPolicy())
+        try:
+            client = await _attach(host)
+            uri = "echo:/progress-2"
+            await client.request("createSession", {"channel": uri, "provider": "echo"})
+            await client.collect(seconds=0.3)
+            publisher = host._sessions[uri].publisher
+            assert publisher is not None
+            await publisher.progress(1)
+            await client.collect(seconds=0.2)
+            assert not [n for n in client.notifications if n.get("method") == "root/progress"]
+        finally:
+            await host.aclose()
