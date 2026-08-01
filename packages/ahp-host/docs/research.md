@@ -85,6 +85,117 @@ port validated against the fixture corpus at `spec/v0.7.0`. Ship root + session
 The installed 0.6.0 client's `SUPPORTED_PROTOCOL_VERSIONS` is
 `['0.6.0','0.5.2','0.5.1']`. It will never negotiate 0.7.0 or 0.8.0.
 
+### VS Code — the client that actually matters
+
+VS Code does **not** depend on the npm package. It vendors upstream's entire
+`types/` tree into `src/vs/platform/agentHost/common/state/protocol/`, pinned by
+a `.ahp-version` file.
+
+| Fact | Value |
+|---|---|
+| `.ahp-version` | `8e0a9bbf` → upstream commit `8e0a9bbf497e01d1868a2d4d990ae71c99684a9d` (2026-07-29), contained in `spec/v0.7.0` |
+| `PROTOCOL_VERSION` | **`0.7.0`** |
+| `SUPPORTED_PROTOCOL_VERSIONS` | **`['0.7.0', '0.6.0', '0.5.2', '0.5.1']`** |
+| VS Code version sampled | 1.132.0 (`main`) |
+
+Unlike `MultiHostClient` and `ahpx`, which each offer a **single** version, VS
+Code offers the **full list** — so it can negotiate down to any of four
+versions.
+
+**Connecting VS Code to a third-party host is a first-class, supported feature**
+— no extension required (`common/remoteAgentHostService.ts:92-107`):
+
+| Setting | Purpose |
+|---|---|
+| `chat.remoteAgentHostsEnabled` | enable remote agent host connections |
+| `chat.remoteAgentHosts` | the list of **WebSocket** remote agent host addresses |
+| `chat.remoteAgentHostsAutoConnect` | auto-connect configured hosts at startup |
+
+`RemoteAgentHostEntryType` is `websocket | ssh | wsl | tunnel | cloudSandbox`;
+the plain WebSocket entry is `{ type: 'websocket', address: string }`. Remote
+sessions get the URI scheme `remote-<authority>-<provider>`.
+
+#### The canonical host-side negotiation algorithm
+
+`common/state/protocol/version/negotiation.ts` — written by the reference host
+author, and directly portable:
+
+```ts
+isCompatibleProtocolVersion(offered, current):
+  majors must match
+  if major === 0, minors must also match     // every 0.x minor bump is breaking
+  offered MUST NOT be greater than current   // a 0.1.0 server can't claim 0.1.5
+
+negotiateProtocolVersion(offered[], current):
+  pick the HIGHEST compatible entry          // client preference order ignored
+  undefined ⇒ respond -32005
+```
+
+**Note the consequence:** this models a host that speaks exactly **one** MINOR.
+A host with `current = '0.7.0'` *rejects* an offered `0.6.0`. Supporting several
+MINORs at once requires holding a **set** of supported versions rather than a
+single `current` — a deliberate extension beyond the reference host. See
+§1a.
+
+#### Two VS Code-specific extras
+
+- **`_vscodeUpgrade`.** On `UnsupportedProtocolVersion`, VS Code reads
+  `_meta.vscodeUpgradeMethod` off the error's `data` to offer a one-click
+  "update server" action. It is for hosts spawned by the VS Code CLI; *"servers
+  without a managing CLI omit it"* (`common/state/protocolUpgrade.ts`). We omit
+  it. Returning a well-formed `-32005` with `UnsupportedProtocolVersionErrorData`
+  still renders a proper incompatibility message.
+- **VS Code's own local endpoint is a useful security precedent**
+  (`agentHost/LOCAL_ENDPOINT.md`): a WebSocket over a **Unix domain socket or
+  named pipe**, never a TCP port, with a random bearer `connectionToken` passed
+  as `?tkn=<token>` on the upgrade; wrong or missing token ⇒ **HTTP 403** during
+  the upgrade. Metadata lives in
+  `<userDataPath>/agent-host/local-endpoint/metadata.json`, user-restricted, and
+  is written only after the endpoint is listening. That is a good model for our
+  own default posture.
+
+**Caveat.** VS Code has its own client implementation (`agentSubscription.ts`,
+`sessionTransport.ts`), so the `MultiHostClient` hard requirements in §2a are
+*not* known to apply to it. Its real requirements have not been measured — see
+§11.
+
+### 1a. Can a host support multiple protocol versions?
+
+Yes, and for v0.1's scope it is nearly free. Measured from
+`registry-snapshot.json` (`actionIntroducedIn`), restricted to root/session/chat:
+
+| Introduced in | Actions |
+|---|---|
+| ≤ 0.5.1 | 52 |
+| 0.5.2 | `session/mcpServerStartRequested`, `session/mcpServerStopRequested` |
+| 0.6.0 | `chat/toolCallAuthRequired`, `chat/toolCallAuthResolved` |
+| 0.7.0 | `chat/workingDirectorySet`/`Removed`, `session/workingDirectorySet`/`Removed` |
+
+The entire 0.5.1 → 0.7.0 delta for our channels is **8 actions, all additive** —
+and **all 8 are outside the v0.1 scope** (MCP, step-up auth, multiroot). Every
+version from 0.4.0 up shares the same session/chat channel split, so there is
+**one state model** across the whole range.
+
+So the cost of multi-version support is:
+
+1. Hold a **set** of supported versions instead of a single `current`, and pick
+   the highest offered member of that set.
+2. An **outbound action filter** keyed on the negotiated version, driven by
+   `actionIntroducedIn` — data, not a hand-maintained table. This is exactly the
+   spec's rule that a host "only sends action types known to the negotiated
+   version".
+3. Per-version audit of **state shapes and command params**, which
+   `actionIntroducedIn` does *not* cover. This is the real cost, and it is why
+   the floor should not be pushed below 0.6.0 without a reason: 0.6.0 relocated
+   input requests into turn `responseParts`, so 0.5.x is a genuinely different
+   state model for elicitation.
+
+**Recommendation: support `{0.7.0, 0.6.0}`.** VS Code negotiates its preferred
+0.7.0; the npm client negotiates 0.6.0; both work against one host and one state
+model. Add 0.5.2/0.5.1 only if something real needs them — that buys `ahpx`,
+which offers a single version and is pinned to a version upstream has already
+dropped.
+
 ### The compatibility rule that makes this matter
 
 `docs/specification/versioning.md`: pre-1.0, two peers are compatible only when
@@ -112,19 +223,26 @@ outright that breaking changes may land in MINOR bumps.
 
 ### Recommendation
 
-**Target 0.6.0 as the primary negotiated version.** Rationale:
+**Support both `0.7.0` and `0.6.0`, preferring 0.7.0.**
 
-- It is the only version a currently-installable first-party client speaks.
-- It includes the chat-channel split (so the architecture is right) and step-up
-  auth (so the hardest lifecycle branch is designed in, even if v0.1 declines it).
-- Targeting 0.7.0/0.8.0 would produce a host with **zero** clients to test
-  against — the opposite of the project's purpose.
+- **0.7.0** is what **VS Code** speaks and prefers, and VS Code is the target
+  client. It is also the newest released spec.
+- **0.6.0** is what the installable npm client speaks, which keeps the CI
+  interop counterparty working.
+- The two share one state model, and the entire action delta between them is
+  two step-up-auth actions and four multiroot actions — all outside v0.1 scope
+  (§1a). Supporting both is close to free.
 
-Add `0.5.2` as a secondary target only if driving `ahpx` in CI proves valuable
-(§4); it is a genuinely separate implementation, not a subset.
+Do **not** target `0.8.0`: it is unreleased, and nothing speaks it.
 
-Track 0.7.0/0.8.0 as the next migration; the version registry
-(`registry-snapshot.json`, §5) makes the action-set delta machine-readable.
+Do not add 0.5.x for now. It buys only `ahpx`, which offers a single version,
+is pinned to `0.5.0` — a version upstream has already dropped from
+`SUPPORTED_PROTOCOL_VERSIONS` — and would drag in a second elicitation state
+model.
+
+An earlier draft of this document recommended 0.6.0 alone, on the evidence that
+no installable client spoke 0.7.0. That was correct about npm and wrong about
+the client that matters: VS Code vendors the types directly and speaks 0.7.0.
 
 ---
 

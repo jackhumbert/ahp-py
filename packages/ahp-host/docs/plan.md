@@ -82,10 +82,27 @@ The internal boundaries are enforced by an import-linter rule instead
 (`types` and `reducers` may not import `core`, `transport` or anything doing
 I/O), so the split remains cheap to perform later if a Python *client* appears.
 
-**Names.** `ahp-host` on PyPI (available; `ahp` and `pyahp` are taken by
-Analytic Hierarchy Process packages). Import name `ahp_host`. Adapters get their
-own distributions — `ahp-host-acp` first — so the core stays vendor-neutral and
-installable with no adapter. Reserve `ahp-types`, `ahp-ws`, `agent-host-protocol`.
+**Names.** Spelled out rather than abbreviated, because `ahp` and `pyahp` on
+PyPI are Analytic Hierarchy Process packages and the abbreviation is a real
+search collision.
+
+| Thing | Name | Note |
+|---|---|---|
+| PyPI distribution | **`agent-host-server`** | available |
+| import package | **`agent_host_server`** | |
+| GitHub repo | **`agent-host-server-py`** | the `-py` suffix disambiguates from the TypeScript/Go/Rust ecosystem |
+| first adapter | `agent-host-server-acp` | separate distribution |
+
+The repo name does **not** need to match the distribution name — plenty of
+projects differ, and PyPI has no opinion about it. The `-py` suffix is worth
+having on the repo (where it sits next to same-named projects in other
+languages) and worth omitting from the distribution (where the index is already
+Python-only and the suffix is noise).
+
+`agent-host-protocol` is also available and is the tidier name, but it describes
+the *protocol*, not a host — taking it would squat the name a future Python
+*client* or types package should have. Reserve it, and `agent-host-protocol-types`,
+without publishing.
 
 ---
 
@@ -175,13 +192,31 @@ schema's action list.
 
 ## 4. Versioning
 
-- **Wire version: `0.6.0`.** The only version an installable first-party client
-  negotiates. `SUPPORTED_PROTOCOL_VERSIONS = ['0.6.0']` initially.
-- Pre-1.0 compatibility is **per-MINOR**, so supporting another version means
-  implementing it, not widening a range. Each supported version is a separate
-  entry with its own action allow-list, derived from
-  `registry-snapshot.json.actionIntroducedIn` — so "only send actions known to
-  the negotiated version" is a data-driven check, not a hand-maintained table.
+- **Wire versions: `['0.7.0', '0.6.0']`, preferring 0.7.0.** VS Code — the
+  primary target client — vendors upstream's types directly and offers
+  `['0.7.0','0.6.0','0.5.2','0.5.1']`, preferring 0.7.0. The installable npm
+  client offers 0.6.0. Supporting both covers both.
+- Pre-1.0 compatibility is **per-MINOR**, so we hold a **set** of supported
+  versions, not a single `current`. This is a deliberate extension beyond the
+  reference host, whose `negotiateProtocolVersion` models exactly one MINOR
+  (`vscode/.../protocol/version/negotiation.ts`) — a host with `current='0.7.0'`
+  there would *reject* an offered `0.6.0`.
+- **Negotiation:** pick the highest offered version that is in our supported
+  set; `-32005` if the intersection is empty. Port the reference host's
+  `isCompatibleProtocolVersion` semantics for the within-MINOR check (majors
+  equal; for major 0, minors equal; offered ≤ ours).
+- **Outbound action filter** keyed on the negotiated version, driven by
+  `registry-snapshot.json.actionIntroducedIn` — so "only send action types known
+  to the negotiated version" is a data-driven check, not a hand-maintained
+  table. For v0.1 this filter has nothing to suppress: the entire 0.6.0→0.7.0
+  action delta for root/session/chat is two step-up-auth actions and four
+  multiroot actions, all outside scope.
+- **The real per-version cost is state shapes and command params**, which
+  `actionIntroducedIn` does not cover. 0.6.0 and 0.7.0 share one state model for
+  our channels; 0.5.x does not (it predates input requests moving into turn
+  `responseParts`). That is why the floor is 0.6.0.
+- We do **not** implement `_vscodeUpgrade`; it is for hosts spawned by the VS
+  Code CLI, and upstream says servers without a managing CLI omit it.
 - **Negotiation must be enforced by us.** The client does not verify the
   answer (measured, E3). No overlap ⇒ `UnsupportedProtocolVersion` (`-32005`)
   and close.
