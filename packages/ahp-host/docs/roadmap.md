@@ -219,7 +219,7 @@ of scope is out on the grounds in §10, not on consumer count.
 | Changeset phases 3–5 (host-side diffing, operations, review) | The memory model in §5 |
 | Auth phase 2 (0.6.0 step-up) | ✅ done — the "dead code until a consumer exists" argument was wrong, the same way it would have been wrong for elicitation |
 | The `resource*` write half | A **second, separate** opt-in on top of the read opt-in |
-| Server→client request direction | Its only consumer is client-published plugin ingestion |
+| Server→client request direction | ✅ done — and its "only consumer" is what makes a plugin's children render at all |
 | MCP server registry | Resolved: the PROVIDER supplies the stream. The protocol surface is implemented; the runtime is permanently out (§10). |
 | Telemetry (`ahp-otlp:`) | No consumer. VS Code discards traces and metrics |
 

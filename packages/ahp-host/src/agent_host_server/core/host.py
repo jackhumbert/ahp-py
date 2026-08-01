@@ -42,6 +42,7 @@ from agent_host_server.core.changesets import (
 from agent_host_server.core.channels import ROOT_URI
 from agent_host_server.core.config import RootConfig, type_matches
 from agent_host_server.core.connection import Connection
+from agent_host_server.core.outbound import OutboundRequests
 from agent_host_server.core.pending import PendingRequests, RequestOutcome
 from agent_host_server.core.policy import Policy
 from agent_host_server.core.resources import (
@@ -243,6 +244,59 @@ def _terminal_info(state: Any) -> dict[str, Any]:
         if key in state:
             info[key] = state[key]
     return info
+
+
+#: File suffix -> the customization type a plugin child of that shape becomes.
+#: Open Plugins' own layout; a suffix this host does not recognise is skipped
+#: rather than guessed at, because a mislabelled child renders in the wrong
+#: section and cannot be corrected by the client that published it.
+_CHILD_TYPES: Final = {
+    ".prompt.md": "prompt",
+    "skill.md": "skill",
+    ".agent.md": "agent",
+    ".instructions.md": "rule",
+    ".rule.md": "rule",
+}
+
+
+def _child_customization(
+    plugin: Mapping[str, Any], uri: str, name: str, content: bytes
+) -> dict[str, Any] | None:
+    """One child of a client-published plugin.
+
+    The id is namespaced under the plugin's, because ids are "session-unique"
+    and two clients may publish a plugin containing the same file name.
+    """
+    lowered = name.lower()
+    kind = next((value for suffix, value in _CHILD_TYPES.items() if lowered.endswith(suffix)), None)
+    if kind is None:
+        return None
+    try:
+        text = content.decode()
+    except UnicodeDecodeError:
+        return None
+    return {
+        "type": kind,
+        "id": f"{plugin.get('id')}/{name}",
+        "uri": uri,
+        "name": _title_of(text) or name,
+        "enabled": True,
+    }
+
+
+def _title_of(text: str) -> str | None:
+    """A markdown child's display name: its front-matter `name`, or its H1.
+
+    Read rather than invented, because the client wrote the file and the name
+    in it is the one a user will recognise.
+    """
+    for line in text.splitlines()[:20]:
+        stripped = line.strip()
+        if stripped.lower().startswith("name:"):
+            return stripped[5:].strip().strip("\"'") or None
+        if stripped.startswith("# "):
+            return stripped[2:].strip() or None
+    return None
 
 
 def _reducer_for_restored(uri: str, state: Mapping[str, Any], session_uri: str) -> str:
@@ -456,6 +510,9 @@ class _Session:
     #: Opaque provider state a previous run persisted. Round-tripped, never
     #: interpreted: only the provider knows what it means.
     resume_state: Mapping[str, Any] | None = None
+    #: `(plugin id, nonce)` pairs already expanded, so a republication with an
+    #: unchanged nonce does not cost a round trip per child file.
+    expanded_plugins: set[tuple[Any, Any]] = field(default_factory=set)
     #: Every chat this session owns, default included. A set rather than a
     #: single URI because `createChat` exists -- and because the summary rules
     #: aggregate across all of them, not just the default.
@@ -511,6 +568,10 @@ class Host:
         #: registry, so elicitation, tool confirmation and auth step-up cannot
         #: each grow their own lifetime and cancellation rules.
         self.pending = PendingRequests()
+        #: Requests the HOST initiates. `resource*` is symmetrical -- "MAY be
+        #: sent in either direction" -- and a client publishes plugin URIs that
+        #: only the client can read.
+        self.outbound = OutboundRequests()
         self._sessions: dict[str, _Session] = {}
         self._connections: set[Connection] = set()
         self._background: set[asyncio.Task[None]] = set()
@@ -704,23 +765,43 @@ class Host:
                     return
                 if self.wire_log is not None:
                     self.wire_log.record("c2s", message, connection.client_id or "?")
-                # Requests run as tasks so a slow one cannot block the next
-                # message on this connection. Notifications are handled inline,
-                # preserving per-channel arrival order for dispatchAction.
-                if "id" in message and "method" in message:
+                # `method` FIRST, and the order is not free-form: a request
+                # carries BOTH `method` and `id`, so testing `id` first routes
+                # every request into the response path -- which now matters,
+                # because the loop is full-duplex and responses arrive here too.
+                if "method" not in message:
+                    # Either a response to something this host asked for, or a
+                    # frame nobody can act on. `resolve` completes the future
+                    # inline: it does nothing else, and the method that was
+                    # waiting resumes on its own task.
+                    if not self.outbound.resolve(message, connection):
+                        # There is no reply that could carry the problem, and it
+                        # must not end the read loop -- invariant 17 covers
+                        # responses as much as notifications.
+                        _log.debug("dropping unmatched response frame")
+                    continue
+                if "id" in message:
+                    # Requests run as tasks so a slow one cannot block the next
+                    # message on this connection.
                     task = asyncio.create_task(self._handle_request(connection, message))
                     pending.add(task)
                     task.add_done_callback(pending.discard)
-                elif "method" in message:
-                    # A notification has no response, so a fault here has
-                    # nowhere to go -- and letting it escape would end the read
-                    # loop and drop a connection over one bad frame from an
-                    # untrusted peer.
-                    try:
-                        await self._handle_notification(connection, message)
-                    except Exception:
-                        _log.exception("notification handler failed: %s", message.get("method"))
+                    continue
+                # Notifications are handled inline, preserving per-channel
+                # arrival order for `dispatchAction`. A notification has no
+                # response, so a fault has nowhere to go -- and letting it
+                # escape would end the read loop, dropping a connection over one
+                # bad frame from an untrusted peer.
+                try:
+                    await self._handle_notification(connection, message)
+                except Exception:
+                    _log.exception("notification handler failed: %s", message.get("method"))
         finally:
+            # Before cancelling the tasks: a waiter that handles the error gets
+            # a real `AhpError` rather than a bare `CancelledError`. Also the
+            # registry holds a strong reference to the connection until this
+            # runs, which is the other reason it belongs here.
+            self.outbound.fail_connection(connection, "transport closed")
             for task in list(pending):
                 task.cancel()
             await self.sequencer.unsubscribe_all(connection)
@@ -1217,6 +1298,104 @@ class Host:
                 uri, str(destination), fail_if_exists=bool(params.get("failIfExists"))
             )
         return {}
+
+    # ─── the reverse direction ───────────────────────────────────────────
+
+    async def read_client_resource(self, connection: Connection, uri: str) -> bytes:
+        """Read a URI only the CLIENT can resolve.
+
+        `resource*` is symmetrical -- "MAY be sent in either direction" -- and
+        this is the direction that exists so a host can fetch client-published
+        content: a `virtual://my-client/...` plugin lives in the client's
+        memory and no filesystem here will ever find it.
+        """
+        result = await self.outbound.call(
+            connection,
+            "resourceRead",
+            {"channel": ROOT_URI, "uri": uri},
+            send=connection.enqueue,
+        )
+        data = result.get("data") if isinstance(result, Mapping) else None
+        if not isinstance(data, str):
+            raise errors.internal_error(f"client returned no content for {uri}")
+        if (result or {}).get("encoding") == _BASE64:
+            try:
+                return base64.b64decode(data, validate=True)
+            except (ValueError, binascii.Error) as exc:
+                raise errors.internal_error(f"client returned invalid base64 for {uri}") from exc
+        return data.encode()
+
+    async def list_client_resource(self, connection: Connection, uri: str) -> list[Any]:
+        result = await self.outbound.call(
+            connection,
+            "resourceList",
+            {"channel": ROOT_URI, "uri": uri},
+            send=connection.enqueue,
+        )
+        entries = result.get("entries") if isinstance(result, Mapping) else None
+        return entries if isinstance(entries, list) else []
+
+    async def expand_client_plugin(
+        self, connection: Connection, session_uri: str, plugin: Mapping[str, Any]
+    ) -> None:
+        """Parse a client-published plugin and surface it with its children.
+
+        This is why the reverse direction exists. A client "MAY synthesize a
+        virtual plugin in memory and rely on the host to expand it into concrete
+        children" -- and until the host does, the plugin renders as a container
+        with nothing in it, which is exactly what a client sees today from a
+        host that ignores `activeClient.customizations`.
+
+        Everything the client sent survives verbatim. ADR 0001's decisive
+        requirement is that the host is authoritative for state it replays to
+        clients NEWER than itself, so a parser that rebuilt the entry through
+        closed models would silently drop fields it does not know about -- and
+        the client that published them would get them back missing.
+        """
+        session = self._sessions.get(session_uri)
+        if session is None:
+            return
+        expanded = dict(plugin)
+        expanded["children"] = await self._plugin_children(connection, plugin)
+        # `customizationUpdated` upserts one container by id and replaces it
+        # entirely, children included -- there is no field-level merge and no
+        # per-child action, so the whole container goes every time.
+        await self.sequencer.publish(
+            session_uri,
+            {"type": "session/customizationUpdated", "customization": expanded},
+        )
+        await self._mirror_summary(session)
+
+    async def _plugin_children(
+        self, connection: Connection, plugin: Mapping[str, Any]
+    ) -> list[Any]:
+        """The children of a client-published plugin, read from the client.
+
+        A failure to read one child drops that child, not the plugin: a
+        half-expanded plugin is more use than none, and the alternative is that
+        one unreadable file hides every skill beside it.
+        """
+        uri = plugin.get("uri")
+        if not isinstance(uri, str):
+            return list(plugin.get("children") or [])
+
+        children: list[Any] = []
+        for entry in await self.list_client_resource(connection, uri):
+            if not isinstance(entry, Mapping):
+                continue
+            name = entry.get("name")
+            if not isinstance(name, str) or entry.get("type") != "file":
+                continue
+            child_uri = f"{uri.rstrip('/')}/{name}"
+            try:
+                content = await self.read_client_resource(connection, child_uri)
+            except Exception:
+                _log.debug("could not read client plugin child %s", child_uri)
+                continue
+            child = _child_customization(plugin, child_uri, name, content)
+            if child is not None:
+                children.append(child)
+        return children
 
     # ─── terminals ───────────────────────────────────────────────────────
 
@@ -2496,7 +2675,7 @@ class Host:
             )
 
         await self.sequencer.publish(channel, action, origin=origin)
-        await self._react(channel, action)
+        await self._react(channel, action, connection)
         session = self._session_for(channel)
         if session is not None:
             await self._mirror_summary(session)
@@ -2569,7 +2748,9 @@ class Host:
                 return "no open input request with that id"
         return None
 
-    async def _react(self, channel: str, action: Mapping[str, Any]) -> None:
+    async def _react(
+        self, channel: str, action: Mapping[str, Any], connection: Connection | None = None
+    ) -> None:
         """Side effects a client action triggers on the agent."""
         action_type = action.get("type")
         if action_type == "session/customizationToggled":
@@ -2577,6 +2758,9 @@ class Host:
             return
         if action_type in _MCP_LIFECYCLE_ACTIONS:
             await self._react_to_mcp(channel, action)
+            return
+        if action_type == "session/activeClientSet" and connection is not None:
+            await self._react_to_active_client(connection, channel, action)
             return
         if action_type in ("terminal/input", "terminal/resized"):
             # Before the session lookup: a terminal channel belongs to no
@@ -2676,6 +2860,61 @@ class Host:
                 cols, rows = action.get("cols"), action.get("rows")
                 if isinstance(cols, int) and isinstance(rows, int):
                     await terminal.process.resize(cols, rows)
+
+    async def _react_to_active_client(
+        self, connection: Connection, channel: str, action: Mapping[str, Any]
+    ) -> None:
+        """Expand any plugins the client just published.
+
+        Done here rather than at `createSession` because a client re-publishes
+        as its workspace changes -- "this is also how a client updates its
+        published tools or customizations: re-dispatch with the full, updated
+        entry" -- and `nonce` exists precisely so a host can tell one
+        publication from the next.
+
+        Expansion runs detached: it makes requests back to the client, and
+        awaiting them inline would block this connection's notification handler
+        on a response that can only arrive through the same read loop.
+        """
+        if channel not in self._sessions:
+            return
+        entry = action.get("activeClient")
+        published = entry.get("customizations") if isinstance(entry, Mapping) else None
+        for plugin in published if isinstance(published, list) else ():
+            if not isinstance(plugin, Mapping) or plugin.get("type") != "plugin":
+                continue
+            if self._already_expanded(channel, plugin):
+                continue
+            self._spawn(self._expand_quietly(connection, channel, plugin))
+
+    def _already_expanded(self, session_uri: str, plugin: Mapping[str, Any]) -> bool:
+        """Whether this exact publication has been expanded before.
+
+        `nonce` is "an opaque version token used by the host to detect changes",
+        so a republication with an unchanged nonce is the same plugin and
+        re-reading every child of it would be a round trip per file for nothing.
+        """
+        session = self._sessions.get(session_uri)
+        if session is None:
+            return False
+        identity = (plugin.get("id"), plugin.get("nonce"))
+        if identity in session.expanded_plugins:
+            return True
+        session.expanded_plugins.add(identity)
+        return False
+
+    async def _expand_quietly(
+        self, connection: Connection, session_uri: str, plugin: Mapping[str, Any]
+    ) -> None:
+        """A client that cannot serve its own plugin is not an error here.
+
+        It published something it could not back up, which is its problem; the
+        session carries on without those children rather than failing anything.
+        """
+        try:
+            await self.expand_client_plugin(connection, session_uri, plugin)
+        except Exception:
+            _log.debug("could not expand client plugin %s", plugin.get("id"))
 
     async def _react_to_mcp(self, channel: str, action: Mapping[str, Any]) -> None:
         """Route a client's start/stop request to whoever owns the runtime.

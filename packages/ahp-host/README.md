@@ -161,10 +161,19 @@ content and tool results all come off the wire. `serverSeq` survives too, which
 matters more than it sounds: the reference client records it with a *maximum*,
 so a counter that restarts at zero can never replay again.
 
+**Client-published plugins are expanded.** `resource*` is symmetrical, and the
+reverse direction exists so a host can fetch content only the client has — a
+`virtual://my-client/...` plugin lives in the client's memory and no filesystem
+here will find it. The host reads it back and publishes the children, which is
+what makes a plugin's skills, prompts and instructions render rather than
+appearing as an empty container.
+
 ### Not implemented
 
-The MCP channel · 0.6.0 step-up auth · the server→client direction of
-`resource*` (its only consumer is ingesting client-published plugins).
+Nothing in the protocol. What is deliberately absent is listed in
+[`docs/roadmap.md`](docs/roadmap.md) §10 and is absent on doctrine, not on
+effort: an MCP client runtime, a PTY backend in this distribution, anything git,
+built-in changeset operations, model routing.
 
 **No command answers `MethodNotFound` any more.** That used to be how this host
 declined a feature, since AHP has no server capability object. Every method is
