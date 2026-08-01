@@ -196,10 +196,10 @@ Ordered by whether a real consumer exists, not by protocol completeness.
 | Multi-chat: `createChat`/`disposeChat`, chat catalogue, `AgentCapabilities` | The only item that changes the host's data model (`_Session.chat_uri` → a dict) |
 | Elicitation | ADR 0005 |
 | Changeset phases 3–5 (host-side diffing, operations, review) | The memory model in §5 |
-| Auth phase 2 (0.6.0 step-up) | A provider that actually fronts MCP servers. Dead code until then |
+| Auth phase 2 (0.6.0 step-up) | ✅ done — the "dead code until a consumer exists" argument was wrong, the same way it would have been wrong for elicitation |
 | The `resource*` write half | A **second, separate** opt-in on top of the read opt-in |
 | Server→client request direction | Its only consumer is client-published plugin ingestion |
-| MCP server registry | The unresolved question in §9.3 |
+| MCP server registry | Resolved: the PROVIDER supplies the stream. The protocol surface is implemented; the runtime is permanently out (§10). |
 | Telemetry (`ahp-otlp:`) | No consumer. VS Code discards traces and metrics |
 
 ---

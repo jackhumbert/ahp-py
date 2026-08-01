@@ -22,6 +22,7 @@ __all__ = [
     "AgentProvider",
     "AgentSession",
     "AgentSessionContext",
+    "AuthChallenge",
     "ClientToolCall",
     "Completes",
     "CompletionItem",
@@ -35,6 +36,7 @@ __all__ = [
     "InputOutcome",
     "InputQuestion",
     "InputRequest",
+    "ManagesMcpServers",
     "ResumableAgentProvider",
     "SessionDescription",
     "SessionPublisher",
@@ -235,6 +237,18 @@ class SessionPublisher(Protocol):
         """ "Human-readable description of what the session is currently doing."\""""
         ...
 
+    async def mcp_server_changed(
+        self, customization_id: str, state: Mapping[str, Any], channel: str | None = None
+    ) -> None:
+        """Report an MCP server's lifecycle.
+
+        `state` is the protocol's discriminated union on `kind` --
+        ``starting``, ``ready``, ``stopped``, ``authRequired``, ``error``.
+        Full replacement of both runtime fields: omitting `channel` clears an
+        existing one, which is what the reducer does with an absent value.
+        """
+        ...
+
     async def progress(
         self, progress: float, total: float | None = None, message: str | None = None
     ) -> None:
@@ -244,6 +258,52 @@ class SessionPublisher(Protocol):
         which is most of them -- so a provider can call it unconditionally.
         """
         ...
+
+
+@dataclass(frozen=True)
+class AuthChallenge:
+    """An upstream service refused the agent, mid-tool-call.
+
+    `reason` is the protocol's own vocabulary -- ``unauthorized`` when there is
+    no token at all, ``insufficientScope`` when there is one and it does not
+    reach far enough. `required_scopes` is authoritative for the next
+    authorization request: clients "MUST NOT assume any subset/superset
+    relationship" to what the resource advertises.
+    """
+
+    resource: Mapping[str, Any]
+    reason: str = "unauthorized"
+    required_scopes: Sequence[str] = ()
+    oauth_client: Mapping[str, Any] | None = None
+
+    def to_wire(self) -> dict[str, Any]:
+        wire: dict[str, Any] = {"reason": self.reason, "resource": dict(self.resource)}
+        if self.required_scopes:
+            wire["requiredScopes"] = list(self.required_scopes)
+        if self.oauth_client is not None:
+            wire["oauthClient"] = dict(self.oauth_client)
+        return wire
+
+
+@runtime_checkable
+class ManagesMcpServers(Protocol):
+    """A provider that fronts MCP servers and can start and stop them.
+
+    **The provider owns the runtime, not the host.** Spawning a process,
+    speaking stdio or HTTP, `tools/list`, restart-on-crash -- all of that lives
+    in the agent harness the host wraps, and upstream's own doctrine puts it
+    there ("the agent host's job is to normalize whatever the harness
+    exposes"). What the host owns is the *state*: publishing the server, its
+    lifecycle, and routing a client's start/stop request to whoever can honour
+    it.
+
+    That split is why this library spawns nothing. A host-side MCP client would
+    be process execution smuggled in behind a customization.
+    """
+
+    async def start_mcp_server(self, customization_id: str) -> None: ...
+
+    async def stop_mcp_server(self, customization_id: str) -> None: ...
 
 
 @runtime_checkable
@@ -301,6 +361,20 @@ class TurnSink(Protocol):
         **Use the returned `tool_input`, not the one you proposed.** A client
         may edit the parameters before approving when `editable` is set, and
         running the original would execute something nobody agreed to.
+        """
+        ...
+
+    async def request_authentication(self, call_id: str, challenge: AuthChallenge) -> None:
+        """Pause a running tool call until a client pushes a credential. Suspends.
+
+        The 0.6.0 step-up flow: the agent got partway through a tool call, the
+        upstream service said "not with that token", and the turn stays open
+        while a human goes and gets one. Same primitive as everything else that
+        waits (ADR 0005), so a cancelled turn frees it.
+
+        Returns when the token has arrived and been recorded. The provider then
+        retries whatever it was doing -- the host does not retry on its behalf,
+        because only the provider knows what the call was.
         """
         ...
 

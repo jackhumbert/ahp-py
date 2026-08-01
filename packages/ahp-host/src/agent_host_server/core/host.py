@@ -87,6 +87,7 @@ from agent_host_server.provider.base import (
     ConfiguresSessions,
     DescribesSession,
     HandlesCustomizations,
+    ManagesMcpServers,
     SessionPublisher,
 )
 from agent_host_server.reducers.clock import now_iso
@@ -132,6 +133,12 @@ _WORKING_DIRECTORY_ACTIONS: Final = frozenset(
 #: Upstream states their rejection rules in prose ("servers SHOULD reject...")
 #: and the reducers enforce none of them.
 _INPUT_ACTIONS: Final = frozenset({"chat/inputAnswerChanged", "chat/inputCompleted"})
+
+#: Client-dispatchable. The reducer moves the customization's state; only the
+#: provider can move the actual server, because only the provider has one.
+_MCP_LIFECYCLE_ACTIONS: Final = frozenset(
+    {"session/mcpServerStartRequested", "session/mcpServerStopRequested"}
+)
 
 #: Client-dispatchable, and each resolves a tool call the host is suspended on.
 #: The protocol's own validation table conditions `chat/toolCallConfirmed` on
@@ -355,6 +362,41 @@ class _Publisher:
         if activity is not None:
             action["activity"] = activity
         await self._host.sequencer.publish(self._session.uri, action)
+        await self._host._mirror_summary(self._session)
+
+    async def mcp_server_changed(
+        self, customization_id: str, state: Mapping[str, Any], channel: str | None = None
+    ) -> None:
+        action: dict[str, Any] = {
+            "type": "session/mcpServerStateChanged",
+            "id": customization_id,
+            "state": dict(state),
+        }
+        if channel is not None:
+            action["channel"] = channel
+        await self._host.sequencer.publish(self._session.uri, action)
+        # An MCP server that needs a credential is something a human has to act
+        # on, so it is surfaced at the session level like any other blocked
+        # thing -- otherwise the only sign is a customization badge nobody is
+        # looking at.
+        if state.get("kind") == "authRequired":
+            await self._host.sequencer.publish(
+                self._session.uri,
+                {
+                    "type": "session/inputNeededSet",
+                    "request": {
+                        "kind": "toolAuthentication",
+                        "id": f"mcp:{customization_id}",
+                        "chat": self._session.chat_uri,
+                        "toolCall": {"toolCallId": customization_id, "status": "authRequired"},
+                    },
+                },
+            )
+        else:
+            await self._host.sequencer.publish(
+                self._session.uri,
+                {"type": "session/inputNeededRemoved", "id": f"mcp:{customization_id}"},
+            )
         await self._host._mirror_summary(self._session)
 
     async def progress(
@@ -1384,6 +1426,7 @@ class Host:
             [s for s in raw_scopes if isinstance(s, str)] if isinstance(raw_scopes, list) else None
         )
         self.tokens.push(resource, token, scopes=scopes, client_id=connection.client_id)
+        await self._resolve_auth_challenges(resource)
         # The resource, never the token. `AuditEvent` carries identifiers only,
         # and a credential in an audit record is a credential on disk.
         self._audit("auth.accepted", connection, detail={"resource": resource})
@@ -1391,6 +1434,19 @@ class Host:
         # says `{authenticated: boolean}`; the wire handler returns `{}`, and the
         # spec agrees with the wire.
         return {}
+
+    async def _resolve_auth_challenges(self, resource: str) -> None:
+        """Wake every tool call that was paused waiting for this credential.
+
+        Resolved on the `authenticate` command rather than on an action, which
+        is what makes step-up different from every other suspended request here:
+        the resolution arrives as a COMMAND, not through `dispatchAction`. The
+        registry does not care -- that is the point of having one.
+        """
+        for request_id in list(self.pending.ids_of_kind("auth")):
+            if self.pending.resolve(request_id, RequestOutcome("accept", {"resource": resource})):
+                for session in self._sessions.values():
+                    await self._retract_input_needed(session, request_id)
 
     def require_auth(self) -> None:
         """Raise `-32007` if anything the agent needs is still unauthenticated.
@@ -2519,6 +2575,9 @@ class Host:
         if action_type == "session/customizationToggled":
             await self._react_to_toggle(channel, action)
             return
+        if action_type in _MCP_LIFECYCLE_ACTIONS:
+            await self._react_to_mcp(channel, action)
+            return
         if action_type in ("terminal/input", "terminal/resized"):
             # Before the session lookup: a terminal channel belongs to no
             # session's chat set, so anything after that lookup is unreachable
@@ -2617,6 +2676,27 @@ class Host:
                 cols, rows = action.get("cols"), action.get("rows")
                 if isinstance(cols, int) and isinstance(rows, int):
                     await terminal.process.resize(cols, rows)
+
+    async def _react_to_mcp(self, channel: str, action: Mapping[str, Any]) -> None:
+        """Route a client's start/stop request to whoever owns the runtime.
+
+        The reducer already moves the customization to `starting`/`stopped`, so
+        every client agrees on the intent without this. What it cannot do is
+        make the server actually start -- the provider owns the process, and
+        this host spawns nothing (see `ManagesMcpServers`).
+        """
+        session = self._sessions.get(channel)
+        if session is None or not isinstance(session.agent_session, ManagesMcpServers):
+            return
+        customization_id = action.get("id")
+        if not isinstance(customization_id, str):
+            return
+        starting = action.get("type") == "session/mcpServerStartRequested"
+        with contextlib.suppress(Exception):
+            if starting:
+                await session.agent_session.start_mcp_server(customization_id)
+            else:
+                await session.agent_session.stop_mcp_server(customization_id)
 
     async def _react_to_toggle(self, channel: str, action: Mapping[str, Any]) -> None:
         """Tell the provider a customization was switched on or off.

@@ -21,6 +21,7 @@ from agent_host_server.core.pending import PendingRequest, PendingRequests
 from agent_host_server.core.sequencer import Sequencer
 from agent_host_server.provider.base import (
     AgentSession,
+    AuthChallenge,
     ClientToolCall,
     InputOutcome,
     InputRequest,
@@ -243,6 +244,46 @@ class ActionTurnSink:
         # something nobody agreed to.
         edited = payload.get("toolInput", call.tool_input)
         return ToolConfirmationOutcome(approved=outcome.response == "accept", tool_input=edited)
+
+    async def request_authentication(self, call_id: str, challenge: AuthChallenge) -> None:
+        """Pause a tool call on an auth challenge, and suspend until it clears.
+
+        The server-level and tool-call-level challenges "remain separate on
+        purpose: the server saying 'I need auth' and a tool invocation saying 'I
+        am waiting on that auth' are different facts that can be true
+        independently." This is the second one -- it pauses one call, and says
+        nothing about the MCP server's own state.
+        """
+        parked = self._pending.open(
+            turn_scope(self._channel, self._turn_id), "auth", key=f"auth:{call_id}"
+        )
+        await self._sequencer.publish(
+            self._channel,
+            {
+                "type": "chat/toolCallAuthRequired",
+                "turnId": self._turn_id,
+                "toolCallId": call_id,
+                "auth": challenge.to_wire(),
+            },
+        )
+        await self._mirror_input_needed(
+            parked.id,
+            {
+                "kind": "toolAuthentication",
+                "turnId": self._turn_id,
+                "toolCall": {"toolCallId": call_id, "status": "authRequired"},
+            },
+        )
+        await parked.future
+        # Back to `running`, "preserving the fields it had before pausing".
+        await self._sequencer.publish(
+            self._channel,
+            {
+                "type": "chat/toolCallAuthResolved",
+                "turnId": self._turn_id,
+                "toolCallId": call_id,
+            },
+        )
 
     async def run_client_tool(self, call: ClientToolCall) -> ToolResult:
         """Ask a client to execute one of its own tools, and suspend.

@@ -99,6 +99,16 @@ class PendingRequests:
             return None
         return self._by_key.get(key)
 
+    def ids_of_kind(self, kind: str) -> list[str]:
+        """Every live request of one kind.
+
+        Step-up auth needs this: its resolution arrives as the `authenticate`
+        COMMAND rather than through `dispatchAction`, so there is no action
+        carrying a request id to look up -- the host knows only the resource,
+        and has to find whoever was waiting on it.
+        """
+        return [rid for rid, request in self._by_id.items() if request.kind == kind]
+
     def get(self, request_id: str) -> PendingRequest | None:
         return self._by_id.get(request_id)
 
