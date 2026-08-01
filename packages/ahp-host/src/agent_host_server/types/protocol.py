@@ -64,14 +64,24 @@ ROOT_CHANNEL: Final = "ahp-root://"
 
 
 class SessionStatus:
-    """Named bits. Values outside this set are legal and must round-trip."""
+    """Named bits, from ``types/channels-session/state.ts``.
 
-    IN_PROGRESS: Final = 1
-    IDLE: Final = 2
-    ERROR: Final = 8
-    IS_READ: Final = 24
-    IS_ARCHIVED: Final = 32
-    INPUT_NEEDED: Final = 64
+    Values outside this set are legal and must round-trip. Note ``INPUT_NEEDED``
+    is a *combination* -- ``(1 << 3) | (1 << 4)`` -- so it shares a bit with
+    ``IN_PROGRESS``; a turn awaiting input is still in progress. Test against
+    these with bitwise checks, never equality.
+    """
+
+    IDLE: Final = 1  # 1 << 0
+    ERROR: Final = 2  # 1 << 1
+    IN_PROGRESS: Final = 8  # 1 << 3
+    INPUT_NEEDED: Final = 24  # (1 << 3) | (1 << 4)
+    IS_READ: Final = 32  # 1 << 5
+    IS_ARCHIVED: Final = 64  # 1 << 6
+
+    #: The low five bits are the activity portion the reducers rewrite
+    #: wholesale; the flags above it are sticky.
+    ACTIVITY_MASK: Final = (1 << 5) - 1
 
     MASK: Final = 0xFFFFFFFF
 

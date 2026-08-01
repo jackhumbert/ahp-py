@@ -29,10 +29,15 @@ dependencies = []
 ws = ["websockets>=13"]
 dev = [
   "pytest>=8",
+  "anyio>=4",
+  "websockets>=13",
   "mypy>=1.11",
   "ruff>=0.6",
   "import-linter>=2",
 ]
+
+[project.scripts]
+agent-host-server = "agent_host_server.__main__:main"
 
 [project.urls]
 Homepage = "https://github.com/jackhumbert/agent-host-server-py"
@@ -64,10 +69,15 @@ select = ["E", "F", "W", "I", "N", "UP", "B", "A", "C4", "PT", "RET", "SIM", "TI
 ignore = [
   # The protocol's own field names are camelCase; mirroring them is correct.
   "N815",
+  # Protocol callbacks have fixed signatures; unused parameters are the point.
+  "ARG002",
 ]
 
 [tool.ruff.lint.per-file-ignores]
 "src/agent_host_server/types/_generated.py" = ["E501"]
+# TransportClosed signals end-of-stream, not a fault; the Error suffix would mislead.
+"src/agent_host_server/transport/base.py" = ["N818"]
+"tests/**" = ["RUF059"]
 
 [tool.ruff.format]
 # The generator is the sole authority on this file's content; formatting it
@@ -86,11 +96,14 @@ name = "Layered: protocol core must not depend on runtime"
 type = "layers"
 # Parenthesised layers are optional, so the contract holds while the lower
 # layers are still being built out (docs/plan.md §11).
+# `core` depends on the transport *abstraction* (Host.serve takes one) while
+# `ws` supplies a concrete implementation -- so transport sits below core, and
+# the core still never imports a concrete transport.
 layers = [
   "(agent_host_server.ws)",
-  "(agent_host_server.transport)",
   "(agent_host_server.core)",
   "(agent_host_server.provider)",
+  "(agent_host_server.transport)",
   "agent_host_server.conformance",
   "(agent_host_server.reducers)",
   "agent_host_server.types",

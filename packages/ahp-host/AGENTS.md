@@ -12,10 +12,14 @@ building), then [`UPSTREAM.md`](UPSTREAM.md) (what revision we target).
 A Python **host** library for the Agent Host Protocol. AHP is an external
 specification owned by Microsoft. We implement it; we do not design it.
 
-Current state: **step 1 of the build order done** — vendored corpora, generated
-data tables, the wire representation, and the 39-fixture round-trip corpus
-green. Next: the reducer port (step 2). Build order is `docs/plan.md` §11;
-decisions are in `docs/decisions/`.
+Current state: **steps 1–6 of the build order done.** All 200 in-scope reducer
+fixtures and all 39 round-trip fixtures pass, the v0.1 command set is
+implemented, and the real published Microsoft TypeScript client drives a full
+turn against the host over WebSocket in CI. Remaining: durable session store,
+`fetchTurns` pagination, an ACP provider adapter. Build order is
+`docs/plan.md` §11; decisions are in `docs/decisions/`.
+
+Run the demo host with `python -m agent_host_server`.
 
 ## Commands
 

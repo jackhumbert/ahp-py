@@ -109,8 +109,8 @@ class TestSessionStatus:
     of the five clients."""
 
     def test_known_flags(self) -> None:
-        assert SessionStatus.IN_PROGRESS == 1
-        assert SessionStatus.INPUT_NEEDED == 64
+        assert SessionStatus.IDLE == 1
+        assert SessionStatus.INPUT_NEEDED == 24
 
     def test_unknown_high_bit_survives(self) -> None:
         """Fixture 005 carries 2147483720, which has bit 31 set."""
@@ -123,3 +123,48 @@ class TestSessionStatus:
     def test_negative_signed_value_normalises_to_unsigned(self) -> None:
         """What a JS `status & ~flag` would emit for a high-bit status."""
         assert session_status_flags(-2147483584) == 2147483712
+
+
+class TestSessionStatusValuesMatchUpstream:
+    """Pinned against the vendored TypeScript.
+
+    An earlier draft had every name bound to the wrong number -- the value *set*
+    was right but shifted by one position -- so the host reported new sessions
+    as `Error` instead of `Idle`. Nothing would have caught that: the wire
+    accepts any integer, and the client renders whatever it is told.
+    """
+
+    def test_values(self) -> None:
+        assert SessionStatus.IDLE == 1
+        assert SessionStatus.ERROR == 1 << 1
+        assert SessionStatus.IN_PROGRESS == 1 << 3
+        assert SessionStatus.INPUT_NEEDED == (1 << 3) | (1 << 4)
+        assert SessionStatus.IS_READ == 1 << 5
+        assert SessionStatus.IS_ARCHIVED == 1 << 6
+
+    def test_input_needed_implies_in_progress(self) -> None:
+        """It is a combination, not a distinct state -- test with bitwise checks."""
+        assert SessionStatus.INPUT_NEEDED & SessionStatus.IN_PROGRESS
+
+    def test_against_the_vendored_typescript(self) -> None:
+        """Parse the enum out of the pinned source, so a re-pin cannot drift."""
+        import re
+
+        from agent_host_server.conformance.corpus import CORPUS_ROOT
+
+        source = (CORPUS_ROOT / "ts" / "session-state.ts").read_text(encoding="utf-8")
+        body = re.search(r"export const enum SessionStatus \{(.*?)\n\}", source, re.S)
+        assert body is not None, "SessionStatus enum not found in the vendored source"
+
+        upstream = {
+            name: eval(expr.strip())
+            for name, expr in re.findall(r"(\w+)\s*=\s*([^,\n]+)", body.group(1))
+        }
+        assert upstream == {
+            "Idle": SessionStatus.IDLE,
+            "Error": SessionStatus.ERROR,
+            "InProgress": SessionStatus.IN_PROGRESS,
+            "InputNeeded": SessionStatus.INPUT_NEEDED,
+            "IsRead": SessionStatus.IS_READ,
+            "IsArchived": SessionStatus.IS_ARCHIVED,
+        }

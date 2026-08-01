@@ -39,6 +39,7 @@ git -C "$CHECKOUT" archive "$SPEC_TAG" \
   types/action-origin.generated.ts \
   types/common/actions.ts \
   types/common/errors.ts \
+  types/channels-session/state.ts \
   schema \
   | tar -x -C "$DEST"
 
@@ -49,6 +50,7 @@ mv "$DEST/types/version/registry.ts"        "$DEST/ts/registry.ts"
 mv "$DEST/types/action-origin.generated.ts" "$DEST/ts/action-origin.generated.ts"
 mv "$DEST/types/common/actions.ts"          "$DEST/ts/actions.ts"
 mv "$DEST/types/common/errors.ts"           "$DEST/ts/errors.ts"
+mv "$DEST/types/channels-session/state.ts"  "$DEST/ts/session-state.ts"
 rm -rf "$DEST/types"
 
 cat > "$DEST/PIN.json" <<EOF

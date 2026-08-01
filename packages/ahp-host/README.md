@@ -9,13 +9,34 @@ Microsoft's protocol for synchronized multi-client state over AI agent sessions.
 > this one is spelled out. If you want pairwise-comparison matrices and
 > consistency ratios, you want one of those instead.
 
-> ### ⚠️ Status: early construction. Not usable yet.
+> ### ⚠️ Status: working, but pre-alpha. Not published.
 >
-> The protocol type layer and the wire round-trip conformance corpus are in
-> place; the reducers, host and transport are not. Nothing is published to PyPI
-> and the API is not stable. See [`docs/plan.md`](docs/plan.md) §11 for the build
-> order, [`docs/research.md`](docs/research.md) for why it is shaped this way,
-> and [`docs/decisions/`](docs/decisions/) for the decisions taken so far.
+> A real client can connect, create a session, and run a turn. The full v0.1
+> command set, the root/session/chat reducers and a WebSocket transport are in
+> place. Not on PyPI, API not stable, single-trust-domain only. See
+> [`docs/plan.md`](docs/plan.md) §11 for what remains and
+> [`docs/decisions/`](docs/decisions/) for the decisions taken.
+
+## Try it
+
+```bash
+pip install -e '.[ws]'
+python -m agent_host_server
+```
+
+That serves the offline echo provider on `ws://127.0.0.1:4321` and prints the
+VS Code settings to paste:
+
+```json
+{
+  "chat.remoteAgentHostsEnabled": true,
+  "chat.remoteAgentHosts": ["ws://127.0.0.1:4321"]
+}
+```
+
+VS Code speaks AHP `0.7.0` and negotiates down through `0.6.0`; this host speaks
+both. Connecting a third-party host is a supported, extension-free VS Code
+feature.
 
 ## What this is for
 
