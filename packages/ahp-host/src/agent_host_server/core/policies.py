@@ -139,6 +139,19 @@ class OwnedSessionPolicy:
     def may_access_resource(self, info: ConnectionInfo, operation: str, uri: str) -> bool:
         return self.allow_resources and operation != "write"
 
+    def may_restore_session(self, session: Mapping[str, Any]) -> bool:
+        """Refused. A restored session has no owner until somebody claims it,
+        and `may_see_channel` refuses unowned channels -- so restoring one would
+        produce a session nobody, including its author, can reach. An embedder
+        that persists ownership alongside the session overrides this."""
+        return False
+
+    def may_push_token(self, info: ConnectionInfo, resource: str) -> bool:
+        """Refused. The token store is host-global, so a token one user pushes
+        is used on every user's behalf -- a deployment that partitions users
+        partitions token stores, and one shared store cannot."""
+        return False
+
     def may_invoke_operation(self, info: ConnectionInfo, changeset: str, operation: str) -> bool:
         return self.may_see_channel(info, changeset)
 

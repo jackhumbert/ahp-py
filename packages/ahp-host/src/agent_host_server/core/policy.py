@@ -90,6 +90,26 @@ class Policy(Protocol):
         """
         ...
 
+    def may_restore_session(self, session: Mapping[str, Any]) -> bool:
+        """Whether a session persisted by a previous run may come back.
+
+        Called at startup with the stored record, before any connection exists
+        -- so it takes no :class:`ConnectionInfo`. It is the gate on the one
+        thing a restart makes possible: state written by a host that may have
+        been configured differently, restored into one that is not.
+        """
+        ...
+
+    def may_push_token(self, info: ConnectionInfo, resource: str) -> bool:
+        """Whether this peer may push a credential for `resource`.
+
+        The only trust decision in the `authenticate` flow, and it is a real
+        one: the token store is host-global, so a token pushed by one client is
+        used by the agent on every client's behalf. A deployment that partitions
+        users partitions token stores, and this is where it says so.
+        """
+        ...
+
     def may_invoke_operation(self, info: ConnectionInfo, changeset: str, operation: str) -> bool:
         """Whether this peer may run a changeset operation.
 
@@ -153,6 +173,12 @@ class LoopbackSingleUserPolicy:
         return True
 
     def may_access_resource(self, info: ConnectionInfo, operation: str, uri: str) -> bool:
+        return True
+
+    def may_restore_session(self, session: Mapping[str, Any]) -> bool:
+        return True
+
+    def may_push_token(self, info: ConnectionInfo, resource: str) -> bool:
         return True
 
     def may_invoke_operation(self, info: ConnectionInfo, changeset: str, operation: str) -> bool:

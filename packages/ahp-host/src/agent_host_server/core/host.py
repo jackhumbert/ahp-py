@@ -23,6 +23,14 @@ from typing import Any, Final
 
 from agent_host_server.core import errors
 from agent_host_server.core.audit import AuditEvent, AuditSink, emit
+from agent_host_server.core.auth import (
+    AUTH_REQUIRED_METHOD,
+    AuthRequiredReason,
+    ProtectedResource,
+    TokenStore,
+    auth_required,
+    auth_required_params,
+)
 from agent_host_server.core.changesets import (
     Changeset,
     ContentStore,
@@ -43,6 +51,7 @@ from agent_host_server.core.resources import (
 )
 from agent_host_server.core.seq import FileSequence
 from agent_host_server.core.sequencer import Sequencer
+from agent_host_server.core.store import InMemorySessionStore, SessionStore, StoredSession
 from agent_host_server.core.turn import TurnRunner
 from agent_host_server.core.versions import DEFAULT_SUPPORTED_VERSIONS, negotiate
 from agent_host_server.core.watches import (
@@ -57,6 +66,8 @@ from agent_host_server.provider.base import (
     AgentProvider,
     AgentSession,
     AgentSessionContext,
+    Completes,
+    CompletionRequest,
     ConfigRequest,
     ConfiguresSessions,
     DescribesSession,
@@ -133,6 +144,15 @@ _RESOURCE_WRITE_METHODS: Final = frozenset(
 _BASE64: Final = "base64"
 _UTF8: Final = "utf-8"
 
+#: One server-to-client notification per OTel signal. The payload is OTLP/JSON
+#: verbatim -- "AHP only adds the routing envelope" -- so this host never parses
+#: or validates it, which is also why there is no OTLP encoder here.
+_OTLP_METHODS: Final = {
+    "logs": "otlp/exportLogs",
+    "traces": "otlp/exportTraces",
+    "metrics": "otlp/exportMetrics",
+}
+
 
 @dataclass
 class _Watch:
@@ -172,6 +192,22 @@ def _read_result(content: Any, requested: Any) -> dict[str, Any]:
     if content.content_type is not None:
         result["contentType"] = content.content_type
     return result
+
+
+def _reducer_for_restored(uri: str, state: Mapping[str, Any], session_uri: str) -> str:
+    """Which reducer a stored channel gets back.
+
+    Chosen by SHAPE, not by URI, for the same reason the sequencer binds
+    reducers at registration: session and chat URIs are client-chosen and
+    opaque, so a scheme test would restore a channel with no reducer at all --
+    the failure that froze state in `docs/experiments.md` E12, made permanent by
+    being written to disk.
+    """
+    if uri == f"{session_uri}/annotations" or "annotations" in state:
+        return "annotations"
+    if "turns" in state:
+        return "chat"
+    return "session"
 
 
 def _active_clients(active_client: Any) -> list[Any]:
@@ -331,6 +367,9 @@ class _Session:
     content: ContentStore = field(default_factory=ContentStore)
     #: Changeset URI -> catalogue entry, for the channels this session owns.
     changesets: dict[str, Changeset] = field(default_factory=dict)
+    #: Opaque provider state a previous run persisted. Round-tripped, never
+    #: interpreted: only the provider knows what it means.
+    resume_state: Mapping[str, Any] | None = None
     #: Every chat this session owns, default included. A set rather than a
     #: single URI because `createChat` exists -- and because the summary rules
     #: aggregate across all of them, not just the default.
@@ -365,6 +404,8 @@ class Host:
         watcher: ResourceWatcher | None = None,
         max_watches_per_connection: int = 32,
         audit: AuditSink | None = None,
+        telemetry: Mapping[str, str] | None = None,
+        store: SessionStore | None = None,
     ) -> None:
         if policy is None:  # pragma: no cover - defensive; typing already forbids it
             raise ValueError("a Policy is required; there is no default")
@@ -408,11 +449,120 @@ class Host:
         # nothing is the honest default for one that cannot say where the
         # record would go.
         self.audit = audit
+        # `InitializeResult.telemetry`: signal -> `ahp-otlp:` URI. Absent
+        # entirely by default, which is what "a host that emits no telemetry"
+        # looks like -- advertising a channel nothing ever publishes to is
+        # worse than advertising none.
+        self.telemetry = dict(telemetry or {})
+        # Tokens the agent needs for services IT talks to. Host-global, matching
+        # the reference implementation -- `authenticate` carries no client
+        # identity, so a per-connection store is not observable by a conformant
+        # client. The consequence is real and gated: `Policy.may_push_token`.
+        self.tokens = TokenStore()
+        # No path chosen on the embedder's behalf, same as `sequence_file`. The
+        # default keeps nothing, which is what a host whose sessions do not
+        # outlive it should do.
+        self.store: SessionStore = store or InMemorySessionStore()
+        self._restored = False
         self.sequencer.observer = self
         self._root_ready = False
         self.wire_log = WireLog(wire_log) if wire_log is not None else None
 
     # ─── lifecycle ───────────────────────────────────────────────────────
+
+    async def restore(self) -> int:
+        """Bring back sessions a previous run persisted. Returns how many.
+
+        Called once, before serving. Every channel is re-registered under the
+        name it was **stored** under, never one derived from the session URI --
+        chat and annotations URIs are client-chosen and opaque (invariant 15),
+        so a derived name would restore a session whose channels nobody can
+        reach.
+
+        A restored session has no live `agent_session`: the provider is asked
+        to resume lazily, on the first turn, so a host with a hundred stored
+        sessions does not spawn a hundred agent runtimes at startup.
+        """
+        if self._restored:
+            return 0
+        self._restored = True
+        await self._ensure_root()
+
+        count = 0
+        for stored in await self.store.load_all():
+            if stored.uri in self._sessions:
+                continue
+            if not self.policy.may_restore_session(stored.to_json()):
+                _log.info("policy declined to restore %s", stored.uri)
+                continue
+            session = await self._restore_one(stored)
+            if session is not None:
+                count += 1
+        if count:
+            await self.sequencer.publish(
+                ROOT_URI,
+                {"type": "root/activeSessionsChanged", "activeSessions": len(self._sessions)},
+            )
+        return count
+
+    async def _restore_one(self, stored: StoredSession) -> _Session | None:
+        chat_uri: str | None = None
+        for uri, state in stored.channels.items():
+            reducer = _reducer_for_restored(uri, state, stored.uri)
+            if reducer == "chat" and chat_uri is None:
+                chat_uri = uri
+        if chat_uri is None:
+            _log.warning("stored session %s has no chat channel; skipped", stored.uri)
+            return None
+
+        session = _Session(
+            uri=stored.uri,
+            chat_uri=chat_uri,
+            provider_id=stored.provider,
+            title=stored.title or "Restored Session",
+            created_at=stored.created_at,
+            resume_state=stored.resume_state,
+        )
+        for uri, state in stored.channels.items():
+            reducer = _reducer_for_restored(uri, state, stored.uri)
+            restored_state = dict(state)
+            if reducer == "chat":
+                # "In-progress turns SHOULD be considered failed." The partial
+                # response is KEPT -- the user should see what the agent had
+                # said before the crash -- but it is moved out of `activeTurn`,
+                # because a turn nothing is running is not active.
+                restored_state.pop("activeTurn", None)
+                session.chat_uris.add(uri)
+            await self.sequencer.register_channel(uri, restored_state, reducer)
+
+        session.publisher = _Publisher(self, session, None)
+        self._sessions[stored.uri] = session
+        await self.sequencer.notify(
+            ROOT_URI,
+            "root/sessionAdded",
+            {"channel": ROOT_URI, "summary": self._full_summary(session)},
+        )
+        session.published_summary = self._project_summary(session)
+        return session
+
+    async def _persist(self, session: _Session) -> None:
+        """Write a session's channels to the store, debounced."""
+        channels: dict[str, Mapping[str, Any]] = {}
+        for uri in [session.uri, session.annotations_uri, *session.chat_uris]:
+            state = self.sequencer.state_of(uri)
+            if isinstance(state, Mapping):
+                channels[uri] = dict(state)
+        with contextlib.suppress(Exception):
+            await self.store.save_soon(
+                StoredSession(
+                    uri=session.uri,
+                    provider=session.provider_id,
+                    created_at=session.created_at,
+                    channels=channels,
+                    title=session.title,
+                    resume_state=session.resume_state,
+                )
+            )
 
     async def _ensure_root(self) -> None:
         if not self._root_ready:
@@ -539,6 +689,10 @@ class Host:
             return await self._dispose_session(connection, params)
         if method == "fetchTurns":
             return await self._fetch_turns(connection, params)
+        if method == "authenticate":
+            return await self._authenticate(connection, params)
+        if method == "completions":
+            return await self._completions(connection, params)
         if method == "createChat":
             return await self._create_chat(connection, params)
         if method == "disposeChat":
@@ -606,12 +760,15 @@ class Host:
         # `snapshots` is ALWAYS an array. MultiHostClient calls .find() on it
         # with no guard, so omitting it puts the client in an endless reconnect
         # loop rather than surfacing an error.
-        return {
+        result: dict[str, Any] = {
             "protocolVersion": chosen,
             "serverSeq": self.sequencer.server_seq,
             "serverInfo": self.info.to_wire(),
             "snapshots": snapshots,
         }
+        if self.telemetry:
+            result["telemetry"] = dict(self.telemetry)
+        return result
 
     async def _subscribe(self, connection: Connection, params: Mapping[str, Any]) -> dict[str, Any]:
         channel = params.get("channel")
@@ -741,6 +898,7 @@ class Host:
             return
         session.published_summary = current
         session.title = current.get("title", session.title)
+        await self._persist(session)
         await self.sequencer.notify(
             ROOT_URI,
             "root/sessionSummaryChanged",
@@ -963,6 +1121,135 @@ class Host:
                 uri, str(destination), fail_if_exists=bool(params.get("failIfExists"))
             )
         return {}
+
+    # ─── authentication ──────────────────────────────────────────────────
+
+    def _protected_resources(self) -> list[ProtectedResource]:
+        return [ProtectedResource.from_wire(r) for r in self.provider.agent.protected_resources]
+
+    async def _authenticate(
+        self, connection: Connection, params: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        """Accept a token for an upstream service the AGENT talks to.
+
+        **This is not a login.** It never gates the AHP connection -- admission
+        happened at `initialize`, and `Policy` decided it. What arrives here is a
+        credential for something else entirely, and the host is a courier for it.
+
+        The resource must be one the host advertised. Accepting an unadvertised
+        one would let a peer fill the store with credentials for services this
+        agent never mentioned, and give it no way to learn that they are useless.
+        """
+        resource = params.get("resource")
+        token = params.get("token")
+        if not isinstance(resource, str) or not isinstance(token, str):
+            raise errors.invalid_params("resource and token are required")
+
+        known = {r.resource for r in self._protected_resources()}
+        if resource not in known:
+            raise errors.invalid_params(f"{resource!r} is not a protected resource of this agent")
+        if not self.policy.may_push_token(connection.info, resource):
+            self._audit("auth.refused", connection, allowed=False, detail={"resource": resource})
+            raise errors.AhpError(-32009, f"Not permitted to authenticate {resource}")
+
+        raw_scopes = params.get("scopes")
+        scopes = (
+            [s for s in raw_scopes if isinstance(s, str)] if isinstance(raw_scopes, list) else None
+        )
+        self.tokens.push(resource, token, scopes=scopes, client_id=connection.client_id)
+        # The resource, never the token. `AuditEvent` carries identifiers only,
+        # and a credential in an audit record is a credential on disk.
+        self._audit("auth.accepted", connection, detail={"resource": resource})
+        # `AuthenticateResult` is `{}` on the wire. The reference's internal type
+        # says `{authenticated: boolean}`; the wire handler returns `{}`, and the
+        # spec agrees with the wire.
+        return {}
+
+    def require_auth(self) -> None:
+        """Raise `-32007` if anything the agent needs is still unauthenticated.
+
+        For an embedder to call from a provider hook. The `data` field is a MUST
+        -- a client uses it to know *what* to authenticate -- so it is built from
+        the advertised resources rather than left empty.
+        """
+        outstanding = self.tokens.unsatisfied(self._protected_resources())
+        if outstanding:
+            raise auth_required(outstanding)
+
+    async def notify_auth_required(
+        self, resource: str, *, reason: AuthRequiredReason = "required"
+    ) -> None:
+        """Tell subscribers a credential is needed, or has expired.
+
+        Ephemeral and explicitly not replayed, so `-32007` on the next command
+        is the complete fallback -- a client that missed this still finds out.
+        """
+        await self.sequencer.notify(
+            ROOT_URI, AUTH_REQUIRED_METHOD, auth_required_params(resource, reason=reason)
+        )
+
+    # ─── telemetry ───────────────────────────────────────────────────────
+
+    async def emit_telemetry(self, signal: str, payload: Mapping[str, Any]) -> None:
+        """Publish one OTLP/JSON batch on the channel advertised for `signal`.
+
+        A thin pass-through, deliberately: "payloads on the wire are OTLP/JSON
+        values verbatim; AHP only adds the routing envelope". Nothing here
+        parses, validates or re-encodes the payload, so this host owes no OTLP
+        implementation and cannot corrupt one.
+
+        Ephemeral by design -- "telemetry is not replayed on reconnect" -- so it
+        goes out as a notification and never touches the replay log. A signal
+        this host did not advertise is dropped: a client that never saw the
+        channel on `initialize` has not subscribed to it.
+        """
+        channel = self.telemetry.get(signal)
+        method = _OTLP_METHODS.get(signal)
+        if channel is None or method is None:
+            return
+        await self.sequencer.notify(channel, method, {"channel": channel, "payload": payload})
+
+    # ─── completions ─────────────────────────────────────────────────────
+
+    async def _completions(
+        self, connection: Connection, params: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        """Suggest attachments for what the user is typing.
+
+        `CompletionsParams.channel` is documented as "the chat URI", but VS Code
+        sends the **session** URI while upstream's own e2e suite sends a chat
+        URI -- and the reference host accepts both. So this accepts both too:
+        being strict here would break the one client that exists, over a field
+        the spec's own implementations disagree about.
+        """
+        channel = params.get("channel")
+        text = params.get("text")
+        if not isinstance(channel, str) or not isinstance(text, str):
+            raise errors.invalid_params("channel and text are required")
+        if not self.policy.may_see_channel(connection.info, channel):
+            raise errors.AhpError(-32009, f"Not permitted to observe {channel}")
+
+        chat = channel
+        session = self._sessions.get(channel)
+        if session is not None:
+            chat = session.chat_uri
+        elif not any(channel in s.chat_uris for s in self._sessions.values()):
+            raise errors.invalid_params(f"{channel} is neither a session nor a chat")
+
+        if not isinstance(self.provider, Completes):
+            return {"items": []}
+
+        offset = params.get("offset")
+        kind = params.get("kind")
+        items = await self.provider.complete(
+            CompletionRequest(
+                kind=kind if isinstance(kind, str) else "",
+                chat=chat,
+                text=text,
+                offset=offset if isinstance(offset, int) else len(text),
+            )
+        )
+        return {"items": [item.to_wire() for item in items]}
 
     # ─── multi-chat ──────────────────────────────────────────────────────
 
@@ -1795,6 +2082,11 @@ class Host:
         # Bring-up published customizations, tools and the chat catalogue, any of
         # which can move a summary field.
         await self._mirror_summary(session)
+        # Persisted unconditionally, not just when the summary moved: a session
+        # that exists is a session a client can come back to, and `_mirror_summary`
+        # deliberately emits nothing when nothing changed -- which at bring-up is
+        # exactly the case.
+        await self._persist(session)
 
     async def _dispose_session(self, connection: Connection, params: Mapping[str, Any]) -> None:
         """Tear the session down, drop its channels, and tell the root channel.
@@ -1826,6 +2118,8 @@ class Host:
         await self.sequencer.drop_channel(session.annotations_uri)
         await self.sequencer.drop_channel(channel)
 
+        with contextlib.suppress(Exception):
+            await self.store.delete(channel)
         await self.sequencer.notify(
             ROOT_URI, "root/sessionRemoved", {"channel": ROOT_URI, "session": channel}
         )
@@ -2163,3 +2457,7 @@ class Host:
                 await session.agent_session.aclose()
         for connection in list(self._connections):
             await connection.close()
+        # Without this the last debounce window of a turn is lost -- which is
+        # exactly the state a client is most likely to come back looking for.
+        with contextlib.suppress(Exception):
+            await self.store.aclose()

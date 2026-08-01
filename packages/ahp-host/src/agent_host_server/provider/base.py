@@ -23,6 +23,9 @@ __all__ = [
     "AgentSession",
     "AgentSessionContext",
     "ClientToolCall",
+    "Completes",
+    "CompletionItem",
+    "CompletionRequest",
     "ConfigRequest",
     "ConfigResolution",
     "ConfigValue",
@@ -57,6 +60,14 @@ class AgentInfo:
     description: str
     models: Sequence[Mapping[str, Any]] = field(default_factory=tuple)
     capabilities: Mapping[str, Any] = field(default_factory=dict)
+    #: `AgentInfo.protectedResources` -- upstream services the AGENT talks to
+    #: that need a credential. Plain wire dicts rather than
+    #: `core.auth.ProtectedResource`, because `provider/` sits below `core/` in
+    #: the import layering; build them with `ProtectedResource.to_wire()`.
+    #:
+    #: Declaring none is fully conformant. It does not mean "no auth needed" --
+    #: it means this agent does not front anything that asks for one.
+    protected_resources: Sequence[Mapping[str, Any]] = field(default_factory=tuple)
 
     def to_wire(self) -> dict[str, Any]:
         wire: dict[str, Any] = {
@@ -67,6 +78,8 @@ class AgentInfo:
         }
         if self.capabilities:
             wire["capabilities"] = dict(self.capabilities)
+        if self.protected_resources:
+            wire["protectedResources"] = [dict(r) for r in self.protected_resources]
         return wire
 
 
@@ -377,6 +390,65 @@ class ConfigValue:
     value: str
     label: str
     description: str | None = None
+
+
+@dataclass(frozen=True)
+class CompletionRequest:
+    """What the user has typed, and where the cursor is.
+
+    ``offset`` is in **UTF-16 code units**, which is the protocol's unit and not
+    Python's. For anything outside the BMP -- an emoji, most CJK extension
+    characters -- a Python string index is a different number, and slicing by
+    the wrong one silently completes against the wrong prefix.
+    :func:`text_before_cursor` does the conversion.
+    """
+
+    kind: str
+    chat: str
+    text: str
+    offset: int
+
+    def text_before_cursor(self) -> str:
+        """The prefix the user has typed, converting the offset correctly."""
+        encoded = self.text.encode("utf-16-le")
+        return encoded[: max(0, self.offset) * 2].decode("utf-16-le", errors="ignore")
+
+
+@dataclass(frozen=True)
+class CompletionItem:
+    """One suggestion. `range` is a half-open interval in the CURRENT input."""
+
+    insert_text: str
+    label: str | None = None
+    detail: str | None = None
+    range_start: int | None = None
+    range_end: int | None = None
+    attachment: Mapping[str, Any] | None = None
+
+    def to_wire(self) -> dict[str, Any]:
+        wire: dict[str, Any] = {"insertText": self.insert_text}
+        for key, value in (
+            ("label", self.label),
+            ("detail", self.detail),
+            ("rangeStart", self.range_start),
+            ("rangeEnd", self.range_end),
+            ("attachment", self.attachment),
+        ):
+            if value is not None:
+                wire[key] = value
+        return wire
+
+
+@runtime_checkable
+class Completes(Protocol):
+    """A provider that suggests attachments as the user types.
+
+    Optional and feature-detected. A provider without it gets an empty list,
+    which is what "nothing to suggest" looks like -- a refusal would make an
+    empty picker indistinguishable from a broken host.
+    """
+
+    async def complete(self, request: CompletionRequest) -> Sequence[CompletionItem]: ...
 
 
 @runtime_checkable

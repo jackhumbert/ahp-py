@@ -153,10 +153,16 @@ passed, the read escaped. There is a test for exactly that race.
 python -m agent_host_server --serve-directory ./workspace
 ```
 
+**Sessions can survive a restart.** Install a `FileSessionStore` and call
+`await host.restore()` before serving. JSON only — never `pickle`, never
+`eval` — because a stored session is attacker-influenced data: titles, chat
+content and tool results all come off the wire. `serverSeq` survives too, which
+matters more than it sounds: the reference client records it with a *maximum*,
+so a counter that restarts at zero can never replay again.
+
 ### Not implemented
 
-`createTerminal`/`disposeTerminal` · authentication, including 0.6.0 step-up ·
-completions · OTLP telemetry · the MCP channel.
+`createTerminal`/`disposeTerminal` · the MCP channel · 0.6.0 step-up auth.
 
 Every one returns a proper JSON-RPC `MethodNotFound` (`-32601`). None are
 silently stubbed. Where the protocol says a host may decline, it declines

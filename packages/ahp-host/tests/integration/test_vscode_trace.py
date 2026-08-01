@@ -44,6 +44,11 @@ EXPECTED_REFUSALS = {
     "disposeTerminal",
 }
 
+#: Implemented, and answered `InvalidParams` because the demo agent advertises
+#: no protected resources and installs no session config beyond what it
+#: declares. Distinct from "not implemented" for the same reason as the others.
+EXPECTED_INVALID = {"authenticate"}
+
 #: Implemented, but answered `NotFound` (-32008) by this host, because the
 #: default resource provider exposes nothing. That is the distinction the
 #: `resource*` family is meant to make: "this host has no such file" is a
@@ -134,6 +139,9 @@ class TestReplay:
                     continue
                 if method in EXPECTED_DENIED:
                     assert response["error"]["code"] == -32009, (method, response["error"])
+                    continue
+                if method in EXPECTED_INVALID:
+                    assert response["error"]["code"] == -32602, (method, response["error"])
                     continue
                 unexpected.append((method, response["error"]))
             assert not unexpected, f"unexpected failures: {unexpected}"

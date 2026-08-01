@@ -143,9 +143,24 @@ class TestUnimplemented:
         IS how a host declines a feature."""
         _, client = connected
         await _initialize(client)
-        for method in ("createTerminal", "authenticate"):
+        for method in ("createTerminal", "disposeTerminal"):
             response = await client.request(method, {"channel": ROOT_URI})
             assert response["error"]["code"] == -32601, method
+
+    async def test_authenticate_refuses_an_unadvertised_resource(
+        self, connected: tuple[Host, FakeClient]
+    ) -> None:
+        """`authenticate` IS implemented; this agent simply fronts nothing that
+        needs a credential. Accepting an unadvertised resource would let a peer
+        fill the token store with credentials for services this agent never
+        mentioned, and give it no way to learn they are useless."""
+        _, client = connected
+        await _initialize(client)
+        response = await client.request(
+            "authenticate",
+            {"channel": ROOT_URI, "resource": "https://api.example.invalid", "token": "t"},
+        )
+        assert response["error"]["code"] == -32602
 
     async def test_writes_are_denied_rather_than_unimplemented(
         self, connected: tuple[Host, FakeClient]

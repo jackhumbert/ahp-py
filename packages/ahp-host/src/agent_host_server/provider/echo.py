@@ -16,6 +16,8 @@ from agent_host_server.provider.base import (
     AgentInfo,
     AgentSessionContext,
     ClientToolCall,
+    CompletionItem,
+    CompletionRequest,
     ConfigRequest,
     ConfigResolution,
     ConfigValue,
@@ -293,6 +295,31 @@ class EchoProvider:
         options = ("HELLO", "HI THERE", "GREETINGS", "OI")
         query = request.query.upper()
         return [ConfigValue(value=o, label=o) for o in options if o.startswith(query)]
+
+    async def complete(self, request: CompletionRequest) -> Sequence[CompletionItem]:
+        """Suggest a couple of fake attachments after `#`.
+
+        Enough to exercise the offset conversion, which is the part that goes
+        wrong: `offset` is in UTF-16 code units and a Python string index is
+        not the same number once anything outside the BMP is in the text.
+        """
+        prefix = request.text_before_cursor()
+        marker = prefix.rfind("#")
+        if marker < 0:
+            return ()
+        typed = prefix[marker + 1 :]
+        start = len(prefix[:marker].encode("utf-16-le")) // 2
+        return [
+            CompletionItem(
+                insert_text=f"#{name}",
+                label=name,
+                range_start=start,
+                range_end=request.offset,
+                attachment={"kind": "file", "uri": f"file:///demo/{name}"},
+            )
+            for name in ("readme.md", "recipe.txt")
+            if name.startswith(typed)
+        ]
 
     async def create_session(self, context: AgentSessionContext) -> EchoSession:
         return EchoSession(
