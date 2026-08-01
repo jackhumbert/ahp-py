@@ -564,3 +564,41 @@ appends it as `?tkn=`, which is `connectionTokenQueryName` in
 There is no UI for this in 1.131.0 — `parseRemoteAgentHostInput` and
 `addRemoteAgentHost` exist and accept a pasted `ws://host:port/?tkn=…` URL, but
 only tests call them.
+
+---
+
+## E13 — Differential testing beyond the corpus
+
+Two independent harnesses ran our reducers against the real TypeScript ones
+under `node --experimental-transform-types`, with `Date.now()` frozen to 9999:
+~1.2M single-step cases across both reducers, plus 705 hand-built session cases
+crossing every action with absent / null / wrong-type / valid payloads over
+three state shapes.
+
+They found **six defects the 247-fixture corpus cannot reach**, because every
+fixture in it is well-formed input from a cooperating peer:
+
+| Defect | Reachable by |
+|---|---|
+| `chat/truncated` with `turnId: null` destroyed the whole transcript | any client — the action is client-dispatchable |
+| tool-call `status` membership raised `TypeError` on an unhashable value | a client — `chat/toolCallComplete` spreads its `result` onto the call |
+| ids used as set/dict keys raised on unhashable values | a client, via `chat/pendingMessageSet` |
+| `session.py` raised `KeyError` on nine client-dispatchable actions | any client omitting an optional field |
+| `_meta: null` / `editedToolInput: null` ignored instead of clearing | any client |
+| `response is None` vs `=== undefined` left input requests open | any client — **and this host produced the offending state itself** |
+
+The recurring root cause is one line of translation: JavaScript distinguishes
+`undefined` from `null`, Python does not. `x === undefined` must be ported as
+`"x" not in obj`, never as `x is None`. Where the reference uses `??` or
+truthiness, `is None` *is* right — so the mistranslation is invisible unless you
+check each site against the source.
+
+**The blind spot, quantified.** Across all 247 fixtures there is no explicit
+`null` for `turnId`, `_meta`, `editedToolInput` or `response`; no empty
+`content` or `options` array; no unhashable id; and no `status` with bit 31 set.
+
+**What this means for the conformance claim.** Passing the corpus proves a port
+*agrees with the reference on well-formed input*. It does not prove the port
+survives a peer that is hostile, buggy, or merely written in a language whose
+serializer emits `null` where TypeScript omits a key. Both properties matter for
+a host, and only the first is testable against upstream's artifacts.

@@ -566,3 +566,64 @@ class TestTurnCancellation:
         ]
         assert echoes, "a rejected action must still be echoed"
         assert echoes[0]["rejectionReason"] == "no active turn to cancel"
+
+
+class TestDisposeSession:
+    """ "The server tears down the session backend, drops associated
+    subscriptions, and broadcasts `root/sessionRemoved`.\""""
+
+    async def test_disposing_removes_the_channels_and_tells_root(
+        self, connected: tuple[Host, FakeClient]
+    ) -> None:
+        _, client = connected
+        await _initialize(client)
+        uri = "echo:/dispose-1"
+        await client.request("createSession", {"channel": uri})
+        await client.collect(seconds=0.3)
+        chat_uri = (await client.request("subscribe", {"channel": uri}))["result"]["snapshot"][
+            "state"
+        ]["chats"][0]["resource"]
+
+        assert (await client.request("disposeSession", {"channel": uri}))["result"] is None
+        await client.collect(seconds=0.3)
+
+        assert "root/sessionRemoved" in [n.get("method") for n in client.notifications]
+        assert (await client.request("listSessions", {"channel": ROOT_URI}))["result"][
+            "items"
+        ] == []
+        # Both channels are gone: subscribing yields the stateless-channel shape.
+        assert (await client.request("subscribe", {"channel": uri}))["result"] == {}
+        assert (await client.request("subscribe", {"channel": chat_uri}))["result"] == {}
+
+    async def test_disposing_an_unknown_session_is_refused(
+        self, connected: tuple[Host, FakeClient]
+    ) -> None:
+        _, client = connected
+        await _initialize(client)
+        response = await client.request("disposeSession", {"channel": "echo:/never-existed"})
+        assert response["error"]["code"] == -32001
+
+    async def test_actions_on_a_disposed_session_are_silently_ignored(
+        self, connected: tuple[Host, FakeClient]
+    ) -> None:
+        """Once the channel is gone the unknown-channel rule applies: no echo."""
+        _, client = connected
+        await _initialize(client)
+        uri = "echo:/dispose-2"
+        await client.request("createSession", {"channel": uri})
+        await client.collect(seconds=0.3)
+        await client.request("subscribe", {"channel": uri})
+        await client.request("disposeSession", {"channel": uri})
+        await client.collect(seconds=0.2)
+
+        before = len(client.actions(uri))
+        await client.notify(
+            "dispatchAction",
+            {
+                "channel": uri,
+                "clientSeq": 1,
+                "action": {"type": "session/titleChanged", "title": "ghost"},
+            },
+        )
+        await client.collect(seconds=0.2)
+        assert len(client.actions(uri)) == before

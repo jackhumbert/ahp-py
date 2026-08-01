@@ -100,12 +100,20 @@ ported reducers gated on upstream's own 247-fixture conformance corpus · a
 pluggable agent provider with an offline echo implementation · WebSocket
 transport behind a transport abstraction.
 
+Implemented commands: `initialize`, `ping`, `subscribe`, `unsubscribe`,
+`listSessions`, `createSession`, `disposeSession`, `dispatchAction`, `reconnect`.
+
 ### Deliberately not in v0.1
 
 Terminals · changesets · comments and annotations · OTLP telemetry · the MCP
 channel · resource watches · the nine `resource*` filesystem methods · side
 chats · multiroot sessions · authentication, including 0.6.0 step-up auth ·
-`fetchTurns` pagination · completions · `resolveSessionConfig`.
+`fetchTurns` pagination · completions · `resolveSessionConfig` · `createChat`
+and `disposeChat` (each session gets one default chat).
+
+State is in-memory: sessions do not survive a host restart. A client
+reconnecting across one is correctly told to take fresh snapshots rather than
+being left silently stale, but its sessions are gone.
 
 Every one of these returns a proper JSON-RPC `MethodNotFound` (`-32601`). None
 are silently stubbed. Where the protocol says a host may decline, it declines

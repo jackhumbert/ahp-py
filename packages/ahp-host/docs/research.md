@@ -380,6 +380,15 @@ corpus: **28 pass, 0 fail.**
 
 ### 2f. Porting hazards the corpus does *not* pin
 
+**Measured blind spot.** Scanning all 247 fixtures: **no action anywhere carries
+an explicit JSON `null`** for `turnId`, `_meta`, `editedToolInput` or `response`,
+and no fixture supplies an empty `content` or `options` array, an unhashable id,
+or a `status` with bit 31 set. Every fixture is well-formed input from a
+cooperating peer. That is the shape of the gap — the corpus proves a port
+*agrees* with the reference, not that it *survives* what an untrusted or merely
+different peer sends. Six real defects lived entirely inside it (`experiments.md`
+E13).
+
 These are where a Python port diverges silently. Each needs a hand-written test.
 
 | Hazard | Why | Rule |

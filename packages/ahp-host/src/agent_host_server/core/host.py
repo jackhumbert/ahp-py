@@ -185,6 +185,8 @@ class Host:
             return await self._list_sessions(connection, params)
         if method == "createSession":
             return await self._create_session(connection, params)
+        if method == "disposeSession":
+            return await self._dispose_session(connection, params)
         raise errors.method_not_found(method)
 
     async def _handle_notification(
@@ -376,6 +378,41 @@ class Host:
             {"type": "session/defaultChatChanged", "defaultChat": session.chat_uri},
         )
         await self.sequencer.publish(session.uri, {"type": "session/ready"})
+
+    async def _dispose_session(self, connection: Connection, params: Mapping[str, Any]) -> None:
+        """Tear the session down, drop its channels, and tell the root channel.
+
+        The spec: "the server tears down the session backend, drops associated
+        subscriptions, and broadcasts `root/sessionRemoved`".
+        """
+        channel = params.get("channel")
+        if not isinstance(channel, str):
+            raise errors.invalid_params("channel is required")
+        session = self._sessions.get(channel)
+        if session is None:
+            raise errors.session_not_found(channel)
+        if not self.policy.may_see_channel(connection.info, channel):
+            raise errors.AhpError(-32009, f"Not permitted to dispose {channel}")
+
+        if session.turn is not None:
+            session.turn.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await session.turn
+        if session.agent_session is not None:
+            await session.agent_session.aclose()
+
+        del self._sessions[channel]
+        await self.sequencer.drop_channel(session.chat_uri)
+        await self.sequencer.drop_channel(channel)
+
+        await self.sequencer.notify(
+            ROOT_URI, "root/sessionRemoved", {"channel": ROOT_URI, "session": channel}
+        )
+        await self.sequencer.publish(
+            ROOT_URI,
+            {"type": "root/activeSessionsChanged", "activeSessions": len(self._sessions)},
+        )
+        return
 
     async def _reconnect(self, connection: Connection, params: Mapping[str, Any]) -> dict[str, Any]:
         # `reconnect` establishes the connection when it arrives first. There is
