@@ -94,7 +94,7 @@ with no adapter installed.
 
 ### Planned for v0.1
 
-Protocol **0.6.0** on the wire · root, session and chat channels · the eight
+Protocol **0.7.0 and 0.6.0** on the wire · root, session and chat channels · the
 commands a real client actually issues · host-global sequencing with replay ·
 ported reducers gated on upstream's own 247-fixture conformance corpus · a
 pluggable agent provider with an offline echo implementation · WebSocket
@@ -164,7 +164,12 @@ value is that other implementations can trust it. So:
   unmodified.
 - Wire types are validated against upstream's 39-fixture round-trip corpus.
 - Integration tests drive the **real published Microsoft TypeScript client**
-  against the host.
+  against the host, and feed our live action stream through the **official
+  TypeScript reducers**, diffing the result against a fresh snapshot.
+- A golden trace captured from a live **VS Code 1.131** session is replayed on
+  every run.
+- Multi-client tests cover the thing AHP exists for: several clients over one
+  session agreeing on order, origin and final state.
 
 That last one matters because the reference client validates almost nothing —
 in testing it accepted an unoffered protocol version, a missing required field
