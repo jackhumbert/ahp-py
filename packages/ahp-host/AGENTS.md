@@ -12,8 +12,10 @@ building), then [`UPSTREAM.md`](UPSTREAM.md) (what revision we target).
 A Python **host** library for the Agent Host Protocol. AHP is an external
 specification owned by Microsoft. We implement it; we do not design it.
 
-Current state: **design phase — `src/` is empty.** The build order is
-`docs/plan.md` §11.
+Current state: **step 1 of the build order done** — vendored corpora, generated
+data tables, the wire representation, and the 39-fixture round-trip corpus
+green. Next: the reducer port (step 2). Build order is `docs/plan.md` §11;
+decisions are in `docs/decisions/`.
 
 ## Commands
 
@@ -42,14 +44,15 @@ scripts/vendor_upstream.sh
 
 | Path | Contents | May import |
 |---|---|---|
-| `src/ahp_host/types/` | wire types, actions, state, errors | stdlib only |
-| `src/ahp_host/reducers/` | the pure reducers + injectable clock | `types` |
-| `src/ahp_host/conformance/` | fixture runners | `types`, `reducers` |
-| `src/ahp_host/core/` | channels, sequencing, subscriptions, replay, policy | `types`, `reducers` |
-| `src/ahp_host/provider/` | `AgentProvider` protocol + echo provider | `types` |
-| `src/ahp_host/transport/` | transport protocol + in-memory pair | `types` |
-| `src/ahp_host/ws/` | WebSocket implementation | `transport`, `types` |
-| `vendor/upstream/` | pinned fixtures and schemas, **committed** | — |
+| `src/agent_host_server/types/` | wire types, actions, state, errors | stdlib only |
+| `src/agent_host_server/reducers/` | the pure reducers + injectable clock | `types` |
+| `src/agent_host_server/conformance/` | fixture runners | `types`, `reducers` |
+| `src/agent_host_server/core/` | channels, sequencing, subscriptions, replay, policy | `types`, `reducers` |
+| `src/agent_host_server/provider/` | `AgentProvider` protocol + echo provider | `types` |
+| `src/agent_host_server/transport/` | transport protocol + in-memory pair | `types` |
+| `src/agent_host_server/ws/` | WebSocket implementation | `transport`, `types` |
+| `vendor/upstream/` | pinned fixtures, schemas and TS source of truth, **committed** | — |
+| `scripts/` | `vendor_upstream.sh` (re-pin), `generate_tables.py` (data tables) | — |
 
 ## Invariants that must not break
 
@@ -98,7 +101,7 @@ fixture, and our suite would stay green while diverging.
 
 ## Adding a provider adapter
 
-Adapters live in their own distribution (`ahp-host-<name>`), never in the core —
+Adapters live in their own distribution (`agent-host-server-<name>`), never in the core —
 the core must stay installable and fully testable with no adapter present.
 
 1. Implement `AgentProvider`; add `ResumableAgentProvider` if the runtime can

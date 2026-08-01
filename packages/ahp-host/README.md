@@ -1,19 +1,21 @@
-# ahp-host-py
+# agent-host-server
 
 A Python **host/server** library for the [Agent Host Protocol][ahp] (AHP) —
 Microsoft's protocol for synchronized multi-client state over AI agent sessions.
 
-> **Not the Analytic Hierarchy Process.** The PyPI names `ahp` and `pyahp` belong
-> to packages for the *Analytic Hierarchy Process*, a decision-making method with
-> no relationship to this project. If you are looking for pairwise-comparison
-> matrices and consistency ratios, you want one of those instead.
+> **"AHP" here means the Agent Host Protocol, not the Analytic Hierarchy
+> Process.** The PyPI names `ahp` and `pyahp` belong to packages for the latter,
+> a decision-making method with no relationship to this project — which is why
+> this one is spelled out. If you want pairwise-comparison matrices and
+> consistency ratios, you want one of those instead.
 
-> ### ⚠️ Status: design phase. There is no implementation yet.
+> ### ⚠️ Status: early construction. Not usable yet.
 >
-> This repository currently contains research and a plan. See
-> [`docs/research.md`](docs/research.md), [`docs/experiments.md`](docs/experiments.md)
-> and [`docs/plan.md`](docs/plan.md). Nothing is installable, and the API
-> described in the plan is not final.
+> The protocol type layer and the wire round-trip conformance corpus are in
+> place; the reducers, host and transport are not. Nothing is published to PyPI
+> and the API is not stable. See [`docs/plan.md`](docs/plan.md) §11 for the build
+> order, [`docs/research.md`](docs/research.md) for why it is shaped this way,
+> and [`docs/decisions/`](docs/decisions/) for the decisions taken so far.
 
 ## What this is for
 

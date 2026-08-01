@@ -1,0 +1,53 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - run: pip install -e '.[dev]'
+
+      - name: Lint
+        run: ruff check . && ruff format --check .
+
+      - name: Type-check
+        run: mypy
+
+      - name: Import contracts
+        run: lint-imports
+
+      # The whole suite runs offline: no model, no credentials, no network.
+      - name: Test
+        run: pytest
+
+  codegen-is-reproducible:
+    # The generated tables are derived from the vendored upstream TypeScript.
+    # A stale checked-in copy would silently diverge from the pin.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e '.[dev]'
+      - run: python scripts/generate_tables.py
+      - name: Fail if _generated.py is stale
+        run: git diff --exit-code -- src/agent_host_server/types/_generated.py

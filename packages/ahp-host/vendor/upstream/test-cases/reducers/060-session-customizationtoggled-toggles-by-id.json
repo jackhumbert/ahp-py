@@ -1,0 +1,59 @@
+{
+  "description": "session/customizationToggled toggles a container by id",
+  "reducer": "session",
+  "initial": {
+    "provider": "copilot",
+    "title": "Test Session",
+    "status": 1,
+    "lifecycle": "creating",
+    "customizations": [
+      {
+        "type": "plugin",
+        "id": "plugin-a",
+        "uri": "https://plugins.example/a",
+        "name": "Plugin A",
+        "enabled": true
+      },
+      {
+        "type": "plugin",
+        "id": "plugin-b",
+        "uri": "https://plugins.example/b",
+        "name": "Plugin B",
+        "enabled": true
+      }
+    ],
+    "activeClients": [],
+    "chats": []
+  },
+  "actions": [
+    {
+      "type": "session/customizationToggled",
+      "id": "plugin-a",
+      "enabled": false
+    }
+  ],
+  "expected": {
+    "provider": "copilot",
+    "title": "Test Session",
+    "status": 1,
+    "lifecycle": "creating",
+    "customizations": [
+      {
+        "type": "plugin",
+        "id": "plugin-a",
+        "uri": "https://plugins.example/a",
+        "name": "Plugin A",
+        "enabled": false
+      },
+      {
+        "type": "plugin",
+        "id": "plugin-b",
+        "uri": "https://plugins.example/b",
+        "name": "Plugin B",
+        "enabled": true
+      }
+    ],
+    "activeClients": [],
+    "chats": []
+  }
+}

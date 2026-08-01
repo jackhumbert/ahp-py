@@ -21,10 +21,13 @@ prefixed. `.research/` holds pinned clones and is git-ignored; see
 
 Nine things determine the shape of this project. In rough order of consequence:
 
-1. **The interoperable version is 0.6.0, not 0.7.0 or 0.8.0.** The spec is at
-   0.7.0 and `main` at 0.8.0, but the newest client you can actually install
-   from npm is **0.6.0**, and it offers exactly `['0.6.0','0.5.2','0.5.1']`.
-   The `typescript/v0.7.0` GitHub release does not exist. *(measured, E1)*
+1. **Target 0.7.0 *and* 0.6.0.** **VS Code** — the client that matters — vendors
+   upstream's `types/` directly and offers the full list
+   `['0.7.0','0.6.0','0.5.2','0.5.1']`, preferring 0.7.0. The newest client
+   installable from **npm** is only **0.6.0** (there is no `typescript/v0.7.0`
+   release), so supporting both covers VS Code and keeps the CI counterparty
+   working. The cost is near zero: the whole 0.6.0→0.7.0 action delta for our
+   channels is six actions, all out of v0.1 scope. *(measured, E1, §1a)*
 
 2. **Reducers cannot be generated — every non-TypeScript client hand-ports
    them** and gates the port on a shared 247-fixture JSON corpus. That corpus
@@ -63,8 +66,8 @@ Nine things determine the shape of this project. In rough order of consequence:
    is a seven-line redirect stub, and `implementations.md` lists exactly one
    server. That is the gap.
 
-**Recommended v0.1:** target protocol **0.6.0** on the wire, with the reducer
-port validated against the fixture corpus at `spec/v0.7.0`. Ship root + session
+**Recommended v0.1:** speak protocol **0.7.0 and 0.6.0** on the wire, with the
+reducer port validated against the fixture corpus at `spec/v0.7.0`. Ship root + session
 + chat channels and a stub echo provider. Scope detail in §10.
 
 ---
@@ -307,7 +310,7 @@ mitigation.
 | # | Divergence | Evidence |
 |---|---|---|
 | 1 | `AhpStateMirror` does not track chats **at all** — `applySnapshot`/`apply` silently drop every `ahp-chat:` snapshot and action, six weeks after 0.4.0 moved turns into `ChatState`. `chatReducer` is exported but never called by the mirror. | `clients/typescript/src/client/state-mirror.ts:80-133` (HEAD); confirmed at runtime, E3 |
-| 2 | `isClientDispatchable`'s signature omits `ChatAction`, though `ClientChatAction` is generated and 17 chat actions are client-dispatchable. The runtime map is complete; the type is stale. | `types/common/reducer-helpers.ts:44` |
+| 2 | `isClientDispatchable`'s signature omits `ChatAction`, though `ClientChatAction` is generated and 15 chat actions are client-dispatchable. The runtime map is complete; the type is stale. | `types/common/reducer-helpers.ts:44` |
 | 3 | `errors.schema.json` is missing `-32011 Conflict` — the generator hardcodes the enum. | `schema/errors.schema.json` vs `types/common/errors.ts:88` |
 | 4 | `chat-channel.md` says the *server* allocates the chat URI and that `disposeChat` does not exist; the TypeScript says the *client* chooses it (`CreateChatParams.chat`) and `disposeChat` is a registered command. | `docs/specification/chat-channel.md` vs `types/channels-chat/commands.ts`, `CommandMap` |
 | 5 | `docs/guide/actions.md:202-210` lists four reducers; seven exist. | `types/reducers.ts:8-15` |
@@ -948,7 +951,8 @@ PyPI availability, checked 2026-08-01 (`404` = available):
 | `ahp` | **taken** (Analytic Hierarchy Process) |
 | `pyahp` | **taken** (Analytic Hierarchy Process) |
 | `agent-host-protocol` | available |
-| `ahp-host`, `ahp-server`, `ahp-core`, `ahp-types`, `ahp-ws` | available |
+| `ahp-host`, `ahp-server`, `ahp-core`, `ahp-types`, `ahp-ws` | available (not taken — see plan.md §2 for why the spelled-out name won) |
+| `agent-host-server`, `agent-host-server-acp`, `agent-host-protocol-types` | available — **chosen** |
 | `ahp-protocol`, `python-ahp`, `agenthost` | available |
 
 The `ahp` search collision with Analytic Hierarchy Process is real and must be

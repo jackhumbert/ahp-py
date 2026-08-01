@@ -1,0 +1,103 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "agent-host-server"
+version = "0.0.0"
+description = "A host/server implementation of the Agent Host Protocol (AHP) for Python."
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.11"
+authors = [{ name = "agent-host-server contributors" }]
+keywords = ["ahp", "agent-host-protocol", "agent", "protocol", "json-rpc", "websocket"]
+classifiers = [
+  "Development Status :: 2 - Pre-Alpha",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Software Development :: Libraries",
+  "Typing :: Typed",
+]
+# The core deliberately has no runtime dependencies. The WebSocket transport is
+# an extra so the protocol layer stays installable and testable on its own.
+dependencies = []
+
+[project.optional-dependencies]
+ws = ["websockets>=13"]
+dev = [
+  "pytest>=8",
+  "mypy>=1.11",
+  "ruff>=0.6",
+  "import-linter>=2",
+]
+
+[project.urls]
+Homepage = "https://github.com/jackhumbert/agent-host-server-py"
+Repository = "https://github.com/jackhumbert/agent-host-server-py"
+Issues = "https://github.com/jackhumbert/agent-host-server-py/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/agent_host_server"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q --strict-markers"
+markers = ["interop: requires Node and the published TypeScript client"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+files = ["src", "tests", "scripts"]
+# The vendored corpora are data, not code.
+exclude = "^vendor/"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N", "UP", "B", "A", "C4", "PT", "RET", "SIM", "TID", "RUF"]
+ignore = [
+  # The protocol's own field names are camelCase; mirroring them is correct.
+  "N815",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"src/agent_host_server/types/_generated.py" = ["E501"]
+
+[tool.ruff.format]
+# The generator is the sole authority on this file's content; formatting it
+# here would break the `git diff --exit-code` reproducibility gate in CI.
+exclude = ["src/agent_host_server/types/_generated.py"]
+
+[tool.importlinter]
+root_package = "agent_host_server"
+include_external_packages = true
+
+# `types` and `reducers` must stay free of I/O and of the runtime layers, so the
+# split into separate distributions stays cheap if a Python client ever appears.
+# See docs/plan.md §2.
+[[tool.importlinter.contracts]]
+name = "Layered: protocol core must not depend on runtime"
+type = "layers"
+# Parenthesised layers are optional, so the contract holds while the lower
+# layers are still being built out (docs/plan.md §11).
+layers = [
+  "(agent_host_server.ws)",
+  "(agent_host_server.transport)",
+  "(agent_host_server.core)",
+  "(agent_host_server.provider)",
+  "agent_host_server.conformance",
+  "(agent_host_server.reducers)",
+  "agent_host_server.types",
+]
+
+[[tool.importlinter.contracts]]
+name = "types performs no I/O"
+type = "forbidden"
+source_modules = ["agent_host_server.types"]
+forbidden_modules = ["asyncio", "socket", "pathlib", "json", "os", "websockets"]

@@ -368,15 +368,23 @@ demonstrably buggy downstream product. The correct source of truth is `types/`.
 > reject any action the client is not allowed to originate.
 
 `IS_CLIENT_DISPATCHABLE` in `types/action-origin.generated.ts` is a generated
-map over every `StateAction['type']`. **40 of 85 actions** carry
-`@clientDispatchable` (chat 17, session 11, annotations 5, terminal 5,
-changeset 1, root 1, resource-watch 0).
+map over every `StateAction['type']`. **38 of 85 actions** are dispatchable:
+chat 15, session 11, annotations 5, terminal 5, changeset 1, root 1,
+resource-watch 0.
+
+There are **40** `@clientDispatchable` JSDoc annotations across
+`types/channels-*/actions.ts`, but only 38 map entries are `true` — upstream's
+`scripts/generate-action-origin.ts` counts an annotation only when the following
+declaration carries a `type: ActionType.X` member, so two annotations on
+non-enum-bearing declarations are skipped. **The generated map is
+authoritative** (it is what `isClientDispatchable` reads) and is what we vendor.
+An earlier draft of this document reported the JSDoc count of 40.
 
 Two shipped-code observations:
 
 1. The `isClientDispatchable` helper's *signature* omits `ChatAction`
    (`RootAction | SessionAction | TerminalAction | ChangesetAction | AnnotationsAction`)
-   even though `ClientChatAction` is generated and 17 chat actions are
+   even though `ClientChatAction` is generated and 15 chat actions are
    client-dispatchable. The runtime map is complete; the type is stale.
 2. `AhpStateMirror` (`clients/typescript/src/client/state-mirror.ts`, HEAD)
    tracks root, sessions, terminals and changesets — **but not chats**.
