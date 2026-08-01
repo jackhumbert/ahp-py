@@ -13,6 +13,8 @@ The recurring root cause is that JavaScript distinguishes `undefined` from
 
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 
 from agent_host_server.reducers import chat_reducer, session_reducer
@@ -255,3 +257,98 @@ class TestOpenInputRequest:
             "an omitted response must not be stored as null -- it serialises to "
             '"response": null, which a reference client reads as resolved'
         )
+
+
+class TestInputAnswerChanged:
+    """The elicitation block, found by the verify pass after the first six fixes.
+
+    All four are reachable from `chat/inputAnswerChanged`, which is
+    client-dispatchable, and none is covered by any fixture.
+    """
+
+    @staticmethod
+    def _open_request(answers: object = None) -> dict[str, object]:
+        # The lookup is on `part.request.id` -- not `requestId`.
+        request: dict[str, object] = {"id": "r1", "questions": []}
+        if answers is not None:
+            request["answers"] = answers
+        return _chat(
+            activeTurn={
+                "id": "t1",
+                "startedAt": "x",
+                "message": {},
+                "responseParts": [{"kind": "inputRequest", "id": "ir1", "request": request}],
+            }
+        )
+
+    @staticmethod
+    def _answers(state: Any) -> Any:
+        return state["activeTurn"]["responseParts"][0]["request"].get("answers")
+
+    def test_an_explicit_null_answer_is_stored_not_deleted(self) -> None:
+        """The reference tests `action.answer === undefined`, so a null answer
+        takes the *else* branch and is stored as a value."""
+        with frozen_clock():
+            out = chat_reducer(
+                self._open_request({"q1": "old"}),
+                {
+                    "type": "chat/inputAnswerChanged",
+                    "requestId": "r1",
+                    "questionId": "q1",
+                    "answer": None,
+                },
+            )
+        assert self._answers(out) == {"q1": None}, "a null answer must be stored, not deleted"
+
+    def test_an_omitted_answer_deletes(self) -> None:
+        with frozen_clock():
+            out = chat_reducer(
+                self._open_request({"q1": "old", "q2": "keep"}),
+                {"type": "chat/inputAnswerChanged", "requestId": "r1", "questionId": "q1"},
+            )
+        assert self._answers(out) == {"q2": "keep"}
+
+    def test_an_unhashable_question_id_does_not_raise(self) -> None:
+        """`answers` is a plain JS object, so any key is coerced to a string
+        rather than raising -- Python would `TypeError` on a dict key."""
+        with frozen_clock():
+            out = chat_reducer(
+                self._open_request({"q1": "old"}),
+                {
+                    "type": "chat/inputAnswerChanged",
+                    "requestId": "r1",
+                    "questionId": {"a": 1},
+                    "answer": "x",
+                },
+            )
+        assert self._answers(out) == {"q1": "old", "[object Object]": "x"}
+
+    def test_array_valued_answers_are_spread_by_index_not_corrupted(self) -> None:
+        """`{...["ab", "cd"]}` is `{"0": "ab", "1": "cd"}` in JS.
+
+        `dict(["ab", "cd"])` would silently produce `{'a': 'b', 'c': 'd'}`, and
+        `dict(["p", "q"])` would raise outright.
+        """
+        with frozen_clock():
+            out = chat_reducer(
+                self._open_request(["ab", "cd"]),
+                {
+                    "type": "chat/inputAnswerChanged",
+                    "requestId": "r1",
+                    "questionId": "k",
+                    "answer": "v",
+                },
+            )
+        assert self._answers(out) == {"0": "ab", "1": "cd", "k": "v"}
+
+    def test_a_two_character_array_answer_does_not_raise(self) -> None:
+        with frozen_clock():
+            chat_reducer(
+                self._open_request(["p", "q"]),
+                {
+                    "type": "chat/inputAnswerChanged",
+                    "requestId": "r1",
+                    "questionId": "k",
+                    "answer": "v",
+                },
+            )

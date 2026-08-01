@@ -138,6 +138,43 @@ def _map_key(value: Any) -> Any:
     return _RefKey(value)
 
 
+def _object_key(value: Any) -> str:
+    """`String(value)` -- how a plain JS object coerces any key.
+
+    Distinct from :func:`_map_key`: a `Map` keeps object keys by reference, but
+    an ordinary object stringifies them. Python would raise `TypeError` on an
+    unhashable key instead, and every site using this is reachable from a
+    client-dispatchable action.
+    """
+    if isinstance(value, str):
+        return value
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, float):
+        return str(int(value)) if value.is_integer() else str(value)
+    if isinstance(value, Sequence) and not isinstance(value, str | bytes):
+        return ",".join(_object_key(item) for item in value)
+    return "[object Object]"
+
+
+def _spread_object(value: Any) -> dict[str, Any]:
+    """`{ ...value }` for a wire value that should be an object.
+
+    A JS spread of an array yields index keys, and of a non-object yields `{}`.
+    `dict(["ab", "cd"])` would instead produce `{'a': 'b', 'c': 'd'}` -- silent
+    corruption -- or raise on `["p", "q"]`.
+    """
+    if isinstance(value, Mapping):
+        return dict(value)
+    if isinstance(value, Sequence) and not isinstance(value, str | bytes):
+        return {str(index): item for index, item in enumerate(value)}
+    return {}
+
+
 def _status_in(status: Any, states: frozenset[str]) -> bool:
     """Membership that is total over any JSON value, as upstream's ``===`` chain is.
 
@@ -993,13 +1030,18 @@ def chat_reducer(state: Any, action: Mapping[str, Any]) -> Any:
             return state
         index, part = existing
         request = part.get("request")
-        answers = dict(coalesce(_mget(request, "answers"), {}) or {})
-        question_id = action.get("questionId")
-        answer = action.get("answer")
-        if answer is None:
+        answers = _spread_object(_mget(request, "answers"))
+        # `String(key)` semantics: `answers` is a plain JS object, so any key is
+        # coerced to a string rather than raising. A dict or list key would be
+        # `TypeError: unhashable` here otherwise, and the action is
+        # client-dispatchable.
+        question_id = _object_key(action.get("questionId"))
+        # `action.answer === undefined` -- an explicit null is a real answer
+        # value upstream and is STORED, not treated as a deletion.
+        if "answer" not in action:
             answers.pop(question_id, None)
         else:
-            answers[question_id] = answer
+            answers[question_id] = action["answer"]
         response_parts[index] = {
             **part,
             "request": {
