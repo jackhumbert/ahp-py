@@ -143,9 +143,24 @@ class TestUnimplemented:
         IS how a host declines a feature."""
         _, client = connected
         await _initialize(client)
-        for method in ("resourceRead", "createTerminal", "authenticate"):
+        for method in ("createTerminal", "authenticate"):
             response = await client.request(method, {"channel": ROOT_URI})
             assert response["error"]["code"] == -32601, method
+
+    async def test_writes_are_denied_rather_than_unimplemented(
+        self, connected: tuple[Host, FakeClient]
+    ) -> None:
+        """The write half IS implemented; this host just has no writable
+        provider. `PermissionDenied` says that; `MethodNotFound` would claim the
+        host cannot write at all, which a client might act on permanently."""
+        _, client = connected
+        await _initialize(client)
+        for method in ("resourceWrite", "resourceDelete", "resourceMkdir"):
+            response = await client.request(
+                method,
+                {"channel": ROOT_URI, "uri": "file:///tmp/x", "data": "", "encoding": "utf-8"},
+            )
+            assert response["error"]["code"] == -32009, method
 
 
 class TestSessionLifecycle:

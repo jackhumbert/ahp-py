@@ -77,6 +77,19 @@ class Policy(Protocol):
         """
         ...
 
+    def may_access_resource(self, info: ConnectionInfo, operation: str, uri: str) -> bool:
+        """Whether this peer may `resolve`, `read` or `list` a resource.
+
+        The **only** per-resource gate that exists. Every `resource*` command
+        targets `ahp-root://`, so `may_see_channel` sees the same URI for all of
+        them and cannot distinguish a source file from a private key.
+
+        `uri` is the **canonical** one -- after the provider has resolved
+        symlinks -- so this decides about the file that will actually be read
+        rather than the name the peer used to ask for it.
+        """
+        ...
+
     def may_set_root_config(self, info: ConnectionInfo, key: str, value: Any) -> bool:
         """Whether this peer may change a host-wide configuration value.
 
@@ -127,6 +140,9 @@ class LoopbackSingleUserPolicy:
         return True
 
     def may_create_session(self, info: ConnectionInfo, params: Mapping[str, Any]) -> bool:
+        return True
+
+    def may_access_resource(self, info: ConnectionInfo, operation: str, uri: str) -> bool:
         return True
 
     def may_set_root_config(self, info: ConnectionInfo, key: str, value: Any) -> bool:

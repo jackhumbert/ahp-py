@@ -137,13 +137,29 @@ does not exist would broadcast client-dispatchable actions that nothing applies,
 which is exactly how this host's session state silently froze once already
 ([`docs/experiments.md`](docs/experiments.md) §E12).
 
+**The `resource*` family** is implemented, and exposes nothing by default. A
+host does not acquire a filesystem by being upgraded: install
+`RootedFilesystemResourceProvider` to serve one directory, and `writable=True`
+is a **second, separate opt-in** on top of that — reading discloses, writing
+destroys, and the two should not be granted by the same gesture.
+
+The jail walks a path one component at a time with `openat` and `O_NOFOLLOW`,
+resolving any symlink itself and re-checking the result against the root. That
+is deliberately not `realpath`-then-open: between the check and the open, a
+component can be swapped for a symlink and the open follows it — the check
+passed, the read escaped. There is a test for exactly that race.
+
+```bash
+python -m agent_host_server --serve-directory ./workspace
+```
+
 ### Not implemented
 
-The nine `resource*` filesystem methods · `createTerminal`/`disposeTerminal` ·
-`createResourceWatch` · `invokeChangesetOperation` · authentication, including
-0.6.0 step-up · completions · `createChat` and `disposeChat` (each session gets
-one default chat) · OTLP telemetry · the MCP channel · multiroot beyond seeding
-and validation.
+`createTerminal`/`disposeTerminal` · `createResourceWatch` ·
+`invokeChangesetOperation` · authentication, including 0.6.0 step-up ·
+completions · `createChat` and `disposeChat` (each session gets one default
+chat) · OTLP telemetry · the MCP channel · multiroot beyond seeding and
+validation.
 
 Every one returns a proper JSON-RPC `MethodNotFound` (`-32601`). None are
 silently stubbed. Where the protocol says a host may decline, it declines

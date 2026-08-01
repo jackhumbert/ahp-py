@@ -7,11 +7,16 @@ missing ``-32011 Conflict`` because its generator hardcodes the enum.
 
 from __future__ import annotations
 
-from typing import Any
+import errno
+from typing import Any, Final
 
 from agent_host_server.types import AHP_ERROR_CODES, JSON_RPC_ERROR_CODES
 
 __all__ = [
+    "EACCES",
+    "ELOOP",
+    "EMLINK",
+    "EPERM",
     "AhpError",
     "already_exists",
     "internal_error",
@@ -36,6 +41,16 @@ class AhpError(Exception):
         if self.data is not None:
             error["data"] = self.data
         return error
+
+
+#: `errno` values the resource jail has to distinguish. Imported here rather
+#: than in `resources.py` so the numbers sit next to the error codes they map
+#: onto, and so a platform without one of them fails at import rather than at
+#: the first traversal.
+ELOOP: Final = errno.ELOOP
+EMLINK: Final = errno.EMLINK
+EACCES: Final = errno.EACCES
+EPERM: Final = errno.EPERM
 
 
 def method_not_found(method: str) -> AhpError:

@@ -18,6 +18,7 @@ import secrets
 from pathlib import Path
 
 from agent_host_server.core import Host, HostInfo, LoopbackSingleUserPolicy
+from agent_host_server.core.resources import RootedFilesystemResourceProvider
 from agent_host_server.core.versions import DEFAULT_SUPPORTED_VERSIONS
 from agent_host_server.provider import EchoProvider
 from agent_host_server.ws import serve_websocket
@@ -81,6 +82,16 @@ def _parse_args() -> argparse.Namespace:
         help="publish a session config schema (reply style, prefix, dynamic greeting)",
     )
     parser.add_argument(
+        "--serve-directory",
+        metavar="PATH",
+        help="expose PATH read-only over the resource* commands, jailed to that root",
+    )
+    parser.add_argument(
+        "--writable",
+        action="store_true",
+        help="also allow writes under --serve-directory. A SECOND opt-in, on purpose.",
+    )
+    parser.add_argument(
         "--sequence-file",
         metavar="PATH",
         help=(
@@ -116,6 +127,11 @@ async def _run() -> None:
         ),
         LoopbackSingleUserPolicy(),
         info=HostInfo(name="agent-host-server (demo)"),
+        resources=RootedFilesystemResourceProvider(
+            Path(args.serve_directory), writable=args.writable
+        )
+        if args.serve_directory
+        else None,
         wire_log=Path(args.wire_log) if args.wire_log else None,
         sequence_file=Path(args.sequence_file) if args.sequence_file else None,
     )

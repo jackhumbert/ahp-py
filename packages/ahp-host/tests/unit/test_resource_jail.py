@@ -1,0 +1,381 @@
+"""The filesystem jail, attacked directly.
+
+Every `resource*` command targets `ahp-root://`, so `may_see_channel` cannot
+distinguish a source file from a private key, and the jail is the thing standing
+between a peer that completed `initialize` and the host's disk.
+
+The escapes worth testing are not "does `..` work" -- they are the ones that
+beat a naive implementation:
+
+* a symlink pointing outside the root;
+* a symlink chain that leaves and returns;
+* an absolute link target;
+* `..` inside a link target;
+* a link swapped in *after* the path was checked, which is what breaks
+  `realpath`-then-open and is why this walks with `openat` instead.
+"""
+
+from __future__ import annotations
+
+import os
+from pathlib import Path
+
+import pytest
+
+from agent_host_server.core.errors import AhpError
+from agent_host_server.core.resources import (
+    NullResourceProvider,
+    RootedFilesystemResourceProvider,
+)
+
+pytestmark = pytest.mark.anyio
+
+
+@pytest.fixture
+def anyio_backend() -> str:
+    return "asyncio"
+
+
+@pytest.fixture
+def jail(tmp_path: Path) -> tuple[RootedFilesystemResourceProvider, Path, Path]:
+    root = tmp_path / "root"
+    outside = tmp_path / "outside"
+    (root / "sub").mkdir(parents=True)
+    outside.mkdir()
+    (root / "hello.txt").write_text("inside\n")
+    (root / "sub" / "nested.txt").write_text("nested\n")
+    (outside / "secret.txt").write_text("SECRET\n")
+    return RootedFilesystemResourceProvider(root), root, outside
+
+
+def _uri(path: Path) -> str:
+    return path.as_uri()
+
+
+class TestReading:
+    async def test_a_file_in_the_root_reads(
+        self, jail: tuple[RootedFilesystemResourceProvider, Path, Path]
+    ) -> None:
+        provider, root, _ = jail
+        content = await provider.read(_uri(root / "hello.txt"))
+        assert content.data == b"inside\n"
+        assert content.content_type == "text/plain"
+
+    async def test_a_nested_file_reads(
+        self, jail: tuple[RootedFilesystemResourceProvider, Path, Path]
+    ) -> None:
+        provider, root, _ = jail
+        assert (await provider.read(_uri(root / "sub" / "nested.txt"))).data == b"nested\n"
+
+    async def test_resolve_reports_type_size_and_an_etag(
+        self, jail: tuple[RootedFilesystemResourceProvider, Path, Path]
+    ) -> None:
+        provider, root, _ = jail
+        info = await provider.resolve(_uri(root / "hello.txt"))
+        assert info.type == "file"
+        assert info.size == 7
+        assert info.etag is not None
+
+    async def test_the_etag_changes_within_one_millisecond(
+        self, jail: tuple[RootedFilesystemResourceProvider, Path, Path]
+    ) -> None:
+        """A size-plus-millisecond etag cannot distinguish two same-size writes
+        inside one millisecond, which is a real lost-update window for the very
+        `ifMatch` flow an etag exists to protect. Nanoseconds can."""
+        provider, root, _ = jail
+        target = root / "hello.txt"
+        first = (await provider.resolve(_uri(target))).etag
+        target.write_text("insid3\n")  # same length, immediately after
+        assert (await provider.resolve(_uri(target))).etag != first
+
+    async def test_listing_reports_entry_types(
+        self, jail: tuple[RootedFilesystemResourceProvider, Path, Path]
+    ) -> None:
+        provider, root, _ = jail
+        entries = {e.name: e.type for e in await provider.list_dir(_uri(root))}
+        assert entries == {"hello.txt": "file", "sub": "directory"}
+
+
+class TestEscapes:
+    async def test_dot_dot_is_refused(
+        self, jail: tuple[RootedFilesystemResourceProvider, Path, Path]
+    ) -> None:
+        provider, root, outside = jail
+        with pytest.raises(AhpError) as caught:
+            await provider.read(f"{_uri(root)}/../outside/secret.txt")
+        assert caught.value.code == -32009
+
+    async def test_an_absolute_path_outside_the_root_is_refused(
+        self, jail: tuple[RootedFilesystemResourceProvider, Path, Path]
+    ) -> None:
+        provider, _root, outside = jail
+        with pytest.raises(AhpError) as caught:
+            await provider.read(_uri(outside / "secret.txt"))
+        assert caught.value.code == -32009
+
+    async def test_a_symlink_out_of_the_root_is_refused(
+        self, jail: tuple[RootedFilesystemResourceProvider, Path, Path]
+    ) -> None:
+        provider, root, outside = jail
+        (root / "escape").symlink_to(outside / "secret.txt")
+        with pytest.raises(AhpError) as caught:
+            await provider.read(_uri(root / "escape"))
+        assert caught.value.code == -32009
+
+    async def test_a_symlinked_directory_out_of_the_root_is_refused(
+        self, jail: tuple[RootedFilesystemResourceProvider, Path, Path]
+    ) -> None:
+        """The interesting variant: the escape is a *parent* component, so the
+        final open looks entirely innocent."""
+        provider, root, outside = jail
+        (root / "door").symlink_to(outside)
+        with pytest.raises(AhpError) as caught:
+            await provider.read(_uri(root / "door" / "secret.txt"))
+        assert caught.value.code == -32009
+
+    async def test_dot_dot_inside_a_link_target_is_refused(
+        self, jail: tuple[RootedFilesystemResourceProvider, Path, Path]
+    ) -> None:
+        """`..` is legitimate inside a link, so it is normalised rather than
+        rejected -- and the normalised result is then walked from the root like
+        any other path, which is what stops it escaping."""
+        provider, root, _outside = jail
+        (root / "sub" / "up").symlink_to("../../outside/secret.txt")
+        with pytest.raises(AhpError) as caught:
+            await provider.read(_uri(root / "sub" / "up"))
+        assert caught.value.code == -32009
+
+    async def test_a_symlink_loop_terminates(
+        self, jail: tuple[RootedFilesystemResourceProvider, Path, Path]
+    ) -> None:
+        provider, root, _ = jail
+        (root / "a").symlink_to(root / "b")
+        (root / "b").symlink_to(root / "a")
+        with pytest.raises(AhpError):
+            await provider.read(_uri(root / "a"))
+
+    async def test_a_symlink_within_the_root_still_works(
+        self, jail: tuple[RootedFilesystemResourceProvider, Path, Path]
+    ) -> None:
+        """The jail refuses escapes, not symlinks. A repository full of internal
+        links has to stay readable or the feature is useless."""
+        provider, root, _ = jail
+        (root / "alias").symlink_to(root / "hello.txt")
+        assert (await provider.read(_uri(root / "alias"))).data == b"inside\n"
+
+    async def test_a_relative_symlink_within_the_root_still_works(
+        self, jail: tuple[RootedFilesystemResourceProvider, Path, Path]
+    ) -> None:
+        provider, root, _ = jail
+        (root / "sub" / "back").symlink_to("../hello.txt")
+        assert (await provider.read(_uri(root / "sub" / "back"))).data == b"inside\n"
+
+    async def test_a_component_swapped_after_the_check_cannot_escape(
+        self, jail: tuple[RootedFilesystemResourceProvider, Path, Path]
+    ) -> None:
+        """The race that beats `realpath`-then-open.
+
+        A naive provider canonicalises the path, compares the prefix, then opens
+        by name. Between the compare and the open, a component is replaced with a
+        symlink, and the open follows it: the check passed and the read escaped.
+        Walking with `openat` has no such window, so the swap simply produces a
+        refusal.
+        """
+        provider, root, outside = jail
+        swappable = root / "swap"
+        swappable.mkdir()
+        (swappable / "target.txt").write_text("innocent\n")
+        uri = _uri(swappable / "target.txt")
+        assert (await provider.read(uri)).data == b"innocent\n"
+
+        # The swap.
+        os.rename(swappable / "target.txt", swappable / "moved.txt")
+        (swappable / "target.txt").symlink_to(outside / "secret.txt")
+
+        with pytest.raises(AhpError) as caught:
+            await provider.read(uri)
+        assert caught.value.code == -32009
+
+    async def test_a_non_file_scheme_is_refused(
+        self, jail: tuple[RootedFilesystemResourceProvider, Path, Path]
+    ) -> None:
+        """Treating an unknown scheme as a path is how a jail acquires a second
+        entrance."""
+        provider, _root, _ = jail
+        for uri in ("git-blob:/abc", "virtual://client/x", "/etc/passwd"):
+            with pytest.raises(AhpError) as caught:
+                await provider.read(uri)
+            assert caught.value.code == -32602
+
+    async def test_a_device_file_is_refused(self, tmp_path: Path) -> None:
+        """A fifo blocks forever and a character device streams forever. Neither
+        is a resource anybody asked for."""
+        root = tmp_path / "root"
+        root.mkdir()
+        os.mkfifo(root / "pipe")
+        provider = RootedFilesystemResourceProvider(root)
+        with pytest.raises(AhpError) as caught:
+            await provider.read(_uri(root / "pipe"))
+        assert caught.value.code == -32009
+
+
+class TestNullProvider:
+    async def test_it_exposes_nothing_and_says_not_found(self) -> None:
+        """`NotFound`, not `PermissionDenied`: a host with no provider has no
+        resources, and "denied" would tell a peer something is there."""
+        provider = NullResourceProvider()
+        for call in (
+            provider.resolve("file:///etc/passwd"),
+            provider.read("file:///etc/passwd"),
+            provider.list_dir("file:///etc"),
+        ):
+            with pytest.raises(AhpError) as caught:
+                await call
+            assert caught.value.code == -32008
+
+
+class TestWriting:
+    """The write half. A second opt-in on top of installing the provider at
+    all: reading discloses, writing destroys."""
+
+    @pytest.fixture
+    def writable(self, tmp_path: Path) -> tuple[RootedFilesystemResourceProvider, Path]:
+        root = tmp_path / "w"
+        root.mkdir()
+        (root / "file.txt").write_text("hello")
+        return RootedFilesystemResourceProvider(root, writable=True), root
+
+    async def test_a_read_only_provider_refuses_every_mutation(
+        self, jail: tuple[RootedFilesystemResourceProvider, Path, Path]
+    ) -> None:
+        provider, root, _ = jail
+        with pytest.raises(AhpError) as caught:
+            await provider.write(_uri(root / "new.txt"), b"x")
+        assert caught.value.code == -32009
+
+    async def test_truncate_overwrites(
+        self, writable: tuple[RootedFilesystemResourceProvider, Path]
+    ) -> None:
+        provider, root = writable
+        await provider.write(_uri(root / "file.txt"), b"bye")
+        assert (root / "file.txt").read_bytes() == b"bye"
+
+    async def test_append_writes_at_eof(
+        self, writable: tuple[RootedFilesystemResourceProvider, Path]
+    ) -> None:
+        """`append` roots `position` at EOF and counts BACKWARDS, which is the
+        easy thing to get inverted."""
+        provider, root = writable
+        await provider.write(_uri(root / "file.txt"), b"!", mode="append")
+        assert (root / "file.txt").read_bytes() == b"hello!"
+
+    async def test_append_with_a_position_inserts_before_eof(
+        self, writable: tuple[RootedFilesystemResourceProvider, Path]
+    ) -> None:
+        provider, root = writable
+        await provider.write(_uri(root / "file.txt"), b"-", mode="append", position=2)
+        assert (root / "file.txt").read_bytes() == b"hel-lo"
+
+    async def test_insert_keeps_the_tail(
+        self, writable: tuple[RootedFilesystemResourceProvider, Path]
+    ) -> None:
+        provider, root = writable
+        await provider.write(_uri(root / "file.txt"), b"XY", mode="insert", position=1)
+        assert (root / "file.txt").read_bytes() == b"hXYello"
+
+    async def test_create_only_refuses_an_existing_file(
+        self, writable: tuple[RootedFilesystemResourceProvider, Path]
+    ) -> None:
+        provider, root = writable
+        with pytest.raises(AhpError) as caught:
+            await provider.write(_uri(root / "file.txt"), b"x", create_only=True)
+        assert caught.value.code == -32010
+
+    async def test_if_match_detects_a_concurrent_write(
+        self, writable: tuple[RootedFilesystemResourceProvider, Path]
+    ) -> None:
+        """The whole reason an etag exists: somebody else wrote between the read
+        and this write."""
+        provider, root = writable
+        etag = (await provider.resolve(_uri(root / "file.txt"))).etag
+        (root / "file.txt").write_text("changed underneath")
+        with pytest.raises(AhpError) as caught:
+            await provider.write(_uri(root / "file.txt"), b"mine", if_match=etag)
+        assert caught.value.code == -32011
+
+    async def test_if_match_allows_an_unchanged_file(
+        self, writable: tuple[RootedFilesystemResourceProvider, Path]
+    ) -> None:
+        provider, root = writable
+        etag = (await provider.resolve(_uri(root / "file.txt"))).etag
+        await provider.write(_uri(root / "file.txt"), b"mine", if_match=etag)
+        assert (root / "file.txt").read_bytes() == b"mine"
+
+    async def test_concurrent_appends_do_not_lose_data(
+        self, writable: tuple[RootedFilesystemResourceProvider, Path]
+    ) -> None:
+        """ "The server MUST evaluate the effective EOF and write atomically with
+        respect to other appenders." Two appends that each read EOF before
+        either writes would otherwise overwrite one another."""
+        import asyncio
+
+        provider, root = writable
+        (root / "log.txt").write_text("")
+        uri = _uri(root / "log.txt")
+        await asyncio.gather(
+            *(provider.write(uri, f"{i}\n".encode(), mode="append") for i in range(20))
+        )
+        assert len((root / "log.txt").read_text().splitlines()) == 20
+
+    async def test_mkdir_is_recursive_and_idempotent(
+        self, writable: tuple[RootedFilesystemResourceProvider, Path]
+    ) -> None:
+        provider, root = writable
+        await provider.mkdir(_uri(root / "a" / "b" / "c"))
+        assert (root / "a" / "b" / "c").is_dir()
+        await provider.mkdir(_uri(root / "a" / "b" / "c"))  # a no-op success
+
+    async def test_mkdir_over_a_file_is_already_exists(
+        self, writable: tuple[RootedFilesystemResourceProvider, Path]
+    ) -> None:
+        provider, root = writable
+        with pytest.raises(AhpError) as caught:
+            await provider.mkdir(_uri(root / "file.txt"))
+        assert caught.value.code == -32010
+
+    async def test_delete_refuses_a_non_empty_directory_unless_recursive(
+        self, writable: tuple[RootedFilesystemResourceProvider, Path]
+    ) -> None:
+        provider, root = writable
+        (root / "dir").mkdir()
+        (root / "dir" / "x").write_text("x")
+        with pytest.raises(AhpError):
+            await provider.delete(_uri(root / "dir"))
+        await provider.delete(_uri(root / "dir"), recursive=True)
+        assert not (root / "dir").exists()
+
+    async def test_a_write_cannot_escape_the_jail(self, tmp_path: Path) -> None:
+        """Writes go through exactly the same walk as reads, so there is no
+        second route out."""
+        root = tmp_path / "w2"
+        outside = tmp_path / "out2"
+        root.mkdir()
+        outside.mkdir()
+        (outside / "target.txt").write_text("original")
+        provider = RootedFilesystemResourceProvider(root, writable=True)
+        (root / "escape").symlink_to(outside / "target.txt")
+
+        with pytest.raises(AhpError) as caught:
+            await provider.write(_uri(root / "escape"), b"overwritten")
+        assert caught.value.code in (-32008, -32009)
+        assert (outside / "target.txt").read_text() == "original"
+
+    async def test_move_and_copy_stay_inside(
+        self, writable: tuple[RootedFilesystemResourceProvider, Path]
+    ) -> None:
+        provider, root = writable
+        await provider.copy(_uri(root / "file.txt"), _uri(root / "copy.txt"))
+        assert (root / "copy.txt").read_text() == "hello"
+        await provider.move(_uri(root / "copy.txt"), _uri(root / "moved.txt"))
+        assert (root / "moved.txt").read_text() == "hello"
+        assert not (root / "copy.txt").exists()

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import binascii
 import contextlib
 import json
 import logging
@@ -26,6 +27,11 @@ from agent_host_server.core.config import RootConfig, type_matches
 from agent_host_server.core.connection import Connection
 from agent_host_server.core.pending import PendingRequests, RequestOutcome
 from agent_host_server.core.policy import Policy
+from agent_host_server.core.resources import (
+    NullResourceProvider,
+    ResourceProvider,
+    WritableResourceProvider,
+)
 from agent_host_server.core.seq import FileSequence
 from agent_host_server.core.sequencer import Sequencer
 from agent_host_server.core.turn import TurnRunner
@@ -91,6 +97,46 @@ _INPUT_ACTIONS: Final = frozenset({"chat/inputAnswerChanged", "chat/inputComplet
 #: approve any other client's pending call. That is upstream's design; the host
 #: still has to check the call is actually pending, which no reducer does.
 _TOOL_RESOLVING_ACTIONS: Final = frozenset({"chat/toolCallConfirmed", "chat/toolCallComplete"})
+
+#: The read half of the `resource*` family, plus the grant request. The write
+#: half -- write, mkdir, copy, move, delete -- is a separate opt-in and is not
+#: implemented (docs/roadmap.md section 6).
+_RESOURCE_METHODS: Final = frozenset(
+    {"resourceResolve", "resourceRead", "resourceList", "resourceRequest"}
+)
+
+#: The mutating half. Answered `PermissionDenied` unless the installed provider
+#: is structurally a `WritableResourceProvider` -- reading discloses, writing
+#: destroys, and a host must not acquire the second by installing the first.
+_RESOURCE_WRITE_METHODS: Final = frozenset(
+    {"resourceWrite", "resourceMkdir", "resourceDelete", "resourceMove", "resourceCopy"}
+)
+
+#: What `resourceRead` returns when the bytes are not valid UTF-8. "Binary
+#: content MUST use `base64`; text content MAY use `utf-8`."
+_BASE64: Final = "base64"
+_UTF8: Final = "utf-8"
+
+
+def _read_result(content: Any, requested: Any) -> dict[str, Any]:
+    """`ResourceReadResult`, honouring the requested encoding where possible.
+
+    "The server SHOULD honor the `encoding` requested... If the server cannot
+    provide the requested encoding, it MUST fall back to either `base64` or
+    `utf-8`." Bytes that are not valid UTF-8 cannot be sent as `utf-8` at all,
+    so that is the one case where the fallback is forced.
+    """
+    result: dict[str, Any] = {}
+    if requested != _BASE64:
+        try:
+            result = {"data": content.data.decode("utf-8"), "encoding": _UTF8}
+        except UnicodeDecodeError:
+            result = {}
+    if not result:
+        result = {"data": base64.b64encode(content.data).decode("ascii"), "encoding": _BASE64}
+    if content.content_type is not None:
+        result["contentType"] = content.content_type
+    return result
 
 
 def _active_clients(active_client: Any) -> list[Any]:
@@ -269,6 +315,7 @@ class Host:
         wire_log: Path | None = None,
         sequence_file: Path | None = None,
         root_config: RootConfig | None = None,
+        resources: ResourceProvider | None = None,
     ) -> None:
         if policy is None:  # pragma: no cover - defensive; typing already forbids it
             raise ValueError("a Policy is required; there is no default")
@@ -295,6 +342,10 @@ class Host:
         # drops every `root/configChanged`, and the host accepts nothing -- the
         # status quo, but now on purpose rather than by accident.
         self.root_config = root_config
+        # A host does not acquire a filesystem by being upgraded. The default
+        # answers NotFound to everything, and installing something else is an
+        # explicit act by the embedder.
+        self.resources: ResourceProvider = resources or NullResourceProvider()
         self._root_ready = False
         self.wire_log = WireLog(wire_log) if wire_log is not None else None
 
@@ -402,6 +453,10 @@ class Host:
             return await self._dispose_session(connection, params)
         if method == "fetchTurns":
             return await self._fetch_turns(connection, params)
+        if method in _RESOURCE_METHODS:
+            return await self._resource(connection, method, params)
+        if method in _RESOURCE_WRITE_METHODS:
+            return await self._resource_write(connection, method, params)
         if method == "resolveSessionConfig":
             return await self._resolve_session_config(params)
         if method == "sessionConfigCompletions":
@@ -649,6 +704,122 @@ class Host:
             raise errors.invalid_params("unrecognised turns cursor")
 
         await self.sequencer.publish(channel, {"type": "chat/turnsLoaded", "turns": []})
+        return {}
+
+    # ─── resources ───────────────────────────────────────────────────────
+
+    async def _resource(
+        self, connection: Connection, method: str, params: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        """The read half of the `resource*` family.
+
+        Resolution happens **before** the policy is asked, so the policy sees the
+        canonical URI rather than the name the peer used -- a peer that reaches a
+        file through a symlink must not get a different answer from one that
+        names it directly.
+        """
+        uri = params.get("uri")
+        if not isinstance(uri, str):
+            raise errors.invalid_params("uri is required")
+
+        if method == "resourceRequest":
+            return self._resource_request(connection, params, uri)
+
+        operation = {"resourceResolve": "resolve", "resourceRead": "read"}.get(method, "list")
+        follow = params.get("followSymlinks")
+        info = await self.resources.resolve(uri, follow_symlinks=follow is not False)
+        if not self.policy.may_access_resource(connection.info, operation, info.uri):
+            raise errors.AhpError(-32009, f"Not permitted to {operation} {uri}")
+
+        if method == "resourceResolve":
+            return info.to_wire()
+        if method == "resourceList":
+            return {"entries": [e.to_wire() for e in await self.resources.list_dir(info.uri)]}
+
+        content = await self.resources.read(info.uri)
+        return _read_result(content, params.get("encoding"))
+
+    def _resource_request(
+        self, connection: Connection, params: Mapping[str, Any], uri: str
+    ) -> dict[str, Any]:
+        """Answer a request for access, honestly.
+
+        This exists so a client stops retrying: without it a denied read becomes
+        a deny/retry/deny loop, because the client has no way to ask whether
+        asking again would help. The host cannot prompt anybody -- it has no UI --
+        so the answer is whatever the standing policy already says, and a refusal
+        is a refusal rather than "ask again later".
+        """
+        wanted = [
+            operation
+            for operation, requested in (
+                ("read", params.get("read")),
+                ("write", params.get("write")),
+            )
+            if requested
+        ] or ["read"]
+        for operation in wanted:
+            if (
+                operation == "write" and not isinstance(self.resources, WritableResourceProvider)
+            ) or not self.policy.may_access_resource(connection.info, operation, uri):
+                raise errors.AhpError(-32009, f"Not permitted to {operation} {uri}")
+        return {}
+
+    async def _resource_write(
+        self, connection: Connection, method: str, params: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        """The mutating half of the `resource*` family.
+
+        Unlike the read half, the policy is asked **before** the provider is
+        touched, using the requested URI: there is nothing to canonicalise
+        against for a file that does not exist yet, and asking afterwards would
+        mean creating it first.
+        """
+        provider = self.resources
+        if not isinstance(provider, WritableResourceProvider):
+            raise errors.AhpError(-32009, "This host does not permit writes")
+
+        pair = method in ("resourceMove", "resourceCopy")
+        uri = params.get("source") if pair else params.get("uri")
+        destination = params.get("destination")
+        if not isinstance(uri, str) or (pair and not isinstance(destination, str)):
+            raise errors.invalid_params("uri is required")
+        for target in (uri, destination) if pair else (uri,):
+            if not self.policy.may_access_resource(connection.info, "write", str(target)):
+                raise errors.AhpError(-32009, f"Not permitted to write {target}")
+
+        if method == "resourceWrite":
+            encoding = params.get("encoding")
+            raw = params.get("data")
+            if not isinstance(raw, str):
+                raise errors.invalid_params("data is required")
+            try:
+                data = base64.b64decode(raw, validate=True) if encoding == _BASE64 else raw.encode()
+            except (ValueError, binascii.Error) as exc:
+                raise errors.invalid_params("data is not valid base64") from exc
+            position = params.get("position")
+            if_match = params.get("ifMatch")
+            mode = params.get("mode")
+            await provider.write(
+                uri,
+                data,
+                mode=mode if isinstance(mode, str) else "truncate",
+                position=position if isinstance(position, int) else 0,
+                create_only=bool(params.get("createOnly")),
+                if_match=if_match if isinstance(if_match, str) else None,
+            )
+        elif method == "resourceMkdir":
+            await provider.mkdir(uri)
+        elif method == "resourceDelete":
+            await provider.delete(uri, recursive=bool(params.get("recursive")))
+        elif method == "resourceMove":
+            await provider.move(
+                uri, str(destination), fail_if_exists=bool(params.get("failIfExists"))
+            )
+        else:
+            await provider.copy(
+                uri, str(destination), fail_if_exists=bool(params.get("failIfExists"))
+            )
         return {}
 
     # ─── session configuration ───────────────────────────────────────────

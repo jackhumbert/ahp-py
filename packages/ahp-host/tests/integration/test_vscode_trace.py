@@ -36,18 +36,21 @@ FIXTURE = Path(__file__).parent / "fixtures" / "vscode-1.131-client-requests.jso
 TRACE: dict[str, Any] = json.loads(FIXTURE.read_text(encoding="utf-8"))
 REQUESTS: list[dict[str, Any]] = TRACE["requests"]
 
-#: Deliberately unimplemented in v0.1. With no server capability object in AHP,
+#: Still unimplemented. With no server capability object in AHP,
 #: `MethodNotFound` IS how a host declines -- VS Code probes all of these and
 #: renders the session regardless.
 EXPECTED_REFUSALS = {
     "createResourceWatch",
     "createTerminal",
     "disposeTerminal",
-    "resolveSessionConfig",
-    "resourceList",
-    "resourceRead",
-    "resourceResolve",
 }
+
+#: Implemented, but answered `NotFound` (-32008) by this host, because the
+#: default resource provider exposes nothing. That is the distinction the
+#: `resource*` family is meant to make: "this host has no such file" is a
+#: different answer from "this host does not do files", and a host does not
+#: acquire a filesystem by being upgraded.
+EXPECTED_ABSENT = {"resourceList", "resourceRead", "resourceResolve"}
 
 
 @pytest.fixture
@@ -121,6 +124,9 @@ class TestReplay:
                     continue
                 if method in EXPECTED_REFUSALS:
                     assert response["error"]["code"] == -32601, (method, response["error"])
+                    continue
+                if method in EXPECTED_ABSENT:
+                    assert response["error"]["code"] == -32008, (method, response["error"])
                     continue
                 unexpected.append((method, response["error"]))
             assert not unexpected, f"unexpected failures: {unexpected}"
