@@ -424,3 +424,145 @@ class TestReconnectAsFirstRequest:
         )
         listed = await client.request("listSessions", {"channel": ROOT_URI})
         assert "error" not in listed, "reconnect did not establish the connection"
+
+
+class TestReconnectAcrossAHostRestart:
+    """`serverSeq` restarts at 0 when the host does.
+
+    A client that remembers 38 and is told "replay, nothing since 38" believes
+    it is up to date while its state is stale and unrecoverable -- strictly
+    worse than being told about a gap. A sequence ahead of ours cannot have come
+    from this process, so it must force snapshots.
+
+    VS Code hit this on the very first reconnect after a host restart.
+    """
+
+    async def test_a_sequence_from_a_previous_epoch_forces_snapshots(
+        self, connected: tuple[Host, FakeClient]
+    ) -> None:
+        _, client = connected
+        result = (
+            await client.request(
+                "reconnect",
+                {
+                    "channel": ROOT_URI,
+                    "clientId": "c1",
+                    "lastSeenServerSeq": 38,
+                    "subscriptions": [ROOT_URI],
+                },
+            )
+        )["result"]
+        assert result["type"] == "snapshot", (
+            "a lastSeenServerSeq ahead of ours means a previous host process; "
+            "replaying an empty action list would leave the client silently stale"
+        )
+        assert [s["resource"] for s in result["snapshots"]] == [ROOT_URI]
+
+    async def test_a_sequence_from_this_epoch_still_replays(
+        self, connected: tuple[Host, FakeClient]
+    ) -> None:
+        _, client = connected
+        await _initialize(client)
+        uri = "ahp-session:/88888888-8888-8888-8888-888888888888"
+        await client.request("createSession", {"channel": uri})
+        await client.collect()
+        result = (
+            await client.request(
+                "reconnect",
+                {
+                    "channel": ROOT_URI,
+                    "clientId": "test-client",
+                    "lastSeenServerSeq": 1,
+                    "subscriptions": [ROOT_URI],
+                },
+            )
+        )["result"]
+        assert result["type"] == "replay"
+        assert all(a["serverSeq"] > 1 for a in result["actions"])
+
+
+class TestTurnCancellation:
+    """Any client may cancel a running turn; the host sequences the outcome."""
+
+    @staticmethod
+    async def _running_turn(client: FakeClient, uri: str) -> str:
+        await _initialize(client)
+        await client.request("createSession", {"channel": uri})
+        await client.collect(seconds=0.3)
+        state = (await client.request("subscribe", {"channel": uri}))["result"]["snapshot"]["state"]
+        chat_uri: str = state["chats"][0]["resource"]
+        await client.request("subscribe", {"channel": chat_uri})
+        await client.notify(
+            "dispatchAction",
+            {
+                "channel": chat_uri,
+                "clientSeq": 1,
+                "action": {
+                    "type": "chat/turnStarted",
+                    "turnId": "t1",
+                    "startedAt": "1970-01-01T00:00:01.000Z",
+                    "message": {"text": "hello", "origin": {"kind": "user"}},
+                },
+            },
+        )
+        return chat_uri
+
+    async def test_cancelling_mid_turn_ends_it_as_cancelled(self) -> None:
+        host = Host(EchoProvider(delay=0.25), LoopbackSingleUserPolicy())
+        client_transport, server_transport = memory_pair()
+        serve = asyncio.create_task(host.serve(server_transport))
+        client = FakeClient(client_transport)
+        try:
+            chat_uri = await self._running_turn(client, "echo:/cancel-1")
+            await asyncio.sleep(0.15)
+            await client.notify(
+                "dispatchAction",
+                {
+                    "channel": chat_uri,
+                    "clientSeq": 2,
+                    "action": {"type": "chat/turnCancelled", "turnId": "t1", "duration": 0},
+                },
+            )
+            await client.collect(seconds=0.8)
+            state = (await client.request("subscribe", {"channel": chat_uri}))["result"][
+                "snapshot"
+            ]["state"]
+            assert state["turns"][0]["state"] == "cancelled"
+            assert state.get("activeTurn") is None
+
+            # A provider returning normally after cancellation must NOT complete
+            # the turn: the reducer would no-op, but it still burns a serverSeq
+            # and tells every client a cancelled turn finished.
+            completes = [
+                a for a in client.actions(chat_uri) if a["action"]["type"] == "chat/turnComplete"
+            ]
+            assert not completes, "a cancelled turn was also completed"
+        finally:
+            serve.cancel()
+            await host.aclose()
+
+    async def test_cancelling_with_no_active_turn_is_rejected(
+        self, connected: tuple[Host, FakeClient]
+    ) -> None:
+        _, client = connected
+        await _initialize(client)
+        uri = "echo:/cancel-2"
+        await client.request("createSession", {"channel": uri})
+        await client.collect(seconds=0.3)
+        state = (await client.request("subscribe", {"channel": uri}))["result"]["snapshot"]["state"]
+        chat_uri = state["chats"][0]["resource"]
+        await client.request("subscribe", {"channel": chat_uri})
+        await client.notify(
+            "dispatchAction",
+            {
+                "channel": chat_uri,
+                "clientSeq": 1,
+                "action": {"type": "chat/turnCancelled", "turnId": "nope", "duration": 0},
+            },
+        )
+        await client.collect(seconds=0.3)
+        echoes = [
+            a for a in client.actions(chat_uri) if a["action"]["type"] == "chat/turnCancelled"
+        ]
+        assert echoes, "a rejected action must still be echoed"
+        assert echoes[0]["rejectionReason"] == "no active turn to cancel"

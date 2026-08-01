@@ -221,8 +221,16 @@ class Sequencer:
             known = [uri for uri in requested if uri in self._states]
             missing = [uri for uri in requested if uri not in self._states]
 
+            # A sequence number ahead of ours cannot have come from this
+            # process: `serverSeq` restarts at 0 when the host does, so a client
+            # remembering 38 against a counter at 0 is from a previous epoch.
+            # Replaying "nothing since 38" would tell it it is up to date while
+            # its state is stale and unrecoverable, which is worse than any gap.
+            # Force snapshots instead.
+            from_previous_epoch = last_seen_server_seq > self._seq
+
             oldest = self._log[0]["serverSeq"] if self._log else self._seq + 1
-            can_replay = last_seen_server_seq >= oldest - 1
+            can_replay = not from_previous_epoch and last_seen_server_seq >= oldest - 1
 
             if can_replay:
                 actions = [

@@ -147,10 +147,26 @@ class TurnRunner:
                 sink,
             )
         except Exception as exc:
-            await sink.turn_failed(f"{type(exc).__name__}: {exc}")
+            if self._is_active(turn_id):
+                await sink.turn_failed(f"{type(exc).__name__}: {exc}")
+            return
+
+        # A provider that returns normally after being cancelled would otherwise
+        # complete a turn a client already ended. The reducer would no-op on it,
+        # but it still burns a serverSeq and broadcasts a `turnComplete` for a
+        # turn every client has already seen cancelled.
+        if not self._is_active(turn_id):
             return
 
         await self._sequencer.publish(
             self._channel,
             {"type": "chat/turnComplete", "turnId": turn_id, "duration": 0},
         )
+
+    def _is_active(self, turn_id: str) -> bool:
+        """Whether *turn_id* is still the channel's active turn."""
+        state = self._sequencer.state_of(self._channel)
+        if not isinstance(state, Mapping):
+            return False
+        active = state.get("activeTurn")
+        return isinstance(active, Mapping) and active.get("id") == turn_id
