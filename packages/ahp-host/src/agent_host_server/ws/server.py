@@ -54,12 +54,22 @@ class WebSocketServer:
         self._server: Any = None
 
     @property
-    def url(self) -> str:
+    def bound_port(self) -> int:
+        """The port actually bound, which differs from `port` when it was 0."""
         if self._server is None:
             raise RuntimeError("server is not running")
         sockets = getattr(self._server, "sockets", None) or []
-        port = sockets[0].getsockname()[1] if sockets else self.port
-        base = f"ws://{self.bind}:{port}"
+        return int(sockets[0].getsockname()[1]) if sockets else self.port
+
+    @property
+    def url(self) -> str:
+        """A full `ws://host:port/?tkn=...` URL.
+
+        VS Code's own input parser accepts exactly this form and splits the
+        token out into `connectionToken` itself (`tkn` is
+        `connectionTokenQueryName` in `vs/base/common/network.ts`).
+        """
+        base = f"ws://{self.bind}:{self.bound_port}"
         return f"{base}/?tkn={self.connection_token}" if self.connection_token else base
 
     def _authorize(self, path: str) -> bool:

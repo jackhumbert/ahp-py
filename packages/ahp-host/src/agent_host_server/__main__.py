@@ -60,21 +60,30 @@ async def _run() -> None:
         connection_token=token,
         allow_remote=args.allow_remote,
     ) as server:
-        address = server.url
         emit = functools.partial(print, flush=True)
-        emit(f"agent-host-server listening on {address}")
+        emit(f"agent-host-server listening on {server.url}")
         emit(f"speaking protocol {', '.join(DEFAULT_SUPPORTED_VERSIONS)}\n")
-        emit("To connect VS Code, add to settings.json:\n")
+
+        # `chat.remoteAgentHosts` holds IRawRemoteAgentHostEntry objects, not
+        # URLs: `address` and `name` are both required strings, `connectionToken`
+        # is separate and VS Code appends it as `?tkn=` itself. The address is
+        # stored scheme-less because the transport defaults to `ws://`; only
+        # `wss://` is preserved.
+        entry: dict[str, object] = {
+            "address": f"{args.bind}:{server.bound_port}",
+            "name": "Echo (agent-host-server)",
+        }
+        if token:
+            entry["connectionToken"] = token
+
+        emit("To connect VS Code (1.131+), add to settings.json:\n")
         emit(
             json.dumps(
-                {
-                    "chat.remoteAgentHostsEnabled": True,
-                    "chat.remoteAgentHosts": [address],
-                },
+                {"chat.remoteAgentHostsEnabled": True, "chat.remoteAgentHosts": [entry]},
                 indent=2,
             )
         )
-        emit("\nThen: Agent Sessions -> the 'Echo' provider.  Ctrl-C to stop.")
+        emit("\nThen open the Agent Sessions view and pick 'Echo'.  Ctrl-C to stop.")
         with contextlib.suppress(asyncio.CancelledError):
             await asyncio.Event().wait()
 
