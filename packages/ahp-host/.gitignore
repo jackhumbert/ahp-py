@@ -1,0 +1,27 @@
+# Local upstream checkouts used for research and codegen. Never committed —
+# the pinned upstream revision lives in UPSTREAM.md, and the vendoring script
+# reproduces this directory.
+/.research/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Node (dev-only: the conformance counterparty runs the real TypeScript client)
+node_modules/
+package-lock.json
+
+# Editors / OS
+.DS_Store
+.idea/
+*.swp
