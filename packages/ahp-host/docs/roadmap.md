@@ -1,8 +1,28 @@
 # Roadmap — from v0.1 to a full feature set
 
-**Status:** proposed. Nothing here is implemented.
-[`plan.md`](plan.md) scoped v0.1 and is done through step 6 of its build order;
-this document scopes everything after it.
+**Status: implemented.** [`plan.md`](plan.md) scoped v0.1; this document scoped
+everything after it, and everything it scoped now ships except what §10 puts
+permanently out of scope.
+
+**No command answers `MethodNotFound` any more.** That error used to be how this
+host declined a feature — AHP has no server capability object, so it is the only
+"no" available. Every method is now implemented, and a refusal is a *specific*
+one: `PermissionDenied` for something this host will not do, `NotFound` for
+something it does not have. Both tell a client more than "stop asking".
+
+Three things were listed here as deferred and then reconsidered, because two of
+the three reasons did not hold up:
+
+* **The server→client `resource*` direction** was filed as "its only consumer is
+  client-published plugins", as though that were minor. It is the reason a
+  plugin's children do not render in the Agents app — VS Code expands them
+  through `fileService` → `resourceRead` against the *client's* URIs.
+* **0.6.0 step-up auth** was filed as "dead code until a provider fronts MCP
+  servers". By that argument elicitation was dead code too, and it shipped with
+  a demo mode.
+* **The MCP channel** was the one partly-right deferral, and it needed splitting
+  rather than defending: the *runtime* is out by doctrine and stays out, but the
+  *protocol surface* was already unblocked by §9.3's own decision.
 
 Derived from a scoping pass over all seven unimplemented areas plus an
 adversarial critic pass, both grounded in the vendored upstream sources under
@@ -130,10 +150,10 @@ fixture corpus, whose comparator normalises `null` away on both sides. See §8.6
 
 **Deliberately not here: the terminal toast.** See §7.
 
-### v0.3 — The session configures itself
+### v0.3 — The session configures itself ✅ landed
 
 The release that makes the Agents app render a host as a *configured* thing
-rather than a bare transcript. **Total: L–XL.**
+rather than a bare transcript.
 
 1. **[ADR 0005] The suspending provider request** — decided before any code.
    Four features need the identical missing primitive and three separate areas
@@ -151,10 +171,10 @@ rather than a bare transcript. **Total: L–XL.**
    only, no state, no reducer. The only way a host with slow bring-up shows
    anything.
 
-### v0.4 — Files and changes
+### v0.4 — Files and changes ✅ landed
 
-**Total: XL.** The first release that hands a peer a filesystem API, so every
-item is behind a gate.
+The first release that hands a peer a filesystem API, so every item is behind a
+gate. The write half landed too, behind its own second opt-in.
 
 1. `ResourceProvider` protocol with a **null default**.
 2. `Policy.may_access_resource(info, op, canonical_uri)` — a hard gate, not an
@@ -169,9 +189,7 @@ item is behind a gate.
 6. The resource-watch channel — reducer (landed in v0.2), `createResourceWatch`
    with an **opaque receiver-assigned id**, change coalescing, per-connection cap.
 
-### v0.5 — Durability and auth
-
-**Total: L.**
+### v0.5 — Durability and auth ✅ landed
 
 1. Durable store proper: store protocol, filesystem store, per-channel snapshots
    on a debounce, catalogue restore, crash recovery, lazy provider resume,
@@ -185,9 +203,12 @@ to how much state is worth persisting, and until config, customizations and
 changesets exist a session has one chat and nothing else. Persisting the current
 shape means a format migration for every subsequent release.
 
-### v0.6+ — Conditional on demand
+### v0.6+ — ✅ landed
 
-Ordered by whether a real consumer exists, not by protocol completeness.
+Originally "conditional on demand". That framing was dropped: the demand test
+was doing work the doctrine test should do, and it kept producing "we cannot
+build this because nobody asked", which is not a reason. What is genuinely out
+of scope is out on the grounds in §10, not on consumer count.
 
 | Item | Blocked on / conditional on |
 |---|---|
