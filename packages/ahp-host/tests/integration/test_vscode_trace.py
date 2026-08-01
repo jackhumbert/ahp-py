@@ -40,7 +40,6 @@ REQUESTS: list[dict[str, Any]] = TRACE["requests"]
 #: `MethodNotFound` IS how a host declines -- VS Code probes all of these and
 #: renders the session regardless.
 EXPECTED_REFUSALS = {
-    "createResourceWatch",
     "createTerminal",
     "disposeTerminal",
 }
@@ -51,6 +50,11 @@ EXPECTED_REFUSALS = {
 #: different answer from "this host does not do files", and a host does not
 #: acquire a filesystem by being upgraded.
 EXPECTED_ABSENT = {"resourceList", "resourceRead", "resourceResolve"}
+
+#: Implemented, but declined because this host installs no watcher. Same
+#: distinction as EXPECTED_ABSENT: "nothing to watch here" is not "this host
+#: cannot watch".
+EXPECTED_DENIED = {"createResourceWatch"}
 
 
 @pytest.fixture
@@ -127,6 +131,9 @@ class TestReplay:
                     continue
                 if method in EXPECTED_ABSENT:
                     assert response["error"]["code"] == -32008, (method, response["error"])
+                    continue
+                if method in EXPECTED_DENIED:
+                    assert response["error"]["code"] == -32009, (method, response["error"])
                     continue
                 unexpected.append((method, response["error"]))
             assert not unexpected, f"unexpected failures: {unexpected}"

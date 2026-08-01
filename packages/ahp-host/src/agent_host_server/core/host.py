@@ -36,6 +36,13 @@ from agent_host_server.core.seq import FileSequence
 from agent_host_server.core.sequencer import Sequencer
 from agent_host_server.core.turn import TurnRunner
 from agent_host_server.core.versions import DEFAULT_SUPPORTED_VERSIONS, negotiate
+from agent_host_server.core.watches import (
+    DEFAULT_COALESCE_SECONDS,
+    ResourceChange,
+    ResourceWatcher,
+    WatchRequest,
+    new_watch_channel,
+)
 from agent_host_server.core.wirelog import WireLog
 from agent_host_server.provider.base import (
     AgentProvider,
@@ -116,6 +123,25 @@ _RESOURCE_WRITE_METHODS: Final = frozenset(
 #: content MUST use `base64`; text content MAY use `utf-8`."
 _BASE64: Final = "base64"
 _UTF8: Final = "utf-8"
+
+
+@dataclass
+class _Watch:
+    request: WatchRequest
+    owner: Connection
+    started: bool = False
+    buffered: list[ResourceChange] = field(default_factory=list)
+    flush: asyncio.Task[None] | None = None
+
+
+def _items(wrapped: Any) -> tuple[str, ...]:
+    """Unwrap the `{items: [...]}` forward-compatibility envelope."""
+    if not isinstance(wrapped, Mapping):
+        return ()
+    items = wrapped.get("items")
+    if not isinstance(items, list):
+        return ()
+    return tuple(i for i in items if isinstance(i, str))
 
 
 def _read_result(content: Any, requested: Any) -> dict[str, Any]:
@@ -316,6 +342,8 @@ class Host:
         sequence_file: Path | None = None,
         root_config: RootConfig | None = None,
         resources: ResourceProvider | None = None,
+        watcher: ResourceWatcher | None = None,
+        max_watches_per_connection: int = 32,
     ) -> None:
         if policy is None:  # pragma: no cover - defensive; typing already forbids it
             raise ValueError("a Policy is required; there is no default")
@@ -346,6 +374,13 @@ class Host:
         # answers NotFound to everything, and installing something else is an
         # explicit act by the embedder.
         self.resources: ResourceProvider = resources or NullResourceProvider()
+        # No default watcher either: a host that exposes no resources has
+        # nothing to watch, and starting a poller over a directory the embedder
+        # never named would be inventing access it did not grant.
+        self.watcher = watcher
+        self._max_watches = max_watches_per_connection
+        self._watches: dict[str, _Watch] = {}
+        self.sequencer.observer = self
         self._root_ready = False
         self.wire_log = WireLog(wire_log) if wire_log is not None else None
 
@@ -453,6 +488,8 @@ class Host:
             return await self._dispose_session(connection, params)
         if method == "fetchTurns":
             return await self._fetch_turns(connection, params)
+        if method == "createResourceWatch":
+            return await self._create_resource_watch(connection, params)
         if method in _RESOURCE_METHODS:
             return await self._resource(connection, method, params)
         if method in _RESOURCE_WRITE_METHODS:
@@ -821,6 +858,103 @@ class Host:
                 uri, str(destination), fail_if_exists=bool(params.get("failIfExists"))
             )
         return {}
+
+    # ─── resource watches ────────────────────────────────────────────────
+
+    async def _create_resource_watch(
+        self, connection: Connection, params: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        if self.watcher is None:
+            raise errors.AhpError(-32009, "This host does not watch resources")
+        uri = params.get("uri")
+        if not isinstance(uri, str):
+            raise errors.invalid_params("uri is required")
+
+        # Resolved first, so the policy and the watch both name the canonical
+        # target rather than whatever route the peer took to it.
+        info = await self.resources.resolve(uri)
+        if not self.policy.may_access_resource(connection.info, "list", info.uri):
+            raise errors.AhpError(-32009, f"Not permitted to watch {uri}")
+
+        owned = sum(1 for w in self._watches.values() if w.owner is connection)
+        if owned >= self._max_watches:
+            # A cap, because `createResourceWatch` is unauthenticated beyond the
+            # connection and each watch is a standing background cost.
+            raise errors.AhpError(-32009, "Too many watches on this connection")
+
+        request = WatchRequest(
+            root=info.uri,
+            recursive=bool(params.get("recursive")),
+            excludes=_items(params.get("excludes")),
+            includes=_items(params.get("includes")),
+        )
+        channel = new_watch_channel()
+        await self.sequencer.register_channel(channel, request.to_state(), "resourceWatch")
+        self._watches[channel] = _Watch(request=request, owner=connection)
+        return {"channel": channel}
+
+    def channel_observed(self, channel: str) -> None:
+        """First subscriber: start watching.
+
+        Started here rather than at `createResourceWatch` so a client that
+        creates a watch and never subscribes costs nothing, and so a watcher
+        cannot outlive the audience that justified it.
+        """
+        watch = self._watches.get(channel)
+        if watch is None or self.watcher is None or watch.started:
+            return
+        watch.started = True
+        self._spawn(self._start_watch(channel, watch))
+
+    def channel_unobserved(self, channel: str) -> None:
+        """Last subscriber gone: stop watching and drop the channel."""
+        watch = self._watches.pop(channel, None)
+        if watch is None:
+            return
+        self._spawn(self._stop_watch(channel, watch))
+
+    async def _start_watch(self, channel: str, watch: _Watch) -> None:
+        assert self.watcher is not None
+        with contextlib.suppress(Exception):
+            await self.watcher.start(watch.request, lambda c: self._on_changes(channel, c))
+
+    async def _stop_watch(self, channel: str, watch: _Watch) -> None:
+        if self.watcher is not None and watch.started:
+            with contextlib.suppress(Exception):
+                await self.watcher.stop(watch.request)
+        if watch.flush is not None:
+            watch.flush.cancel()
+        await self.sequencer.drop_channel(channel)
+
+    def _on_changes(self, channel: str, changes: Sequence[ResourceChange]) -> None:
+        """Buffer a batch, and schedule one action for the whole interval.
+
+        A `git checkout` produces thousands of events. Published individually
+        that is thousands of sequence numbers, reducer passes and fan-outs --
+        and enough log entries to evict this channel's own replay history.
+        """
+        watch = self._watches.get(channel)
+        if watch is None:
+            return
+        watch.buffered.extend(changes)
+        if watch.flush is None or watch.flush.done():
+            watch.flush = asyncio.create_task(self._flush_watch(channel))
+            self._background.add(watch.flush)
+            watch.flush.add_done_callback(self._background.discard)
+
+    async def _flush_watch(self, channel: str) -> None:
+        await asyncio.sleep(DEFAULT_COALESCE_SECONDS)
+        watch = self._watches.get(channel)
+        if watch is None or not watch.buffered:
+            return
+        batch, watch.buffered = watch.buffered, []
+        await self.sequencer.publish(
+            channel,
+            {
+                "type": "resourceWatch/changed",
+                "changes": {"items": [c.to_wire() for c in batch]},
+            },
+        )
 
     # ─── session configuration ───────────────────────────────────────────
 

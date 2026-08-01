@@ -99,7 +99,9 @@ class Sequencer:
         #: can tell the truth.
         self._evicted_through: dict[str, int] = {}
         self._subscribers: dict[str, set[Subscriber]] = {}
-        self._observer = observer
+        #: Settable after construction so a host can register itself, which it
+        #: cannot do while it is still building its own sequencer.
+        self.observer = observer
 
     @property
     def server_seq(self) -> int:
@@ -292,13 +294,13 @@ class Sequencer:
         would leave the lock held and the host wedged -- and the observer is
         embedder code.
         """
-        if self._observer is None:
+        if self.observer is None:
             return
         try:
             if observed:
-                self._observer.channel_observed(channel)
+                self.observer.channel_observed(channel)
             else:
-                self._observer.channel_unobserved(channel)
+                self.observer.channel_unobserved(channel)
         except Exception:
             _log.exception("subscription observer failed on %s", channel)
 
