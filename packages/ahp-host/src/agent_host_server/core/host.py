@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any, Final
 
 from agent_host_server.core import errors
+from agent_host_server.core.audit import AuditEvent, AuditSink, emit
 from agent_host_server.core.changesets import (
     Changeset,
     ContentStore,
@@ -357,6 +358,7 @@ class Host:
         resources: ResourceProvider | None = None,
         watcher: ResourceWatcher | None = None,
         max_watches_per_connection: int = 32,
+        audit: AuditSink | None = None,
     ) -> None:
         if policy is None:  # pragma: no cover - defensive; typing already forbids it
             raise ValueError("a Policy is required; there is no default")
@@ -396,6 +398,10 @@ class Host:
         #: Changeset operations the embedder made invocable. Empty by default,
         #: and nothing in this library ever adds to it.
         self._operations: dict[str, OperationHandler] = {}
+        # Decisions, not conversation. Absent by default: a host that records
+        # nothing is the honest default for one that cannot say where the
+        # record would go.
+        self.audit = audit
         self.sequencer.observer = self
         self._root_ready = False
         self.wire_log = WireLog(wire_log) if wire_log is not None else None
@@ -413,10 +419,33 @@ class Host:
             await self.sequencer.register_channel(ROOT_URI, root_state, "root")
             self._root_ready = True
 
-    async def serve(self, transport: Transport, *, peer: str | None = None) -> None:
-        """Drive one client connection until its transport closes."""
+    async def serve(
+        self,
+        transport: Transport,
+        *,
+        peer: str | None = None,
+        headers: Mapping[str, str] | None = None,
+        token: str | None = None,
+    ) -> None:
+        """Drive one client connection until its transport closes.
+
+        `headers` and `token` are whatever the transport learned while admitting
+        the peer, passed through untouched so `Policy.authorize_connection` has
+        something to decide with. The usual shape for a non-loopback deployment
+        is a reverse proxy that authenticates the person and forwards the
+        resulting principal as a header on the upgrade; without this, that
+        evidence exists at the handshake and is destroyed one call before the
+        only place it is useful.
+
+        The library assigns no meaning to any header. A forwarded header is
+        evidence only if the socket cannot be reached except through the proxy
+        that set it -- which is the embedder's problem, and saying so is better
+        than a hook that quietly implies otherwise.
+        """
         await self._ensure_root()
-        connection = Connection(transport, peer=peer, wire_log=self.wire_log)
+        connection = Connection(
+            transport, peer=peer, headers=headers, token=token, wire_log=self.wire_log
+        )
         connection.start_writer()
         self._connections.add(connection)
         pending: set[asyncio.Task[None]] = set()
@@ -550,9 +579,11 @@ class Host:
         connection.protocol_version = chosen
 
         if not self.policy.authorize_connection(connection.info):
+            self._audit("connection.refused", connection, allowed=False)
             raise errors.AhpError(-32009, "Connection refused by policy")
 
         connection.initialized = True
+        self._audit("connection.admitted", connection, detail={"protocolVersion": chosen})
 
         snapshots: list[dict[str, Any]] = []
         for uri in params.get("initialSubscriptions") or []:
@@ -1384,6 +1415,7 @@ class Host:
         if channel in self._sessions:
             raise errors.already_exists(channel)
         if not self.policy.may_create_session(connection.info, params):
+            self._audit("session.refused", connection, channel=channel, allowed=False)
             raise errors.AhpError(-32009, "Not permitted to create a session")
 
         provider_id = params.get("provider") or self.provider.agent.provider
@@ -1455,6 +1487,7 @@ class Host:
 
         # Bring-up runs after the response so the client can subscribe first.
         # Hold a reference: a bare create_task can be garbage-collected mid-flight.
+        self._audit("session.created", connection, channel=channel)
         task = asyncio.create_task(self._bring_up(session, params))
         self._background.add(task)
         task.add_done_callback(self._background.discard)
@@ -1581,20 +1614,29 @@ class Host:
             connection.client_id = client_id if isinstance(client_id, str) else str(uuid.uuid4())
             connection.protocol_version = self.supported_versions[0]
             if not self.policy.authorize_connection(connection.info):
+                self._audit("connection.refused", connection, allowed=False)
                 raise errors.AhpError(-32009, "Connection refused by policy")
             connection.initialized = True
+            self._audit("connection.resumed", connection)
 
-        subscriptions = [
-            uri
-            for uri in params.get("subscriptions") or []
-            if isinstance(uri, str) and self.policy.may_see_channel(connection.info, uri)
-        ]
-        for uri in subscriptions:
+        requested = [uri for uri in params.get("subscriptions") or [] if isinstance(uri, str)]
+        allowed = [uri for uri in requested if self.policy.may_see_channel(connection.info, uri)]
+        # Refused channels are NOT silently dropped. `missing` is documented as
+        # "subscriptions that cannot be resumed -- disposed sessions, or
+        # resources the client may no longer observe", and a client uses it to
+        # drop them from its local set. Filtering them out before `replay` sees
+        # them tells the client nothing, so it keeps asking forever.
+        refused = [uri for uri in requested if uri not in allowed]
+
+        for uri in allowed:
             await self.sequencer.subscribe(connection, uri)
         last_seen = params.get("lastSeenServerSeq")
-        return await self.sequencer.replay(
-            last_seen if isinstance(last_seen, int) else 0, subscriptions
+        result = await self.sequencer.replay(
+            last_seen if isinstance(last_seen, int) else 0, allowed
         )
+        if refused:
+            result["missing"] = [*result.get("missing", []), *refused]
+        return result
 
     # ─── client-dispatched actions ───────────────────────────────────────
 
@@ -1619,8 +1661,30 @@ class Host:
 
         rejection = self._validate_client_action(connection, channel, action)
         if rejection is not None:
+            self._audit(
+                "action.rejected",
+                connection,
+                channel=channel,
+                allowed=False,
+                reason=rejection,
+                detail={"action": action.get("type")},
+            )
             await self.sequencer.publish(channel, action, origin=origin, rejection_reason=rejection)
             return
+        if action.get("type") in _TOOL_RESOLVING_ACTIONS:
+            # Who approved a tool call is the single event an operator is most
+            # likely to be asked about, and the protocol's own validation table
+            # conditions approval on the call's STATUS, never on identity.
+            self._audit(
+                "toolcall.resolved",
+                connection,
+                channel=channel,
+                detail={
+                    "action": action.get("type"),
+                    "toolCallId": action.get("toolCallId"),
+                    "approved": action.get("approved"),
+                },
+            )
 
         await self.sequencer.publish(channel, action, origin=origin)
         await self._react(channel, action)
@@ -1805,6 +1869,55 @@ class Host:
                 self._spawn(self._retract_all(session, [r.id for r in runner.abandoned]))
             with contextlib.suppress(Exception):
                 await self._mirror_summary(session)
+
+    # ─── observability ───────────────────────────────────────────────────
+
+    def _audit(
+        self,
+        kind: str,
+        connection: Connection,
+        *,
+        channel: str | None = None,
+        allowed: bool = True,
+        reason: str | None = None,
+        detail: Mapping[str, Any] | None = None,
+    ) -> None:
+        emit(
+            self.audit,
+            AuditEvent(
+                kind=kind,
+                client_id=connection.client_id or None,
+                peer=connection.peer,
+                channel=channel,
+                allowed=allowed,
+                reason=reason,
+                detail=detail or {},
+            ),
+        )
+
+    def counters(self) -> dict[str, int]:
+        """A few numbers, without reaching into private attributes.
+
+        "The port is open" is a weak liveness signal for a process whose
+        interesting failure modes -- a wedged sequencer, a provider that stopped
+        answering, suspended requests nobody will resolve -- all keep the port
+        open. `pending` is the one to watch: it only grows when providers are
+        waiting on clients that are not answering.
+
+        Deliberately not a metrics endpoint. What scrapes this is the
+        embedder's; what it means is documented here.
+        """
+        return {
+            "connections": len(self._connections),
+            "sessions": len(self._sessions),
+            "activeTurns": sum(
+                1 for s in self._sessions.values() if s.turn is not None and not s.turn.done()
+            ),
+            "pendingRequests": len(self.pending),
+            "watches": len(self._watches),
+            "channels": self.sequencer.channel_count,
+            "serverSeq": self.sequencer.server_seq,
+        }
 
     # ─── shutdown ────────────────────────────────────────────────────────
 

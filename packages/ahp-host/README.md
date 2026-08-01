@@ -171,6 +171,30 @@ correctly told to take fresh snapshots, but it is told that on **every**
 reconnect thereafter, because the reference client records the sequence with a
 maximum and stays permanently ahead of a counter that restarted at zero.
 
+## Embedding it behind a proxy
+
+The library ships one `Policy` that permits everything
+(`LoopbackSingleUserPolicy`) and one that partitions sessions between users
+(`OwnedSessionPolicy`). The second is an **example**, not a core concept — but
+it comes with the negative tests that matter, because every deployment writes
+the same four and they are the ones that fail loudly when a change routes around
+a hook: peer B cannot see A's session, cannot subscribe to its channels, cannot
+dispatch into it, and cannot resume A's connection by asserting A's `clientId`.
+
+`Host.serve` takes `headers=` and `token=`, and the WebSocket server forwards
+both from the upgrade. **The library assigns meaning to neither.** Which header
+carries a principal, and whether to believe it, is the embedder's decision — and
+a forwarded header is evidence only if the socket cannot be reached except
+through the proxy that set it.
+
+`Host.counters()` reports connections, sessions, active turns, pending requests,
+watches, channels and `serverSeq`. `AuditSink` records decisions — admissions,
+refusals, session creation, tool-call resolutions — with **no conversation
+content by construction**. Both are absent by default.
+
+One host runs **one provider**. `RootState.agents` is plural and this publishes
+one entry, deliberately: see [`docs/roadmap.md`](docs/roadmap.md) §4a.
+
 ## ⚠️ Security: read this before exposing a host
 
 **AHP defines no security model, and says so.** Connection admission is

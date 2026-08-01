@@ -442,6 +442,59 @@ dequeue and start the next turn.
 
 ---
 
+## 4a. Embedder requests
+
+[`requests.md`](requests.md) is written from the outside in: what an application
+embedding this library runs into when it deploys **behind an identity-aware
+reverse proxy, serving several users**, rather than on loopback for one.
+
+It is worth reading in full, because it is the only document here written by
+somebody who does not already know how the library works. Its framing is also
+right: none of it asks the library to claim it is safe to expose. Every item is
+about giving an embedder the material to make its *own* trust decisions, which
+is the split [`policy.py`](../src/agent_host_server/core/policy.py) already
+declares.
+
+All five are now implemented. What each one found:
+
+**1. The handshake's headers and token never reached `Policy` — verified, and
+worse than it read.** `ConnectionInfo` declares `token` and `headers`;
+`Connection.token` was assigned `None` and never set, and `headers` was never
+passed at all. So both fields were *permanently* empty — a hook that looks
+usable and is not, which is worse than one that is absent. `Host.serve` now
+takes both and the WebSocket server forwards the upgrade's headers and the
+`?tkn=` it had already parsed. The library assigns meaning to neither.
+
+**2. A worked partitioning policy.** `OwnedSessionPolicy` plus
+`principal_from_header`. The request was right that the harness matters more
+than the class, and the negative suite found a genuine bug: policy-refused
+channels were filtered out *before* `replay` saw them, so they never appeared in
+`missing` — and `missing` is precisely how a client learns to drop channels it
+"may no longer observe". Security held; the client was never told.
+
+**3. Structured audit events.** `AuditSink`, absent by default, fire-and-forget.
+Content stays out by construction — identifiers and outcomes, never message
+text, and there is a test asserting a rejected action's payload does not reach
+the record.
+
+**4. Multi-agent on one host — decided: one host, one provider.** `RootState.agents`
+is plural and this host publishes one entry, and that is now a documented
+position rather than an omission. The reason is that nothing else in the
+protocol is keyed by agent: `createSession.provider` selects one, but tools,
+customizations, config and capabilities all hang off the *session*, so a
+multi-provider host would have to invent a per-provider view of each. Running
+one host per agent costs a process and keeps every one of those surfaces
+unambiguous. If upstream later keys those surfaces by provider, this is worth
+revisiting; until then a second provider would be this library's invention.
+
+**5. A liveness surface.** `Host.counters()` — connections, sessions, active
+turns, pending requests, watches, channels, `serverSeq`. Not a metrics endpoint;
+what scrapes it is the embedder's. `pendingRequests` is the one to watch: it
+only grows when providers are suspended on clients that are not answering, which
+is exactly the failure mode that keeps the port open.
+
+---
+
 ## 5. Other unowned surface
 
 Each of these is small, real, and belonged to no area:

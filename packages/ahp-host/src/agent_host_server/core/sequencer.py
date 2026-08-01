@@ -104,6 +104,11 @@ class Sequencer:
         self.observer = observer
 
     @property
+    def channel_count(self) -> int:
+        """How many channels hold state. A liveness number, not a metric."""
+        return len(self._states)
+
+    @property
     def server_seq(self) -> int:
         """The current global sequence. Read-only outside the critical section."""
         return self._seq

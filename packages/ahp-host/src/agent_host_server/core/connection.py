@@ -34,6 +34,8 @@ class Connection:
         *,
         client_id: str = "",
         peer: str | None = None,
+        headers: Mapping[str, str] | None = None,
+        token: str | None = None,
         wire_log: Any = None,
     ) -> None:
         self.transport = transport
@@ -41,7 +43,17 @@ class Connection:
         self.peer = peer
         self.initialized = False
         self.protocol_version: str | None = None
-        self.token: str | None = None
+        # Whatever the transport learned at admission time. For a WebSocket
+        # that is the upgrade request's headers and its `?tkn=`; for another
+        # transport it may be nothing at all.
+        #
+        # The library never interprets either. Which header carries a principal,
+        # and whether to believe it, is the embedder's decision -- and a
+        # forwarded header is only evidence if the socket can be reached
+        # exclusively through the proxy that set it, which the library cannot
+        # know and must not assume.
+        self.headers = headers
+        self.token = token
         self.wire_log = wire_log
         self._outbox: asyncio.Queue[Mapping[str, Any] | None] = asyncio.Queue()
         self._writer: asyncio.Task[None] | None = None
@@ -49,7 +61,12 @@ class Connection:
 
     @property
     def info(self) -> ConnectionInfo:
-        return ConnectionInfo(client_id=self.client_id, peer=self.peer, token=self.token)
+        return ConnectionInfo(
+            client_id=self.client_id,
+            peer=self.peer,
+            token=self.token,
+            headers=self.headers,
+        )
 
     # ─── outbound ────────────────────────────────────────────────────────
 

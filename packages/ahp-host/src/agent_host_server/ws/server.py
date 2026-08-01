@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import logging
 import secrets
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
 from http import HTTPStatus
 from typing import Any
@@ -31,6 +31,31 @@ __all__ = ["WebSocketServer", "serve_websocket"]
 _log = logging.getLogger(__name__)
 
 _LOOPBACK = frozenset({"127.0.0.1", "::1", "localhost"})
+
+
+def _token_of(path: str) -> str | None:
+    """VS Code's `?tkn=` from the upgrade path."""
+    return parse_qs(urlparse(path).query).get("tkn", [None])[0]
+
+
+def _headers_of(request: Any) -> Mapping[str, str] | None:
+    """The upgrade request's headers, lower-cased, or ``None``.
+
+    Copied rather than aliased: the live object belongs to the websockets
+    library and outlives nothing in particular. Lower-cased because HTTP header
+    names are case-insensitive and an embedder should not have to remember that
+    about somebody else's proxy.
+    """
+    headers = getattr(request, "headers", None)
+    if headers is None:
+        return None
+    try:
+        return {str(k).lower(): str(v) for k, v in headers.raw_items()}
+    except AttributeError:
+        try:
+            return {str(k).lower(): str(v) for k, v in dict(headers).items()}
+        except Exception:  # pragma: no cover - defensive against a shape change
+            return None
 
 
 class WebSocketServer:
@@ -80,15 +105,22 @@ class WebSocketServer:
     def _authorize(self, path: str) -> bool:
         if self.connection_token is None:
             return True
-        query = parse_qs(urlparse(path).query)
-        supplied = query.get("tkn", [None])[0]
+        supplied = _token_of(path)
         return supplied is not None and secrets.compare_digest(supplied, self.connection_token)
 
     async def _handler(self, socket: Any) -> None:
         # Admission already happened in `_process_request`; by here the upgrade
-        # has completed, so this only wires the transport up.
+        # has completed, so this only wires the transport up -- and forwards
+        # what the handshake saw, which is the only chance the Policy gets to
+        # see it.
         peer = str(getattr(socket, "remote_address", None) or "")
-        await self.host.serve(WebSocketTransport(socket), peer=peer)
+        request = getattr(socket, "request", None)
+        await self.host.serve(
+            WebSocketTransport(socket),
+            peer=peer,
+            headers=_headers_of(request),
+            token=_token_of(getattr(request, "path", "") or ""),
+        )
 
     async def _process_request(self, connection: Any, request: Any) -> Any:
         """Reject a bad token during the upgrade, with 403 -- as VS Code does.

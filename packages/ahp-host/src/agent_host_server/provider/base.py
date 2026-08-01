@@ -413,6 +413,19 @@ class DescribesSession(Protocol):
 
 @runtime_checkable
 class AgentProvider(Protocol):
+    """One host, one provider. A decision, not an omission.
+
+    `RootState.agents` is plural and this host publishes a single entry. That is
+    deliberate: nothing else in the protocol is keyed by agent. `createSession.provider`
+    selects one, but tools, customizations, config and capabilities all hang off
+    the *session*, so a multi-provider host would have to invent a per-provider
+    view of each of those and then decide what a client sees when they disagree.
+
+    Running one host process per agent costs a process and leaves every one of
+    those surfaces unambiguous. See `docs/roadmap.md` section 4a; if upstream
+    later keys those surfaces by provider, this is worth revisiting.
+    """
+
     @property
     def agent(self) -> AgentInfo: ...
 
