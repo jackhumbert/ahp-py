@@ -21,17 +21,38 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 from typing import Any, Final
 
+from agent_host_server.reducers.annotations import annotations_reducer
+from agent_host_server.reducers.changeset import changeset_reducer
 from agent_host_server.reducers.chat import chat_reducer
+from agent_host_server.reducers.resource_watch import resource_watch_reducer
 from agent_host_server.reducers.root import root_reducer
 from agent_host_server.reducers.session import session_reducer
+from agent_host_server.reducers.terminal import terminal_reducer
 
-__all__ = ["REDUCERS", "Reducer", "chat_reducer", "root_reducer", "session_reducer"]
+__all__ = [
+    "REDUCERS",
+    "Reducer",
+    "annotations_reducer",
+    "changeset_reducer",
+    "chat_reducer",
+    "resource_watch_reducer",
+    "root_reducer",
+    "session_reducer",
+    "terminal_reducer",
+]
 
 Reducer = Callable[[Any, Mapping[str, Any]], Any]
 
 #: Keyed by the fixture corpus's `reducer` field so the harness can dispatch.
+#: All seven, so the whole 247-fixture corpus runs -- ADR 0004 makes the port
+#: all-or-nothing per channel, and registering a channel whose reducer does not
+#: exist would leave its client-dispatchable actions unreduced.
 REDUCERS: Final[dict[str, Reducer]] = {
     "root": root_reducer,
     "session": session_reducer,
     "chat": chat_reducer,
+    "terminal": terminal_reducer,
+    "changeset": changeset_reducer,
+    "annotations": annotations_reducer,
+    "resourceWatch": resource_watch_reducer,
 }

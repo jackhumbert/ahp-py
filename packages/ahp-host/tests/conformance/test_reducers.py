@@ -27,12 +27,20 @@ from agent_host_server.reducers import REDUCERS
 from agent_host_server.reducers.clock import frozen_clock
 from agent_host_server.types import reduced_equal
 
-#: The channels v0.1 implements. See docs/plan.md §1 and ADR 0004.
-IN_SCOPE = frozenset({"root", "session", "chat"})
+#: Every channel in the corpus. v0.1 shipped root + session + chat; the
+#: remaining four were ported in v0.2 (docs/roadmap.md §2), which takes the
+#: conformance claim from 200/247 to the whole corpus.
+#:
+#: The reducers landed *before* their channels are registered, on purpose: ADR
+#: 0004 makes the port all-or-nothing per channel, so a channel registered
+#: without its reducer would broadcast client-dispatchable actions that nothing
+#: applies -- the exact failure that froze session state in `docs/experiments.md`
+#: §E12.
+IN_SCOPE = frozenset(
+    {"root", "session", "chat", "terminal", "changeset", "annotations", "resourceWatch"}
+)
 
-#: Deliberately out of scope for v0.1 -- 25 actions and four extra state
-#: vocabularies that no client needs to render a conversation.
-OUT_OF_SCOPE = frozenset({"terminal", "changeset", "annotations", "resourceWatch"})
+OUT_OF_SCOPE: frozenset[str] = frozenset()
 
 ALL_FIXTURES = list(reducer_fixtures())
 SCOPED = [f for f in ALL_FIXTURES if f.reducer in IN_SCOPE]
@@ -62,8 +70,8 @@ def test_corpus_is_intact() -> None:
 
 def test_scope_split_is_explicit() -> None:
     """State plainly how much of the corpus we run, so it cannot drift silently."""
-    assert len(SCOPED) == 200, "v0.1 runs root + session + chat"
-    assert len(UNSCOPED) == 47
+    assert len(SCOPED) == 247, "the whole corpus is in scope"
+    assert len(UNSCOPED) == 0
     assert {f.reducer for f in UNSCOPED} == OUT_OF_SCOPE
 
 
