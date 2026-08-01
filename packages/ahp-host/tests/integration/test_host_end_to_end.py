@@ -136,16 +136,55 @@ class TestHandshake:
 
 
 class TestUnimplemented:
-    async def test_declines_loudly_with_method_not_found(
+    async def test_every_protocol_method_is_now_answered(
         self, connected: tuple[Host, FakeClient]
     ) -> None:
-        """No silent stubs: there is no server capability object, so this error
-        IS how a host declines a feature."""
+        """No command answers `MethodNotFound` any more.
+
+        That error was how this host declined a feature -- AHP has no server
+        capability object, so it is the only "no" available. Every method is now
+        implemented, and a refusal is a *specific* one: `PermissionDenied` for
+        something this host will not do, `NotFound` for something it does not
+        have. Both tell a client more than -32601, which says "stop asking".
+        """
         _, client = connected
         await _initialize(client)
-        for method in ("createTerminal", "disposeTerminal"):
-            response = await client.request(method, {"channel": ROOT_URI})
-            assert response["error"]["code"] == -32601, method
+        for method in ("createTerminal", "disposeTerminal", "resourceRead"):
+            response = await client.request(
+                method,
+                {
+                    "channel": ROOT_URI,
+                    "uri": "file:///x",
+                    "claim": {"kind": "session", "session": "echo:/s"},
+                },
+            )
+            assert response["error"]["code"] != -32601, method
+
+    async def test_an_unknown_method_still_is_method_not_found(
+        self, connected: tuple[Host, FakeClient]
+    ) -> None:
+        _, client = connected
+        await _initialize(client)
+        response = await client.request("notARealMethod", {"channel": ROOT_URI})
+        assert response["error"]["code"] == -32601
+
+    async def test_a_terminal_is_refused_with_a_reason(
+        self, connected: tuple[Host, FakeClient]
+    ) -> None:
+        """The default backend declines and says why. A real one belongs in its
+        own distribution: arbitrary command execution should be a dependency a
+        reviewer can see, not an import."""
+        _, client = connected
+        await _initialize(client)
+        response = await client.request(
+            "createTerminal",
+            {
+                "channel": "agenthost-terminal:/t1",
+                "claim": {"kind": "session", "session": "echo:/s"},
+            },
+        )
+        assert response["error"]["code"] == -32009
+        assert "backend" in response["error"]["message"]
 
     async def test_authenticate_refuses_an_unadvertised_resource(
         self, connected: tuple[Host, FakeClient]

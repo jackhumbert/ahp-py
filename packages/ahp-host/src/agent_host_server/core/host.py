@@ -52,6 +52,21 @@ from agent_host_server.core.resources import (
 from agent_host_server.core.seq import FileSequence
 from agent_host_server.core.sequencer import Sequencer
 from agent_host_server.core.store import InMemorySessionStore, SessionStore, StoredSession
+from agent_host_server.core.terminals import (
+    CLAIM_GATED_ACTIONS,
+    CommandFinished,
+    CommandLine,
+    CommandStart,
+    CwdReported,
+    RefusingTerminalBackend,
+    ShellIntegrationParser,
+    TerminalBackend,
+    TerminalProcess,
+    TerminalRequest,
+    claim_from_wire,
+    terminal_dispatch_rejection,
+    trim_scrollback,
+)
 from agent_host_server.core.turn import TurnRunner
 from agent_host_server.core.versions import DEFAULT_SUPPORTED_VERSIONS, negotiate
 from agent_host_server.core.watches import (
@@ -192,6 +207,35 @@ def _read_result(content: Any, requested: Any) -> dict[str, Any]:
     if content.content_type is not None:
         result["contentType"] = content.content_type
     return result
+
+
+@dataclass
+class _Terminal:
+    channel: str
+    parser: ShellIntegrationParser
+    process: TerminalProcess | None = None
+    #: The command line an OSC 633 `E` announced, waiting for the `C` that
+    #: starts the command it describes.
+    pending_command: str = ""
+    command_id: str | None = None
+    announced: bool = False
+
+    async def close(self) -> None:
+        if self.process is not None:
+            with contextlib.suppress(Exception):
+                await self.process.kill()
+        self.parser.reset()
+
+
+def _terminal_info(state: Any) -> dict[str, Any]:
+    """The `TerminalInfo` fields the root catalogue carries."""
+    if not isinstance(state, Mapping):
+        return {}
+    info: dict[str, Any] = {}
+    for key in ("title", "cwd", "isPty"):
+        if key in state:
+            info[key] = state[key]
+    return info
 
 
 def _reducer_for_restored(uri: str, state: Mapping[str, Any], session_uri: str) -> str:
@@ -406,6 +450,7 @@ class Host:
         audit: AuditSink | None = None,
         telemetry: Mapping[str, str] | None = None,
         store: SessionStore | None = None,
+        terminals: TerminalBackend | None = None,
     ) -> None:
         if policy is None:  # pragma: no cover - defensive; typing already forbids it
             raise ValueError("a Policy is required; there is no default")
@@ -464,6 +509,11 @@ class Host:
         # outlive it should do.
         self.store: SessionStore = store or InMemorySessionStore()
         self._restored = False
+        # Declines every terminal, with a reason. A real backend is arbitrary
+        # command execution and belongs in its own distribution -- see
+        # `core/terminals.py` and `docs/roadmap.md` section 6.
+        self.terminals: TerminalBackend = terminals or RefusingTerminalBackend()
+        self._live_terminals: dict[str, _Terminal] = {}
         self.sequencer.observer = self
         self._root_ready = False
         self.wire_log = WireLog(wire_log) if wire_log is not None else None
@@ -689,6 +739,10 @@ class Host:
             return await self._dispose_session(connection, params)
         if method == "fetchTurns":
             return await self._fetch_turns(connection, params)
+        if method == "createTerminal":
+            return await self._create_terminal(connection, params)
+        if method == "disposeTerminal":
+            return await self._dispose_terminal(connection, params)
         if method == "authenticate":
             return await self._authenticate(connection, params)
         if method == "completions":
@@ -1121,6 +1175,179 @@ class Host:
                 uri, str(destination), fail_if_exists=bool(params.get("failIfExists"))
             )
         return {}
+
+    # ─── terminals ───────────────────────────────────────────────────────
+
+    async def _create_terminal(
+        self, connection: Connection, params: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        """Open a terminal, if a backend was installed and the policy allows it.
+
+        The default backend declines with `PermissionDenied`, not
+        `MethodNotFound` -- once the method is registered it exists, and -32601
+        for a request the host parsed and rejected would tell a client to stop
+        asking for terminals entirely rather than that this one was refused.
+        """
+        channel = params.get("channel")
+        if not isinstance(channel, str):
+            raise errors.invalid_params("channel is required")
+        if self.sequencer.has_channel(channel):
+            raise errors.already_exists(channel)
+        claim = claim_from_wire(params.get("claim"))
+        if claim is None:
+            raise errors.invalid_params("a valid claim is required")
+        if not self.policy.may_create_terminal(connection.info, params):
+            self._audit("terminal.refused", connection, channel=channel, allowed=False)
+            raise errors.AhpError(-32009, "Not permitted to create a terminal")
+
+        cols, rows = params.get("cols"), params.get("rows")
+        # `cwd` is passed through as the CLIENT asked for it, and it is the
+        # backend's job to refuse one it should not honour -- the host has no
+        # filesystem opinion here, and inventing one would be a second, weaker
+        # jail beside the resource provider's.
+        request = TerminalRequest(
+            channel=channel,
+            claim=claim,
+            name=params.get("name") if isinstance(params.get("name"), str) else None,
+            cwd=params.get("cwd") if isinstance(params.get("cwd"), str) else None,
+            cols=cols if isinstance(cols, int) else None,
+            rows=rows if isinstance(rows, int) else None,
+        )
+
+        terminal = _Terminal(channel=channel, parser=ShellIntegrationParser())
+        process = await self.terminals.create(
+            request, lambda chunk: self._on_terminal_output(channel, chunk)
+        )
+        terminal.process = process
+
+        state: dict[str, Any] = {
+            "content": [],
+            "claim": claim.to_wire(),
+            "isPty": process.is_pty,
+        }
+        for key, value in (
+            ("title", request.name),
+            ("cwd", request.cwd),
+            ("cols", request.cols),
+            ("rows", request.rows),
+        ):
+            if value is not None:
+                state[key] = value
+        # Bound at registration, never routed from the scheme: VS Code uses
+        # three `agenthost-terminal:` forms and the spec's examples use a
+        # fourth (invariant 15).
+        await self.sequencer.register_channel(channel, state, "terminal")
+        self._live_terminals[channel] = terminal
+        await self._publish_terminal_catalogue()
+        self._audit("terminal.created", connection, channel=channel)
+        return {}
+
+    async def _dispose_terminal(
+        self, connection: Connection, params: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        channel = params.get("channel")
+        if not isinstance(channel, str):
+            raise errors.invalid_params("channel is required")
+        terminal = self._live_terminals.pop(channel, None)
+        if terminal is None:
+            raise errors.AhpError(-32008, f"No such terminal: {channel}")
+        if not self.policy.may_see_channel(connection.info, channel):
+            raise errors.AhpError(-32009, f"Not permitted to dispose {channel}")
+        await terminal.close()
+        await self.sequencer.drop_channel(channel)
+        await self._publish_terminal_catalogue()
+        self._audit("terminal.disposed", connection, channel=channel)
+        return {}
+
+    async def _publish_terminal_catalogue(self) -> None:
+        """`RootState.terminals`. Full replacement, as the reducer expects."""
+        await self.sequencer.publish(
+            ROOT_URI,
+            {
+                "type": "root/terminalsChanged",
+                "terminals": [
+                    {"resource": uri, **_terminal_info(self.sequencer.state_of(uri))}
+                    for uri in self._live_terminals
+                ],
+            },
+        )
+
+    def _on_terminal_output(self, channel: str, chunk: bytes) -> Any:
+        terminal = self._live_terminals.get(channel)
+        if terminal is None:
+            return None
+        return self._spawn_result(self._publish_terminal_output(terminal, chunk))
+
+    def _spawn_result(self, coroutine: Coroutine[Any, Any, None]) -> None:
+        self._spawn(coroutine)
+
+    async def _publish_terminal_output(self, terminal: _Terminal, chunk: bytes) -> None:
+        """Map one read into actions, **in stream order**.
+
+        The order matters: a single read can carry
+        `output ESC]633;D ESC]633;C output`, and treating the chunk as
+        (all text, then all events) would append the second half of the output
+        to the wrong content part.
+        """
+        channel = terminal.channel
+        for item in terminal.parser.feed(chunk).items:
+            if isinstance(item, str):
+                if item:
+                    await self.sequencer.publish(channel, {"type": "terminal/data", "data": item})
+                continue
+            if not terminal.announced:
+                terminal.announced = True
+                await self.sequencer.publish(
+                    channel, {"type": "terminal/commandDetectionAvailable"}
+                )
+            if isinstance(item, CommandLine):
+                terminal.pending_command = item.command_line
+            elif isinstance(item, CommandStart):
+                terminal.command_id = f"cmd-{uuid.uuid4()}"
+                await self.sequencer.publish(
+                    channel,
+                    {
+                        "type": "terminal/commandExecuted",
+                        "commandId": terminal.command_id,
+                        "commandLine": terminal.pending_command,
+                        "timestamp": now_iso(),
+                    },
+                )
+                terminal.pending_command = ""
+            elif isinstance(item, CommandFinished) and terminal.command_id is not None:
+                await self.sequencer.publish(
+                    channel,
+                    {
+                        "type": "terminal/commandFinished",
+                        "commandId": terminal.command_id,
+                        "exitCode": item.exit_code,
+                    },
+                )
+                terminal.command_id = None
+            elif isinstance(item, CwdReported):
+                await self.sequencer.publish(
+                    channel, {"type": "terminal/cwdChanged", "cwd": item.cwd}
+                )
+        self._trim_terminal(channel)
+
+    def _trim_terminal(self, channel: str) -> None:
+        """Drop the oldest scrollback, silently.
+
+        The guide licenses either side trimming independently. Publishing a
+        server-side `terminal/cleared` -- what the reference host does -- is
+        rejected here because the protocol has no partial-trim action: `cleared`
+        wipes the whole buffer, so trimming the oldest 10% would blank the
+        screen of every subscriber, including ones with memory to spare.
+        """
+        state = self.sequencer.state_of(channel)
+        if not isinstance(state, Mapping):
+            return
+        content = state.get("content")
+        if not isinstance(content, list):
+            return
+        trimmed = trim_scrollback(content)
+        if trimmed is not content and trimmed != content:
+            self.sequencer._states[channel] = {**state, "content": trimmed}
 
     # ─── authentication ──────────────────────────────────────────────────
 
@@ -2237,6 +2464,16 @@ class Host:
         if not self.policy.may_dispatch(connection.info, channel, action):
             return "rejected by policy"
 
+        if self.sequencer.reducer_of(channel) == "terminal":
+            state = self.sequencer.state_of(channel)
+            claim = claim_from_wire(state.get("claim") if isinstance(state, Mapping) else None)
+            return terminal_dispatch_rejection(
+                action,
+                claim=claim,
+                client_id=connection.client_id,
+                gated=CLAIM_GATED_ACTIONS,
+            )
+
         if action_type == "root/configChanged":
             return self._validate_root_config(connection, action)
 
@@ -2281,6 +2518,12 @@ class Host:
         action_type = action.get("type")
         if action_type == "session/customizationToggled":
             await self._react_to_toggle(channel, action)
+            return
+        if action_type in ("terminal/input", "terminal/resized"):
+            # Before the session lookup: a terminal channel belongs to no
+            # session's chat set, so anything after that lookup is unreachable
+            # for it.
+            await self._forward_to_terminal(channel, action)
             return
         session = next((s for s in self._sessions.values() if channel in s.chat_uris), None)
         if session is None:
@@ -2354,6 +2597,26 @@ class Host:
         for request_id in request_ids:
             with contextlib.suppress(Exception):
                 await self._retract_input_needed(session, request_id)
+
+    async def _forward_to_terminal(self, channel: str, action: Mapping[str, Any]) -> None:
+        """Keystrokes and resizes go to the process, not into `content`.
+
+        Echoing input into the buffer here would double it against the
+        `terminal/data` the pty sends back -- which is exactly why the reducer
+        treats `terminal/input` as a no-op.
+        """
+        terminal = self._live_terminals.get(channel)
+        if terminal is None or terminal.process is None:
+            return
+        with contextlib.suppress(Exception):
+            if action.get("type") == "terminal/input":
+                data = action.get("data")
+                if isinstance(data, str):
+                    await terminal.process.write(data.encode())
+            else:
+                cols, rows = action.get("cols"), action.get("rows")
+                if isinstance(cols, int) and isinstance(rows, int):
+                    await terminal.process.resize(cols, rows)
 
     async def _react_to_toggle(self, channel: str, action: Mapping[str, Any]) -> None:
         """Tell the provider a customization was switched on or off.

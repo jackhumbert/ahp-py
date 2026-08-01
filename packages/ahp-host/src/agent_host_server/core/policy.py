@@ -90,6 +90,18 @@ class Policy(Protocol):
         """
         ...
 
+    def may_create_terminal(self, info: ConnectionInfo, params: Mapping[str, Any]) -> bool:
+        """Whether this peer may open a terminal.
+
+        The sharpest hook here, even with no backend installed. A terminal is
+        arbitrary command execution with a client-chosen working directory, and
+        `Policy` cannot authenticate a peer at all -- `reconnect` resumes on a
+        client-asserted `clientId` with no credential. A host that installs a
+        real backend without also narrowing this has granted a shell to anyone
+        who can reach the socket.
+        """
+        ...
+
     def may_restore_session(self, session: Mapping[str, Any]) -> bool:
         """Whether a session persisted by a previous run may come back.
 
@@ -173,6 +185,9 @@ class LoopbackSingleUserPolicy:
         return True
 
     def may_access_resource(self, info: ConnectionInfo, operation: str, uri: str) -> bool:
+        return True
+
+    def may_create_terminal(self, info: ConnectionInfo, params: Mapping[str, Any]) -> bool:
         return True
 
     def may_restore_session(self, session: Mapping[str, Any]) -> bool:

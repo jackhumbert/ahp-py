@@ -49,11 +49,12 @@ session creation, and a full turn. The details of what it sends — and the thre
 host bugs that finding out uncovered — are in
 [`docs/experiments.md`](docs/experiments.md) §E12.
 
-Expect a *"The terminal process failed to launch: Method not found:
-createTerminal"* toast. That is this host declining a feature it does not
-implement. AHP has no server capability object, so `MethodNotFound` **is** how a
-host says no; VS Code probes about 40 such methods per session and renders fine
-without them.
+Expect a terminal-launch error if you open one. `createTerminal` **is**
+implemented — the host declines it because no `TerminalBackend` is installed,
+and this distribution deliberately ships none: a POSIX pty in the default wheel
+is arbitrary command execution one import away, in a library whose `Policy`
+cannot authenticate a peer. Supply a backend and terminals work; see
+[`core/terminals.py`](src/agent_host_server/core/terminals.py).
 
 To see the wire:
 
@@ -162,7 +163,14 @@ so a counter that restarts at zero can never replay again.
 
 ### Not implemented
 
-`createTerminal`/`disposeTerminal` · the MCP channel · 0.6.0 step-up auth.
+The MCP channel · 0.6.0 step-up auth · the server→client direction of
+`resource*` (its only consumer is ingesting client-published plugins).
+
+**No command answers `MethodNotFound` any more.** That used to be how this host
+declined a feature, since AHP has no server capability object. Every method is
+now implemented, and a refusal is specific: `PermissionDenied` for something the
+host will not do, `NotFound` for something it does not have. Both tell a client
+more than "stop asking".
 
 Every one returns a proper JSON-RPC `MethodNotFound` (`-32601`). None are
 silently stubbed. Where the protocol says a host may decline, it declines

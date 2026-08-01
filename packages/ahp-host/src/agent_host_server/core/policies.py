@@ -139,6 +139,11 @@ class OwnedSessionPolicy:
     def may_access_resource(self, info: ConnectionInfo, operation: str, uri: str) -> bool:
         return self.allow_resources and operation != "write"
 
+    def may_create_terminal(self, info: ConnectionInfo, params: Mapping[str, Any]) -> bool:
+        """Refused. A terminal is arbitrary command execution and this policy
+        exists for hosts serving people who do not trust each other."""
+        return False
+
     def may_restore_session(self, session: Mapping[str, Any]) -> bool:
         """Refused. A restored session has no owner until somebody claims it,
         and `may_see_channel` refuses unowned channels -- so restoring one would

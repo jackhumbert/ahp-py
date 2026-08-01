@@ -36,13 +36,10 @@ FIXTURE = Path(__file__).parent / "fixtures" / "vscode-1.131-client-requests.jso
 TRACE: dict[str, Any] = json.loads(FIXTURE.read_text(encoding="utf-8"))
 REQUESTS: list[dict[str, Any]] = TRACE["requests"]
 
-#: Still unimplemented. With no server capability object in AHP,
-#: `MethodNotFound` IS how a host declines -- VS Code probes all of these and
-#: renders the session regardless.
-EXPECTED_REFUSALS = {
-    "createTerminal",
-    "disposeTerminal",
-}
+#: Nothing answers `MethodNotFound` any more: every method VS Code probes is
+#: implemented. What is left are *specific* refusals, which tell a client more
+#: than -32601 does.
+EXPECTED_REFUSALS: set[str] = set()
 
 #: Implemented, and answered `InvalidParams` because the demo agent advertises
 #: no protected resources and installs no session config beyond what it
@@ -54,12 +51,15 @@ EXPECTED_INVALID = {"authenticate"}
 #: `resource*` family is meant to make: "this host has no such file" is a
 #: different answer from "this host does not do files", and a host does not
 #: acquire a filesystem by being upgraded.
-EXPECTED_ABSENT = {"resourceList", "resourceRead", "resourceResolve"}
+EXPECTED_ABSENT = {"resourceList", "resourceRead", "resourceResolve", "disposeTerminal"}
 
 #: Implemented, but declined because this host installs no watcher. Same
 #: distinction as EXPECTED_ABSENT: "nothing to watch here" is not "this host
 #: cannot watch".
-EXPECTED_DENIED = {"createResourceWatch"}
+#: Declined for a stated reason rather than unimplemented: no watcher and no
+#: terminal backend are installed, and a terminal backend deliberately is not
+#: shipped in this distribution at all.
+EXPECTED_DENIED = {"createResourceWatch", "createTerminal"}
 
 
 @pytest.fixture
