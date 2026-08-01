@@ -311,6 +311,8 @@ class HostInfo:
 @dataclass
 class _Session:
     uri: str
+    #: The default chat. `SessionState.defaultChat`, and the one a session is
+    #: created with.
     chat_uri: str
     provider_id: str
     title: str
@@ -329,6 +331,10 @@ class _Session:
     content: ContentStore = field(default_factory=ContentStore)
     #: Changeset URI -> catalogue entry, for the channels this session owns.
     changesets: dict[str, Changeset] = field(default_factory=dict)
+    #: Every chat this session owns, default included. A set rather than a
+    #: single URI because `createChat` exists -- and because the summary rules
+    #: aggregate across all of them, not just the default.
+    chat_uris: set[str] = field(default_factory=set)
 
     @property
     def annotations_uri(self) -> str:
@@ -533,6 +539,10 @@ class Host:
             return await self._dispose_session(connection, params)
         if method == "fetchTurns":
             return await self._fetch_turns(connection, params)
+        if method == "createChat":
+            return await self._create_chat(connection, params)
+        if method == "disposeChat":
+            return await self._dispose_chat(connection, params)
         if method == "invokeChangesetOperation":
             return await self._invoke_changeset_operation(connection, params)
         if method == "createResourceWatch":
@@ -633,26 +643,57 @@ class Host:
         if isinstance(state, Mapping):
             summary = {key: state[key] for key in _SUMMARY_FIELDS if key in state}
 
-        # Aggregation across chats, per `SessionSummary`'s producer rules: take
-        # the activity bits from the default chat and the max of every chat's
-        # `modifiedAt`. With one chat both reduce to that chat's values -- but
-        # writing it as an aggregate now means multi-chat does not have to
-        # rediscover the rule. Session-scoped flag bits (IsRead, IsArchived)
-        # stay with the session and are not overwritten.
-        chat = self.sequencer.state_of(session.chat_uri)
-        if isinstance(chat, Mapping):
-            chat_status = chat.get("status")
-            if isinstance(chat_status, int):
-                session_flags = summary.get("status", _STATUS_IDLE)
-                flags = session_flags if isinstance(session_flags, int) else _STATUS_IDLE
-                summary["status"] = session_status_flags(
-                    (flags & ~SessionStatus.ACTIVITY_MASK)
-                    | (chat_status & SessionStatus.ACTIVITY_MASK)
-                )
-            modified = chat.get("modifiedAt")
-            if isinstance(modified, str):
-                summary["modifiedAt"] = max(modified, session.created_at)
-        summary.setdefault("modifiedAt", session.created_at)
+        # Aggregation across chats, spelled out because upstream states it as
+        # producer SHOULDs rather than as a reducer, so nothing enforces it:
+        #
+        #   status:     activity bits from the DEFAULT chat, but PROMOTE
+        #               InputNeeded if ANY chat needs input and Error if ANY
+        #               chat errored. The promotion is the whole point -- it is
+        #               what makes a blocked worker chat visible in a session
+        #               list that only ever renders the default one.
+        #   activity:   the default chat's, or the chat that won the promotion.
+        #   modifiedAt: the max across every chat.
+        #
+        # Session-scoped flag bits (IsRead, IsArchived) stay with the session
+        # and are never overwritten by a chat.
+        session_flags = summary.get("status", _STATUS_IDLE)
+        flags = session_flags if isinstance(session_flags, int) else _STATUS_IDLE
+        activity_bits = 0
+        promoted_from: Mapping[str, Any] | None = None
+        modified = session.created_at
+
+        for chat_uri in [session.chat_uri, *sorted(session.chat_uris - {session.chat_uri})]:
+            chat = self.sequencer.state_of(chat_uri)
+            if not isinstance(chat, Mapping):
+                continue
+            status = chat.get("status")
+            if isinstance(status, int):
+                bits = status & SessionStatus.ACTIVITY_MASK
+                if chat_uri == session.chat_uri:
+                    activity_bits = bits
+                # `InputNeeded` shares a bit with `InProgress` -- it is
+                # `(1 << 3) | (1 << 4)` -- so it is tested as a whole, never by
+                # equality.
+                needs_input = bits & SessionStatus.INPUT_NEEDED == SessionStatus.INPUT_NEEDED
+                errored = bool(bits & SessionStatus.ERROR)
+                if needs_input or errored:
+                    activity_bits |= bits
+                    if promoted_from is None and chat_uri != session.chat_uri:
+                        promoted_from = chat
+            when = chat.get("modifiedAt")
+            if isinstance(when, str):
+                modified = max(modified, when)
+
+        summary["status"] = session_status_flags(
+            (flags & ~SessionStatus.ACTIVITY_MASK) | activity_bits
+        )
+        summary["modifiedAt"] = modified
+        if promoted_from is not None:
+            # "mirror the activity string ... of the chat currently driving the
+            # promoted status bits when a non-default chat wins".
+            borrowed = promoted_from.get("activity")
+            if isinstance(borrowed, str):
+                summary["activity"] = borrowed
 
         # `SessionSummary.annotations` lets badge UI render counts "without
         # subscribing to the channel itself", so it is derived here rather than
@@ -717,7 +758,11 @@ class Host:
         if session is not None:
             return session
         return next(
-            (s for s in self._sessions.values() if channel in (s.chat_uri, s.annotations_uri)),
+            (
+                s
+                for s in self._sessions.values()
+                if channel in s.chat_uris or channel == s.annotations_uri
+            ),
             None,
         )
 
@@ -917,6 +962,191 @@ class Host:
             await provider.copy(
                 uri, str(destination), fail_if_exists=bool(params.get("failIfExists"))
             )
+        return {}
+
+    # ─── multi-chat ──────────────────────────────────────────────────────
+
+    def _multichat(self) -> Mapping[str, Any] | None:
+        """`AgentCapabilities.multipleChats`, or ``None``.
+
+        Absent means "clients MUST NOT call `createChat` to open chats beyond
+        the default one the session starts with" -- another client MUST that
+        only the host can enforce, since a client that ignores it just sends the
+        command anyway.
+        """
+        capability = self.provider.agent.capabilities.get("multipleChats")
+        return capability if isinstance(capability, Mapping) else None
+
+    async def _create_chat(
+        self, connection: Connection, params: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        """Open a second chat in a session.
+
+        The chat URI is **client-chosen**, which contradicts `chat-channel.md:71`
+        ("the server allocates the chat URI"). The types say client-chosen
+        (`CreateChatParams.chat`), the reference host implements client-chosen,
+        and VS Code's client sends one -- so three implementations agree against
+        one sentence of prose. Recorded as an upstream question in
+        `docs/roadmap.md` section 11.
+        """
+        session_uri = params.get("channel")
+        chat_uri = params.get("chat")
+        if not isinstance(session_uri, str) or not isinstance(chat_uri, str):
+            raise errors.invalid_params("channel and chat are required")
+        session = self._sessions.get(session_uri)
+        if session is None:
+            raise errors.session_not_found(session_uri)
+        if not self.policy.may_see_channel(connection.info, session_uri):
+            raise errors.AhpError(-32009, f"Not permitted to modify {session_uri}")
+
+        capability = self._multichat()
+        if capability is None:
+            raise errors.invalid_params("this agent does not advertise multipleChats")
+        if self.sequencer.has_channel(chat_uri):
+            raise errors.already_exists(chat_uri)
+
+        source = params.get("source")
+        origin = self._chat_origin(session, capability, source)
+        directories = self._chat_working_directories(session, params, source)
+
+        created_at = now_iso()
+        state: dict[str, Any] = {
+            "resource": chat_uri,
+            "title": "New Chat",
+            "status": _STATUS_IDLE,
+            "modifiedAt": created_at,
+            "turns": [],
+        }
+        if origin is not None:
+            state["origin"] = origin
+        if directories is not None:
+            state["workingDirectories"] = list(directories)
+        await self.sequencer.register_channel(chat_uri, state, "chat")
+        session.chat_uris.add(chat_uri)
+
+        await self.sequencer.publish(
+            session_uri,
+            {
+                "type": "session/chatAdded",
+                "summary": {
+                    "resource": chat_uri,
+                    "title": state["title"],
+                    "status": _STATUS_IDLE,
+                    "modifiedAt": created_at,
+                },
+            },
+        )
+        self._audit("chat.created", connection, channel=chat_uri)
+
+        initial = params.get("initialMessage")
+        if isinstance(initial, Mapping):
+            # Delivered as an ordinary turn, so the whole turn machinery --
+            # sequencing, the suspending primitive, cancellation -- applies to a
+            # forked chat exactly as it does to the default one.
+            await self.sequencer.publish(
+                chat_uri,
+                {
+                    "type": "chat/turnStarted",
+                    "turnId": f"t-{uuid.uuid4()}",
+                    "startedAt": created_at,
+                    "message": dict(initial),
+                },
+            )
+            await self._react(chat_uri, {"type": "chat/turnStarted"})
+        await self._mirror_summary(session)
+        return {}
+
+    def _chat_origin(
+        self, session: _Session, capability: Mapping[str, Any], source: Any
+    ) -> dict[str, Any] | None:
+        """Validate `source` and turn it into the new chat's `origin`.
+
+        Each mode has its own capability sub-flag, and "clients MUST only
+        request `kind: 'fork'` when the selected agent advertises
+        `capabilities.multipleChats.fork'" -- a client MUST, so the host checks
+        it.
+        """
+        if not isinstance(source, Mapping):
+            return None
+        kind = source.get("kind")
+        if kind not in ("fork", "sideChat"):
+            raise errors.invalid_params(f"unknown chat source {kind!r}")
+        flag = "fork" if kind == "fork" else "sideChat"
+        if not capability.get(flag):
+            raise errors.invalid_params(f"this agent does not advertise multipleChats.{flag}")
+
+        source_chat = source.get("chat")
+        if not isinstance(source_chat, str) or source_chat not in session.chat_uris:
+            # "The source chat MUST belong to this session."
+            raise errors.invalid_params("source chat does not belong to this session")
+
+        origin: dict[str, Any] = {"kind": kind, "chat": source_chat}
+        turn_id = source.get("turnId")
+        if isinstance(turn_id, str):
+            origin["turnId"] = turn_id
+        selection = source.get("selection")
+        if kind == "sideChat" and isinstance(selection, Mapping):
+            # "The host MUST snapshot and preserve this exact selection when it
+            # accepts `createChat`; later source-turn deltas do not alter it."
+            # Copied, therefore, never referenced.
+            origin["selection"] = dict(selection)
+        return origin
+
+    def _chat_working_directories(
+        self, session: _Session, params: Mapping[str, Any], source: Any
+    ) -> Sequence[str] | None:
+        """The chat's directory subset, validated against the session's set."""
+        if isinstance(source, Mapping) and source.get("kind") == "fork":
+            # "Forked chats inherit the source chat's `workingDirectories`; this
+            # field is ignored for forks."
+            return None
+        requested = params.get("workingDirectories")
+        if requested is None:
+            return None
+        if self._multiroot() is None:
+            raise errors.invalid_params("this agent does not advertise multipleWorkingDirectories")
+        state = self.sequencer.state_of(session.uri)
+        owned = state.get("workingDirectories") if isinstance(state, Mapping) else None
+        owned = owned if isinstance(owned, list) else []
+        subset = [d for d in requested if isinstance(d, str)]
+        for directory in subset:
+            if directory not in owned:
+                # "Every entry MUST be present in the owning session's
+                # `workingDirectories`; the server MUST reject any entry that is
+                # not." Without this a chat names a filesystem root the session
+                # was never granted.
+                raise errors.invalid_params(f"{directory} is not a session working directory")
+        return subset
+
+    async def _dispose_chat(
+        self, connection: Connection, params: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        """Dispose one chat.
+
+        `DisposeChatParams` carries only `channel`, so the channel IS the chat --
+        note that `chat-channel.md` says "the protocol does not currently expose
+        a `disposeChat` command" while the types, the message map and the
+        reference host all define it. Same contradiction as `createChat`, same
+        resolution: three implementations against one sentence.
+        """
+        chat_uri = params.get("channel")
+        if not isinstance(chat_uri, str):
+            raise errors.invalid_params("channel is required")
+        session = next((s for s in self._sessions.values() if chat_uri in s.chat_uris), None)
+        if session is None:
+            raise errors.AhpError(-32008, f"No such chat: {chat_uri}")
+        if not self.policy.may_see_channel(connection.info, chat_uri):
+            raise errors.AhpError(-32009, f"Not permitted to dispose {chat_uri}")
+        if chat_uri == session.chat_uri:
+            # The default chat is the session. Disposing it would leave a
+            # session with no `defaultChat`, which every client reads.
+            raise errors.invalid_params("the default chat cannot be disposed")
+
+        session.chat_uris.discard(chat_uri)
+        await self.sequencer.publish(session.uri, {"type": "session/chatRemoved", "chat": chat_uri})
+        await self.sequencer.drop_channel(chat_uri)
+        self._audit("chat.disposed", connection, channel=chat_uri)
+        await self._mirror_summary(session)
         return {}
 
     # ─── changesets ──────────────────────────────────────────────────────
@@ -1434,6 +1664,7 @@ class Host:
             title="New Session",
             created_at=created_at,
         )
+        session.chat_uris.add(chat_uri)
         token = params.get("progressToken")
         session.publisher = _Publisher(self, session, token if isinstance(token, str) else None)
         self._sessions[channel] = session
@@ -1590,7 +1821,8 @@ class Host:
         del self._sessions[channel]
         for changeset_uri in session.changesets:
             await self.sequencer.drop_channel(changeset_uri)
-        await self.sequencer.drop_channel(session.chat_uri)
+        for owned_chat in session.chat_uris:
+            await self.sequencer.drop_channel(owned_chat)
         await self.sequencer.drop_channel(session.annotations_uri)
         await self.sequencer.drop_channel(channel)
 
@@ -1756,7 +1988,7 @@ class Host:
         if action_type == "session/customizationToggled":
             await self._react_to_toggle(channel, action)
             return
-        session = next((s for s in self._sessions.values() if s.chat_uri == channel), None)
+        session = next((s for s in self._sessions.values() if channel in s.chat_uris), None)
         if session is None:
             return
         if action_type == "chat/turnStarted":

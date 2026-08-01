@@ -155,11 +155,8 @@ python -m agent_host_server --serve-directory ./workspace
 
 ### Not implemented
 
-`createTerminal`/`disposeTerminal` · `createResourceWatch` ·
-`invokeChangesetOperation` · authentication, including 0.6.0 step-up ·
-completions · `createChat` and `disposeChat` (each session gets one default
-chat) · OTLP telemetry · the MCP channel · multiroot beyond seeding and
-validation.
+`createTerminal`/`disposeTerminal` · authentication, including 0.6.0 step-up ·
+completions · OTLP telemetry · the MCP channel.
 
 Every one returns a proper JSON-RPC `MethodNotFound` (`-32601`). None are
 silently stubbed. Where the protocol says a host may decline, it declines
