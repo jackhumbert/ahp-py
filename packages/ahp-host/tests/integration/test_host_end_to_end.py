@@ -627,3 +627,31 @@ class TestDisposeSession:
         )
         await client.collect(seconds=0.2)
         assert len(client.actions(uri)) == before
+
+
+class TestPing:
+    """`ping` is ungated by design.
+
+    transport.md, Keep-Alive: "the server MUST respond regardless of whether the
+    client has completed `initialize` or holds any subscriptions." It is how a
+    client stops an idle-timeout proxy from closing the socket, so gating it on
+    the handshake would break exactly the case it exists for.
+    """
+
+    async def test_ping_is_answered_before_initialize(
+        self, connected: tuple[Host, FakeClient]
+    ) -> None:
+        response = await client_ping(connected[1])
+        assert "error" not in response, response.get("error")
+        assert response["result"] is None
+
+    async def test_ping_is_answered_after_initialize(
+        self, connected: tuple[Host, FakeClient]
+    ) -> None:
+        _, client = connected
+        await _initialize(client)
+        assert (await client_ping(client))["result"] is None
+
+
+async def client_ping(client: FakeClient) -> dict[str, Any]:
+    return await client.request("ping", {"channel": ROOT_URI})

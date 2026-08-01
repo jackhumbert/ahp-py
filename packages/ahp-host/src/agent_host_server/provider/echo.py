@@ -45,13 +45,25 @@ class EchoSession:
 class EchoProvider:
     """Echoes the user's message back, one text delta at a time."""
 
-    def __init__(self, *, provider_id: str = "echo", delay: float = 0.0) -> None:
+    def __init__(
+        self,
+        *,
+        provider_id: str = "echo",
+        display_name: str = "Echo",
+        description: str = "Echoes your message back. No model, no network.",
+        model_name: str = "Echo Model v1",
+        delay: float = 0.0,
+    ) -> None:
         self._delay = delay
+        # `display_name` is what a client labels the agent with; `models` become
+        # entries in VS Code's chat model picker (AgentHostLanguageModelProvider
+        # reads them straight out of root state). They are deliberately different
+        # strings here so it is obvious which is which in the UI.
         self._info = AgentInfo(
             provider=provider_id,
-            display_name="Echo",
-            description="Echoes your message back. No model, no network.",
-            models=({"id": "echo-1", "name": "Echo"},),
+            display_name=display_name,
+            description=description,
+            models=({"id": "echo-1", "name": model_name},),
         )
 
     @property

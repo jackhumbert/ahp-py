@@ -168,6 +168,13 @@ class Host:
     ) -> Any:
         if method == "initialize":
             return await self._initialize(connection, params)
+        if method == "ping":
+            # "the server MUST respond regardless of whether the client has
+            # completed `initialize` or holds any subscriptions"
+            # (docs/specification/transport.md, Keep-Alive). A ping is how a
+            # client keeps an idle-timeout intermediary from closing the socket,
+            # so it cannot be gated on anything.
+            return None
         if method == "reconnect":
             # A valid FIRST request: it re-establishes a connection that dropped,
             # so there is no prior `initialize` on *this* transport. VS Code
@@ -177,8 +184,6 @@ class Host:
             return await self._reconnect(connection, params)
         if not connection.initialized:
             raise errors.invalid_params("initialize must be the first request")
-        if method == "ping":
-            return None
         if method == "subscribe":
             return await self._subscribe(connection, params)
         if method == "listSessions":

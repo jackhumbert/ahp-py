@@ -41,6 +41,16 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--delay", type=float, default=0.05, help="echo delta delay, seconds")
     parser.add_argument(
+        "--agent-name",
+        default="Echo",
+        help="AgentInfo.displayName -- how clients label the agent",
+    )
+    parser.add_argument(
+        "--model-name",
+        default="Echo Model v1",
+        help="the model name shown in VS Code's chat model picker",
+    )
+    parser.add_argument(
         "--wire-log",
         metavar="PATH",
         help="append every frame as ahp-inspector JSONL (open with `npx ahp-inspector`)",
@@ -60,7 +70,11 @@ async def _run() -> None:
         token = secrets.token_urlsafe(24)
 
     host = Host(
-        EchoProvider(delay=args.delay),
+        EchoProvider(
+            delay=args.delay,
+            display_name=args.agent_name,
+            model_name=args.model_name,
+        ),
         LoopbackSingleUserPolicy(),
         info=HostInfo(name="agent-host-server (demo)"),
         wire_log=Path(args.wire_log) if args.wire_log else None,
