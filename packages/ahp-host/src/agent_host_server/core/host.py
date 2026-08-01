@@ -10,18 +10,21 @@ declines a feature.
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextlib
+import json
 import logging
 import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Final
 
 from agent_host_server.core import errors
-from agent_host_server.core.channels import ROOT_URI, ChannelKind, classify
+from agent_host_server.core.channels import ROOT_URI
 from agent_host_server.core.connection import Connection
 from agent_host_server.core.policy import Policy
+from agent_host_server.core.seq import FileSequence
 from agent_host_server.core.sequencer import Sequencer
 from agent_host_server.core.turn import TurnRunner
 from agent_host_server.core.versions import DEFAULT_SUPPORTED_VERSIONS, negotiate
@@ -35,7 +38,7 @@ from agent_host_server.provider.base import (
 from agent_host_server.reducers.clock import now_iso
 from agent_host_server.transport.base import Transport
 from agent_host_server.types import IS_CLIENT_DISPATCHABLE
-from agent_host_server.types.protocol import SessionStatus
+from agent_host_server.types.protocol import SessionStatus, session_status_flags
 
 __all__ = ["Host", "HostInfo"]
 
@@ -43,6 +46,56 @@ _log = logging.getLogger(__name__)
 
 #: SessionStatus.Idle -- what a freshly created session reports.
 _STATUS_IDLE = SessionStatus.IDLE
+
+#: The mutable half of `SessionSummary`. `SessionState` "inlines (denormalizes)
+#: every SessionMetadata field directly onto itself", so the catalogue summary is
+#: a straight projection of the session channel's own state -- which is how the
+#: host keeps the two in sync without enumerating action types. `resource`,
+#: `provider` and `createdAt` are identity and never appear in a change set.
+_SUMMARY_FIELDS: Final = (
+    "title",
+    "status",
+    "activity",
+    "project",
+    "workingDirectories",
+    "annotations",
+    "changes",
+    "_meta",
+)
+
+#: Upper bound on one `listSessions` page. The spec lets a server "impose its
+#: own upper cap"; without one, a host with a large catalogue serialises the
+#: whole thing into a single response.
+_MAX_PAGE = 200
+
+#: Client-dispatchable, and between them they name the filesystem roots the
+#: agent gets tool access to.
+_WORKING_DIRECTORY_ACTIONS: Final = frozenset(
+    {"session/workingDirectorySet", "session/workingDirectoryRemoved"}
+)
+
+
+def _encode_cursor(summary: Mapping[str, Any]) -> str:
+    """A keyset cursor: the sort key of the last entry on the page.
+
+    Keyset rather than an offset because the catalogue mutates between pages --
+    an offset silently skips an entry when a session is disposed mid-walk. The
+    encoding is opaque by contract ("clients MUST NOT parse, modify, or persist
+    them"); base64url is chosen only so it survives a client that logs it.
+    """
+    payload = json.dumps([summary["modifiedAt"], summary["resource"]], separators=(",", ":"))
+    return base64.urlsafe_b64encode(payload.encode()).decode()
+
+
+def _decode_cursor(cursor: str) -> tuple[str, str]:
+    try:
+        modified_at, resource = json.loads(base64.urlsafe_b64decode(cursor.encode()))
+        return str(modified_at), str(resource)
+    except (ValueError, TypeError):
+        # "An unrecognised cursor SHOULD be rejected with an `InvalidParams`
+        # error" -- rather than silently restarting from the first page, which
+        # would make a client's paging loop never terminate.
+        raise errors.invalid_params("unrecognised pagination cursor") from None
 
 
 @dataclass(frozen=True)
@@ -66,6 +119,15 @@ class _Session:
     agent_session: AgentSession | None = None
     turn: asyncio.Task[None] | None = None
     meta: dict[str, Any] = field(default_factory=dict)
+    #: The summary the root channel was last told about. `root/sessionSummaryChanged`
+    #: carries only fields that changed, so the host has to remember what it sent.
+    published_summary: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def annotations_uri(self) -> str:
+        """ "The channel URI is derived from the session URI by appending
+        `/annotations`." One per session, always."""
+        return f"{self.uri}/annotations"
 
 
 class Host:
@@ -84,6 +146,7 @@ class Host:
         info: HostInfo | None = None,
         supported_versions: Sequence[str] = DEFAULT_SUPPORTED_VERSIONS,
         wire_log: Path | None = None,
+        sequence_file: Path | None = None,
     ) -> None:
         if policy is None:  # pragma: no cover - defensive; typing already forbids it
             raise ValueError("a Policy is required; there is no default")
@@ -91,7 +154,13 @@ class Host:
         self.policy = policy
         self.info = info or HostInfo()
         self.supported_versions = tuple(supported_versions)
-        self.sequencer = Sequencer()
+        # Without `sequence_file` the counter restarts with the process, which
+        # is right for a host whose sessions do not outlive it and wrong for one
+        # whose do -- see `core/seq.py`. No path is chosen on the embedder's
+        # behalf.
+        self.sequencer = Sequencer(
+            allocator=FileSequence(sequence_file) if sequence_file is not None else None
+        )
         self._sessions: dict[str, _Session] = {}
         self._connections: set[Connection] = set()
         self._background: set[asyncio.Task[None]] = set()
@@ -197,6 +266,8 @@ class Host:
             return await self._create_session(connection, params)
         if method == "disposeSession":
             return await self._dispose_session(connection, params)
+        if method == "fetchTurns":
+            return await self._fetch_turns(connection, params)
         raise errors.method_not_found(method)
 
     async def _handle_notification(
@@ -264,26 +335,245 @@ class Host:
         # for channels that carry no snapshot.
         return {"snapshot": snapshot} if snapshot is not None else {}
 
+    # ─── session summaries ───────────────────────────────────────────────
+    #
+    # The root channel's catalogue and the session channel's state are two views
+    # of the same thing -- `SessionState` inlines every `SessionMetadata` field
+    # -- and the spec makes keeping them in sync the host's job: "the host keeps
+    # the two in sync via `root/sessionSummaryChanged`".
+    #
+    # So rather than enumerate the actions that mutate a summary field, the host
+    # projects the session channel's state after every publish and emits the
+    # difference. That is automatically right for actions we do not emit yet, and
+    # it cannot drift when a new one is added.
+
+    def _project_summary(self, session: _Session) -> dict[str, Any]:
+        """The mutable half of the session's `SessionSummary`, derived from state."""
+        state = self.sequencer.state_of(session.uri)
+        summary: dict[str, Any] = {}
+        if isinstance(state, Mapping):
+            summary = {key: state[key] for key in _SUMMARY_FIELDS if key in state}
+
+        # Aggregation across chats, per `SessionSummary`'s producer rules: take
+        # the activity bits from the default chat and the max of every chat's
+        # `modifiedAt`. With one chat both reduce to that chat's values -- but
+        # writing it as an aggregate now means multi-chat does not have to
+        # rediscover the rule. Session-scoped flag bits (IsRead, IsArchived)
+        # stay with the session and are not overwritten.
+        chat = self.sequencer.state_of(session.chat_uri)
+        if isinstance(chat, Mapping):
+            chat_status = chat.get("status")
+            if isinstance(chat_status, int):
+                session_flags = summary.get("status", _STATUS_IDLE)
+                flags = session_flags if isinstance(session_flags, int) else _STATUS_IDLE
+                summary["status"] = session_status_flags(
+                    (flags & ~SessionStatus.ACTIVITY_MASK)
+                    | (chat_status & SessionStatus.ACTIVITY_MASK)
+                )
+            modified = chat.get("modifiedAt")
+            if isinstance(modified, str):
+                summary["modifiedAt"] = max(modified, session.created_at)
+        summary.setdefault("modifiedAt", session.created_at)
+
+        # `SessionSummary.annotations` lets badge UI render counts "without
+        # subscribing to the channel itself", so it is derived here rather than
+        # left to a producer to remember. Absent would mean "this session
+        # exposes no annotations channel", which is no longer true.
+        annotations = self.sequencer.state_of(session.annotations_uri)
+        if isinstance(annotations, Mapping):
+            entries = annotations.get("annotations")
+            entries = entries if isinstance(entries, list) else []
+            summary["annotations"] = {
+                "resource": session.annotations_uri,
+                "annotationCount": len(entries),
+                "entryCount": sum(
+                    len(e["entries"])
+                    for e in entries
+                    if isinstance(e, Mapping) and isinstance(e.get("entries"), list)
+                ),
+            }
+        return summary
+
+    def _full_summary(self, session: _Session) -> dict[str, Any]:
+        """Identity fields plus the projection. What `listSessions` returns."""
+        return {
+            "resource": session.uri,
+            "provider": session.provider_id,
+            "createdAt": session.created_at,
+            **self._project_summary(session),
+        }
+
+    async def _mirror_summary(self, session: _Session) -> None:
+        """Emit `root/sessionSummaryChanged` for whatever actually changed.
+
+        "Only fields present in `changes` have new values; omitted fields are
+        unchanged on the client's cached summary." Sending nothing when nothing
+        changed matters: the client caches a session list and a no-op
+        notification per streamed delta would be a notification per token.
+        """
+        current = self._project_summary(session)
+        changes = {
+            key: value
+            for key, value in current.items()
+            if key not in session.published_summary or session.published_summary[key] != value
+        }
+        if not changes:
+            return
+        session.published_summary = current
+        session.title = current.get("title", session.title)
+        await self.sequencer.notify(
+            ROOT_URI,
+            "root/sessionSummaryChanged",
+            {"channel": ROOT_URI, "session": session.uri, "changes": changes},
+        )
+
+    def _session_for(self, channel: str) -> _Session | None:
+        """The session owning a session, chat or annotations channel.
+
+        A reverse lookup over the sessions the host minted, not a parse of the
+        URI (invariant 15) -- `<session>/annotations` happens to be derivable,
+        but session and chat URIs are client-chosen and opaque.
+        """
+        session = self._sessions.get(channel)
+        if session is not None:
+            return session
+        return next(
+            (s for s in self._sessions.values() if channel in (s.chat_uri, s.annotations_uri)),
+            None,
+        )
+
     async def _list_sessions(
         self, connection: Connection, params: Mapping[str, Any]
     ) -> dict[str, Any]:
-        del params  # `limit`/`cursor` accepted and ignored: we never paginate yet.
-        items = [
-            {
-                "resource": session.uri,
-                "provider": session.provider_id,
-                "title": session.title,
-                "status": _STATUS_IDLE,
-                "createdAt": session.created_at,
-                "modifiedAt": session.created_at,
-            }
-            for session in self._sessions.values()
-            if self.policy.may_see_channel(connection.info, session.uri)
-        ]
+        # "The server SHOULD return most-recently-modified entries first, so the
+        # first page is the immediately useful one." The URI breaks ties into a
+        # total order, without which a cursor could skip or repeat an entry.
+        visible = sorted(
+            (
+                self._full_summary(session)
+                for session in self._sessions.values()
+                if self.policy.may_see_channel(connection.info, session.uri)
+            ),
+            key=lambda summary: (summary["modifiedAt"], summary["resource"]),
+            reverse=True,
+        )
+
+        cursor = params.get("cursor")
+        if cursor is not None:
+            if not isinstance(cursor, str):
+                raise errors.invalid_params("cursor must be a string")
+            after = _decode_cursor(cursor)
+            visible = [s for s in visible if (s["modifiedAt"], s["resource"]) < after]
+
+        limit = params.get("limit")
+        size = limit if isinstance(limit, int) and 0 < limit <= _MAX_PAGE else _MAX_PAGE
+        page, rest = visible[:size], visible[size:]
+
         # A *successful* listSessions MUST carry `items`: the client's
         # `for...of summaries.items` sits outside its try/catch, so a malformed
         # success is fatal where an error response would have been tolerated.
-        return {"items": items}
+        result: dict[str, Any] = {"items": page}
+        if rest:
+            # "A missing `nextCursor` signals the end of the collection" -- so it
+            # is set only when there is genuinely another page, never eagerly.
+            result["nextCursor"] = _encode_cursor(page[-1])
+        return result
+
+    async def _fetch_turns(
+        self, connection: Connection, params: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        """Load older turns into a chat. There are never any: state is in memory.
+
+        This host keeps every turn of a chat in that chat's state and therefore
+        never sets `ChatState.turnsNextCursor`, so there is no older page to
+        page in. It is still implemented rather than refused, because the
+        alternative reading -- `MethodNotFound` -- is wrong twice over: the
+        command *is* supported, and a client cannot distinguish "this host does
+        not page" from "this host is broken".
+
+        Two MUSTs are honoured literally:
+
+        * "the host MUST dispatch `chat/turnsLoaded` ... before responding" is
+          unconditional, so an empty load still dispatches. With no turns and no
+          cursor the reducer's result is the identity, which is the honest
+          answer: nothing older exists.
+        * "The host MUST reject unrecognised cursors with `InvalidParams`." We
+          have never issued one, so every cursor is unrecognised.
+        """
+        channel = params.get("channel")
+        if not isinstance(channel, str):
+            raise errors.invalid_params("channel is required")
+        if not self.policy.may_see_channel(connection.info, channel):
+            raise errors.AhpError(-32009, f"Not permitted to observe {channel}")
+        if self.sequencer.reducer_of(channel) != "chat":
+            raise errors.invalid_params(f"{channel} is not a chat channel")
+        if params.get("cursor") is not None:
+            raise errors.invalid_params("unrecognised turns cursor")
+
+        await self.sequencer.publish(channel, {"type": "chat/turnsLoaded", "turns": []})
+        return {}
+
+    # ─── working directories ─────────────────────────────────────────────
+
+    def _multiroot(self) -> Mapping[str, Any] | None:
+        """`AgentCapabilities.multipleWorkingDirectories`, or ``None``.
+
+        Absent means "clients MUST NOT mutate a session's or chat's
+        working-directory set and MUST NOT set more than one entry" -- a client
+        MUST that only the host can actually enforce.
+        """
+        capability = self.provider.agent.capabilities.get("multipleWorkingDirectories")
+        return capability if isinstance(capability, Mapping) else None
+
+    def _admit_working_directories(
+        self, connection: Connection, session: str, params: Mapping[str, Any]
+    ) -> list[str]:
+        """The directories `createSession` may seed, after capability and policy."""
+        requested = [d for d in params.get("workingDirectories") or () if isinstance(d, str)]
+        if self._multiroot() is None:
+            # "Servers without that capability treat only the first entry as the
+            # session's working directory and ignore the rest." Truncate rather
+            # than refuse: the spec makes this the server's defined behaviour,
+            # not an error.
+            requested = requested[:1]
+        return [
+            directory
+            for directory in requested
+            if self.policy.may_grant_working_directory(connection.info, session, directory)
+        ]
+
+    def _validate_working_directory_action(
+        self, connection: Connection, channel: str, action: Mapping[str, Any]
+    ) -> str | None:
+        """Enforce the multiroot MUSTs the reducers deliberately do not.
+
+        Upstream is explicit that these live here: "the pure reducers apply these
+        mutations verbatim ... the `immutablePrimary` guarantee therefore lives
+        at the dispatch-validation / host-acceptance layer, not in the reducer".
+        """
+        multiroot = self._multiroot()
+        if multiroot is None:
+            return "this agent does not advertise multipleWorkingDirectories"
+
+        directory = action.get("directory")
+        if not isinstance(directory, str):
+            return "directory must be a string"
+
+        if action["type"] == "session/workingDirectorySet":
+            if not self.policy.may_grant_working_directory(connection.info, channel, directory):
+                return "rejected by policy"
+            return None
+
+        # session/workingDirectoryRemoved. "A host MAY decline to apply the
+        # removal (e.g. the immutable primary at index 0), leaving the set
+        # unchanged" -- declined loudly, so the client reverts its optimistic
+        # prediction instead of showing a directory that is still in use.
+        if multiroot.get("immutablePrimary"):
+            state = self.sequencer.state_of(channel)
+            existing = state.get("workingDirectories") if isinstance(state, Mapping) else None
+            if isinstance(existing, list) and existing and existing[0] == directory:
+                return "the primary working directory is immutable"
+        return None
 
     async def _create_session(self, connection: Connection, params: Mapping[str, Any]) -> None:
         channel = params.get("channel")
@@ -297,6 +587,7 @@ class Host:
             raise errors.AhpError(-32009, "Not permitted to create a session")
 
         provider_id = params.get("provider") or self.provider.agent.provider
+        working_directories = self._admit_working_directories(connection, channel, params)
         chat_uri = f"ahp-chat:/{uuid.uuid4()}"
         created_at = now_iso()
         session = _Session(
@@ -308,18 +599,20 @@ class Host:
         )
         self._sessions[channel] = session
 
-        await self.sequencer.register_channel(
-            channel,
-            {
-                "provider": provider_id,
-                "title": session.title,
-                "status": _STATUS_IDLE,
-                "lifecycle": "creating",
-                "activeClients": [],
-                "chats": [],
-            },
-            "session",
-        )
+        session_state: dict[str, Any] = {
+            "provider": provider_id,
+            "title": session.title,
+            "status": _STATUS_IDLE,
+            "lifecycle": "creating",
+            "activeClients": [],
+            "chats": [],
+        }
+        if working_directories:
+            # Seeded rather than left absent: a chat subset "MUST already be in
+            # the session's `workingDirectories`", and that check is unanswerable
+            # against a set the host never recorded.
+            session_state["workingDirectories"] = working_directories
+        await self.sequencer.register_channel(channel, session_state, "session")
         await self.sequencer.register_channel(
             chat_uri,
             {
@@ -330,6 +623,20 @@ class Host:
                 "turns": [],
             },
             "chat",
+        )
+        # "Each session owns at most one annotations channel. The channel URI is
+        # derived from the session URI by appending `/annotations`."
+        #
+        # Registered even though this host produces no annotations, because a
+        # client subscribing to an unregistered channel gets a result with no
+        # `snapshot`, and VS Code's client THROWS on that rather than tolerating
+        # it (`remoteAgentHostProtocolClient.ts:863-869`). It subscribes
+        # unconditionally: the committed reconnect capture in
+        # `tests/integration/fixtures/vscode-1.131-client-requests.json` carries
+        # the annotations URI in `subscriptions`, so before this the failure
+        # happened on every single connect.
+        await self.sequencer.register_channel(
+            session.annotations_uri, {"annotations": []}, "annotations"
         )
 
         # Bring-up runs after the response so the client can subscribe first.
@@ -359,14 +666,10 @@ class Host:
             )
             return
 
-        summary = {
-            "resource": session.uri,
-            "provider": session.provider_id,
-            "title": session.title,
-            "status": _STATUS_IDLE,
-            "createdAt": session.created_at,
-            "modifiedAt": session.created_at,
-        }
+        summary = self._full_summary(session)
+        # Remember what root was told, so the first `root/sessionSummaryChanged`
+        # carries a real difference rather than restating the whole summary.
+        session.published_summary = self._project_summary(session)
         await self.sequencer.notify(
             ROOT_URI, "root/sessionAdded", {"channel": ROOT_URI, "summary": summary}
         )
@@ -407,6 +710,9 @@ class Host:
                 )
 
         await self.sequencer.publish(session.uri, {"type": "session/ready"})
+        # Bring-up published customizations, tools and the chat catalogue, any of
+        # which can move a summary field.
+        await self._mirror_summary(session)
 
     async def _dispose_session(self, connection: Connection, params: Mapping[str, Any]) -> None:
         """Tear the session down, drop its channels, and tell the root channel.
@@ -432,6 +738,7 @@ class Host:
 
         del self._sessions[channel]
         await self.sequencer.drop_channel(session.chat_uri)
+        await self.sequencer.drop_channel(session.annotations_uri)
         await self.sequencer.drop_channel(channel)
 
         await self.sequencer.notify(
@@ -497,6 +804,9 @@ class Host:
 
         await self.sequencer.publish(channel, action, origin=origin)
         await self._react(channel, action)
+        session = self._session_for(channel)
+        if session is not None:
+            await self._mirror_summary(session)
 
     def _validate_client_action(
         self, connection: Connection, channel: str, action: Mapping[str, Any]
@@ -517,8 +827,14 @@ class Host:
         if not self.policy.may_dispatch(connection.info, channel, action):
             return "rejected by policy"
 
+        if action_type in _WORKING_DIRECTORY_ACTIONS:
+            return self._validate_working_directory_action(connection, channel, action)
+
+        # Asked of the bound reducer, never of the URI's scheme (invariant 15).
+        # Classifying by scheme happens to work for chat URIs this host mints and
+        # breaks the moment a client names one, which `createChat` will allow.
         state = self.sequencer.state_of(channel)
-        if classify(channel) is ChannelKind.CHAT and isinstance(state, Mapping):
+        if self.sequencer.reducer_of(channel) == "chat" and isinstance(state, Mapping):
             if action_type == "chat/turnCancelled" and state.get("activeTurn") is None:
                 return "no active turn to cancel"
             if action_type == "chat/turnStarted" and state.get("activeTurn") is not None:
@@ -533,11 +849,30 @@ class Host:
             return
         if action_type == "chat/turnStarted":
             runner = TurnRunner(self.sequencer, channel)
-            session.turn = asyncio.create_task(runner.run(session.agent_session, action))
+            session.turn = asyncio.create_task(self._run_turn(session, runner, action))
         elif action_type == "chat/turnCancelled" and session.turn is not None:
             session.turn.cancel()
             if session.agent_session is not None:
                 await session.agent_session.cancel("client cancelled")
+
+    async def _run_turn(
+        self, session: _Session, runner: TurnRunner, action: Mapping[str, Any]
+    ) -> None:
+        """Run one turn, then bring the root catalogue back in step.
+
+        Deliberately mirrored at the two ends of the turn rather than per action.
+        The spec sanctions exactly this: servers "MAY coalesce or debounce
+        updates for noisy fields (for example, `modifiedAt` bumps while a turn is
+        streaming)". Emitting per delta would be one root notification per token,
+        to every connected client, to move a timestamp nobody is watching.
+        """
+        try:
+            await runner.run(session.agent_session, action)
+        finally:
+            # `finally`, not `else`: a cancelled or failed turn moves the status
+            # bits too, and that is the transition a session list most needs.
+            with contextlib.suppress(Exception):
+                await self._mirror_summary(session)
 
     # ─── shutdown ────────────────────────────────────────────────────────
 

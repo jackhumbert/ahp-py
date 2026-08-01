@@ -60,6 +60,15 @@ def _parse_args() -> argparse.Namespace:
         action="store_true",
         help="advertise a demo plugin/agent/skill/instruction/hook/MCP tree, named AHS*",
     )
+    parser.add_argument(
+        "--sequence-file",
+        metavar="PATH",
+        help=(
+            "persist serverSeq here so it keeps increasing across a restart; "
+            "without it a reconnecting client is correctly told to take fresh "
+            "snapshots, on every reconnect, for the life of the host"
+        ),
+    )
     parser.add_argument("-v", "--verbose", action="store_true", help="debug logging")
     return parser.parse_args()
 
@@ -84,6 +93,7 @@ async def _run() -> None:
         LoopbackSingleUserPolicy(),
         info=HostInfo(name="agent-host-server (demo)"),
         wire_log=Path(args.wire_log) if args.wire_log else None,
+        sequence_file=Path(args.sequence_file) if args.sequence_file else None,
     )
 
     async with serve_websocket(

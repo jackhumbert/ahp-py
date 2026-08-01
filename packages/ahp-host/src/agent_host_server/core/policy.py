@@ -77,6 +77,24 @@ class Policy(Protocol):
         """
         ...
 
+    def may_grant_working_directory(
+        self, info: ConnectionInfo, session: str, directory: str
+    ) -> bool:
+        """Whether this peer may give the agent tool access to `directory`.
+
+        `session/workingDirectorySet` is client-dispatchable, so without this a
+        peer names the filesystem roots the agent operates on. The reducer
+        applies such an action verbatim -- upstream is explicit that the
+        `immutablePrimary` guarantee "lives at the dispatch-validation / host
+        acceptance layer, not in the reducer".
+
+        Today the set is state the host merely records. The moment the
+        `resource*` family or a terminal backend lands it becomes an authorization
+        decision, so it is gated now rather than retrofitted onto an established
+        wire behaviour.
+        """
+        ...
+
 
 class LoopbackSingleUserPolicy:
     """Everything permitted. **Single trust domain only.**
@@ -99,4 +117,9 @@ class LoopbackSingleUserPolicy:
         return True
 
     def may_create_session(self, info: ConnectionInfo, params: Mapping[str, Any]) -> bool:
+        return True
+
+    def may_grant_working_directory(
+        self, info: ConnectionInfo, session: str, directory: str
+    ) -> bool:
         return True

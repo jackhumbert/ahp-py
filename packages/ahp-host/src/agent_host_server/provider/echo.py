@@ -9,6 +9,8 @@ adapter author reads.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Mapping
+from typing import Any
 
 from agent_host_server.provider.base import (
     AgentInfo,
@@ -74,6 +76,7 @@ class EchoProvider:
         model_name: str = "Echo Model v1",
         delay: float = 0.0,
         customizations: bool = False,
+        capabilities: Mapping[str, Any] | None = None,
     ) -> None:
         self._delay = delay
         self._customizations = customizations
@@ -81,11 +84,17 @@ class EchoProvider:
         # entries in VS Code's chat model picker (AgentHostLanguageModelProvider
         # reads them straight out of root state). They are deliberately different
         # strings here so it is obvious which is which in the UI.
+        #
+        # `capabilities` is empty by default and that is the conformant choice:
+        # every entry in `AgentCapabilities` is a client MUST NOT that only its
+        # presence lifts, so a host that declares nothing is a host with the
+        # narrowest surface, not an incomplete one.
         self._info = AgentInfo(
             provider=provider_id,
             display_name=display_name,
             description=description,
             models=({"id": "echo-1", "name": model_name},),
+            capabilities=dict(capabilities or {}),
         )
 
     @property

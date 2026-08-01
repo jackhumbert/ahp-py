@@ -143,7 +143,7 @@ class TestUnimplemented:
         IS how a host declines a feature."""
         _, client = connected
         await _initialize(client)
-        for method in ("resourceRead", "createTerminal", "authenticate", "fetchTurns"):
+        for method in ("resourceRead", "createTerminal", "authenticate"):
             response = await client.request(method, {"channel": ROOT_URI})
             assert response["error"]["code"] == -32601, method
 
@@ -736,3 +736,444 @@ class TestCustomizations:
         state = await self._state(client, "echo:/cust-3")
         assert not state.get("customizations")
         assert not state.get("serverTools")
+
+
+class TestSessionCatalogue:
+    """`listSessions` and `root/sessionSummaryChanged` are two views of one thing.
+
+    In VS Code's Agents-app window the session list is the home screen, so a
+    summary the host never mirrors is a stale home screen -- not a missing nicety.
+    """
+
+    @staticmethod
+    async def _make(client: FakeClient, uri: str) -> None:
+        await client.request("createSession", {"channel": uri, "provider": "echo"})
+        await client.collect(seconds=0.3)
+
+    async def test_a_title_change_is_mirrored_to_root(
+        self, connected: tuple[Host, FakeClient]
+    ) -> None:
+        _, client = connected
+        await _initialize(client)
+        uri = "echo:/summary-1"
+        await self._make(client, uri)
+        client.notifications.clear()
+
+        await client.notify(
+            "dispatchAction",
+            {
+                "channel": uri,
+                "clientSeq": 1,
+                "action": {"type": "session/titleChanged", "title": "Renamed by a client"},
+            },
+        )
+        await client.collect(seconds=0.3)
+
+        changed = [
+            n["params"]
+            for n in client.notifications
+            if n.get("method") == "root/sessionSummaryChanged"
+        ]
+        assert changed, "the root catalogue was never told the title moved"
+        assert changed[-1]["session"] == uri
+        assert changed[-1]["changes"]["title"] == "Renamed by a client"
+
+    async def test_only_changed_fields_are_carried(
+        self, connected: tuple[Host, FakeClient]
+    ) -> None:
+        """ "Only fields present in `changes` have new values." Identity fields
+        never change and are not carried at all."""
+        _, client = connected
+        await _initialize(client)
+        uri = "echo:/summary-2"
+        await self._make(client, uri)
+        client.notifications.clear()
+
+        await client.notify(
+            "dispatchAction",
+            {
+                "channel": uri,
+                "clientSeq": 1,
+                "action": {"type": "session/titleChanged", "title": "Only the title"},
+            },
+        )
+        await client.collect(seconds=0.3)
+        changes = [
+            n["params"]["changes"]
+            for n in client.notifications
+            if n.get("method") == "root/sessionSummaryChanged"
+        ][-1]
+        assert set(changes) == {"title"}
+        for identity in ("resource", "provider", "createdAt"):
+            assert identity not in changes
+
+    async def test_an_unchanged_summary_emits_nothing(
+        self, connected: tuple[Host, FakeClient]
+    ) -> None:
+        """A client caches the session list; a no-op notification per streamed
+        delta would be one notification per token, to every connected client."""
+        _, client = connected
+        await _initialize(client)
+        uri = "echo:/summary-3"
+        await self._make(client, uri)
+        client.notifications.clear()
+
+        await client.notify(
+            "dispatchAction",
+            {
+                "channel": uri,
+                "clientSeq": 1,
+                "action": {"type": "session/titleChanged", "title": "New Session"},
+            },
+        )
+        await client.collect(seconds=0.3)
+        assert not [
+            n for n in client.notifications if n.get("method") == "root/sessionSummaryChanged"
+        ]
+
+    async def test_list_sessions_pages_and_the_cursor_walks_the_catalogue(
+        self, connected: tuple[Host, FakeClient]
+    ) -> None:
+        _, client = connected
+        await _initialize(client)
+        for index in range(5):
+            await self._make(client, f"echo:/page-{index}")
+
+        first = (await client.request("listSessions", {"channel": ROOT_URI, "limit": 2}))["result"]
+        assert len(first["items"]) == 2
+        assert "nextCursor" in first
+
+        seen = [item["resource"] for item in first["items"]]
+        cursor = first["nextCursor"]
+        while cursor is not None:
+            page = (
+                await client.request(
+                    "listSessions", {"channel": ROOT_URI, "limit": 2, "cursor": cursor}
+                )
+            )["result"]
+            seen.extend(item["resource"] for item in page["items"])
+            cursor = page.get("nextCursor")
+
+        # Every session exactly once: a keyset cursor must not skip or repeat.
+        assert sorted(seen) == sorted(f"echo:/page-{i}" for i in range(5))
+        assert len(seen) == len(set(seen))
+
+    async def test_the_last_page_carries_no_cursor(
+        self, connected: tuple[Host, FakeClient]
+    ) -> None:
+        """ "A missing `nextCursor` signals the end of the collection" -- so an
+        eagerly-set one makes a client's paging loop never terminate."""
+        _, client = connected
+        await _initialize(client)
+        await self._make(client, "echo:/only-one")
+        result = (await client.request("listSessions", {"channel": ROOT_URI, "limit": 50}))[
+            "result"
+        ]
+        assert len(result["items"]) == 1
+        assert "nextCursor" not in result
+
+    async def test_an_unrecognised_cursor_is_invalid_params(
+        self, connected: tuple[Host, FakeClient]
+    ) -> None:
+        _, client = connected
+        await _initialize(client)
+        response = await client.request(
+            "listSessions", {"channel": ROOT_URI, "cursor": "not-a-real-cursor"}
+        )
+        assert response["error"]["code"] == -32602
+
+
+class TestFetchTurns:
+    """This host keeps every turn in state, so there is never an older page --
+    but the command is supported, and a client cannot tell "does not page" from
+    "is broken" if we answer MethodNotFound."""
+
+    async def test_dispatches_turns_loaded_before_responding(
+        self, connected: tuple[Host, FakeClient]
+    ) -> None:
+        """The MUST is unconditional: "the host MUST dispatch `chat/turnsLoaded`
+        ... before responding"."""
+        _, client = connected
+        await _initialize(client)
+        uri = "echo:/fetch-1"
+        await client.request("createSession", {"channel": uri, "provider": "echo"})
+        await client.collect(seconds=0.3)
+        state = (await client.request("subscribe", {"channel": uri}))["result"]["snapshot"]["state"]
+        chat_uri = state["chats"][0]["resource"]
+        await client.request("subscribe", {"channel": chat_uri})
+        client.notifications.clear()
+
+        response = await client.request("fetchTurns", {"channel": chat_uri})
+        assert response["result"] == {}
+        loaded = [a for a in client.actions(chat_uri) if a["action"]["type"] == "chat/turnsLoaded"]
+        assert loaded, "turnsLoaded must be dispatched even when nothing is loaded"
+
+    async def test_any_cursor_is_unrecognised(self, connected: tuple[Host, FakeClient]) -> None:
+        """ "The host MUST reject unrecognised cursors with `InvalidParams`" --
+        and this host has never issued one."""
+        _, client = connected
+        await _initialize(client)
+        uri = "echo:/fetch-2"
+        await client.request("createSession", {"channel": uri, "provider": "echo"})
+        await client.collect(seconds=0.3)
+        state = (await client.request("subscribe", {"channel": uri}))["result"]["snapshot"]["state"]
+        chat_uri = state["chats"][0]["resource"]
+
+        response = await client.request("fetchTurns", {"channel": chat_uri, "cursor": "anything"})
+        assert response["error"]["code"] == -32602
+
+    async def test_a_non_chat_channel_is_refused(self, connected: tuple[Host, FakeClient]) -> None:
+        """Asked of the sequencer's bound reducer, never of the URI's scheme."""
+        _, client = connected
+        await _initialize(client)
+        response = await client.request("fetchTurns", {"channel": ROOT_URI})
+        assert response["error"]["code"] == -32602
+
+
+class TestWorkingDirectories:
+    """The reducers apply these mutations verbatim, on purpose. Upstream:
+    "the `immutablePrimary` guarantee therefore lives at the dispatch-validation
+    / host-acceptance layer, not in the reducer"."""
+
+    @staticmethod
+    def _host(multiroot: dict[str, Any] | None = None) -> Host:
+        capabilities = {"multipleWorkingDirectories": multiroot} if multiroot is not None else {}
+        return Host(EchoProvider(capabilities=capabilities), LoopbackSingleUserPolicy())
+
+    @staticmethod
+    async def _connect(host: Host) -> tuple[FakeClient, asyncio.Task[None]]:
+        client_transport, server_transport = memory_pair()
+        serve = asyncio.create_task(host.serve(server_transport))
+        client = FakeClient(client_transport)
+        await _initialize(client)
+        return client, serve
+
+    async def test_create_session_seeds_the_declared_set(self) -> None:
+        host = self._host({"immutablePrimary": False})
+        client, serve = await self._connect(host)
+        try:
+            uri = "echo:/wd-1"
+            await client.request(
+                "createSession",
+                {
+                    "channel": uri,
+                    "provider": "echo",
+                    "workingDirectories": ["file:///a", "file:///b"],
+                },
+            )
+            state = (await client.request("subscribe", {"channel": uri}))["result"]["snapshot"][
+                "state"
+            ]
+            assert state["workingDirectories"] == ["file:///a", "file:///b"]
+        finally:
+            serve.cancel()
+            await host.aclose()
+
+    async def test_without_the_capability_only_the_first_entry_survives(self) -> None:
+        """ "Servers without that capability treat only the first entry as the
+        session's working directory and ignore the rest.\""""
+        host = self._host()
+        client, serve = await self._connect(host)
+        try:
+            uri = "echo:/wd-2"
+            await client.request(
+                "createSession",
+                {
+                    "channel": uri,
+                    "provider": "echo",
+                    "workingDirectories": ["file:///a", "file:///b", "file:///c"],
+                },
+            )
+            state = (await client.request("subscribe", {"channel": uri}))["result"]["snapshot"][
+                "state"
+            ]
+            assert state["workingDirectories"] == ["file:///a"]
+        finally:
+            serve.cancel()
+            await host.aclose()
+
+    async def test_without_the_capability_a_client_may_not_mutate_the_set(self) -> None:
+        """ "When absent, clients MUST NOT mutate a session's or chat's
+        working-directory set" -- a client MUST only the host can enforce."""
+        host = self._host()
+        client, serve = await self._connect(host)
+        try:
+            uri = "echo:/wd-3"
+            await client.request(
+                "createSession",
+                {"channel": uri, "provider": "echo", "workingDirectories": ["file:///a"]},
+            )
+            await client.request("subscribe", {"channel": uri})
+            await client.notify(
+                "dispatchAction",
+                {
+                    "channel": uri,
+                    "clientSeq": 1,
+                    "action": {"type": "session/workingDirectorySet", "directory": "file:///evil"},
+                },
+            )
+            await client.collect(seconds=0.3)
+            echoes = [
+                a
+                for a in client.actions(uri)
+                if a["action"]["type"] == "session/workingDirectorySet"
+            ]
+            assert echoes, "a rejected action MUST still be echoed so the client can revert"
+            assert "rejectionReason" in echoes[-1]
+            state = (await client.request("subscribe", {"channel": uri}))["result"]["snapshot"][
+                "state"
+            ]
+            assert state["workingDirectories"] == ["file:///a"]
+        finally:
+            serve.cancel()
+            await host.aclose()
+
+    async def test_the_immutable_primary_cannot_be_removed(self) -> None:
+        host = self._host({"immutablePrimary": True})
+        client, serve = await self._connect(host)
+        try:
+            uri = "echo:/wd-4"
+            await client.request(
+                "createSession",
+                {
+                    "channel": uri,
+                    "provider": "echo",
+                    "workingDirectories": ["file:///primary", "file:///peer"],
+                },
+            )
+            await client.request("subscribe", {"channel": uri})
+            for directory in ("file:///primary", "file:///peer"):
+                await client.notify(
+                    "dispatchAction",
+                    {
+                        "channel": uri,
+                        "clientSeq": 1,
+                        "action": {
+                            "type": "session/workingDirectoryRemoved",
+                            "directory": directory,
+                        },
+                    },
+                )
+            await client.collect(seconds=0.3)
+            state = (await client.request("subscribe", {"channel": uri}))["result"]["snapshot"][
+                "state"
+            ]
+            # The peer went; the primary is a fixed process root for the session.
+            assert state["workingDirectories"] == ["file:///primary"]
+        finally:
+            serve.cancel()
+            await host.aclose()
+
+    async def test_a_policy_may_refuse_a_directory(self) -> None:
+        class NoTmp(LoopbackSingleUserPolicy):
+            def may_grant_working_directory(self, info: Any, session: str, directory: str) -> bool:
+                return not directory.startswith("file:///tmp")
+
+        host = Host(EchoProvider(capabilities={"multipleWorkingDirectories": {}}), NoTmp())
+        client, serve = await self._connect(host)
+        try:
+            uri = "echo:/wd-5"
+            await client.request(
+                "createSession",
+                {
+                    "channel": uri,
+                    "provider": "echo",
+                    "workingDirectories": ["file:///work", "file:///tmp/secrets"],
+                },
+            )
+            state = (await client.request("subscribe", {"channel": uri}))["result"]["snapshot"][
+                "state"
+            ]
+            assert state["workingDirectories"] == ["file:///work"]
+        finally:
+            serve.cancel()
+            await host.aclose()
+
+
+class TestAnnotationsChannel:
+    """VS Code subscribes to `<session>/annotations` unconditionally and its
+    client throws on a result with no `snapshot`
+    (`remoteAgentHostProtocolClient.ts:863-869`). Before the channel was
+    registered that fired on every connect."""
+
+    async def test_a_session_exposes_an_annotations_channel(
+        self, connected: tuple[Host, FakeClient]
+    ) -> None:
+        _, client = connected
+        await _initialize(client)
+        uri = "echo:/ann-1"
+        await client.request("createSession", {"channel": uri, "provider": "echo"})
+        await client.collect(seconds=0.3)
+
+        response = await client.request("subscribe", {"channel": f"{uri}/annotations"})
+        assert "snapshot" in response["result"], "a snapshot-less result throws in the client"
+        assert response["result"]["snapshot"]["state"] == {"annotations": []}
+
+    async def test_the_summary_carries_the_annotations_channel(
+        self, connected: tuple[Host, FakeClient]
+    ) -> None:
+        """`SessionSummary.annotations` exists so badge UI can render counts
+        "without subscribing to the channel itself"."""
+        _, client = connected
+        await _initialize(client)
+        uri = "echo:/ann-2"
+        await client.request("createSession", {"channel": uri, "provider": "echo"})
+        await client.collect(seconds=0.3)
+
+        item = (await client.request("listSessions", {"channel": ROOT_URI}))["result"]["items"][0]
+        assert item["annotations"] == {
+            "resource": f"{uri}/annotations",
+            "annotationCount": 0,
+            "entryCount": 0,
+        }
+
+    async def test_annotations_are_reduced_and_counted(
+        self, connected: tuple[Host, FakeClient]
+    ) -> None:
+        """All five annotation actions are client-dispatchable, so registering
+        the channel without its reducer would broadcast actions nothing applies."""
+        _, client = connected
+        await _initialize(client)
+        uri = "echo:/ann-3"
+        await client.request("createSession", {"channel": uri, "provider": "echo"})
+        await client.collect(seconds=0.3)
+        annotations_uri = f"{uri}/annotations"
+        await client.request("subscribe", {"channel": annotations_uri})
+
+        await client.notify(
+            "dispatchAction",
+            {
+                "channel": annotations_uri,
+                "clientSeq": 1,
+                "action": {
+                    "type": "annotations/set",
+                    "annotation": {
+                        "id": "a1",
+                        "resource": "file:///x.py",
+                        "entries": [{"id": "e1", "text": "look here"}],
+                    },
+                },
+            },
+        )
+        await client.collect(seconds=0.3)
+
+        state = (await client.request("subscribe", {"channel": annotations_uri}))["result"][
+            "snapshot"
+        ]["state"]
+        assert [a["id"] for a in state["annotations"]] == ["a1"]
+
+        item = (await client.request("listSessions", {"channel": ROOT_URI}))["result"]["items"][0]
+        assert item["annotations"]["annotationCount"] == 1
+        assert item["annotations"]["entryCount"] == 1
+
+    async def test_disposing_the_session_drops_the_annotations_channel(
+        self, connected: tuple[Host, FakeClient]
+    ) -> None:
+        _, client = connected
+        await _initialize(client)
+        uri = "echo:/ann-4"
+        await client.request("createSession", {"channel": uri, "provider": "echo"})
+        await client.collect(seconds=0.3)
+        await client.request("disposeSession", {"channel": uri})
+        response = await client.request("subscribe", {"channel": f"{uri}/annotations"})
+        assert response["result"] == {}, "the channel outlived its session"
