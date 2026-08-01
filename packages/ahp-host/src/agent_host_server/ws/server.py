@@ -15,6 +15,7 @@ socket without a :class:`~agent_host_server.core.policy.Policy`.
 
 from __future__ import annotations
 
+import logging
 import secrets
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -26,6 +27,8 @@ from agent_host_server.core.host import Host
 from agent_host_server.ws.transport import WebSocketTransport
 
 __all__ = ["WebSocketServer", "serve_websocket"]
+
+_log = logging.getLogger(__name__)
 
 _LOOPBACK = frozenset({"127.0.0.1", "::1", "localhost"})
 
@@ -51,6 +54,8 @@ class WebSocketServer:
         self.bind = bind
         self.port = port
         self.connection_token = connection_token
+        #: The most recent handshake path, for diagnosing a refused client.
+        self.last_handshake_path: str | None = None
         self._server: Any = None
 
     @property
@@ -80,19 +85,26 @@ class WebSocketServer:
         return supplied is not None and secrets.compare_digest(supplied, self.connection_token)
 
     async def _handler(self, socket: Any) -> None:
-        path = getattr(getattr(socket, "request", None), "path", "") or ""
-        if not self._authorize(path):
-            await socket.close(code=1008, reason="invalid connection token")
-            return
+        # Admission already happened in `_process_request`; by here the upgrade
+        # has completed, so this only wires the transport up.
         peer = str(getattr(socket, "remote_address", None) or "")
         await self.host.serve(WebSocketTransport(socket), peer=peer)
 
     async def _process_request(self, connection: Any, request: Any) -> Any:
-        """Reject a bad token during the upgrade, with 403 -- as VS Code does."""
-        del connection
-        if self._authorize(getattr(request, "path", "") or ""):
+        """Reject a bad token during the upgrade, with 403 -- as VS Code does.
+
+        `respond` lives on the *connection*, not the request. Getting that wrong
+        raises inside the handshake, which websockets reports as a generic
+        failure -- indistinguishable from a rejected token, and it aborts every
+        connection including valid ones.
+        """
+        path = getattr(request, "path", "") or ""
+        _log.debug("handshake path=%r", path)
+        self.last_handshake_path = path
+        if self._authorize(path):
             return None
-        return request.respond(HTTPStatus.FORBIDDEN, "invalid connection token\n")
+        _log.warning("rejecting handshake: bad or missing connection token (path=%r)", path)
+        return connection.respond(HTTPStatus.FORBIDDEN, "invalid connection token\n")
 
     async def start(self) -> None:
         import websockets

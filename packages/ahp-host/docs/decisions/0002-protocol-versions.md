@@ -13,7 +13,7 @@ Measured on 2026-08-01:
 
 | Client | Offers | Note |
 |---|---|---|
-| **VS Code** 1.132.0 | `['0.7.0','0.6.0','0.5.2','0.5.1']` | vendors upstream `types/` at `.ahp-version` = `8e0a9bbf`; the **full** list |
+| **VS Code** 1.131.0 | **`['0.7.0']`** at runtime | vendors upstream `types/` at `.ahp-version` = `8e0a9bbf`. Its source *declares* `['0.7.0','0.6.0','0.5.2','0.5.1']`, but the client sends `[PROTOCOL_VERSION]` alone — measured, `experiments.md` E12c |
 | npm `@microsoft/agent-host-protocol` | `0.6.0` latest published; `MultiHostClient` offers `[PROTOCOL_VERSION]` only | no `typescript/v0.7.0` release exists |
 | `ahpx` | a single version, lockfile-pinned to `0.5.0` | `0.5.0` is no longer in upstream's own supported list |
 
@@ -32,7 +32,10 @@ intersection is empty, return `UnsupportedProtocolVersion` (`-32005`) with
 
 ## Rationale
 
-- 0.7.0 is what VS Code speaks and prefers, and is the newest released spec.
+- 0.7.0 is what VS Code speaks — and since it offers *only* that, supporting it
+  is **required**, not preferred. A 0.6.0-only host is refused outright. (This
+  decision was taken before that was measured; the original reasoning was
+  weaker than the fact now available.)
 - 0.6.0 keeps the installable npm client usable as the CI interop counterparty.
 - **The cost is close to zero.** The entire 0.6.0 → 0.7.0 action delta for
   root/session/chat is two step-up-auth actions and four multiroot actions — all

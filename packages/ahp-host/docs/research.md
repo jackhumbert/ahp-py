@@ -101,9 +101,11 @@ a `.ahp-version` file.
 | `SUPPORTED_PROTOCOL_VERSIONS` | **`['0.7.0', '0.6.0', '0.5.2', '0.5.1']`** |
 | VS Code version sampled | 1.132.0 (`main`) |
 
-Unlike `MultiHostClient` and `ahpx`, which each offer a **single** version, VS
-Code offers the **full list** — so it can negotiate down to any of four
-versions.
+> **Corrected by measurement — see `experiments.md` E12c.** Those constants are
+> what VS Code's vendored source *declares*; at runtime its client sends
+> `protocolVersions: ["0.7.0"]` alone, exactly as `MultiHostClient` does. It
+> cannot negotiate down. A host that speaks only 0.6.0 is refused outright, so
+> supporting 0.7.0 is required, not preferred.
 
 **Connecting VS Code to a third-party host is a first-class, supported feature**
 — no extension required (`common/remoteAgentHostService.ts:92-107`):
@@ -157,10 +159,23 @@ single `current` — a deliberate extension beyond the reference host. See
   is written only after the endpoint is listening. That is a good model for our
   own default posture.
 
-**Caveat.** VS Code has its own client implementation (`agentSubscription.ts`,
-`sessionTransport.ts`), so the `MultiHostClient` hard requirements in §2a are
-*not* known to apply to it. Its real requirements have not been measured — see
-§11.
+**Measured, 2026-08-01 — `experiments.md` E12.** A real VS Code 1.131 drove this
+host through a full turn. Its own client (`agentSubscription.ts`,
+`sessionTransport.ts`) is not the npm package, and it differs in three ways that
+matter:
+
+1. **It opens with `reconnect`, not `initialize`**, whenever it remembers a
+   `serverSeq` and a subscription set — and it does **not** fall back when
+   refused, it retries forever. `MultiHostClient` does fall back; VS Code does
+   not.
+2. **Session URIs are `<provider>:/<uuid>`** (e.g. `echo:/af2d658f-…`), and chat
+   URIs can be `ahp-chat://<chatId>/<base64 session uri>`. Neither matches the
+   `ahp-session:` / `ahp-chat:` forms in the spec's examples, so **a host must
+   never route on the URI scheme.**
+3. **It offers a single protocol version.**
+
+It probed 40 unimplemented methods in one session, took `-32601` for all of
+them, and rendered the session anyway.
 
 ### 1a. Can a host support multiple protocol versions?
 

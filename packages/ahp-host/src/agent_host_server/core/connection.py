@@ -29,7 +29,12 @@ __all__ = ["Connection"]
 
 class Connection:
     def __init__(
-        self, transport: Transport, *, client_id: str = "", peer: str | None = None
+        self,
+        transport: Transport,
+        *,
+        client_id: str = "",
+        peer: str | None = None,
+        wire_log: Any = None,
     ) -> None:
         self.transport = transport
         self.client_id = client_id
@@ -37,6 +42,7 @@ class Connection:
         self.initialized = False
         self.protocol_version: str | None = None
         self.token: str | None = None
+        self.wire_log = wire_log
         self._outbox: asyncio.Queue[Mapping[str, Any] | None] = asyncio.Queue()
         self._writer: asyncio.Task[None] | None = None
         self._closed = False
@@ -61,6 +67,8 @@ class Connection:
             message = await self._outbox.get()
             if message is None:
                 return
+            if self.wire_log is not None:
+                self.wire_log.record("s2c", message, self.client_id or "?")
             try:
                 await self.transport.send(message)
             except TransportClosed:

@@ -15,7 +15,12 @@ Two shapes recur and are worth naming up front:
   children search;
 * ``status`` is a bitset, and JavaScript coerces bitwise operands to *signed*
   int32 while every other client port uses unsigned. Each bitwise result goes
-  through :func:`session_status_flags` so we agree with Go/Rust/Kotlin/Swift.
+  through :func:`session_status_flags` so we agree with Go/Rust/Kotlin/Swift;
+* **the action is read with ``.get`` / :func:`_obj`, never indexed.** A missing
+  property is ``undefined`` upstream, not a throw: ``session/titleChanged`` with
+  no ``title`` sets ``title: undefined`` (reducer.ts:165) and returns a state.
+  Nine of these actions are client-dispatchable, so ``action["title"]`` would
+  hand any untrusted peer a ``KeyError`` out of the reducer.
 """
 
 from __future__ import annotations
@@ -45,6 +50,18 @@ _MCP_SERVER = "mcpServer"
 
 
 # ─── Helpers ─────────────────────────────────────────────────────────────────
+
+
+def _obj(value: Any) -> Mapping[str, Any]:
+    """A wire object read the way JavaScript reads one.
+
+    Covers both shapes upstream relies on and Python does not give for free:
+    ``x.y`` on a non-object is ``undefined`` rather than an ``AttributeError``,
+    and ``{...x}`` on a non-object is ``{}`` rather than a ``TypeError``. Used
+    for every nested read of an *action*, whose payload comes from a peer that
+    may be newer than us or simply wrong (ADR 0001).
+    """
+    return value if isinstance(value, Mapping) else {}
 
 
 def _status_of(state: Mapping[str, Any]) -> int:
@@ -124,7 +141,7 @@ def _with_optional(target: dict[str, Any], key: str, value: Any) -> dict[str, An
 
 def _update_mcp_server(
     state: Mapping[str, Any],
-    target_id: str,
+    target_id: Any,
     update: Callable[[Mapping[str, Any]], dict[str, Any]],
 ) -> Any:
     """Port of `updateMcpServerCustomization`.
@@ -195,14 +212,18 @@ def session_reducer(state: Any, action: Mapping[str, Any]) -> Any:
         return {**state, "lifecycle": "ready"}
 
     if action_type == "session/creationFailed":
-        return {**state, "lifecycle": "creationFailed", "creationError": action["error"]}
+        # `creationError: action.error` -- an omitted error is `undefined`
+        # upstream, which is an absent key here, not a raise.
+        return _with_optional(
+            {**state, "lifecycle": "creationFailed"}, "creationError", action.get("error")
+        )
 
     # ── Chat catalog ─────────────────────────────────────────────────────────
 
     if action_type == "session/chatAdded":
-        summary = action["summary"]
+        summary = action.get("summary")
         chats = coalesce(state.get("chats"), [])
-        index = _index_of(chats, "resource", summary.get("resource"))
+        index = _index_of(chats, "resource", _obj(summary).get("resource"))
         if index < 0:
             return {**state, "chats": [*chats, summary]}
         updated = list(chats)
@@ -210,12 +231,13 @@ def session_reducer(state: Any, action: Mapping[str, Any]) -> Any:
         return {**state, "chats": updated}
 
     if action_type == "session/chatRemoved":
+        chat = action.get("chat")
         chats = coalesce(state.get("chats"), [])
-        index = _index_of(chats, "resource", action["chat"])
+        index = _index_of(chats, "resource", chat)
         if index < 0:
             return state
         next_state = {**state, "chats": _without(chats, index)}
-        if state.get("defaultChat") == action["chat"]:
+        if state.get("defaultChat") == chat:
             # Upstream `delete next.defaultChat` -- the routing hint cannot point
             # at a chat that no longer exists.
             next_state.pop("defaultChat", None)
@@ -223,12 +245,12 @@ def session_reducer(state: Any, action: Mapping[str, Any]) -> Any:
 
     if action_type == "session/chatUpdated":
         chats = coalesce(state.get("chats"), [])
-        index = _index_of(chats, "resource", action["chat"])
+        index = _index_of(chats, "resource", action.get("chat"))
         if index < 0:
             return state
         # Upstream destructures `resource` out of `changes`: identity fields are
         # ignored even when a sender wrongly carries them.
-        changes = {k: v for k, v in action["changes"].items() if k != "resource"}
+        changes = {k: v for k, v in _obj(action.get("changes")).items() if k != "resource"}
         updated = list(chats)
         updated[index] = {**chats[index], **changes}
         return {**state, "chats": updated}
@@ -239,7 +261,9 @@ def session_reducer(state: Any, action: Mapping[str, Any]) -> Any:
     # ── Metadata ─────────────────────────────────────────────────────────────
 
     if action_type == "session/titleChanged":
-        return {**state, "title": action["title"]}
+        # `title: action.title` -- an omitted title is `undefined` upstream, so
+        # it clears the title and returns a state. Client-dispatchable.
+        return _with_optional({**state}, "title", action.get("title"))
 
     if action_type == "session/isReadChanged":
         # `isRead` is a declared boolean; plain truthiness matches JS here.
@@ -271,10 +295,12 @@ def session_reducer(state: Any, action: Mapping[str, Any]) -> Any:
         # dropped, not created (fixture 114).
         if config is None:
             return state
+        # `{...action.config}` -- spreading an absent config is `{}` upstream,
+        # not a throw, so a payload-less change is an empty replace or a no-op
+        # merge. Client-dispatchable.
+        patch = _obj(action.get("config"))
         values = (
-            {**action["config"]}
-            if action.get("replace")
-            else {**coalesce(config.get("values"), {}), **action["config"]}
+            {**patch} if action.get("replace") else {**coalesce(config.get("values"), {}), **patch}
         )
         return {**state, "config": {**config, "values": values}}
 
@@ -282,14 +308,17 @@ def session_reducer(state: Any, action: Mapping[str, Any]) -> Any:
         return _with_optional({**state}, "_meta", action.get("_meta"))
 
     if action_type == "session/serverToolsChanged":
-        return {**state, "serverTools": action["tools"]}
+        return _with_optional({**state}, "serverTools", action.get("tools"))
 
     # ── Active clients ───────────────────────────────────────────────────────
 
     if action_type == "session/activeClientSet":
-        active_client = action["activeClient"]
+        active_client = action.get("activeClient")
         clients = coalesce(state.get("activeClients"), [])
-        index = _index_of(clients, "clientId", active_client.get("clientId"))
+        # `action.activeClient.clientId` -- a property read off a missing or
+        # non-object payload is `undefined` in JS, never a throw. The lookup then
+        # misses and the payload is appended verbatim. Client-dispatchable.
+        index = _index_of(clients, "clientId", _obj(active_client).get("clientId"))
         if index < 0:
             return {**state, "activeClients": [*clients, active_client]}
         updated = list(clients)
@@ -298,7 +327,7 @@ def session_reducer(state: Any, action: Mapping[str, Any]) -> Any:
 
     if action_type == "session/activeClientRemoved":
         clients = coalesce(state.get("activeClients"), [])
-        index = _index_of(clients, "clientId", action["clientId"])
+        index = _index_of(clients, "clientId", action.get("clientId"))
         if index < 0:
             return state
         return {**state, "activeClients": _without(clients, index)}
@@ -307,16 +336,17 @@ def session_reducer(state: Any, action: Mapping[str, Any]) -> Any:
 
     if action_type == "session/workingDirectorySet":
         # Membership, not truthiness: an existing empty set still appends.
+        directory = action.get("directory")
         directories = coalesce(state.get("workingDirectories"), [])
-        if _index_of_value(directories, action["directory"]) >= 0:
+        if _index_of_value(directories, directory) >= 0:
             return state
-        return {**state, "workingDirectories": [*directories, action["directory"]]}
+        return {**state, "workingDirectories": [*directories, directory]}
 
     if action_type == "session/workingDirectoryRemoved":
         directories = state.get("workingDirectories")
         if directories is None:
             return state
-        index = _index_of_value(directories, action["directory"])
+        index = _index_of_value(directories, action.get("directory"))
         if index < 0:
             return state
         return {**state, "workingDirectories": _without(directories, index)}
@@ -324,9 +354,9 @@ def session_reducer(state: Any, action: Mapping[str, Any]) -> Any:
     # ── Input needed ─────────────────────────────────────────────────────────
 
     if action_type == "session/inputNeededSet":
-        request = action["request"]
+        request = action.get("request")
         requests = coalesce(state.get("inputNeeded"), [])
-        index = _index_of(requests, "id", request.get("id"))
+        index = _index_of(requests, "id", _obj(request).get("id"))
         if index < 0:
             input_needed = [*requests, request]
         else:
@@ -342,7 +372,7 @@ def session_reducer(state: Any, action: Mapping[str, Any]) -> Any:
         requests = state.get("inputNeeded")
         if requests is None:
             return state
-        index = _index_of(requests, "id", action["id"])
+        index = _index_of(requests, "id", action.get("id"))
         if index < 0:
             return state
         remaining = _without(requests, index)
@@ -361,16 +391,21 @@ def session_reducer(state: Any, action: Mapping[str, Any]) -> Any:
     # ── Customizations ───────────────────────────────────────────────────────
 
     if action_type == "session/customizationsChanged":
-        return {**state, "customizations": action["customizations"]}
+        return _with_optional({**state}, "customizations", action.get("customizations"))
 
     if action_type == "session/customizationToggled":
         customizations = state.get("customizations")
         if customizations is None:
             return state
-        top_index = _index_of(customizations, "id", action["id"])
+        target_id = action.get("id")
+        # `enabled: action.enabled` -- an omitted flag is `undefined` upstream,
+        # i.e. the key goes away, and only once an id has matched. Both reads are
+        # client-dispatchable.
+        enabled = action.get("enabled")
+        top_index = _index_of(customizations, "id", target_id)
         if top_index >= 0:
             updated = list(customizations)
-            updated[top_index] = {**customizations[top_index], "enabled": action["enabled"]}
+            updated[top_index] = _with_optional({**customizations[top_index]}, "enabled", enabled)
             return {**state, "customizations": updated}
         for index, container in enumerate(customizations):
             if not isinstance(container, Mapping) or container.get("type") == _MCP_SERVER:
@@ -378,20 +413,22 @@ def session_reducer(state: Any, action: Mapping[str, Any]) -> Any:
             children = container.get("children")
             if children is None:
                 continue
-            child_index = _index_of(children, "id", action["id"])
+            child_index = _index_of(children, "id", target_id)
             if child_index < 0:
                 continue
             new_children = list(children)
-            new_children[child_index] = {**children[child_index], "enabled": action["enabled"]}
+            new_children[child_index] = _with_optional(
+                {**children[child_index]}, "enabled", enabled
+            )
             updated = list(customizations)
             updated[index] = {**container, "children": new_children}
             return {**state, "customizations": updated}
         return state
 
     if action_type == "session/customizationUpdated":
-        customization = action["customization"]
+        customization = action.get("customization")
         customizations = coalesce(state.get("customizations"), [])
-        index = _index_of(customizations, "id", customization.get("id"))
+        index = _index_of(customizations, "id", _obj(customization).get("id"))
         if index < 0:
             return {**state, "customizations": [*customizations, customization]}
         # Full replacement, `children` included: a host that wants to keep the
@@ -404,7 +441,8 @@ def session_reducer(state: Any, action: Mapping[str, Any]) -> Any:
         customizations = state.get("customizations")
         if customizations is None:
             return state
-        top_index = _index_of(customizations, "id", action["id"])
+        target_id = action.get("id")
+        top_index = _index_of(customizations, "id", target_id)
         if top_index >= 0:
             # Removing a container removes its children with it.
             return {**state, "customizations": _without(customizations, top_index)}
@@ -418,7 +456,7 @@ def session_reducer(state: Any, action: Mapping[str, Any]) -> Any:
             if children is None:
                 containers.append(container)
                 continue
-            child_index = _index_of(children, "id", action["id"])
+            child_index = _index_of(children, "id", target_id)
             if child_index < 0:
                 containers.append(container)
                 continue
@@ -431,27 +469,31 @@ def session_reducer(state: Any, action: Mapping[str, Any]) -> Any:
     # ── MCP servers ──────────────────────────────────────────────────────────
 
     if action_type == "session/mcpServerStateChanged":
-        state_value = action["state"]
+        state_value = action.get("state")
         channel = action.get("channel")
         return _update_mcp_server(
             state,
-            action["id"],
-            # Full replacement of both runtime fields: an omitted `channel`
-            # clears an existing one.
-            lambda entry: _with_optional({**entry, "state": state_value}, "channel", channel),
+            action.get("id"),
+            # Full replacement of both runtime fields: an omitted `channel` --
+            # or `state` -- is written as `undefined` upstream, so it clears an
+            # existing one rather than leaving it in place.
+            lambda entry: _with_optional(
+                _with_optional({**entry}, "state", state_value), "channel", channel
+            ),
         )
 
     if action_type == "session/mcpServerStartRequested":
+        # A missing `id` matches nothing and no-ops. Client-dispatchable.
         return _update_mcp_server(
             state,
-            action["id"],
+            action.get("id"),
             lambda entry: _with_optional({**entry, "state": {"kind": "starting"}}, "channel", None),
         )
 
     if action_type == "session/mcpServerStopRequested":
         return _update_mcp_server(
             state,
-            action["id"],
+            action.get("id"),
             lambda entry: _with_optional({**entry, "state": {"kind": "stopped"}}, "channel", None),
         )
 

@@ -1,0 +1,171 @@
+"""Replay the request shapes a real VS Code 1.131 sent, against a fresh host.
+
+The fixture beside this file was captured from a live connection, not written by
+hand. It is the only regression guarding three defects that neither the 200
+reducer fixtures nor the npm-client interop test caught, because all three come
+from VS Code doing something the spec's *examples* do not:
+
+* it opens with ``reconnect``, not ``initialize``, and does not fall back when
+  refused -- it retries forever, so the connection simply never establishes;
+* its session URIs are ``<provider>:/<uuid>``, not ``ahp-session:/<uuid>``, so a
+  host routing reducers on the URI scheme applies none at all and its state
+  silently freezes at the snapshot;
+* it offers a single protocol version, ``["0.7.0"]``.
+
+Replaying shapes rather than the raw log on purpose: ids, UUIDs and VS Code's
+polling volume are noise, and a byte-exact replay would be brittle without
+testing anything more.
+"""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+from agent_host_server.core import Host, LoopbackSingleUserPolicy
+from agent_host_server.provider import EchoProvider
+
+from .test_host_end_to_end import FakeClient
+
+pytestmark = pytest.mark.anyio
+
+FIXTURE = Path(__file__).parent / "fixtures" / "vscode-1.131-client-requests.json"
+TRACE: dict[str, Any] = json.loads(FIXTURE.read_text(encoding="utf-8"))
+REQUESTS: list[dict[str, Any]] = TRACE["requests"]
+
+#: Deliberately unimplemented in v0.1. With no server capability object in AHP,
+#: `MethodNotFound` IS how a host declines -- VS Code probes all of these and
+#: renders the session regardless.
+EXPECTED_REFUSALS = {
+    "createResourceWatch",
+    "createTerminal",
+    "disposeTerminal",
+    "resolveSessionConfig",
+    "resourceList",
+    "resourceRead",
+    "resourceResolve",
+}
+
+
+@pytest.fixture
+def anyio_backend() -> str:
+    return "asyncio"
+
+
+def _request(method: str, action_type: str | None = None) -> dict[str, Any]:
+    for entry in REQUESTS:
+        if entry["method"] != method:
+            continue
+        if action_type is None or (entry["params"].get("action") or {}).get("type") == action_type:
+            return entry
+    raise AssertionError(f"fixture has no {method} {action_type or ''}")
+
+
+class TestCapturedShapes:
+    """Assertions about the capture itself, so a re-capture that loses the
+    interesting shapes fails loudly rather than quietly weakening the test."""
+
+    def test_vscode_opens_with_reconnect(self) -> None:
+        assert REQUESTS[0]["method"] == "reconnect"
+        assert REQUESTS[1]["method"] == "initialize"
+
+    def test_vscode_offers_a_single_protocol_version(self) -> None:
+        assert _request("initialize")["params"]["protocolVersions"] == ["0.7.0"]
+
+    def test_session_uri_uses_the_provider_scheme(self) -> None:
+        channel = _request("createSession")["params"]["channel"]
+        assert channel.startswith("echo:/"), channel
+        assert not channel.startswith("ahp-session:"), "capture lost the provider-scheme URI"
+
+    def test_create_session_carries_plural_working_directories(self) -> None:
+        """`workingDirectories` is the 0.7.0 shape; the singular was removed."""
+        params = _request("createSession")["params"]
+        assert isinstance(params["workingDirectories"], list)
+        assert "workingDirectory" not in params
+
+    def test_create_session_contributes_client_tools(self) -> None:
+        """VS Code offers its own tools for the agent to invoke -- the
+        active-client tool routing v0.1 does not implement but must not choke on."""
+        active = _request("createSession")["params"]["activeClient"]
+        assert active["clientId"]
+        assert isinstance(active["tools"], list)
+        assert active["tools"]
+
+    def test_no_home_paths_leaked_into_the_fixture(self) -> None:
+        assert "/Users/" not in FIXTURE.read_text(encoding="utf-8")
+
+
+class TestReplay:
+    async def test_the_whole_captured_sequence_runs(self) -> None:
+        """Replay every shape in order; nothing may fail except the known refusals."""
+        host = Host(EchoProvider(), LoopbackSingleUserPolicy())
+        import asyncio
+
+        from agent_host_server.transport import memory_pair
+
+        client_transport, server_transport = memory_pair()
+        serve = asyncio.create_task(host.serve(server_transport))
+        client = FakeClient(client_transport)
+        try:
+            unexpected: list[tuple[str, Any]] = []
+            for entry in REQUESTS:
+                method, params = entry["method"], dict(entry["params"])
+                if "id" not in entry:
+                    await client.notify(method, params)
+                    continue
+                response = await client.request(method, params)
+                if "error" not in response:
+                    continue
+                if method in EXPECTED_REFUSALS:
+                    assert response["error"]["code"] == -32601, (method, response["error"])
+                    continue
+                unexpected.append((method, response["error"]))
+            assert not unexpected, f"unexpected failures: {unexpected}"
+        finally:
+            serve.cancel()
+            await host.aclose()
+
+    async def test_a_turn_completes_over_the_captured_session_uri(self) -> None:
+        """The end the user sees: create the session VS Code's way, run its turn."""
+        import asyncio
+
+        from agent_host_server.transport import memory_pair
+
+        host = Host(EchoProvider(), LoopbackSingleUserPolicy())
+        client_transport, server_transport = memory_pair()
+        serve = asyncio.create_task(host.serve(server_transport))
+        client = FakeClient(client_transport)
+        try:
+            await client.request("initialize", _request("initialize")["params"])
+
+            session_uri = _request("createSession")["params"]["channel"]
+            await client.request("createSession", _request("createSession")["params"])
+            await client.collect(seconds=0.3)
+
+            session = (await client.request("subscribe", {"channel": session_uri}))["result"]
+            state = session["snapshot"]["state"]
+            assert state["lifecycle"] == "ready", "bring-up did not complete"
+            chat_uri = state["chats"][0]["resource"]
+
+            await client.request("subscribe", {"channel": chat_uri})
+            turn = dict(_request("dispatchAction", "chat/turnStarted")["params"])
+            turn["channel"] = chat_uri
+            await client.notify("dispatchAction", turn)
+            await client.collect(seconds=0.5)
+
+            fresh = (await client.request("subscribe", {"channel": chat_uri}))["result"]
+            turns = fresh["snapshot"]["state"]["turns"]
+            assert len(turns) == 1, turns
+            assert turns[0]["state"] == "complete"
+            text = "".join(
+                part.get("content", "")
+                for part in turns[0]["responseParts"]
+                if part.get("kind") == "markdown"
+            )
+            assert text.startswith("You said: "), text
+        finally:
+            serve.cancel()
+            await host.aclose()

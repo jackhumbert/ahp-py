@@ -24,19 +24,44 @@ pip install -e '.[ws]'
 python -m agent_host_server
 ```
 
-That serves the offline echo provider on `ws://127.0.0.1:4321` and prints the
-VS Code settings to paste:
+That serves the offline echo provider on loopback and prints the VS Code
+settings to paste — add them to `settings.json`, then open the **Agent Sessions**
+view and pick **Echo**:
 
 ```json
 {
   "chat.remoteAgentHostsEnabled": true,
-  "chat.remoteAgentHosts": ["ws://127.0.0.1:4321"]
+  "chat.remoteAgentHosts": [
+    { "address": "127.0.0.1:4321", "name": "Echo" }
+  ]
 }
 ```
 
-VS Code speaks AHP `0.7.0` and negotiates down through `0.6.0`; this host speaks
-both. Connecting a third-party host is a supported, extension-free VS Code
-feature.
+Add `"connectionToken": "…"` to the entry if you started the host with
+`--token`. `address` and `name` are both required, and VS Code silently drops an
+entry that is missing either. The address is scheme-less on purpose — VS Code's
+transport prepends `ws://`, and only `wss://` is preserved.
+
+Connecting a third-party host is a supported, extension-free VS Code feature
+(1.131+). Verified working against **VS Code Stable 1.131.0**: handshake,
+session creation, and a full turn. The details of what it sends — and the three
+host bugs that finding out uncovered — are in
+[`docs/experiments.md`](docs/experiments.md) §E12.
+
+Expect a *"The terminal process failed to launch: Method not found:
+createTerminal"* toast. That is this host declining a feature it does not
+implement. AHP has no server capability object, so `MethodNotFound` **is** how a
+host says no; VS Code probes about 40 such methods per session and renders fine
+without them.
+
+To see the wire:
+
+```bash
+python -m agent_host_server --token --wire-log /tmp/agent-host-demo.jsonl
+```
+
+which writes [ahp-inspector](https://github.com/roblourens/ahp-inspector) JSONL —
+`npx ahp-inspector` picks up an `agent-host-*.jsonl` file with no arguments.
 
 ## What this is for
 

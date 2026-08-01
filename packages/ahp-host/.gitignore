@@ -22,6 +22,9 @@ node_modules/
 package-lock.json
 
 # Editors / OS
+# Local workspace settings: these accumulate live connection tokens once you
+# point VS Code at a running host. The example lives in the README instead.
+.vscode/
 .DS_Store
 .idea/
 *.swp

@@ -4,8 +4,12 @@ Total ordering is a protocol guarantee, so it is enforced structurally rather
 than hoped for. Everything that could break it happens inside **one** critical
 section, in this order:
 
-    assign serverSeq -> apply the reducer -> append to the replay log
-                     -> enqueue to every subscriber
+    apply the reducer -> assign serverSeq -> append to the replay log
+                      -> enqueue to every subscriber
+
+The reducer runs *before* the sequence number is taken, so a reducer that
+raises cannot consume one: a burnt `serverSeq` would be missing from the log
+forever, and replay above a `Snapshot.fromSeq` could never fill the hole.
 
 ``serverSeq`` is a single **host-global** monotonic counter -- not per-channel
 and not per-connection. ``reconnect`` carries exactly one scalar
@@ -21,14 +25,16 @@ break every client mirror -- ordering *is* the correctness model here.
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections import deque
 from collections.abc import Iterable, Mapping
 from typing import Any, Protocol
 
-from agent_host_server.core.channels import reducer_name_for
 from agent_host_server.reducers import REDUCERS
 
 __all__ = ["Sequencer", "Subscriber"]
+
+_log = logging.getLogger(__name__)
 
 
 class Subscriber(Protocol):
@@ -45,6 +51,8 @@ class Sequencer:
         self._lock = asyncio.Lock()
         self._seq = 0
         self._states: dict[str, Any] = {}
+        #: channel URI -> reducer name, recorded when the channel is created.
+        self._reducers: dict[str, str] = {}
         self._log: deque[dict[str, Any]] = deque(maxlen=replay_limit)
         self._subscribers: dict[str, set[Subscriber]] = {}
 
@@ -55,14 +63,28 @@ class Sequencer:
 
     # ─── state registration ──────────────────────────────────────────────
 
-    async def register_channel(self, uri: str, initial_state: Any) -> None:
-        """Create a channel's authoritative state."""
+    async def register_channel(self, uri: str, initial_state: Any, reducer: str) -> None:
+        """Create a channel's authoritative state and bind its reducer.
+
+        The reducer is recorded here rather than derived from the URI scheme.
+        Session and chat URIs are **client-chosen and opaque**: VS Code uses
+        ``<provider>:/<uuid>`` for sessions and
+        ``ahp-chat://<chatId>/<base64 session uri>`` for chats, neither of which
+        matches the ``ahp-session:`` / ``ahp-chat:`` forms the spec's examples
+        use. Routing on the scheme silently applies no reducer at all, so the
+        host's state freezes at the snapshot while it keeps broadcasting actions
+        -- every client then diverges immediately, with nothing to notice it.
+        """
+        if reducer not in REDUCERS:
+            raise ValueError(f"unknown reducer {reducer!r}")
         async with self._lock:
             self._states[uri] = initial_state
+            self._reducers[uri] = reducer
 
     async def drop_channel(self, uri: str) -> None:
         async with self._lock:
             self._states.pop(uri, None)
+            self._reducers.pop(uri, None)
             self._subscribers.pop(uri, None)
 
     def has_channel(self, uri: str) -> bool:
@@ -91,6 +113,27 @@ class Sequencer:
             if channel not in self._states:
                 return None
 
+            # Reduce FIRST, against a candidate state, and only then take a
+            # sequence number. A reducer that raises must not consume a
+            # serverSeq: the number would be gone from the log forever, and
+            # `Snapshot.fromSeq` replay -- which assumes the log is contiguous
+            # above the snapshot -- could never fill the hole. Every client
+            # that reconnected across it would silently miss the gap.
+            #
+            # A fault is turned into a rejection rather than propagated. The
+            # inbound path treats a malformed action from an untrusted peer as
+            # a protocol error, not as grounds to drop the connection.
+            next_state = self._states[channel]
+            if rejection_reason is None:
+                reducer_name = self._reducers.get(channel)
+                if reducer_name is not None:
+                    try:
+                        next_state = REDUCERS[reducer_name](next_state, action)
+                    except Exception as exc:
+                        _log.exception("reducer failed on %s", channel)
+                        rejection_reason = f"reducer error: {type(exc).__name__}: {exc}"
+                        next_state = self._states[channel]
+
             self._seq += 1
             envelope: dict[str, Any] = {
                 "channel": channel,
@@ -104,12 +147,7 @@ class Sequencer:
 
             # A rejected action is echoed so the client can revert its
             # optimistic prediction, but it is NOT applied.
-            if rejection_reason is None:
-                reducer_name = reducer_name_for(channel)
-                if reducer_name is not None:
-                    reducer = REDUCERS[reducer_name]
-                    self._states[channel] = reducer(self._states[channel], action)
-
+            self._states[channel] = next_state
             self._log.append(envelope)
 
             message = {"jsonrpc": "2.0", "method": "action", "params": envelope}

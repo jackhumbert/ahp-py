@@ -69,6 +69,14 @@ That is what catches a misspelled key, a wrongly-required optional, or a
 mis-modelled nesting — exactly the gap upstream records for TypeScript, which
 "does not verify generated-type correctness" because its types are erased.
 
+## Confirmed in practice
+
+The decision to keep unknown data verbatim paid off immediately: VS Code's
+`createSession` carries an `activeClient.tools` array of its own contributed
+tool definitions, and its session state carries fields v0.1 does not model. A
+host that parsed into closed models would have dropped them on the floor while
+remaining authoritative for that state.
+
 ## Alternatives rejected
 
 - **Pydantic v2 models.** Idiomatic and the ecosystem norm, but `extra='allow'`

@@ -315,3 +315,112 @@ class TestSequencing:
         await client.collect()
         for envelope in client.actions(uri):
             assert envelope["serverSeq"] > from_seq
+
+
+class TestRealClientUriShapes:
+    """Session and chat URIs are client-chosen and opaque.
+
+    Captured from a live VS Code 1.131 connection: it uses `<provider>:/<uuid>`
+    for sessions and `ahp-chat://<chatId>/<base64 session uri>` for chats --
+    neither matches the `ahp-session:` / `ahp-chat:` forms in the spec's
+    examples. A host that routes reducers on the URI scheme applies no reducer
+    at all: its state freezes at the snapshot while it keeps broadcasting
+    actions, and every client diverges with nothing to notice it.
+    """
+
+    async def test_provider_scheme_session_uri_is_reduced(
+        self, connected: tuple[Host, FakeClient]
+    ) -> None:
+        host, client = connected
+        await _initialize(client)
+        uri = "echo:/5ae48ebd-4c94-4977-884a-374badc31cd9"
+        await client.request("createSession", {"channel": uri, "provider": "echo"})
+        await client.request("subscribe", {"channel": uri})
+        await client.notify(
+            "dispatchAction",
+            {
+                "channel": uri,
+                "clientSeq": 1,
+                "action": {"type": "session/titleChanged", "title": "Renamed"},
+            },
+        )
+        await client.collect()
+        fresh = (await client.request("subscribe", {"channel": uri}))["result"]
+        assert fresh["snapshot"]["state"]["title"] == "Renamed", (
+            "the reducer did not run -- state is frozen at the initial snapshot"
+        )
+
+    async def test_bring_up_reaches_ready_on_a_provider_scheme_uri(
+        self, connected: tuple[Host, FakeClient]
+    ) -> None:
+        _, client = connected
+        await _initialize(client)
+        uri = "echo:/c0873bda-45aa-4eb0-9e36-6d5ce861fee7"
+        await client.request("createSession", {"channel": uri})
+        await client.collect()
+        fresh = (await client.request("subscribe", {"channel": uri}))["result"]
+        state = fresh["snapshot"]["state"]
+        assert state["lifecycle"] == "ready"
+        assert len(state["chats"]) == 1, "session/chatAdded was not applied"
+
+
+class TestReconnectAsFirstRequest:
+    """VS Code opens with `reconnect`, not `initialize`.
+
+    Its runtime uses `reconnect` whenever it remembers a serverSeq and a
+    subscription set. Refusing it does not make VS Code fall back -- it retries
+    the same request forever, so the connection never establishes.
+    """
+
+    async def test_reconnect_without_a_prior_initialize_is_accepted(
+        self, connected: tuple[Host, FakeClient]
+    ) -> None:
+        _, client = connected
+        response = await client.request(
+            "reconnect",
+            {
+                "channel": ROOT_URI,
+                "clientId": "098d0783-37bd-47d5-b16e-c232e685c5d1",
+                "lastSeenServerSeq": 38,
+                "subscriptions": [ROOT_URI],
+            },
+        )
+        assert "error" not in response, response.get("error")
+        assert response["result"]["type"] in {"replay", "snapshot"}
+
+    async def test_reconnect_after_a_host_restart_falls_back_to_snapshots(
+        self, connected: tuple[Host, FakeClient]
+    ) -> None:
+        """A serverSeq from a previous process cannot be replayed."""
+        _, client = connected
+        result = (
+            await client.request(
+                "reconnect",
+                {
+                    "channel": ROOT_URI,
+                    "clientId": "c1",
+                    "lastSeenServerSeq": 9999,
+                    "subscriptions": [ROOT_URI, "echo:/gone", "ahp-chat://default/Z29uZQ"],
+                },
+            )
+        )["result"]
+        assert result["type"] in {"replay", "snapshot"}
+        # Channels that no longer exist must not appear as snapshots.
+        resources = {s["resource"] for s in result.get("snapshots", [])}
+        assert "echo:/gone" not in resources
+
+    async def test_the_connection_is_usable_after_a_reconnect_handshake(
+        self, connected: tuple[Host, FakeClient]
+    ) -> None:
+        _, client = connected
+        await client.request(
+            "reconnect",
+            {
+                "channel": ROOT_URI,
+                "clientId": "c1",
+                "lastSeenServerSeq": 0,
+                "subscriptions": [ROOT_URI],
+            },
+        )
+        listed = await client.request("listSessions", {"channel": ROOT_URI})
+        assert "error" not in listed, "reconnect did not establish the connection"

@@ -13,7 +13,9 @@ import asyncio
 import contextlib
 import functools
 import json
+import logging
 import secrets
+from pathlib import Path
 
 from agent_host_server.core import Host, HostInfo, LoopbackSingleUserPolicy
 from agent_host_server.core.versions import DEFAULT_SUPPORTED_VERSIONS
@@ -38,11 +40,21 @@ def _parse_args() -> argparse.Namespace:
         help="bind off-loopback. AHP defines no authentication -- read docs/research.md §8.",
     )
     parser.add_argument("--delay", type=float, default=0.05, help="echo delta delay, seconds")
+    parser.add_argument(
+        "--wire-log",
+        metavar="PATH",
+        help="append every frame as ahp-inspector JSONL (open with `npx ahp-inspector`)",
+    )
+    parser.add_argument("-v", "--verbose", action="store_true", help="debug logging")
     return parser.parse_args()
 
 
 async def _run() -> None:
     args = _parse_args()
+    logging.basicConfig(
+        level=logging.DEBUG if args.verbose else logging.INFO,
+        format="%(asctime)s %(levelname)-7s %(name)s: %(message)s",
+    )
     token = args.token
     if token == "":
         token = secrets.token_urlsafe(24)
@@ -51,6 +63,7 @@ async def _run() -> None:
         EchoProvider(delay=args.delay),
         LoopbackSingleUserPolicy(),
         info=HostInfo(name="agent-host-server (demo)"),
+        wire_log=Path(args.wire_log) if args.wire_log else None,
     )
 
     async with serve_websocket(

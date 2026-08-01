@@ -11,9 +11,11 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
 import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from agent_host_server.core import errors
@@ -23,6 +25,7 @@ from agent_host_server.core.policy import Policy
 from agent_host_server.core.sequencer import Sequencer
 from agent_host_server.core.turn import TurnRunner
 from agent_host_server.core.versions import DEFAULT_SUPPORTED_VERSIONS, negotiate
+from agent_host_server.core.wirelog import WireLog
 from agent_host_server.provider.base import AgentProvider, AgentSession, AgentSessionContext
 from agent_host_server.reducers.clock import now_iso
 from agent_host_server.transport.base import Transport
@@ -30,6 +33,8 @@ from agent_host_server.types import IS_CLIENT_DISPATCHABLE
 from agent_host_server.types.protocol import SessionStatus
 
 __all__ = ["Host", "HostInfo"]
+
+_log = logging.getLogger(__name__)
 
 #: SessionStatus.Idle -- what a freshly created session reports.
 _STATUS_IDLE = SessionStatus.IDLE
@@ -73,6 +78,7 @@ class Host:
         *,
         info: HostInfo | None = None,
         supported_versions: Sequence[str] = DEFAULT_SUPPORTED_VERSIONS,
+        wire_log: Path | None = None,
     ) -> None:
         if policy is None:  # pragma: no cover - defensive; typing already forbids it
             raise ValueError("a Policy is required; there is no default")
@@ -85,6 +91,7 @@ class Host:
         self._connections: set[Connection] = set()
         self._background: set[asyncio.Task[None]] = set()
         self._root_ready = False
+        self.wire_log = WireLog(wire_log) if wire_log is not None else None
 
     # ─── lifecycle ───────────────────────────────────────────────────────
 
@@ -93,13 +100,14 @@ class Host:
             await self.sequencer.register_channel(
                 ROOT_URI,
                 {"agents": [self.provider.agent.to_wire()], "activeSessions": 0},
+                "root",
             )
             self._root_ready = True
 
     async def serve(self, transport: Transport, *, peer: str | None = None) -> None:
         """Drive one client connection until its transport closes."""
         await self._ensure_root()
-        connection = Connection(transport, peer=peer)
+        connection = Connection(transport, peer=peer, wire_log=self.wire_log)
         connection.start_writer()
         self._connections.add(connection)
         pending: set[asyncio.Task[None]] = set()
@@ -108,6 +116,8 @@ class Host:
                 message = await transport.receive()
                 if message is None:
                     return
+                if self.wire_log is not None:
+                    self.wire_log.record("c2s", message, connection.client_id or "?")
                 # Requests run as tasks so a slow one cannot block the next
                 # message on this connection. Notifications are handled inline,
                 # preserving per-channel arrival order for dispatchAction.
@@ -116,7 +126,14 @@ class Host:
                     pending.add(task)
                     task.add_done_callback(pending.discard)
                 elif "method" in message:
-                    await self._handle_notification(connection, message)
+                    # A notification has no response, so a fault here has
+                    # nowhere to go -- and letting it escape would end the read
+                    # loop and drop a connection over one bad frame from an
+                    # untrusted peer.
+                    try:
+                        await self._handle_notification(connection, message)
+                    except Exception:
+                        _log.exception("notification handler failed: %s", message.get("method"))
         finally:
             for task in list(pending):
                 task.cancel()
@@ -151,6 +168,13 @@ class Host:
     ) -> Any:
         if method == "initialize":
             return await self._initialize(connection, params)
+        if method == "reconnect":
+            # A valid FIRST request: it re-establishes a connection that dropped,
+            # so there is no prior `initialize` on *this* transport. VS Code
+            # opens with `reconnect` whenever it has a remembered serverSeq and
+            # subscription set, and does not fall back to `initialize` if we
+            # refuse -- it just retries, forever.
+            return await self._reconnect(connection, params)
         if not connection.initialized:
             raise errors.invalid_params("initialize must be the first request")
         if method == "ping":
@@ -161,8 +185,6 @@ class Host:
             return await self._list_sessions(connection, params)
         if method == "createSession":
             return await self._create_session(connection, params)
-        if method == "reconnect":
-            return await self._reconnect(connection, params)
         raise errors.method_not_found(method)
 
     async def _handle_notification(
@@ -284,6 +306,7 @@ class Host:
                 "activeClients": [],
                 "chats": [],
             },
+            "session",
         )
         await self.sequencer.register_channel(
             chat_uri,
@@ -294,6 +317,7 @@ class Host:
                 "modifiedAt": created_at,
                 "turns": [],
             },
+            "chat",
         )
 
         # Bring-up runs after the response so the client can subscribe first.
@@ -354,6 +378,19 @@ class Host:
         await self.sequencer.publish(session.uri, {"type": "session/ready"})
 
     async def _reconnect(self, connection: Connection, params: Mapping[str, Any]) -> dict[str, Any]:
+        # `reconnect` establishes the connection when it arrives first. There is
+        # no version to negotiate -- it carries no `protocolVersions` -- so we
+        # adopt our most-preferred one. It also carries no credential: it
+        # resumes on a client-asserted `clientId` alone, which is exactly why
+        # admission is the Policy's decision and not this method's.
+        if not connection.initialized:
+            client_id = params.get("clientId")
+            connection.client_id = client_id if isinstance(client_id, str) else str(uuid.uuid4())
+            connection.protocol_version = self.supported_versions[0]
+            if not self.policy.authorize_connection(connection.info):
+                raise errors.AhpError(-32009, "Connection refused by policy")
+            connection.initialized = True
+
         subscriptions = [
             uri
             for uri in params.get("subscriptions") or []

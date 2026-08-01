@@ -4,8 +4,13 @@ Ported from ``types/channels-chat/reducer.ts`` -- turn lifecycle, the seven-stat
 tool call machine, pending messages, input requests (elicitations) and the
 derived summary status.
 
-Three things about this port are load-bearing and easy to get wrong:
+Four things about this port are load-bearing and easy to get wrong:
 
+* **``undefined`` is not ``null``.** Upstream's ``x === undefined`` is FALSE for a
+  JSON null, so an explicit null takes the *else* branch. Every such test is
+  ported as a key-presence check (``"x" in action``), never ``is None``, which
+  would conflate an absent key with a null one. ``??`` and truthiness do treat
+  the two alike, so those stay ``is None``: check reducer.ts before changing one.
 * **The tool call result is flat.** ``ToolCallCompletedState`` spreads
   ``action.result`` onto the tool call itself; ``success`` / ``pastTenseMessage``
   / ``content`` / ``structuredContent`` / ``error`` are siblings of ``status``,
@@ -89,6 +94,58 @@ _TERMINAL_STATES = frozenset({_COMPLETED, _CANCELLED})
 
 def _mget(value: Any, key: str) -> Any:
     return value.get(key) if isinstance(value, Mapping) else None
+
+
+def _has_key(value: Any, key: str) -> bool:
+    """Whether ``key`` is PRESENT, which is not the same as non-null.
+
+    Upstream's ``x === undefined`` is false for a JSON ``null``: an explicit null
+    is a value, an absent key is not. ``_mget(...) is None`` conflates the two,
+    so every site that ports a ``=== undefined`` test goes through this instead.
+    """
+    return isinstance(value, Mapping) and key in value
+
+
+class _RefKey:
+    """Identity key for a wire value Python refuses to hash.
+
+    A JS ``Map``/``Set`` accepts anything: primitives compare by SameValueZero,
+    objects and arrays by reference. Python raises ``TypeError`` on a dict or a
+    list, and every id here is peer-supplied (``chat/pendingMessageSet`` stores
+    ``id`` verbatim), so those are wrapped and compared by identity -- which is
+    exactly what upstream does for them.
+    """
+
+    __slots__ = ("value",)
+
+    def __init__(self, value: Any) -> None:
+        self.value = value
+
+    def __hash__(self) -> int:
+        return id(self.value)
+
+    def __eq__(self, other: object) -> bool:
+        return isinstance(other, _RefKey) and other.value is self.value
+
+
+def _map_key(value: Any) -> Any:
+    """A hashable stand-in for a wire value used as a ``Map``/``Set`` key upstream."""
+    if value is None or isinstance(value, str | bool | int | float):
+        # Tagging bools apart restores SameValueZero, where `true` and `1` are
+        # distinct keys but Python collides them. `1` and `1.0` stay collided --
+        # they are the same JS number anyway.
+        return (isinstance(value, bool), value)
+    return _RefKey(value)
+
+
+def _status_in(status: Any, states: frozenset[str]) -> bool:
+    """Membership that is total over any JSON value, as upstream's ``===`` chain is.
+
+    ``status`` is not trustworthy: ``chat/toolCallComplete`` spreads the client's
+    ``result`` straight onto the tool call, so a peer can set it to a dict or a
+    list, and ``x in <frozenset>`` raises ``TypeError`` on those.
+    """
+    return isinstance(status, str) and status in states
 
 
 def _seq(value: Any) -> list[Any]:
@@ -181,7 +238,7 @@ def _has_blocking_tool_call(state: Mapping[str, Any]) -> bool:
         return False
     return any(
         _mget(part, "kind") == _TOOL_CALL
-        and _mget(_mget(part, "toolCall"), "status") in _NON_TERMINAL_BLOCKING
+        and _status_in(_mget(_mget(part, "toolCall"), "status"), _NON_TERMINAL_BLOCKING)
         for part in _parts(active)
     )
 
@@ -190,8 +247,11 @@ def _has_open_input_request(state: Mapping[str, Any]) -> bool:
     active = state.get("activeTurn")
     if active is None:
         return False
+    # `part.response === undefined`: a part carrying an explicit `"response": null`
+    # is RESOLVED upstream. Reading null as open leaves the channel at
+    # `input-needed` where the reference has already dropped to `in-progress`.
     return any(
-        _mget(part, "kind") == _INPUT_REQUEST and _mget(part, "response") is None
+        _mget(part, "kind") == _INPUT_REQUEST and not _has_key(part, "response")
         for part in _parts(active)
     )
 
@@ -203,7 +263,8 @@ def _find_open_input_request_part(
         if (
             isinstance(part, Mapping)
             and part.get("kind") == _INPUT_REQUEST
-            and part.get("response") is None
+            # `part.response === undefined` again: presence, not nullness.
+            and "response" not in part
             and _mget(part.get("request"), "id") == request_id
         ):
             return index, part
@@ -268,7 +329,7 @@ def _end_turn(
             continue
         tc = _mget(part, "toolCall")
         status = _mget(tc, "status")
-        if status in _TERMINAL_STATES:
+        if _status_in(status, _TERMINAL_STATES):
             response_parts.append(part)
             continue
         streaming = status == _STREAMING
@@ -578,10 +639,15 @@ def chat_reducer(state: Any, action: Mapping[str, Any]) -> Any:
             if tc.get("status") != _STREAMING:
                 return tc
             updated = {**tc}
-            meta = action.get("_meta")
-            if meta is not None:
-                updated["_meta"] = meta
+            # `action._meta !== undefined`: an explicit null CLEARS `_meta`, only
+            # an absent key leaves it alone. Presence, not nullness.
+            if "_meta" in action:
+                updated["_meta"] = action.get("_meta")
             content = action.get("content")
+            # DELIBERATE DIVERGENCE, do not "fix": upstream tests
+            # `action.content !== undefined` and then concatenates, so
+            # `content: null` appends the literal string "null" to `partialInput`.
+            # Ours appends nothing. Keep it -- a null is not text.
             if content is not None:
                 updated["partialInput"] = _as_text(coalesce(tc.get("partialInput"), "")) + _as_text(
                     content
@@ -599,7 +665,7 @@ def chat_reducer(state: Any, action: Mapping[str, Any]) -> Any:
 
         def ready_updater(tc: Mapping[str, Any]) -> Any:
             status = tc.get("status")
-            if status not in _READY_SOURCE_STATES:
+            if not _status_in(status, _READY_SOURCE_STATES):
                 return tc
             base = _tc_base_with_meta(tc, action.get("_meta"))
             base["contributor"] = _refine_contributor(
@@ -655,12 +721,13 @@ def chat_reducer(state: Any, action: Mapping[str, Any]) -> Any:
             base = _tc_base_with_meta(tc, action.get("_meta"))
             selected = _resolve_selected_option(tc.get("options"), action.get("selectedOptionId"))
             if action.get("approved"):
-                edited = action.get("editedToolInput")
                 # Only inline (string) input is replaceable; referenced input is
                 # swapped by the host at the resource, not here.
+                # `action.editedToolInput !== undefined`: an explicit null is an
+                # edit that CLEARS the input, so this is presence, not nullness.
                 tool_input = (
-                    edited
-                    if edited is not None and isinstance(tc.get("toolInput"), str)
+                    action.get("editedToolInput")
+                    if "editedToolInput" in action and isinstance(tc.get("toolInput"), str)
                     else tc.get("toolInput")
                 )
                 resolved = {
@@ -695,7 +762,7 @@ def chat_reducer(state: Any, action: Mapping[str, Any]) -> Any:
 
         def complete_updater(tc: Mapping[str, Any]) -> Any:
             status = tc.get("status")
-            if status not in _COMPLETE_SOURCE_STATES:
+            if not _status_in(status, _COMPLETE_SOURCE_STATES):
                 return tc
             result = action.get("result")
             # A *successful* completion from `auth-required` is invalid:
@@ -787,9 +854,9 @@ def chat_reducer(state: Any, action: Mapping[str, Any]) -> Any:
             if tc.get("status") != _RUNNING:
                 return tc
             updated = {**tc}
-            meta = action.get("_meta")
-            if meta is not None:
-                updated["_meta"] = meta
+            # `action._meta !== undefined`: an explicit null CLEARS `_meta`.
+            if "_meta" in action:
+                updated["_meta"] = action.get("_meta")
             updated["content"] = action.get("content")
             return updated
 
@@ -866,9 +933,15 @@ def chat_reducer(state: Any, action: Mapping[str, Any]) -> Any:
     # ── Truncation ───────────────────────────────────────────────────────────
 
     if action_type == "chat/truncated":
+        # `action.turnId === undefined` clears everything -- and ONLY an absent
+        # key does. An explicit null falls through to the id search, finds
+        # nothing and no-ops. This action is client-dispatchable, so reading null
+        # as absent lets any peer whose serializer writes `null` for an omitted
+        # option wipe the entire transcript.
+        clear_all = "turnId" not in action
         turn_id = action.get("turnId")
         existing_turns = _seq(state.get("turns"))
-        if turn_id is None:
+        if clear_all:
             turns: list[Any] = []
         else:
             index = next(
@@ -884,7 +957,7 @@ def chat_reducer(state: Any, action: Mapping[str, Any]) -> Any:
             "activeTurn": None,
             "modifiedAt": now_iso(),
         }
-        if turn_id is None:
+        if clear_all:
             # Upstream `delete`s the key: the window is no longer a tail, so
             # there is nothing older left to page.
             next_state.pop("turnsNextCursor", None)
@@ -892,8 +965,13 @@ def chat_reducer(state: Any, action: Mapping[str, Any]) -> Any:
 
     if action_type == "chat/turnsLoaded":
         existing_turns = _seq(state.get("turns"))
-        existing_ids = {_mget(t, "id") for t in existing_turns}
-        older = [t for t in _seq(action.get("turns")) if _mget(t, "id") not in existing_ids]
+        # `new Set(...)` takes any id; a Python set raises on a dict or a list,
+        # and a replayed turn id is whatever the peer sent. `_map_key` keeps the
+        # unhashable ones out of the set without changing which turns match.
+        existing_ids = {_map_key(_mget(t, "id")) for t in existing_turns}
+        older = [
+            t for t in _seq(action.get("turns")) if _map_key(_mget(t, "id")) not in existing_ids
+        ]
         return {
             **state,
             "turns": [*older, *existing_turns],
@@ -949,14 +1027,21 @@ def chat_reducer(state: Any, action: Mapping[str, Any]) -> Any:
             **(coalesce(_mget(request, "answers"), {}) or {}),
             **(coalesce(action.get("answers"), {}) or {}),
         }
-        response_parts[index] = {
+        completed = {
             **part,
             "request": {
                 **(request if isinstance(request, Mapping) else {}),
                 "answers": final_answers if len(final_answers) > 0 else None,
             },
-            "response": action.get("response"),
         }
+        # `response: action.response` upstream sets the property to `undefined`
+        # when the action omits it, which never reaches the wire. Writing None
+        # here would serialize as `"response": null` -- and a reference peer reads
+        # that as RESOLVED while we still treat it as open, so the two compute a
+        # different `status` for the same channel. Write the key only if it came.
+        if "response" in action:
+            completed["response"] = action["response"]
+        response_parts[index] = completed
         next_state = {**state, "activeTurn": {**active, "responseParts": response_parts}}
         return {
             **next_state,
@@ -1003,19 +1088,23 @@ def chat_reducer(state: Any, action: Mapping[str, Any]) -> Any:
         if queued is None:
             return state
         items = _seq(queued)
+        # `chat/pendingMessageSet` stores `id` verbatim, so a queued id can be a
+        # dict or a list -- fine as a JS Map/Set key, fatal as a Python one.
+        # `_map_key` wraps those; the ordering below is otherwise untouched.
         by_id: dict[Any, Any] = {}
         for message in items:
-            by_id[_mget(message, "id")] = message  # A JS Map: last write wins.
+            by_id[_map_key(_mget(message, "id"))] = message  # A JS Map: last write wins.
         ordered: set[Any] = set()
         reordered: list[Any] = []
         for identifier in _seq(action.get("order")):
-            if identifier in by_id and identifier not in ordered:
-                ordered.add(identifier)
-                reordered.append(by_id[identifier])
+            key = _map_key(identifier)
+            if key in by_id and key not in ordered:
+                ordered.add(key)
+                reordered.append(by_id[key])
         # Append anything not mentioned in `order`, preserving the original
         # order, so a client with a stale view never silently drops a message.
         for message in items:
-            if _mget(message, "id") not in ordered:
+            if _map_key(_mget(message, "id")) not in ordered:
                 reordered.append(message)
         return {**state, "queuedMessages": reordered}
 

@@ -77,9 +77,12 @@ failures in *clients*, not in our tests. Evidence for every item is in
    JavaScript and falsy in Python; `if x:` silently changes reducer behaviour.
    Always `if x is not None:`.
 6. **`??` is not `or`.** Use the `coalesce()` helper so every site is greppable.
-7. **`serverSeq` is assigned in exactly one place**, host-global, inside the
-   critical section that also applies the reducer, appends to the replay log and
-   enqueues fan-out — in that order.
+7. **`serverSeq` is assigned in exactly one place**, host-global, inside one
+   critical section — and the reducer runs **before** the number is taken. A
+   reducer that raises must not consume a `serverSeq`: the number would be
+   missing from the log forever and replay above a `Snapshot.fromSeq` could
+   never fill the hole. A reducer fault becomes a `rejectionReason`, never an
+   exception that escapes.
 8. **Subscription registration and snapshot capture are atomic**, and the
    `subscribe`/`initialize` response is queued before any action for that
    channel. `Snapshot.fromSeq` is the protocol's only formal ordering rule.
@@ -95,6 +98,22 @@ failures in *clients*, not in our tests. Evidence for every item is in
 13. **No `Host` without a `Policy`.** No socket-binding convenience function.
 14. **Unimplemented commands return `MethodNotFound` (`-32601`)** and appear in
     the README's unimplemented list. No silent stubs, no invented error codes.
+15. **Never route on a channel URI's scheme.** Session and chat URIs are
+    client-chosen and opaque: VS Code uses `<provider>:/<uuid>` for sessions and
+    `ahp-chat://<chatId>/<base64 session uri>` for chats. The reducer is bound
+    when the channel is registered. Routing on the scheme applies *no* reducer,
+    which freezes host state silently while it keeps broadcasting actions.
+16. **`reconnect` is a valid FIRST request.** It re-establishes a dropped
+    connection, so there is no prior `initialize` on that transport. VS Code
+    opens with it and does not fall back if refused — it retries forever.
+17. **A notification handler must not let an exception escape.** There is no
+    response to carry the error, and an escaping one ends the read loop,
+    dropping a connection over one bad frame from an untrusted peer.
+18. **`x === undefined` is not `x is None`.** In JSON an explicit `null` is not
+    an absent key, and the reference reducers distinguish them. Port
+    `=== undefined` as `"x" not in obj`, never as `is None` — that class of
+    mistranslation lets a peer wipe a chat transcript. Where the reference uses
+    `??` or truthiness, `is None` *is* correct.
 
 ## Absorbing a new upstream spec release
 

@@ -439,3 +439,128 @@ InternalError. AHP application codes:
 
 There is no "not implemented" AHP code — an unimplemented command returns
 JSON-RPC `MethodNotFound` (`-32601`).
+
+---
+
+## E12 — A real VS Code 1.131 connected to this host
+
+The decisive experiment, run 2026-08-01 against `python -m agent_host_server`
+over WebSocket on loopback with a connection token. VS Code Stable **1.131.0**,
+macOS. Full frame capture via `--wire-log` (275 frames).
+
+**Result: it works.** Handshake, session creation, chat subscription, and a full
+turn — the user typed `hello` and got `You said: hello` back from the echo
+provider.
+
+It also broke three things no other test caught, because all three are places
+VS Code does something the spec's *examples* do not.
+
+### E12a — VS Code opens with `reconnect`, not `initialize`
+
+First frame on a fresh socket:
+
+```jsonc
+{"id":66,"method":"reconnect","params":{
+  "clientId":"66a61b49-…","lastSeenServerSeq":38,
+  "subscriptions":["ahp-root://","echo:/88c9e07f-…", …]}}
+```
+
+Our host answered `-32602 "initialize must be the first request"`. **VS Code did
+not fall back to `initialize`** — it retried the same request on an exponential
+backoff, forever, so the connection never established. (The npm client's
+`MultiHostClient` *does* fall back on an `RpcError`; VS Code's own client does
+not.)
+
+`reconnect` re-establishes a connection that dropped, so by construction there
+is no prior `initialize` on *that* transport. A host must accept it as a first
+request. It carries no `protocolVersions` and no credential — it resumes on a
+client-asserted `clientId` alone.
+
+### E12b — Session URIs are `<provider>:/<uuid>`, chats can be base64
+
+From the same subscription list:
+
+| URI | What it is |
+|---|---|
+| `echo:/af2d658f-61c0-4279-a549-ffb2d89517f2` | a **session** — provider scheme, not `ahp-session:` |
+| `echo:/af2d658f-…/annotations` | an annotations channel derived from it |
+| `ahp-chat://default/ZWNobzovYzA4NzNiZGEt…` | a **chat** — authority `default`, path is base64 |
+
+That base64 decodes to `echo:/c0873bda-45aa-4eb0-9e36-6d5ce861fee7` — the
+session URI. So a chat URI can be `ahp-chat://<chatId>/<base64 session uri>`.
+
+**Consequence:** a host that routes reducers on the URI scheme applies **no
+reducer at all** to a VS Code session. Its state freezes at the snapshot while
+it keeps broadcasting actions, and every client diverges immediately with
+nothing to notice. The reducer must be bound when the channel is created, never
+inferred from the URI. Fixed; regression in
+`tests/integration/test_vscode_trace.py`.
+
+### E12c — VS Code offers exactly one protocol version
+
+```jsonc
+{"id":1,"method":"initialize","params":{
+  "channel":"ahp-root://","protocolVersions":["0.7.0"],
+  "clientId":"0a78fdaa-…","clientInfo":{"name":"vscode…"}, …}}
+```
+
+**This corrects §1 of `research.md`.** That section reported VS Code offering the
+full `['0.7.0','0.6.0','0.5.2','0.5.1']` list, which is what
+`SUPPORTED_PROTOCOL_VERSIONS` declares in its vendored source — but the runtime
+sends `[PROTOCOL_VERSION]` alone, exactly as the npm `MultiHostClient` does.
+
+So supporting 0.7.0 was not a preference, it was **required**: a host speaking
+only 0.6.0 would have been refused outright. The decision in ADR 0002 was right
+for a reason weaker than the one now available.
+
+### E12d — What VS Code probes, and tolerates
+
+40 refused calls in one session, all `-32601`, none fatal:
+
+| Method | Times |
+|---|---|
+| `createResourceWatch` | 17 |
+| `resourceRead`, `resourceResolve` | 10 each |
+| `resolveSessionConfig`, `resourceList`, `createTerminal`, `disposeTerminal` | 1 each |
+
+Only `createTerminal` surfaced to the user, as a
+*"The terminal process failed to launch: Method not found: createTerminal"*
+toast. Everything else was absorbed silently. This is the designed behaviour —
+AHP has no server capability object, so `MethodNotFound` **is** how a host
+declines — and it confirms a v0.1 host can decline broadly and still render.
+
+### E12e — `createSession` contributes client tools
+
+```jsonc
+{"channel":"echo:/af2d658f-…","provider":"echo",
+ "workingDirectories":["file:///"],
+ "config":{"autoApprove":"default","mode":"interactive"},
+ "activeClient":{"clientId":"0a78fdaa-…","tools":[{"name":"usages", …}, …]}}
+```
+
+`workingDirectories` is plural — the 0.7.0 shape. And `activeClient.tools` is
+the active-client tool routing from `research.md` §8a: VS Code offers *its own*
+tools for the agent to invoke. v0.1 does not implement that, but must not choke
+on being handed them.
+
+### E12f — The settings that connect it
+
+```json
+{
+  "chat.remoteAgentHostsEnabled": true,
+  "chat.remoteAgentHosts": [
+    {"address": "127.0.0.1:4321", "name": "Echo", "connectionToken": "…"}
+  ]
+}
+```
+
+`chat.remoteAgentHosts` holds `IRawRemoteAgentHostEntry` objects — `address` and
+`name` are both **required strings**, and an entry failing that guard is
+silently dropped. The address is stored scheme-less (the transport prepends
+`ws://`; only `wss://` is preserved), and `connectionToken` is separate: VS Code
+appends it as `?tkn=`, which is `connectionTokenQueryName` in
+`vs/base/common/network.ts`.
+
+There is no UI for this in 1.131.0 — `parseRemoteAgentHostInput` and
+`addRemoteAgentHost` exist and accept a pasted `ws://host:port/?tkn=…` URL, but
+only tests call them.

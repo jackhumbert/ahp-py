@@ -129,9 +129,45 @@ async def test_official_reducers_agree_with_our_state() -> None:
     assert report["divergentKeys"] in ([], ["modifiedAt"]), report["divergentKeys"]
 
 
+async def test_wrong_connection_token_is_rejected_with_403() -> None:
+    """A bad token must be refused with HTTP 403 during the upgrade.
+
+    Asserted at the HTTP level on purpose. An earlier version only checked that
+    the client failed to connect, which passed for the wrong reason: the
+    handshake hook was raising (`respond` is on the connection, not the
+    request), so *every* connection was aborted and the test still went green.
+    """
+    import urllib.error
+    import urllib.request
+
+    host = Host(EchoProvider(), LoopbackSingleUserPolicy())
+    async with serve_websocket(host, connection_token="the-real-token") as server:
+        port = server.bound_port
+
+        def fetch(url: str) -> int:
+            request = urllib.request.Request(
+                url,
+                headers={
+                    "Upgrade": "websocket",
+                    "Connection": "Upgrade",
+                    "Sec-WebSocket-Key": "dGhlIHNhbXBsZSBub25jZQ==",
+                    "Sec-WebSocket-Version": "13",
+                },
+            )
+            try:
+                with urllib.request.urlopen(request, timeout=10) as response:
+                    return int(response.status)
+            except urllib.error.HTTPError as exc:
+                return int(exc.code)
+
+        assert await asyncio.to_thread(fetch, f"http://127.0.0.1:{port}/?tkn=nope") == 403
+        assert await asyncio.to_thread(fetch, f"http://127.0.0.1:{port}/") == 403
+    await host.aclose()
+
+
 @requires_client
-async def test_wrong_connection_token_is_rejected() -> None:
-    """VS Code's own local endpoint rejects a bad token with 403 on the upgrade."""
+async def test_wrong_connection_token_stops_the_real_client() -> None:
+    """And the real client cannot get through it either."""
     host = Host(EchoProvider(), LoopbackSingleUserPolicy())
     async with serve_websocket(host, connection_token="the-real-token") as server:
         bad_url = server.url.replace("the-real-token", "not-the-token")
