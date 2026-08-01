@@ -23,6 +23,10 @@ __all__ = [
     "AgentSession",
     "AgentSessionContext",
     "ClientToolCall",
+    "ConfigRequest",
+    "ConfigResolution",
+    "ConfigValue",
+    "ConfiguresSessions",
     "DescribesSession",
     "InputOutcome",
     "InputQuestion",
@@ -281,6 +285,68 @@ class SessionDescription:
 
     customizations: Sequence[Mapping[str, Any]] = ()
     server_tools: Sequence[Mapping[str, Any]] = ()
+
+
+@dataclass(frozen=True)
+class ConfigRequest:
+    """What a client has chosen so far, while it is still setting a session up.
+
+    Sent repeatedly as the user changes things -- pick a directory, toggle a
+    property -- and each answer is the **full** current property set, not a
+    delta, contextual to what has been chosen.
+    """
+
+    provider: str | None = None
+    working_directory: str | None = None
+    values: Mapping[str, Any] = field(default_factory=dict)
+    #: Set only for a completion query: the property whose values are wanted,
+    #: and what the user has typed so far.
+    property: str | None = None
+    query: str = ""
+
+
+@dataclass(frozen=True)
+class ConfigResolution:
+    """The properties a session can be created with, given the current context.
+
+    `properties` is `SessionConfigSchema.properties`. `values` is echoed back to
+    the client with any server-resolved defaults applied, and is what the client
+    then passes to `createSession`.
+    """
+
+    properties: Mapping[str, Mapping[str, Any]] = field(default_factory=dict)
+    values: Mapping[str, Any] = field(default_factory=dict)
+    required: Sequence[str] = ()
+
+
+@dataclass(frozen=True)
+class ConfigValue:
+    """One option for a property whose schema set ``enumDynamic``."""
+
+    value: str
+    label: str
+    description: str | None = None
+
+
+@runtime_checkable
+class ConfiguresSessions(Protocol):
+    """A provider that a session can be configured *before* it exists.
+
+    Optional, and feature-detected with ``isinstance`` like the other extension
+    points. A provider without it gets an empty schema, which is the honest
+    answer for an agent with nothing to configure -- not a refusal, because a
+    client cannot tell "no configuration" from "broken host" if it gets one.
+    """
+
+    async def resolve_config(self, request: ConfigRequest) -> ConfigResolution: ...
+
+    async def complete_config(self, request: ConfigRequest) -> Sequence[ConfigValue]:
+        """Values for a property whose schema set ``enumDynamic``.
+
+        Only reached for such a property, so a provider that declares none never
+        needs to implement it meaningfully.
+        """
+        ...
 
 
 @runtime_checkable

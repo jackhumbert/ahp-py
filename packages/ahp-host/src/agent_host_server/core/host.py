@@ -22,6 +22,7 @@ from typing import Any, Final
 
 from agent_host_server.core import errors
 from agent_host_server.core.channels import ROOT_URI
+from agent_host_server.core.config import RootConfig, type_matches
 from agent_host_server.core.connection import Connection
 from agent_host_server.core.pending import PendingRequests, RequestOutcome
 from agent_host_server.core.policy import Policy
@@ -34,6 +35,8 @@ from agent_host_server.provider.base import (
     AgentProvider,
     AgentSession,
     AgentSessionContext,
+    ConfigRequest,
+    ConfiguresSessions,
     DescribesSession,
 )
 from agent_host_server.reducers.clock import now_iso
@@ -203,6 +206,7 @@ class Host:
         supported_versions: Sequence[str] = DEFAULT_SUPPORTED_VERSIONS,
         wire_log: Path | None = None,
         sequence_file: Path | None = None,
+        root_config: RootConfig | None = None,
     ) -> None:
         if policy is None:  # pragma: no cover - defensive; typing already forbids it
             raise ValueError("a Policy is required; there is no default")
@@ -224,6 +228,11 @@ class Host:
         self._sessions: dict[str, _Session] = {}
         self._connections: set[Connection] = set()
         self._background: set[asyncio.Task[None]] = set()
+        # No default schema, for the same reason there is no default Policy.
+        # Without one `RootState.config` stays absent, the reducer's own guard
+        # drops every `root/configChanged`, and the host accepts nothing -- the
+        # status quo, but now on purpose rather than by accident.
+        self.root_config = root_config
         self._root_ready = False
         self.wire_log = WireLog(wire_log) if wire_log is not None else None
 
@@ -231,11 +240,13 @@ class Host:
 
     async def _ensure_root(self) -> None:
         if not self._root_ready:
-            await self.sequencer.register_channel(
-                ROOT_URI,
-                {"agents": [self.provider.agent.to_wire()], "activeSessions": 0},
-                "root",
-            )
+            root_state: dict[str, Any] = {
+                "agents": [self.provider.agent.to_wire()],
+                "activeSessions": 0,
+            }
+            if self.root_config is not None:
+                root_state["config"] = self.root_config.to_wire()
+            await self.sequencer.register_channel(ROOT_URI, root_state, "root")
             self._root_ready = True
 
     async def serve(self, transport: Transport, *, peer: str | None = None) -> None:
@@ -329,6 +340,10 @@ class Host:
             return await self._dispose_session(connection, params)
         if method == "fetchTurns":
             return await self._fetch_turns(connection, params)
+        if method == "resolveSessionConfig":
+            return await self._resolve_session_config(params)
+        if method == "sessionConfigCompletions":
+            return await self._session_config_completions(params)
         raise errors.method_not_found(method)
 
     async def _handle_notification(
@@ -574,6 +589,163 @@ class Host:
         await self.sequencer.publish(channel, {"type": "chat/turnsLoaded", "turns": []})
         return {}
 
+    # ─── session configuration ───────────────────────────────────────────
+
+    def _config_request(self, params: Mapping[str, Any]) -> ConfigRequest:
+        values = params.get("config")
+        working_directory = params.get("workingDirectory")
+        provider = params.get("provider")
+        query = params.get("query")
+        prop = params.get("property")
+        return ConfigRequest(
+            provider=provider if isinstance(provider, str) else None,
+            working_directory=working_directory if isinstance(working_directory, str) else None,
+            values=values if isinstance(values, Mapping) else {},
+            property=prop if isinstance(prop, str) else None,
+            query=query if isinstance(query, str) else "",
+        )
+
+    async def _resolve_session_config(self, params: Mapping[str, Any]) -> dict[str, Any]:
+        """What a session can be configured with, given what the client has chosen.
+
+        Called repeatedly while the user sets a session up -- once per session in
+        the measured VS Code trace -- and each answer is the **full** current
+        property set, not a delta.
+
+        A provider that does not implement `ConfiguresSessions` gets an empty
+        schema rather than `MethodNotFound`. "This agent has nothing to
+        configure" is a real answer; a refusal is indistinguishable from a
+        broken host.
+        """
+        if not isinstance(self.provider, ConfiguresSessions):
+            return {"schema": {"type": "object", "properties": {}}, "values": {}}
+
+        resolved = await self.provider.resolve_config(self._config_request(params))
+        schema: dict[str, Any] = {
+            "type": "object",
+            "properties": dict(resolved.properties),
+        }
+        if resolved.required:
+            schema["required"] = list(resolved.required)
+        return {"schema": schema, "values": dict(resolved.values)}
+
+    async def _session_config_completions(self, params: Mapping[str, Any]) -> dict[str, Any]:
+        """Values for a property whose schema declared `enumDynamic`.
+
+        Answered with an empty list rather than refused when the provider does
+        not implement it: a client only asks for a property whose schema *it was
+        given*, so the honest failure is "no matches", not "no such method".
+        """
+        request = self._config_request(params)
+        if request.property is None:
+            raise errors.invalid_params("property is required")
+        if not isinstance(self.provider, ConfiguresSessions):
+            return {"items": []}
+
+        items = await self.provider.complete_config(request)
+        return {
+            "items": [
+                {
+                    "value": item.value,
+                    "label": item.label,
+                    **({"description": item.description} if item.description else {}),
+                }
+                for item in items
+            ]
+        }
+
+    async def _session_config_for(self, params: Mapping[str, Any]) -> dict[str, Any] | None:
+        """`SessionState.config` for a session about to be created.
+
+        The client has already walked `resolveSessionConfig` and passes what it
+        settled on as `createSession.config`; the schema comes from the provider
+        so the two agree. Values are filtered through the schema for the same
+        reason a `root/configChanged` is: a value with no property is invisible
+        to a client and unsettable, so publishing it only misleads.
+        """
+        if not isinstance(self.provider, ConfiguresSessions):
+            return None
+        resolved = await self.provider.resolve_config(self._config_request(params))
+        if not resolved.properties:
+            return None
+        chosen = params.get("config")
+        values = dict(resolved.values)
+        if isinstance(chosen, Mapping):
+            values.update(
+                {k: v for k, v in chosen.items() if isinstance(k, str) and k in resolved.properties}
+            )
+        return {
+            "schema": {"type": "object", "properties": dict(resolved.properties)},
+            "values": values,
+        }
+
+    def _validate_session_config(
+        self, connection: Connection, channel: str, action: Mapping[str, Any]
+    ) -> str | None:
+        """Gate `session/configChanged`, which is client-dispatchable.
+
+        Same shape as the root gate, against the schema this session was created
+        with. `sessionMutable` is the protocol's own marker for "the user may
+        change this after creation"; without it a property is a creation-time
+        choice and changing it later would leave the agent configured one way
+        and the state saying another.
+        """
+        state = self.sequencer.state_of(channel)
+        config = state.get("config") if isinstance(state, Mapping) else None
+        schema = config.get("schema") if isinstance(config, Mapping) else None
+        properties = schema.get("properties") if isinstance(schema, Mapping) else None
+        if not isinstance(properties, Mapping):
+            return "this session publishes no configuration"
+
+        values = action.get("config")
+        if not isinstance(values, Mapping):
+            return "config must be an object"
+        for key, value in values.items():
+            prop = properties.get(key) if isinstance(key, str) else None
+            if not isinstance(prop, Mapping):
+                return f"{key!r} is not a configurable property"
+            if not prop.get("sessionMutable"):
+                return f"{key!r} cannot be changed after the session is created"
+            if not type_matches(prop, value):
+                return f"{key!r} does not accept that value"
+            if not self.policy.may_set_root_config(connection.info, key, value):
+                return f"{key!r} rejected by policy"
+        if action.get("replace"):
+            return "replacing the whole config is not permitted"
+        return None
+
+    def _validate_root_config(
+        self, connection: Connection, action: Mapping[str, Any]
+    ) -> str | None:
+        """Gate `root/configChanged`, which is client-dispatchable.
+
+        The schema is the gate, not the policy: an unknown key, a read-only one,
+        or a value of the wrong type is refused whatever policy the embedder
+        supplied -- and permissive policies are the norm on loopback. Policy is
+        asked last, for the decisions a schema cannot express.
+        """
+        if self.root_config is None:
+            # No schema published, so nothing is configurable. The reducer would
+            # drop this anyway; rejecting says so out loud.
+            return "this host publishes no configuration"
+        config = action.get("config")
+        if not isinstance(config, Mapping):
+            return "config must be an object"
+        for key, value in config.items():
+            if not isinstance(key, str):
+                return "config keys must be strings"
+            rejection = self.root_config.rejection(key, value)
+            if rejection is not None:
+                return rejection
+            if not self.policy.may_set_root_config(connection.info, key, value):
+                return f"{key!r} rejected by policy"
+        # `replace: true` drops every key the action omits, including ones this
+        # peer could not have set. Refused: a merge expresses every legitimate
+        # intent, and this does not.
+        if action.get("replace"):
+            return "replacing the whole config is not permitted"
+        return None
+
     # ─── active clients ──────────────────────────────────────────────────
 
     async def _retire_active_client(self, connection: Connection) -> None:
@@ -679,6 +851,11 @@ class Host:
 
         provider_id = params.get("provider") or self.provider.agent.provider
         working_directories = self._admit_working_directories(connection, channel, params)
+        # Resolved BEFORE the channel is registered, which is forced by the
+        # protocol rather than chosen: `session/configChanged` carries values
+        # only, and the reducer no-ops entirely when `SessionState.config` is
+        # absent. A schema that is not in the initial state can never be added.
+        session_config = await self._session_config_for(params)
         chat_uri = f"ahp-chat:/{uuid.uuid4()}"
         created_at = now_iso()
         session = _Session(
@@ -708,6 +885,8 @@ class Host:
             # the session's `workingDirectories`", and that check is unanswerable
             # against a set the host never recorded.
             session_state["workingDirectories"] = working_directories
+        if session_config is not None:
+            session_state["config"] = session_config
         await self.sequencer.register_channel(channel, session_state, "session")
         await self.sequencer.register_channel(
             chat_uri,
@@ -925,6 +1104,12 @@ class Host:
             return f"{action_type} is not client-dispatchable"
         if not self.policy.may_dispatch(connection.info, channel, action):
             return "rejected by policy"
+
+        if action_type == "root/configChanged":
+            return self._validate_root_config(connection, action)
+
+        if action_type == "session/configChanged":
+            return self._validate_session_config(connection, channel, action)
 
         if action_type in _WORKING_DIRECTORY_ACTIONS:
             return self._validate_working_directory_action(connection, channel, action)

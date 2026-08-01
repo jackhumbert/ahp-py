@@ -119,7 +119,16 @@ python -m agent_host_server --elicit
 ```
 
 `--confirm-tools` asks before running a tool and honours a client's edits to the
-input; `--client-tools` delegates the work to a tool the client owns.
+input; `--client-tools` delegates the work to a tool the client owns;
+`--configurable` publishes a session config schema.
+
+**Configuration** is `resolveSessionConfig` / `sessionConfigCompletions` plus
+`RootState.config`, and it comes with its gate rather than after it. A host
+publishes no schema by default, and **the schema is the gate**: an unknown key,
+a read-only property or a wrong-typed value is refused whatever policy the
+embedder supplied. That matters because `root/configChanged` is
+client-dispatchable, VS Code sends it about ten times per connect, and a
+permissive policy is the norm for a loopback host.
 
 The terminal, changeset and resource-watch **reducers** are complete and
 conformant, but their **channels are not registered** and their commands are not
@@ -132,9 +141,9 @@ which is exactly how this host's session state silently froze once already
 
 The nine `resource*` filesystem methods · `createTerminal`/`disposeTerminal` ·
 `createResourceWatch` · `invokeChangesetOperation` · authentication, including
-0.6.0 step-up · completions · `resolveSessionConfig` · `createChat` and
-`disposeChat` (each session gets one default chat) · OTLP telemetry · the MCP
-channel · multiroot beyond seeding and validation.
+0.6.0 step-up · completions · `createChat` and `disposeChat` (each session gets
+one default chat) · OTLP telemetry · the MCP channel · multiroot beyond seeding
+and validation.
 
 Every one returns a proper JSON-RPC `MethodNotFound` (`-32601`). None are
 silently stubbed. Where the protocol says a host may decline, it declines

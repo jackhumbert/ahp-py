@@ -9,13 +9,16 @@ adapter author reads.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 from agent_host_server.provider.base import (
     AgentInfo,
     AgentSessionContext,
     ClientToolCall,
+    ConfigRequest,
+    ConfigResolution,
+    ConfigValue,
     InputQuestion,
     InputRequest,
     SessionDescription,
@@ -121,7 +124,13 @@ class EchoSession:
             await sink.text_delta(f"You said: {text}")
             return
 
-        for chunk in ("You said: ", message.text):
+        # Whatever the client settled on during `resolveSessionConfig` arrives
+        # here, so the configuration is observably load-bearing rather than
+        # decorative.
+        prefix = self.context.config.get("prefix")
+        prefix = prefix if isinstance(prefix, str) else "You said:"
+        text = message.text.upper() if self.context.config.get("style") == "shout" else message.text
+        for chunk in (f"{prefix} ", text):
             if self._cancelled:
                 return
             if self._delay:
@@ -199,8 +208,10 @@ class EchoProvider:
         elicit: bool = False,
         confirm_tools: bool = False,
         client_tools: bool = False,
+        configurable: bool = False,
         capabilities: Mapping[str, Any] | None = None,
     ) -> None:
+        self._configurable = configurable
         self._delay = delay
         self._customizations = customizations
         self._elicit = elicit
@@ -226,6 +237,51 @@ class EchoProvider:
     @property
     def agent(self) -> AgentInfo:
         return self._info
+
+    async def resolve_config(self, request: ConfigRequest) -> ConfigResolution:
+        """A small, contextual schema -- enough to see the mechanism work.
+
+        `style` is fixed at creation. `prefix` is `sessionMutable`, so it is the
+        only one a client may change afterwards, and `greeting` only appears
+        once a style is chosen -- which is the point of resolving iteratively
+        rather than publishing one static schema.
+        """
+        if not self._configurable:
+            return ConfigResolution()
+        properties: dict[str, Mapping[str, Any]] = {
+            "style": {
+                "type": "string",
+                "title": "Reply style",
+                "enum": ["plain", "shout"],
+                "enumLabels": ["Plain", "SHOUTING"],
+                "default": "plain",
+            },
+            "prefix": {
+                "type": "string",
+                "title": "Reply prefix",
+                "default": "You said:",
+                "sessionMutable": True,
+            },
+        }
+        if request.values.get("style") == "shout":
+            properties["greeting"] = {
+                "type": "string",
+                "title": "Greeting",
+                "description": "Offered only once the style is SHOUTING.",
+                "enumDynamic": True,
+            }
+        return ConfigResolution(
+            properties=properties,
+            values={"style": request.values.get("style", "plain")},
+        )
+
+    async def complete_config(self, request: ConfigRequest) -> Sequence[ConfigValue]:
+        """Dynamic values for `greeting`, filtered by what the user has typed."""
+        if request.property != "greeting":
+            return ()
+        options = ("HELLO", "HI THERE", "GREETINGS", "OI")
+        query = request.query.upper()
+        return [ConfigValue(value=o, label=o) for o in options if o.startswith(query)]
 
     async def create_session(self, context: AgentSessionContext) -> EchoSession:
         return EchoSession(

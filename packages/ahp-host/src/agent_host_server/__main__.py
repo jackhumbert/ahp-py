@@ -76,6 +76,11 @@ def _parse_args() -> argparse.Namespace:
         help="make the echo agent delegate to a tool the CLIENT owns (no host filesystem)",
     )
     parser.add_argument(
+        "--configurable",
+        action="store_true",
+        help="publish a session config schema (reply style, prefix, dynamic greeting)",
+    )
+    parser.add_argument(
         "--sequence-file",
         metavar="PATH",
         help=(
@@ -107,6 +112,7 @@ async def _run() -> None:
             elicit=args.elicit,
             confirm_tools=args.confirm_tools,
             client_tools=args.client_tools,
+            configurable=args.configurable,
         ),
         LoopbackSingleUserPolicy(),
         info=HostInfo(name="agent-host-server (demo)"),

@@ -77,6 +77,16 @@ class Policy(Protocol):
         """
         ...
 
+    def may_set_root_config(self, info: ConnectionInfo, key: str, value: Any) -> bool:
+        """Whether this peer may change a host-wide configuration value.
+
+        Consulted **after** the schema has already rejected unknown keys,
+        read-only properties and type mismatches -- so this is for decisions the
+        schema cannot express, like "only the client that owns this host may
+        change it". A host that publishes no config schema never reaches here.
+        """
+        ...
+
     def may_grant_working_directory(
         self, info: ConnectionInfo, session: str, directory: str
     ) -> bool:
@@ -117,6 +127,9 @@ class LoopbackSingleUserPolicy:
         return True
 
     def may_create_session(self, info: ConnectionInfo, params: Mapping[str, Any]) -> bool:
+        return True
+
+    def may_set_root_config(self, info: ConnectionInfo, key: str, value: Any) -> bool:
         return True
 
     def may_grant_working_directory(
