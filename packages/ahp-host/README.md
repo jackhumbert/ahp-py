@@ -11,11 +11,12 @@ Microsoft's protocol for synchronized multi-client state over AI agent sessions.
 
 > ### ⚠️ Status: working, but pre-alpha. Not published.
 >
-> A real client can connect, create a session, and run a turn. The full v0.1
-> command set, the root/session/chat reducers and a WebSocket transport are in
-> place. Not on PyPI, API not stable, single-trust-domain only. See
-> [`docs/plan.md`](docs/plan.md) §11 for what remains and
-> [`docs/decisions/`](docs/decisions/) for the decisions taken.
+> A real client can connect, create a session, and run a turn. **All seven
+> reducers pass upstream's whole 247-fixture corpus**, the v0.1 command set plus
+> `fetchTurns` is implemented, and a WebSocket transport is in place. Not on
+> PyPI, API not stable, single-trust-domain only.
+> [`docs/roadmap.md`](docs/roadmap.md) scopes everything that remains;
+> [`docs/decisions/`](docs/decisions/) records the decisions taken.
 
 ## Try it
 
@@ -92,32 +93,42 @@ must not enshrine an agent loop, tool schema, model provider or storage backend,
 and this project holds that line: the core is vendor-neutral and fully testable
 with no adapter installed.
 
-### Planned for v0.1
+### Implemented
 
-Protocol **0.7.0 and 0.6.0** on the wire · root, session and chat channels · the
-commands a real client actually issues · host-global sequencing with replay ·
-ported reducers gated on upstream's own 247-fixture conformance corpus · a
-pluggable agent provider with an offline echo implementation · WebSocket
-transport behind a transport abstraction.
+Protocol **0.7.0 and 0.6.0** on the wire · root, session, chat and annotations
+channels · **all seven reducers**, gated on upstream's whole 247-fixture corpus
+· host-global sequencing with per-channel replay budgets · a pluggable agent
+provider with an offline echo implementation · WebSocket transport behind a
+transport abstraction.
 
-Implemented commands: `initialize`, `ping`, `subscribe`, `unsubscribe`,
-`listSessions`, `createSession`, `disposeSession`, `dispatchAction`, `reconnect`.
+Commands: `initialize`, `ping`, `subscribe`, `unsubscribe`, `listSessions`
+(paginated), `createSession`, `disposeSession`, `dispatchAction`, `reconnect`,
+`fetchTurns`.
 
-### Deliberately not in v0.1
+The terminal, changeset and resource-watch **reducers** are complete and
+conformant, but their **channels are not registered** and their commands are not
+implemented. That ordering is deliberate: registering a channel whose reducer
+does not exist would broadcast client-dispatchable actions that nothing applies,
+which is exactly how this host's session state silently froze once already
+([`docs/experiments.md`](docs/experiments.md) §E12).
 
-Terminals · changesets · comments and annotations · OTLP telemetry · the MCP
-channel · resource watches · the nine `resource*` filesystem methods · side
-chats · multiroot sessions · authentication, including 0.6.0 step-up auth ·
-`fetchTurns` pagination · completions · `resolveSessionConfig` · `createChat`
-and `disposeChat` (each session gets one default chat).
+### Not implemented
 
-State is in-memory: sessions do not survive a host restart. A client
-reconnecting across one is correctly told to take fresh snapshots rather than
-being left silently stale, but its sessions are gone.
+The nine `resource*` filesystem methods · `createTerminal`/`disposeTerminal` ·
+`createResourceWatch` · `invokeChangesetOperation` · authentication, including
+0.6.0 step-up · completions · `resolveSessionConfig` · `createChat` and
+`disposeChat` (each session gets one default chat) · OTLP telemetry · the MCP
+channel · multiroot beyond seeding and validation.
 
-Every one of these returns a proper JSON-RPC `MethodNotFound` (`-32601`). None
-are silently stubbed. Where the protocol says a host may decline, it declines
-loudly.
+Every one returns a proper JSON-RPC `MethodNotFound` (`-32601`). None are
+silently stubbed. Where the protocol says a host may decline, it declines
+loudly — see the terminal note under [Try it](#try-it).
+
+Session state is in-memory: sessions do not survive a host restart. `serverSeq`
+*can* survive one, with `--sequence-file`; without it a reconnecting client is
+correctly told to take fresh snapshots, but it is told that on **every**
+reconnect thereafter, because the reference client records the sequence with a
+maximum and stays permanently ahead of a counter that restarted at zero.
 
 ## ⚠️ Security: read this before exposing a host
 
@@ -145,8 +156,12 @@ This library's position:
   requires a policy object.
 - Default bind is loopback. Binding off-loopback without an explicit policy is a
   hard error, not a warning.
-- v0.1 does not implement the filesystem family or terminals at all, so the two
-  largest holes stay closed by construction.
+- The filesystem family and terminals are not implemented at all, so the two
+  largest holes stay closed by construction. When they land they land behind
+  gates that must exist first — [`docs/roadmap.md`](docs/roadmap.md) §6 lists
+  them, and a real PTY backend is not going in this distribution.
+- `--wire-log` redacts credentials and writes owner-only. It still contains
+  every message of every session, which is a transcript, not a trace.
 
 **v0.1 is single-trust-domain.** It is not multi-tenant, and it is not safe to
 expose to an untrusted network. Both known existing hosts punt on this too — VS
@@ -161,8 +176,15 @@ value is that other implementations can trust it. So:
 
 - Reducers are validated against **upstream's own 247-fixture corpus**, the same
   artifact the Rust, Go, Kotlin and Swift clients are gated on, consumed
-  unmodified.
+  unmodified. All 247, not a subset.
 - Wire types are validated against upstream's 39-fixture round-trip corpus.
+- **The corpus's own blind spot is covered separately.** Its comparator drops
+  `null`-valued keys on both sides, so it cannot express the difference between
+  an absent key and an explicit `null` — the single most common porting defect
+  here, and one an audit found in four reducers at once. So a second corpus is
+  generated by running adversarial cases through the **real pinned TypeScript
+  reducers** under Node and freezing their output verbatim, nulls and all
+  (`scripts/regenerate_js_semantics.sh`). Comparison is byte-for-byte, offline.
 - Integration tests drive the **real published Microsoft TypeScript client**
   against the host, and feed our live action stream through the **official
   TypeScript reducers**, diffing the result against a fresh snapshot.

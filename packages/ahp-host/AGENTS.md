@@ -4,20 +4,26 @@ For AI agents and humans maintaining this repository. Assume the reader starts
 with zero context.
 
 **Read first:** [`docs/research.md`](docs/research.md) (what the protocol
-actually does, with evidence), then [`docs/plan.md`](docs/plan.md) (what we are
-building), then [`UPSTREAM.md`](UPSTREAM.md) (what revision we target).
+actually does, with evidence), then [`docs/plan.md`](docs/plan.md) (what v0.1
+is), then [`docs/roadmap.md`](docs/roadmap.md) (everything after it), then
+[`UPSTREAM.md`](UPSTREAM.md) (what revision we target).
 
 ## What this project is
 
 A Python **host** library for the Agent Host Protocol. AHP is an external
 specification owned by Microsoft. We implement it; we do not design it.
 
-Current state: **steps 1–6 of the build order done.** All 200 in-scope reducer
-fixtures and all 39 round-trip fixtures pass, the v0.1 command set is
-implemented, and the real published Microsoft TypeScript client drives a full
-turn against the host over WebSocket in CI. Remaining: durable session store,
-`fetchTurns` pagination, an ACP provider adapter. Build order is
-`docs/plan.md` §11; decisions are in `docs/decisions/`.
+Current state: **v0.1 complete; v0.2 landing.** All **247** reducer fixtures and
+all 39 round-trip fixtures pass, the v0.1 command set is implemented, and the
+real published Microsoft TypeScript client drives a full turn against the host
+over WebSocket in CI. v0.1's build order is
+`docs/plan.md` §11; everything after it is scoped in
+[`docs/roadmap.md`](docs/roadmap.md), which is currently being worked through
+release by release. Decisions are in `docs/decisions/`.
+
+**Before adding a feature, read `docs/roadmap.md` §6.** It lists hard ordering
+constraints — things that must exist *before* a feature ships, not alongside it
+— and §10 lists what is permanently out of scope for this distribution.
 
 Run the demo host with `python -m agent_host_server`.
 
@@ -44,12 +50,19 @@ Re-vendoring upstream (only when bumping the pin — see `UPSTREAM.md`):
 scripts/vendor_upstream.sh
 ```
 
+Regenerating the JS-semantics oracle from the pinned TypeScript (also only on a
+pin bump; needs Node and `.research/agent-host-protocol`):
+
+```bash
+scripts/regenerate_js_semantics.sh
+```
+
 ## Layout
 
 | Path | Contents | May import |
 |---|---|---|
 | `src/agent_host_server/types/` | wire types, actions, state, errors | stdlib only |
-| `src/agent_host_server/reducers/` | the pure reducers + injectable clock | `types` |
+| `src/agent_host_server/reducers/` | the pure reducers + injectable clock + `js.py` | `types` |
 | `src/agent_host_server/conformance/` | fixture runners | `types`, `reducers` |
 | `src/agent_host_server/core/` | channels, sequencing, subscriptions, replay, policy | `types`, `reducers` |
 | `src/agent_host_server/provider/` | `AgentProvider` protocol + echo provider | `types` |
@@ -114,6 +127,24 @@ failures in *clients*, not in our tests. Evidence for every item is in
     `=== undefined` as `"x" not in obj`, never as `is None` — that class of
     mistranslation lets a peer wipe a chat transcript. Where the reference uses
     `??` or truthiness, `is None` *is* correct.
+19. **Use `reducers/js.py` for every JavaScript-semantics operation.** It exists
+    because the same three mistakes keep recurring, and because the fixture
+    corpus cannot see any of them:
+    - `js.get` / `js.assign` for reading and writing an optional field.
+      An unconditional JS spread (`{...state, x: action.x}`) writes an explicit
+      `null` **through** and drops only an absent key. A helper that deletes on
+      `None` conflates the two, and the corpus comparator normalises `null` away
+      so it passes anyway. An audit found this in four reducers at once.
+    - `js.strict_equal` / `js.index_of` for any `===`. Python `==` matches
+      `True` against `1`, matches absent against `null`, and compares objects
+      structurally where `===` compares them by reference — so an id lookup
+      selects a different entry than the reference does, on data a peer controls.
+    - `js.key_of` for a `Map`/`Set` key, `js.to_string` for JS `+` coercion.
+
+    New behaviour of this kind needs a case in `scripts/js_semantics_cases.py`
+    and a regenerated `tests/conformance/fixtures/js-semantics.json`. The oracle
+    is the reference reducer itself — never a hand-written expectation, because
+    a hand-written one just restates the reading being tested.
 
 ## Absorbing a new upstream spec release
 

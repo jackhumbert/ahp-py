@@ -169,3 +169,49 @@ class TestReplay:
         finally:
             serve.cancel()
             await host.aclose()
+
+
+class TestMeasuredCallCounts:
+    """The evidence a prioritisation argument rests on, in the repository.
+
+    Two of the seven scoping areas were originally ranked on per-method refusal
+    frequencies that lived only in an uncommitted wire log. A reviewer could not
+    check them, so they are counted here instead -- method names and counts
+    only, never params.
+    """
+
+    @staticmethod
+    def _measured() -> dict[str, Any]:
+        measured: dict[str, Any] = TRACE["measured"]
+        return measured
+
+    def test_the_counts_carry_no_message_content(self) -> None:
+        """The capture is a full transcript of a real conversation, so only the
+        aggregate crosses into the repository."""
+        measured = self._measured()
+        assert set(measured) == {
+            "note",
+            "sessionsCreated",
+            "clientToServer",
+            "serverToClient",
+        }
+        for direction in ("clientToServer", "serverToClient"):
+            assert all(isinstance(v, int) for v in measured[direction].values())
+
+    def test_the_resource_family_dominates_the_refusals(self) -> None:
+        """This is why `resource*` is the next release and terminals are not:
+        it is not a judgement about which feature is nicer."""
+        counts = self._measured()["clientToServer"]
+        resource_calls = sum(v for k, v in counts.items() if k.startswith("resource"))
+        assert resource_calls > 100
+        assert resource_calls > 10 * counts.get("createTerminal", 0)
+
+    def test_the_terminal_toast_is_rare_per_session(self) -> None:
+        """The scoping pass cited `createTerminal` x7. Measured, it is about one
+        per session -- which is what made "spend 250 lines on the toast" the
+        wrong trade (docs/roadmap.md section 7)."""
+        measured = self._measured()
+        per_session = (
+            measured["clientToServer"].get("createTerminal", 0) / measured["sessionsCreated"]
+        )
+        assert per_session <= 1

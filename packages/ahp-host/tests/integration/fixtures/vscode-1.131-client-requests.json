@@ -407,5 +407,32 @@
         "channel": "echo:/af2d658f-61c0-4279-a549-ffb2d89517f2"
       }
     }
-  ]
+  ],
+  "measured": {
+    "note": "Per-method call counts from a live VS Code 1.131 Agents-app session, counted from a --wire-log capture. METHOD NAMES AND COUNTS ONLY -- no params, no message content, no tokens. The capture itself is not committed because it is a full transcript of a real conversation. These exist so a prioritisation argument about which refused method matters most can be checked rather than taken on trust.",
+    "sessionsCreated": 3,
+    "clientToServer": {
+      "ping": 1057,
+      "resourceResolve": 86,
+      "dispatchAction": 38,
+      "resourceRead": 35,
+      "createResourceWatch": 27,
+      "resourceList": 16,
+      "subscribe": 8,
+      "unsubscribe": 6,
+      "disposeSession": 3,
+      "initialize": 3,
+      "listSessions": 3,
+      "resolveSessionConfig": 3,
+      "createSession": 3,
+      "reconnect": 2,
+      "createTerminal": 2,
+      "disposeTerminal": 2
+    },
+    "serverToClient": {
+      "action": 79,
+      "root/sessionAdded": 6,
+      "root/sessionRemoved": 4
+    }
+  }
 }
