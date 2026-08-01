@@ -105,6 +105,22 @@ Commands: `initialize`, `ping`, `subscribe`, `unsubscribe`, `listSessions`
 (paginated), `createSession`, `disposeSession`, `dispatchAction`, `reconnect`,
 `fetchTurns`.
 
+A provider can also **stop and wait for a human** — elicitation, tool-call
+confirmation, and handing a tool to a client to execute — all on one primitive
+([ADR 0005](docs/decisions/0005-suspending-provider-requests.md)). That last one
+is worth calling out: the host marks a tool call `contributor: {kind: "client"}`,
+the client runs it in its own process, and the client reports the result. **The
+agent gets the editor's own tools with no filesystem API on the host at all.**
+
+Try any of them against the demo host:
+
+```bash
+python -m agent_host_server --elicit
+```
+
+`--confirm-tools` asks before running a tool and honours a client's edits to the
+input; `--client-tools` delegates the work to a tool the client owns.
+
 The terminal, changeset and resource-watch **reducers** are complete and
 conformant, but their **channels are not registered** and their commands are not
 implemented. That ordering is deliberate: registering a channel whose reducer

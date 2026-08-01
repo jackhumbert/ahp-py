@@ -17,12 +17,16 @@ import uuid
 from collections.abc import Mapping
 from typing import Any
 
-from agent_host_server.core.pending import PendingRequests
+from agent_host_server.core.pending import PendingRequest, PendingRequests
 from agent_host_server.core.sequencer import Sequencer
 from agent_host_server.provider.base import (
     AgentSession,
+    ClientToolCall,
     InputOutcome,
     InputRequest,
+    ToolConfirmation,
+    ToolConfirmationOutcome,
+    ToolResult,
     UserMessage,
 )
 
@@ -48,11 +52,15 @@ class ActionTurnSink:
         channel: str,
         turn_id: str,
         pending: PendingRequests | None = None,
+        session_uri: str | None = None,
     ) -> None:
         self._sequencer = sequencer
         self._channel = channel
         self._turn_id = turn_id
         self._pending = pending if pending is not None else PendingRequests()
+        #: Where `session/inputNeeded` entries are mirrored. Optional so a bare
+        #: sink stays constructible in a test without a session around it.
+        self._session_uri = session_uri
         self._markdown_part_id: str | None = None
         self._reasoning_part_id: str | None = None
 
@@ -178,27 +186,163 @@ class ActionTurnSink:
             self._channel,
             {"type": "chat/inputRequested", "turnId": self._turn_id, "request": wire},
         )
+        # Mirrored to the session so a client can answer WITHOUT having
+        # subscribed to this chat -- "this is the channel a client dispatches
+        # its response to; it does not need to have subscribed to that chat
+        # first" -- and so the session's status carries InputNeeded, which is
+        # what a session list renders.
+        await self._mirror_input_needed(parked.id, {"kind": "chatInput", "request": wire})
 
         outcome = await parked.future
         answers = outcome.payload if isinstance(outcome.payload, Mapping) else {}
         return InputOutcome(response=outcome.response, answers=answers)
+
+    async def confirm_tool_call(self, call: ToolConfirmation) -> ToolConfirmationOutcome:
+        """Publish `chat/toolCallReady` and suspend until a client confirms.
+
+        The tool call itself must already exist -- `chat/toolCallReady` moves an
+        existing call into `pendingConfirmation`, it does not create one -- so a
+        provider calls `tool_call_started` first.
+        """
+        parked = self._pending.open(
+            turn_scope(self._channel, self._turn_id), "confirm", key=call.call_id
+        )
+
+        action: dict[str, Any] = {
+            "type": "chat/toolCallReady",
+            "turnId": self._turn_id,
+            "toolCallId": call.call_id,
+            "invocationMessage": call.invocation_message,
+        }
+        if call.tool_input is not None:
+            action["toolInput"] = call.tool_input
+        if call.confirmation_title is not None:
+            action["confirmationTitle"] = call.confirmation_title
+        if call.editable:
+            action["editable"] = True
+        await self._sequencer.publish(self._channel, action)
+
+        await self._mirror_input_needed(
+            parked.id,
+            {
+                "kind": "toolConfirmation",
+                "turnId": self._turn_id,
+                "toolCall": {
+                    "toolCallId": call.call_id,
+                    "toolName": call.name,
+                    "displayName": call.display_name or call.name,
+                    "status": "pendingConfirmation",
+                },
+            },
+        )
+
+        outcome = await parked.future
+        payload = outcome.payload if isinstance(outcome.payload, Mapping) else {}
+        # The APPROVED input, not the proposed one: `editable` lets a client
+        # rewrite the parameters, and running the original would execute
+        # something nobody agreed to.
+        edited = payload.get("toolInput", call.tool_input)
+        return ToolConfirmationOutcome(approved=outcome.response == "accept", tool_input=edited)
+
+    async def run_client_tool(self, call: ClientToolCall) -> ToolResult:
+        """Ask a client to execute one of its own tools, and suspend.
+
+        `contributor: {kind: 'client', clientId}` is what makes the client
+        responsible: "the identified client is responsible for executing the
+        tool and dispatching `chat/toolCallComplete` with the result."
+        """
+        if not self._is_active_client(call.client_id):
+            # Refused rather than parked. A request addressed to a client that
+            # is not in the session can never be answered, and a provider that
+            # awaits it blocks its turn until somebody cancels -- an error the
+            # adapter can handle beats a hang it cannot see.
+            raise LookupError(f"{call.client_id!r} is not an active client of this session")
+
+        parked = self._pending.open(
+            turn_scope(self._channel, self._turn_id), "clienttool", key=call.call_id
+        )
+
+        action: dict[str, Any] = {
+            "type": "chat/toolCallStart",
+            "turnId": self._turn_id,
+            "toolCallId": call.call_id,
+            "toolName": call.name,
+            "displayName": call.display_name or call.name,
+            "contributor": {"kind": "client", "clientId": call.client_id},
+        }
+        if call.tool_input is not None:
+            action["toolInput"] = call.tool_input
+        await self._sequencer.publish(self._channel, action)
+
+        await self._mirror_input_needed(
+            parked.id,
+            {
+                "kind": "toolClientExecution",
+                "turnId": self._turn_id,
+                "clientId": call.client_id,
+                "toolCall": {
+                    "toolCallId": call.call_id,
+                    "toolName": call.name,
+                    "displayName": call.display_name or call.name,
+                    "status": "running",
+                },
+            },
+        )
+
+        outcome = await parked.future
+        return ToolResult(value=outcome.payload)
+
+    def _is_active_client(self, client_id: str) -> bool:
+        if self._session_uri is None:
+            return False
+        state = self._sequencer.state_of(self._session_uri)
+        clients = state.get("activeClients") if isinstance(state, Mapping) else None
+        if not isinstance(clients, list):
+            return False
+        return any(
+            isinstance(entry, Mapping) and entry.get("clientId") == client_id for entry in clients
+        )
+
+    async def _mirror_input_needed(self, request_id: str, request: dict[str, Any]) -> None:
+        """Publish one `session/inputNeeded` entry for a parked request."""
+        if self._session_uri is None:
+            return
+        await self._sequencer.publish(
+            self._session_uri,
+            {
+                "type": "session/inputNeededSet",
+                "request": {**request, "id": request_id, "chat": self._channel},
+            },
+        )
 
 
 class TurnRunner:
     """Runs one turn: hand the message to the agent, publish what comes back."""
 
     def __init__(
-        self, sequencer: Sequencer, channel: str, pending: PendingRequests | None = None
+        self,
+        sequencer: Sequencer,
+        channel: str,
+        pending: PendingRequests | None = None,
+        session_uri: str | None = None,
     ) -> None:
         self._sequencer = sequencer
         self._channel = channel
         self._pending = pending if pending is not None else PendingRequests()
+        self._session_uri = session_uri
+        #: Requests still parked when the turn ended. The caller retracts their
+        #: `session/inputNeeded` entries -- not this class, because the turn task
+        #: is frequently the one being cancelled and cannot be relied on to
+        #: finish another await.
+        self.abandoned: list[PendingRequest] = []
 
     async def run(self, agent_session: AgentSession | None, started: Mapping[str, Any]) -> None:
         turn_id = started.get("turnId")
         if not isinstance(turn_id, str):
             return
-        sink = ActionTurnSink(self._sequencer, self._channel, turn_id, self._pending)
+        sink = ActionTurnSink(
+            self._sequencer, self._channel, turn_id, self._pending, self._session_uri
+        )
 
         if agent_session is None:
             await sink.turn_failed("no agent session")
@@ -220,7 +364,9 @@ class TurnRunner:
             # raise or cancellation -- nothing may still be parked under it, or
             # the provider stays blocked on a future nobody will ever resolve
             # and the chat sits in `InputNeeded` until the session is disposed.
-            self._pending.cancel_scope(turn_scope(self._channel, turn_id), "turn ended")
+            self.abandoned = self._pending.cancel_scope(
+                turn_scope(self._channel, turn_id), "turn ended"
+            )
 
         # A provider that returns normally after being cancelled would otherwise
         # complete a turn a client already ended. The reducer would no-op on it,

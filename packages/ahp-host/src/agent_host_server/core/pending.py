@@ -47,6 +47,9 @@ class PendingRequest:
     scope: str
     kind: str
     future: asyncio.Future[RequestOutcome] = field(repr=False)
+    #: A second name the resolving action uses. Tool-call actions carry a
+    #: `toolCallId`, not a request id, so they need one.
+    key: str | None = None
 
 
 class PendingRequests:
@@ -55,17 +58,21 @@ class PendingRequests:
     def __init__(self) -> None:
         self._by_id: dict[str, PendingRequest] = {}
         self._by_scope: dict[str, set[str]] = {}
+        self._by_key: dict[str, str] = {}
         self._counter = 0
 
     def __len__(self) -> int:
         return len(self._by_id)
 
-    def open(self, scope: str, kind: str) -> PendingRequest:
+    def open(self, scope: str, kind: str, key: str | None = None) -> PendingRequest:
         """Park a new request and return it, un-awaited.
 
         The id is minted **here**. A provider-chosen id lets two providers
         collide; a client-chosen one lets a peer resolve a request it was never
         offered. The caller publishes the id to clients; nobody supplies one.
+
+        *key* is an optional second name -- a `toolCallId` -- because the
+        actions that resolve a tool call name the call, not the request.
         """
         self._counter += 1
         request_id = f"{kind}-{self._counter}"
@@ -74,10 +81,23 @@ class PendingRequests:
             scope=scope,
             kind=kind,
             future=asyncio.get_running_loop().create_future(),
+            key=key,
         )
         self._by_id[request_id] = request
         self._by_scope.setdefault(scope, set()).add(request_id)
+        if key is not None:
+            self._by_key[key] = request_id
         return request
+
+    def id_for_key(self, key: Any) -> str | None:
+        """The live request registered under *key*, if any.
+
+        Takes any value: the key comes off a client-dispatched action, so it may
+        be a dict, a number, or missing entirely.
+        """
+        if not isinstance(key, str):
+            return None
+        return self._by_key.get(key)
 
     def get(self, request_id: str) -> PendingRequest | None:
         return self._by_id.get(request_id)
@@ -101,23 +121,33 @@ class PendingRequests:
             request.future.set_result(outcome)
         return True
 
-    def cancel_scope(self, scope: str, reason: str) -> int:
-        """End every request opened under *scope*. Returns how many were live.
+    def cancel_scope(self, scope: str, reason: str) -> list[PendingRequest]:
+        """End every request opened under *scope*. Returns the ones that were live.
 
         The provider's ``await`` raises ``CancelledError``, which is already how
         turn cancellation reaches it -- so an adapter that handles cancellation
         at all handles this without knowing it exists.
+
+        The returned list is what the caller needs to retract the corresponding
+        `session/inputNeeded` entries: a cancelled turn that leaves them behind
+        pins the session in `InputNeeded` with nothing to answer.
         """
-        cancelled = 0
+        cancelled: list[PendingRequest] = []
         for request_id in list(self._by_scope.get(scope, ())):
             request = self._discard(request_id)
             if request is None:
                 continue
+            # Reported whether or not the future still needed cancelling. When
+            # the TASK is cancelled, the future it was awaiting is already
+            # cancelled by the time this runs -- but its `session/inputNeeded`
+            # entry is still published, and that is what the caller retracts.
+            # Reporting only the ones cancelled here left the session pinned in
+            # `InputNeeded` after every cancelled turn.
             if not request.future.done():
                 request.future.cancel()
-                cancelled += 1
+            cancelled.append(request)
         if cancelled:
-            _log.debug("cancelled %d pending request(s) in %s: %s", cancelled, scope, reason)
+            _log.debug("cancelled %d pending request(s) in %s: %s", len(cancelled), scope, reason)
         return cancelled
 
     def _discard(self, request_id: str) -> PendingRequest | None:
@@ -129,4 +159,6 @@ class PendingRequests:
             scoped.discard(request_id)
             if not scoped:
                 del self._by_scope[request.scope]
+        if request.key is not None and self._by_key.get(request.key) == request_id:
+            del self._by_key[request.key]
         return request

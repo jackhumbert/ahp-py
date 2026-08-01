@@ -22,12 +22,16 @@ __all__ = [
     "AgentProvider",
     "AgentSession",
     "AgentSessionContext",
+    "ClientToolCall",
     "DescribesSession",
     "InputOutcome",
     "InputQuestion",
     "InputRequest",
     "ResumableAgentProvider",
     "SessionDescription",
+    "ToolConfirmation",
+    "ToolConfirmationOutcome",
+    "ToolResult",
     "TurnSink",
     "UserMessage",
 ]
@@ -114,6 +118,57 @@ class InputOutcome:
 
 
 @dataclass(frozen=True)
+class ToolConfirmation:
+    """The agent wants to run a tool and is asking first.
+
+    ``invocation_message`` is what a client renders in the prompt.
+    ``editable`` lets a client change ``tool_input`` before approving, in which
+    case the edited input comes back on the outcome.
+    """
+
+    call_id: str
+    name: str
+    invocation_message: str
+    display_name: str | None = None
+    tool_input: Any = None
+    confirmation_title: str | None = None
+    editable: bool = False
+
+
+@dataclass(frozen=True)
+class ToolConfirmationOutcome:
+    approved: bool
+    #: The input the client actually approved. Identical to what was proposed
+    #: unless the call was `editable` and a client changed it -- in which case
+    #: running the original would execute something nobody agreed to.
+    tool_input: Any = None
+
+
+@dataclass(frozen=True)
+class ClientToolCall:
+    """A tool the *client* owns, which the host asks it to run.
+
+    The agent gets the editor's own tools -- file reads, searches, whatever the
+    client published on `activeClient.tools` -- with **no filesystem API on the
+    host at all**. The client executes in its own process, under its own
+    permissions, and reports the result.
+    """
+
+    call_id: str
+    name: str
+    client_id: str
+    tool_input: Any = None
+    display_name: str | None = None
+
+
+@dataclass(frozen=True)
+class ToolResult:
+    """What a client reported back. ``value`` is the raw wire result."""
+
+    value: Any = None
+
+
+@dataclass(frozen=True)
 class AgentSessionContext:
     session_uri: str
     chat_uri: str
@@ -124,6 +179,15 @@ class AgentSessionContext:
     model: str | None = None
     config: Mapping[str, Any] = field(default_factory=dict)
     resume_state: Mapping[str, Any] | None = None
+    #: The client that created the session, if it published itself via
+    #: `createSession.activeClient`. Only a starting point: clients come and go
+    #: over the life of a session, and the authoritative list is
+    #: `SessionState.activeClients`.
+    active_client_id: str | None = None
+    #: Tools that client offered to execute on the agent's behalf. These run in
+    #: the client's process, so they are the one tool surface that needs no
+    #: filesystem API on the host at all.
+    client_tools: Sequence[Mapping[str, Any]] = ()
 
 
 @runtime_checkable
@@ -160,6 +224,24 @@ class TurnSink(Protocol):
         A provider that awaits input nobody is watching will block its own turn
         until it is cancelled. That is a real failure mode; it is bounded by the
         turn, and `session/inputNeeded` makes it visible while it happens.
+        """
+        ...
+
+    async def confirm_tool_call(self, call: ToolConfirmation) -> ToolConfirmationOutcome:
+        """Ask before running a tool, and wait. Suspends; see ADR 0005.
+
+        **Use the returned `tool_input`, not the one you proposed.** A client
+        may edit the parameters before approving when `editable` is set, and
+        running the original would execute something nobody agreed to.
+        """
+        ...
+
+    async def run_client_tool(self, call: ClientToolCall) -> ToolResult:
+        """Have a *client* execute one of its own tools, and wait. Suspends.
+
+        `call.client_id` must name a client in the session's `activeClients`;
+        the host refuses otherwise rather than parking a request no one will
+        ever answer.
         """
         ...
 

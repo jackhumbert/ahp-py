@@ -49,7 +49,7 @@ async def test_cancelling_a_scope_frees_every_request_in_it() -> None:
     second = pending.open("turn-1", "input")
     other = pending.open("turn-2", "input")
 
-    assert pending.cancel_scope("turn-1", "turn ended") == 2
+    assert {r.id for r in pending.cancel_scope("turn-1", "turn ended")} == {first.id, second.id}
     assert first.future.cancelled()
     assert second.future.cancelled()
     assert not other.future.done(), "a different turn's request was collateral"
@@ -91,4 +91,20 @@ async def test_is_open_tolerates_any_json_value() -> None:
 
 
 async def test_cancelling_an_unknown_scope_is_a_no_op() -> None:
-    assert PendingRequests().cancel_scope("never-existed", "x") == 0
+    assert PendingRequests().cancel_scope("never-existed", "x") == []
+
+
+async def test_a_scope_reports_requests_whose_future_was_already_cancelled() -> None:
+    """When the TASK is cancelled, the future it was awaiting is cancelled
+    before the scope teardown runs. Those requests still have a published
+    `session/inputNeeded` entry to retract -- reporting only the ones cancelled
+    here left every cancelled turn's session pinned in InputNeeded.
+    """
+    pending = PendingRequests()
+    request = pending.open("turn-1", "clienttool", key="call-1")
+    request.future.cancel()  # what task cancellation does to the awaited future
+
+    reported = pending.cancel_scope("turn-1", "turn ended")
+    assert [r.id for r in reported] == [request.id]
+    assert len(pending) == 0
+    assert pending.id_for_key("call-1") is None, "the key index leaked"

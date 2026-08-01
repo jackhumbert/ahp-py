@@ -66,6 +66,16 @@ def _parse_args() -> argparse.Namespace:
         help="make the echo agent stop and ask a question mid-turn (ADR 0005)",
     )
     parser.add_argument(
+        "--confirm-tools",
+        action="store_true",
+        help="make the echo agent ask before running its tool, and honour edits to the input",
+    )
+    parser.add_argument(
+        "--client-tools",
+        action="store_true",
+        help="make the echo agent delegate to a tool the CLIENT owns (no host filesystem)",
+    )
+    parser.add_argument(
         "--sequence-file",
         metavar="PATH",
         help=(
@@ -95,6 +105,8 @@ async def _run() -> None:
             model_name=args.model_name,
             customizations=args.customizations,
             elicit=args.elicit,
+            confirm_tools=args.confirm_tools,
+            client_tools=args.client_tools,
         ),
         LoopbackSingleUserPolicy(),
         info=HostInfo(name="agent-host-server (demo)"),

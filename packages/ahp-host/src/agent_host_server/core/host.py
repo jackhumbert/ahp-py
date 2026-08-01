@@ -15,7 +15,7 @@ import contextlib
 import json
 import logging
 import uuid
-from collections.abc import Mapping, Sequence
+from collections.abc import Coroutine, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Final
@@ -79,6 +79,33 @@ _WORKING_DIRECTORY_ACTIONS: Final = frozenset(
 #: Upstream states their rejection rules in prose ("servers SHOULD reject...")
 #: and the reducers enforce none of them.
 _INPUT_ACTIONS: Final = frozenset({"chat/inputAnswerChanged", "chat/inputCompleted"})
+
+#: Client-dispatchable, and each resolves a tool call the host is suspended on.
+#: The protocol's own validation table conditions `chat/toolCallConfirmed` on
+#: the call's STATUS and never on client identity -- so any subscriber may
+#: approve any other client's pending call. That is upstream's design; the host
+#: still has to check the call is actually pending, which no reducer does.
+_TOOL_RESOLVING_ACTIONS: Final = frozenset({"chat/toolCallConfirmed", "chat/toolCallComplete"})
+
+
+def _active_clients(active_client: Any) -> list[Any]:
+    """`createSession.activeClient` as the initial `activeClients` list.
+
+    `tools` is required on `SessionActiveClient` and a client that omits it is
+    malformed, but the list is fanned out to every subscriber and a missing key
+    would break their iteration -- so it is normalised, not rejected. Everything
+    else on the entry survives verbatim (ADR 0001).
+    """
+    if not isinstance(active_client, Mapping):
+        return []
+    if not isinstance(active_client.get("clientId"), str):
+        # Without a clientId the entry is unaddressable: nothing can update it,
+        # remove it, or be told to execute its tools.
+        return []
+    entry = dict(active_client)
+    if not isinstance(entry.get("tools"), list):
+        entry["tools"] = []
+    return [entry]
 
 
 def _answers_of(state: Any, request_id: str) -> Mapping[str, Any]:
@@ -246,6 +273,7 @@ class Host:
                 task.cancel()
             await self.sequencer.unsubscribe_all(connection)
             self._connections.discard(connection)
+            await self._retire_active_client(connection)
             await connection.close()
 
     # ─── dispatch ────────────────────────────────────────────────────────
@@ -546,6 +574,36 @@ class Host:
         await self.sequencer.publish(channel, {"type": "chat/turnsLoaded", "turns": []})
         return {}
 
+    # ─── active clients ──────────────────────────────────────────────────
+
+    async def _retire_active_client(self, connection: Connection) -> None:
+        """Drop a departed client from every session that listed it.
+
+        "The server SHOULD automatically dispatch that removal when an active
+        client disconnects." Without it the session keeps advertising tools
+        nobody can execute, and a provider that picks one waits forever for a
+        result from a socket that is gone.
+        """
+        client_id = connection.client_id
+        if not client_id:
+            return
+        for session in list(self._sessions.values()):
+            state = self.sequencer.state_of(session.uri)
+            if not isinstance(state, Mapping):
+                continue
+            clients = state.get("activeClients")
+            if not isinstance(clients, list):
+                continue
+            if not any(
+                isinstance(entry, Mapping) and entry.get("clientId") == client_id
+                for entry in clients
+            ):
+                continue
+            await self.sequencer.publish(
+                session.uri,
+                {"type": "session/activeClientRemoved", "clientId": client_id},
+            )
+
     # ─── working directories ─────────────────────────────────────────────
 
     def _multiroot(self) -> Mapping[str, Any] | None:
@@ -637,7 +695,12 @@ class Host:
             "title": session.title,
             "status": _STATUS_IDLE,
             "lifecycle": "creating",
-            "activeClients": [],
+            # `createSession.activeClient` is how a client publishes the tools
+            # it can execute on the agent's behalf. VS Code sends its ENTIRE
+            # tool set here, with full input schemas (experiments.md E12e), and
+            # a host that drops it is throwing away the one tool surface that
+            # needs no filesystem API at all.
+            "activeClients": _active_clients(params.get("activeClient")),
             "chats": [],
         }
         if working_directories:
@@ -681,12 +744,15 @@ class Host:
 
     async def _bring_up(self, session: _Session, params: Mapping[str, Any]) -> None:
         try:
+            active_client = _active_clients(params.get("activeClient"))
             context = AgentSessionContext(
                 session_uri=session.uri,
                 chat_uri=session.chat_uri,
                 provider_id=session.provider_id,
                 working_directories=tuple(params.get("workingDirectories") or ()),
                 config=params.get("config") or {},
+                active_client_id=active_client[0]["clientId"] if active_client else None,
+                client_tools=tuple(active_client[0]["tools"]) if active_client else (),
             )
             session.agent_session = await self.provider.create_session(context)
         except Exception as exc:
@@ -872,6 +938,14 @@ class Host:
                 return "no active turn to cancel"
             if action_type == "chat/turnStarted" and state.get("activeTurn") is not None:
                 return "a turn is already active"
+            if (
+                action_type in _TOOL_RESOLVING_ACTIONS
+                and self.pending.id_for_key(action.get("toolCallId")) is None
+            ):
+                # A tool call the host is not waiting on. Rejected rather than
+                # ignored, so the client reverts its optimistic state instead of
+                # rendering a call as answered forever.
+                return "no tool call awaiting that id"
             if action_type in _INPUT_ACTIONS and not self.pending.is_open(action.get("requestId")):
                 # "Servers SHOULD reject client-dispatched input actions when no
                 # unresolved input-request part has the matching requestId."
@@ -889,7 +963,7 @@ class Host:
         if session is None:
             return
         if action_type == "chat/turnStarted":
-            runner = TurnRunner(self.sequencer, channel, self.pending)
+            runner = TurnRunner(self.sequencer, channel, self.pending, session.uri)
             session.turn = asyncio.create_task(self._run_turn(session, runner, action))
         elif action_type == "chat/turnCancelled" and session.turn is not None:
             session.turn.cancel()
@@ -902,7 +976,7 @@ class Host:
             request_id = action.get("requestId")
             if isinstance(request_id, str):
                 response = action.get("response")
-                self.pending.resolve(
+                resolved = self.pending.resolve(
                     request_id,
                     RequestOutcome(
                         response=response if isinstance(response, str) else "cancel",
@@ -916,6 +990,47 @@ class Host:
                         payload=_answers_of(self.sequencer.state_of(channel), request_id),
                     ),
                 )
+                if resolved:
+                    await self._retract_input_needed(session, request_id)
+        elif action_type in _TOOL_RESOLVING_ACTIONS:
+            request_id = self.pending.id_for_key(action.get("toolCallId"))
+            if request_id is not None:
+                if action_type == "chat/toolCallConfirmed":
+                    approved = action.get("approved")
+                    outcome = RequestOutcome(
+                        response="accept" if approved is not False else "decline",
+                        # `editedToolInput` is the client's rewrite of the
+                        # parameters. Carried through so the provider runs what
+                        # was approved rather than what it proposed.
+                        payload={"toolInput": action["editedToolInput"]}
+                        if "editedToolInput" in action
+                        else {},
+                    )
+                else:
+                    outcome = RequestOutcome(response="accept", payload=action.get("result"))
+                if self.pending.resolve(request_id, outcome):
+                    await self._retract_input_needed(session, request_id)
+
+    def _spawn(self, coroutine: Coroutine[Any, Any, None]) -> None:
+        """Run something to completion outside the caller's cancellation scope.
+
+        A bare `create_task` can be garbage-collected mid-flight, so the
+        reference is held until it finishes.
+        """
+        task = asyncio.create_task(coroutine)
+        self._background.add(task)
+        task.add_done_callback(self._background.discard)
+
+    async def _retract_input_needed(self, session: _Session, request_id: str) -> None:
+        await self.sequencer.publish(
+            session.uri, {"type": "session/inputNeededRemoved", "id": request_id}
+        )
+        await self._mirror_summary(session)
+
+    async def _retract_all(self, session: _Session, request_ids: Sequence[str]) -> None:
+        for request_id in request_ids:
+            with contextlib.suppress(Exception):
+                await self._retract_input_needed(session, request_id)
 
     async def _run_turn(
         self, session: _Session, runner: TurnRunner, action: Mapping[str, Any]
@@ -931,8 +1046,12 @@ class Host:
         try:
             await runner.run(session.agent_session, action)
         finally:
-            # `finally`, not `else`: a cancelled or failed turn moves the status
-            # bits too, and that is the transition a session list most needs.
+            # Retracted in a DETACHED task on purpose. This one is frequently
+            # the task being cancelled, and a cancelled task cannot be relied on
+            # to finish another await -- but a session left advertising input
+            # nobody can answer stays `InputNeeded` until it is disposed.
+            if runner.abandoned:
+                self._spawn(self._retract_all(session, [r.id for r in runner.abandoned]))
             with contextlib.suppress(Exception):
                 await self._mirror_summary(session)
 
