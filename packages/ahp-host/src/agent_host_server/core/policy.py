@@ -90,6 +90,16 @@ class Policy(Protocol):
         """
         ...
 
+    def may_invoke_operation(self, info: ConnectionInfo, changeset: str, operation: str) -> bool:
+        """Whether this peer may run a changeset operation.
+
+        An operation is whatever the embedder registered -- there are no
+        built-in ones, because the names VS Code uses (`commit`, `create-pr`,
+        `discard-changes`) include a credentialed network call and an
+        irreversible destruction of work.
+        """
+        ...
+
     def may_set_root_config(self, info: ConnectionInfo, key: str, value: Any) -> bool:
         """Whether this peer may change a host-wide configuration value.
 
@@ -143,6 +153,9 @@ class LoopbackSingleUserPolicy:
         return True
 
     def may_access_resource(self, info: ConnectionInfo, operation: str, uri: str) -> bool:
+        return True
+
+    def may_invoke_operation(self, info: ConnectionInfo, changeset: str, operation: str) -> bool:
         return True
 
     def may_set_root_config(self, info: ConnectionInfo, key: str, value: Any) -> bool:

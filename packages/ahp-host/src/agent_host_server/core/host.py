@@ -22,6 +22,14 @@ from pathlib import Path
 from typing import Any, Final
 
 from agent_host_server.core import errors
+from agent_host_server.core.changesets import (
+    Changeset,
+    ContentStore,
+    FileChange,
+    OperationHandler,
+    changes_summary,
+    file_entry,
+)
 from agent_host_server.core.channels import ROOT_URI
 from agent_host_server.core.config import RootConfig, type_matches
 from agent_host_server.core.connection import Connection
@@ -315,6 +323,11 @@ class _Session:
     #: Handed to the provider, and kept here so the host can publish on the
     #: session's behalf too.
     publisher: SessionPublisher | None = None
+    #: Before/after bytes for this session's changesets. Per-session and dies
+    #: with it: a diff cache, not a filesystem.
+    content: ContentStore = field(default_factory=ContentStore)
+    #: Changeset URI -> catalogue entry, for the channels this session owns.
+    changesets: dict[str, Changeset] = field(default_factory=dict)
 
     @property
     def annotations_uri(self) -> str:
@@ -380,6 +393,9 @@ class Host:
         self.watcher = watcher
         self._max_watches = max_watches_per_connection
         self._watches: dict[str, _Watch] = {}
+        #: Changeset operations the embedder made invocable. Empty by default,
+        #: and nothing in this library ever adds to it.
+        self._operations: dict[str, OperationHandler] = {}
         self.sequencer.observer = self
         self._root_ready = False
         self.wire_log = WireLog(wire_log) if wire_log is not None else None
@@ -488,6 +504,8 @@ class Host:
             return await self._dispose_session(connection, params)
         if method == "fetchTurns":
             return await self._fetch_turns(connection, params)
+        if method == "invokeChangesetOperation":
+            return await self._invoke_changeset_operation(connection, params)
         if method == "createResourceWatch":
             return await self._create_resource_watch(connection, params)
         if method in _RESOURCE_METHODS:
@@ -762,6 +780,17 @@ class Host:
         if method == "resourceRequest":
             return self._resource_request(connection, params, uri)
 
+        # Host-owned content is answered BEFORE the provider is consulted, so a
+        # changeset renders on a host that exposes no filesystem at all. VS
+        # Code intercepts its own `git-blob:` scheme the same way.
+        owner = self._content_owner(uri)
+        if owner is not None:
+            if not self.policy.may_see_channel(connection.info, owner.uri):
+                raise errors.AhpError(-32009, f"Not permitted to read {uri}")
+            if method != "resourceRead":
+                raise errors.invalid_params(f"{uri} is content, not a path")
+            return _read_result(owner.content.get(uri), params.get("encoding"))
+
         operation = {"resourceResolve": "resolve", "resourceRead": "read"}.get(method, "list")
         follow = params.get("followSymlinks")
         info = await self.resources.resolve(uri, follow_symlinks=follow is not False)
@@ -858,6 +887,133 @@ class Host:
                 uri, str(destination), fail_if_exists=bool(params.get("failIfExists"))
             )
         return {}
+
+    # ─── changesets ──────────────────────────────────────────────────────
+
+    def _content_owner(self, uri: str) -> _Session | None:
+        """The session whose store holds `uri`, if any."""
+        for session in self._sessions.values():
+            if session.content.owns(uri):
+                return session
+        return None
+
+    async def publish_changeset(
+        self,
+        session_uri: str,
+        changeset: Changeset,
+        changes: Sequence[FileChange],
+    ) -> str:
+        """Publish (or refresh) a changeset and its file list.
+
+        The channel is registered here, when the host mints the URI, so a
+        subscribe is answered by an exact-string lookup and nothing ever parses
+        a channel URI (invariant 15).
+        """
+        session = self._sessions.get(session_uri)
+        if session is None:
+            raise errors.session_not_found(session_uri)
+
+        files = [file_entry(change, session.content) for change in changes]
+        first = changeset.uri not in session.changesets
+        session.changesets[changeset.uri] = changeset
+        if first:
+            await self.sequencer.register_channel(
+                changeset.uri, {"status": "computing", "files": []}, "changeset"
+            )
+            await self.sequencer.publish(
+                session_uri,
+                {
+                    "type": "session/changesetsChanged",
+                    "changesets": [c.to_catalogue_entry() for c in session.changesets.values()],
+                },
+            )
+
+        # `contentChanged` replaces the file list wholesale and carries the
+        # operations in the same action, so a client never sees a changeset with
+        # files but no buttons.
+        action: dict[str, Any] = {"type": "changeset/contentChanged", "files": files}
+        if changeset.operations:
+            action["operations"] = [o.to_wire() for o in changeset.operations]
+        await self.sequencer.publish(changeset.uri, action)
+        await self.sequencer.publish(
+            changeset.uri, {"type": "changeset/statusChanged", "status": "ready"}
+        )
+
+        # The roll-up a session list renders, summed from the per-file diffs the
+        # host just computed -- so the list and the changeset cannot disagree.
+        await self._set_changes_summary(session, files)
+        return changeset.uri
+
+    async def _set_changes_summary(
+        self, session: _Session, files: Sequence[Mapping[str, Any]]
+    ) -> None:
+        state = self.sequencer.state_of(session.uri)
+        if not isinstance(state, Mapping):
+            return
+        summary = changes_summary(files)
+        # `SessionSummary.changes` has no action of its own; it rides on the
+        # session state like every other summary field, and `_mirror_summary`
+        # carries it to root.
+        self.sequencer._states[session.uri] = {**state, "changes": summary}
+        await self._mirror_summary(session)
+
+    async def _invoke_changeset_operation(
+        self, connection: Connection, params: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        """Run an embedder-registered operation. There are no built-in ones.
+
+        `commit`, `create-pr`, `discard-changes` and `sync` are VS Code private
+        string constants, not protocol names. One is a credentialed network call
+        and one irreversibly destroys work, so what an operation id means is the
+        embedder's decision and this host ships none of them.
+        """
+        channel = params.get("channel")
+        operation = params.get("operationId")
+        if not isinstance(channel, str) or not isinstance(operation, str):
+            raise errors.invalid_params("channel and operationId are required")
+        if self.sequencer.reducer_of(channel) != "changeset":
+            raise errors.invalid_params(f"{channel} is not a changeset")
+        if not self.policy.may_invoke_operation(connection.info, channel, operation):
+            raise errors.AhpError(-32009, f"Not permitted to invoke {operation}")
+
+        handler = self._operations.get(operation)
+        if handler is None:
+            raise errors.invalid_params(f"unknown operation {operation!r}")
+
+        await self.sequencer.publish(
+            channel,
+            {
+                "type": "changeset/operationStatusChanged",
+                "operationId": operation,
+                "status": "running",
+            },
+        )
+        try:
+            await handler(channel, operation)
+        except Exception as exc:
+            await self.sequencer.publish(
+                channel,
+                {
+                    "type": "changeset/operationStatusChanged",
+                    "operationId": operation,
+                    "status": "error",
+                    "error": {"message": f"{type(exc).__name__}: {exc}"},
+                },
+            )
+            return {}
+        await self.sequencer.publish(
+            channel,
+            {
+                "type": "changeset/operationStatusChanged",
+                "operationId": operation,
+                "status": "idle",
+            },
+        )
+        return {}
+
+    def register_operation(self, operation_id: str, handler: OperationHandler) -> None:
+        """Make an operation invocable. Explicit, per operation, by the embedder."""
+        self._operations[operation_id] = handler
 
     # ─── resource watches ────────────────────────────────────────────────
 
@@ -1080,6 +1236,20 @@ class Host:
         if action.get("replace"):
             return "replacing the whole config is not permitted"
         return None
+
+    def _validate_review(self, channel: str) -> str | None:
+        """Reject review on a changeset that never advertised it.
+
+        "Requires the changeset to advertise `capabilities.review`." The reducer
+        enforces nothing -- the changeset channel has no validation table at all
+        -- so a peer could otherwise mark files reviewed on a changeset whose
+        client renders no review UI, and the flag would sit in state unexplained.
+        """
+        for session in self._sessions.values():
+            entry = session.changesets.get(channel)
+            if entry is not None:
+                return None if entry.reviewable else "this changeset is not reviewable"
+        return "unknown changeset"
 
     def _validate_root_config(
         self, connection: Connection, action: Mapping[str, Any]
@@ -1385,6 +1555,8 @@ class Host:
             await session.agent_session.aclose()
 
         del self._sessions[channel]
+        for changeset_uri in session.changesets:
+            await self.sequencer.drop_channel(changeset_uri)
         await self.sequencer.drop_channel(session.chat_uri)
         await self.sequencer.drop_channel(session.annotations_uri)
         await self.sequencer.drop_channel(channel)
@@ -1477,6 +1649,9 @@ class Host:
 
         if action_type == "root/configChanged":
             return self._validate_root_config(connection, action)
+
+        if action_type == "changeset/filesReviewChanged":
+            return self._validate_review(channel)
 
         if action_type == "session/configChanged":
             return self._validate_session_config(connection, channel, action)
