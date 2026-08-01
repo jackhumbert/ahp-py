@@ -13,18 +13,38 @@ import asyncio
 from agent_host_server.provider.base import (
     AgentInfo,
     AgentSessionContext,
+    SessionDescription,
     TurnSink,
     UserMessage,
+)
+from agent_host_server.provider.demo_customizations import (
+    demo_customizations,
+    demo_server_tools,
 )
 
 __all__ = ["EchoProvider", "EchoSession"]
 
 
 class EchoSession:
-    def __init__(self, context: AgentSessionContext, *, delay: float = 0.0) -> None:
+    def __init__(
+        self, context: AgentSessionContext, *, delay: float = 0.0, customizations: bool = False
+    ) -> None:
         self.context = context
         self._delay = delay
+        self._customizations = customizations
         self._cancelled = False
+
+    async def describe(self) -> SessionDescription:
+        """Contribute a fully-populated customization tree, when asked to.
+
+        Off by default: it exists to find out what a client renders, not to
+        pretend the echo agent has plugins.
+        """
+        if not self._customizations:
+            return SessionDescription()
+        return SessionDescription(
+            customizations=demo_customizations(), server_tools=demo_server_tools()
+        )
 
     async def send_user_message(self, message: UserMessage, sink: TurnSink) -> None:
         self._cancelled = False
@@ -53,8 +73,10 @@ class EchoProvider:
         description: str = "Echoes your message back. No model, no network.",
         model_name: str = "Echo Model v1",
         delay: float = 0.0,
+        customizations: bool = False,
     ) -> None:
         self._delay = delay
+        self._customizations = customizations
         # `display_name` is what a client labels the agent with; `models` become
         # entries in VS Code's chat model picker (AgentHostLanguageModelProvider
         # reads them straight out of root state). They are deliberately different
@@ -71,4 +93,4 @@ class EchoProvider:
         return self._info
 
     async def create_session(self, context: AgentSessionContext) -> EchoSession:
-        return EchoSession(context, delay=self._delay)
+        return EchoSession(context, delay=self._delay, customizations=self._customizations)

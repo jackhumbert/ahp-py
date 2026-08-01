@@ -26,7 +26,12 @@ from agent_host_server.core.sequencer import Sequencer
 from agent_host_server.core.turn import TurnRunner
 from agent_host_server.core.versions import DEFAULT_SUPPORTED_VERSIONS, negotiate
 from agent_host_server.core.wirelog import WireLog
-from agent_host_server.provider.base import AgentProvider, AgentSession, AgentSessionContext
+from agent_host_server.provider.base import (
+    AgentProvider,
+    AgentSession,
+    AgentSessionContext,
+    DescribesSession,
+)
 from agent_host_server.reducers.clock import now_iso
 from agent_host_server.transport.base import Transport
 from agent_host_server.types import IS_CLIENT_DISPATCHABLE
@@ -382,6 +387,25 @@ class Host:
             session.uri,
             {"type": "session/defaultChatChanged", "defaultChat": session.chat_uri},
         )
+        # Customizations and tools are session STATE, so they are published as
+        # actions before `ready` -- a client subscribing on ready then sees them
+        # in its snapshot rather than racing for them.
+        if isinstance(session.agent_session, DescribesSession):
+            described = await session.agent_session.describe()
+            if described.customizations:
+                await self.sequencer.publish(
+                    session.uri,
+                    {
+                        "type": "session/customizationsChanged",
+                        "customizations": list(described.customizations),
+                    },
+                )
+            if described.server_tools:
+                await self.sequencer.publish(
+                    session.uri,
+                    {"type": "session/serverToolsChanged", "tools": list(described.server_tools)},
+                )
+
         await self.sequencer.publish(session.uri, {"type": "session/ready"})
 
     async def _dispose_session(self, connection: Connection, params: Mapping[str, Any]) -> None:

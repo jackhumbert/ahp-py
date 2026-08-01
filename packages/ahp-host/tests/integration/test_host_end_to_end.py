@@ -655,3 +655,84 @@ class TestPing:
 
 async def client_ping(client: FakeClient) -> dict[str, Any]:
     return await client.request("ping", {"channel": ROOT_URI})
+
+
+class TestCustomizations:
+    """A provider contributing customizations and tools to session state.
+
+    The tree is two-level and easy to get wrong: the top-level `Customization`
+    union is only `plugin` / `directory` / `mcpServer`, and agents, skills,
+    prompts, rules and hooks are CHILDREN of a container. `serverTools` is a
+    separate field, not a customization.
+    """
+
+    @staticmethod
+    async def _state(client: FakeClient, uri: str) -> dict[str, Any]:
+        await _initialize(client)
+        await client.request("createSession", {"channel": uri})
+        await client.collect(seconds=0.4)
+        result = (await client.request("subscribe", {"channel": uri}))["result"]
+        return dict(result["snapshot"]["state"])
+
+    async def test_the_whole_tree_lands_in_session_state(self) -> None:
+        host = Host(EchoProvider(customizations=True), LoopbackSingleUserPolicy())
+        client_transport, server_transport = memory_pair()
+        serve = asyncio.create_task(host.serve(server_transport))
+        try:
+            state = await self._state(FakeClient(client_transport), "echo:/cust-1")
+            top = {c["type"]: c for c in state["customizations"]}
+            assert set(top) == {"plugin", "directory", "mcpServer"}
+
+            children = {c["type"] for c in top["plugin"]["children"]}
+            assert children == {"agent", "skill", "prompt", "rule", "hook"}
+
+            assert [t["name"] for t in state["serverTools"]] == [
+                "ahs_echo_tool",
+                "ahs_clock_tool",
+            ]
+        finally:
+            serve.cancel()
+            await host.aclose()
+
+    async def test_customizations_are_published_before_ready(self) -> None:
+        """So a client subscribing on `ready` sees them in its snapshot rather
+        than racing for them."""
+        host = Host(EchoProvider(customizations=True), LoopbackSingleUserPolicy())
+        client_transport, server_transport = memory_pair()
+        serve = asyncio.create_task(host.serve(server_transport))
+        client = FakeClient(client_transport)
+        try:
+            await _initialize(client)
+            uri = "echo:/cust-2"
+            await client.request("createSession", {"channel": uri})
+            await client.collect(seconds=0.4)
+
+            # Asserted from the replay log rather than from what this client
+            # happened to observe: bring-up is asynchronous, so a client that
+            # subscribes after it finishes correctly sees the result in its
+            # snapshot instead. The published ORDER is what matters here.
+            replay = (
+                await client.request(
+                    "reconnect",
+                    {
+                        "channel": ROOT_URI,
+                        "clientId": "test-client",
+                        "lastSeenServerSeq": 0,
+                        "subscriptions": [uri],
+                    },
+                )
+            )["result"]
+            order = [a["action"]["type"] for a in replay["actions"]]
+            assert "session/customizationsChanged" in order, order
+            assert order.index("session/customizationsChanged") < order.index("session/ready")
+            assert order.index("session/serverToolsChanged") < order.index("session/ready")
+        finally:
+            serve.cancel()
+            await host.aclose()
+
+    async def test_they_are_off_by_default(self, connected: tuple[Host, FakeClient]) -> None:
+        """The echo agent has no plugins; pretending otherwise would be a lie."""
+        _, client = connected
+        state = await self._state(client, "echo:/cust-3")
+        assert not state.get("customizations")
+        assert not state.get("serverTools")

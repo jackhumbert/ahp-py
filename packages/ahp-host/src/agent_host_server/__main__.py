@@ -55,6 +55,11 @@ def _parse_args() -> argparse.Namespace:
         metavar="PATH",
         help="append every frame as ahp-inspector JSONL (open with `npx ahp-inspector`)",
     )
+    parser.add_argument(
+        "--customizations",
+        action="store_true",
+        help="advertise a demo plugin/agent/skill/instruction/hook/MCP tree, named AHS*",
+    )
     parser.add_argument("-v", "--verbose", action="store_true", help="debug logging")
     return parser.parse_args()
 
@@ -74,6 +79,7 @@ async def _run() -> None:
             delay=args.delay,
             display_name=args.agent_name,
             model_name=args.model_name,
+            customizations=args.customizations,
         ),
         LoopbackSingleUserPolicy(),
         info=HostInfo(name="agent-host-server (demo)"),

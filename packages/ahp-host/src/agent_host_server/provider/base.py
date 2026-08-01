@@ -22,7 +22,9 @@ __all__ = [
     "AgentProvider",
     "AgentSession",
     "AgentSessionContext",
+    "DescribesSession",
     "ResumableAgentProvider",
+    "SessionDescription",
     "TurnSink",
     "UserMessage",
 ]
@@ -113,6 +115,36 @@ class AgentSession(Protocol):
     async def cancel(self, reason: str | None = None) -> None: ...
 
     async def aclose(self) -> None: ...
+
+
+@dataclass(frozen=True)
+class SessionDescription:
+    """What a provider contributes to a session's own state, beyond its turns.
+
+    These are session *state*, not turn events, so they do not go through the
+    :class:`TurnSink` -- the host publishes them as `session/*` actions during
+    bring-up and whenever the provider reports a change.
+
+    `customizations` is the two-level tree the protocol defines: the top level
+    holds only `plugin`, `directory` and `mcpServer` entries, and agents,
+    skills, prompts, rules and hooks are **children** of a container.
+    `server_tools` is a separate field (`SessionState.serverTools`), not a
+    customization.
+    """
+
+    customizations: Sequence[Mapping[str, Any]] = ()
+    server_tools: Sequence[Mapping[str, Any]] = ()
+
+
+@runtime_checkable
+class DescribesSession(Protocol):
+    """An agent session that contributes customizations or tools.
+
+    Optional, and feature-detected with ``isinstance`` rather than a capability
+    flag -- the same shape as :class:`ResumableAgentProvider`.
+    """
+
+    async def describe(self) -> SessionDescription: ...
 
 
 @runtime_checkable
