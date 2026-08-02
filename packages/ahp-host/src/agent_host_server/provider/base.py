@@ -506,7 +506,17 @@ class TurnSink(Protocol):
         something an adapter can forget."""
         ...
 
-    async def turn_failed(self, message: str) -> None: ...
+    async def turn_failed(
+        self, message: str, error_type: str = "agent.turn", duration_ms: int = 0
+    ) -> None:
+        """End the turn in error. `errorType` is REQUIRED by the protocol.
+
+        Omitting it rendered every failure as `Error: (undefined) <message>`.
+        Any non-empty string renders -- the schema declares `errorType: string`
+        with no enum -- so the default matches the reference host's dotted
+        vocabulary rather than inventing one.
+        """
+        ...
 
     async def request_input(self, request: InputRequest) -> InputOutcome:
         """Ask a human, and **wait**. See ADR 0005.

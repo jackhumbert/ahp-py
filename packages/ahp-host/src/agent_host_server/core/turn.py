@@ -14,6 +14,7 @@ to know that; here it is impossible to get wrong.
 from __future__ import annotations
 
 import json
+import time
 import uuid
 from collections.abc import Mapping
 from typing import Any
@@ -165,14 +166,35 @@ class ActionTurnSink:
         }
         await self._sequencer.publish(self._channel, action)
 
-    async def turn_failed(self, message: str) -> None:
+    async def turn_failed(
+        self, message: str, error_type: str = "agent.turn", duration_ms: int = 0
+    ) -> None:
+        """End the turn in error.
+
+        `errorType` is REQUIRED by `ErrorInfo` and we omitted it, so the client
+        rendered every failure as the literal string `Error: (undefined) ...`.
+        Its first mapper wants `_meta.chatError.fetchError.type` and returns
+        undefined without it, so the `??` fallback -- `Error: ({0}) {1}` --
+        always won, with `errorType` interpolated as `undefined`.
+
+        The vocabulary is NOT a contract: the schema says `errorType: string`
+        with no enum, and the client only ever interpolates it into a display
+        string. The dotted tokens here match the reference host
+        (`agent.turn`, `provider.resumeSession`) rather than the
+        `somethingFailed` style VS Code's own host emits, which is produced by
+        its host-side code and consumed by nobody.
+
+        Cancellation does NOT come through here. `chat/turnCancelled` is its
+        own action, carries no ErrorInfo, and settles the turn as `cancelled`;
+        routing a user's stop through `chat/error` would paint it red.
+        """
         await self._sequencer.publish(
             self._channel,
             {
                 "type": "chat/error",
                 "turnId": self._turn_id,
-                "error": {"message": message},
-                "duration": 0,
+                "error": {"errorType": error_type, "message": message},
+                "duration": duration_ms,
             },
         )
 
@@ -402,6 +424,15 @@ class ActionTurnSink:
         )
 
 
+def _elapsed_ms(started_at: float) -> int:
+    """Milliseconds since *started_at*, from the monotonic clock.
+
+    Monotonic rather than wall clock: a turn that straddles an NTP correction
+    or a DST change must not report a negative duration.
+    """
+    return max(0, int((time.monotonic() - started_at) * 1000))
+
+
 def _agent_uri(value: Any) -> str | None:
     """`AgentSelection.uri`, which is the whole of that type."""
     if isinstance(value, Mapping):
@@ -466,8 +497,12 @@ class TurnRunner:
             self._sequencer, self._channel, turn_id, self._pending, self._session_uri
         )
 
+        started_at = time.monotonic()
+
         if agent_session is None:
-            await sink.turn_failed("no agent session")
+            # Distinct from a provider crash, and named the way the reference
+            # host names it: the session could not be resumed.
+            await sink.turn_failed("no agent session", "provider.resumeSession")
             return
 
         message = started.get("message") or {}
@@ -487,7 +522,11 @@ class TurnRunner:
             )
         except Exception as exc:
             if self._is_active(turn_id):
-                await sink.turn_failed(f"{type(exc).__name__}: {exc}")
+                await sink.turn_failed(
+                    f"{type(exc).__name__}: {exc}",
+                    "agent.turn",
+                    _elapsed_ms(started_at),
+                )
             return
         finally:
             # ADR 0005: the turn is the scope. However this turn ended -- return,
@@ -507,7 +546,14 @@ class TurnRunner:
 
         await self._sequencer.publish(
             self._channel,
-            {"type": "chat/turnComplete", "turnId": turn_id, "duration": 0},
+            # Measured, not zero. The client renders it as the turn's elapsed
+            # time (`elapsedMs: c.duration`), so a hardcoded 0 made every turn
+            # in the transcript look instantaneous.
+            {
+                "type": "chat/turnComplete",
+                "turnId": turn_id,
+                "duration": _elapsed_ms(started_at),
+            },
         )
 
     def _is_active(self, turn_id: str) -> bool:
