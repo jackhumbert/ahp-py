@@ -99,7 +99,7 @@ from agent_host_server.provider.base import (
 )
 from agent_host_server.reducers.clock import now_iso
 from agent_host_server.transport.base import Transport
-from agent_host_server.types import IS_CLIENT_DISPATCHABLE
+from agent_host_server.types import IS_CLIENT_DISPATCHABLE, JSON_RPC_ERROR_CODES
 from agent_host_server.types.protocol import SessionStatus, session_status_flags
 
 __all__ = ["Host", "HostInfo"]
@@ -565,6 +565,10 @@ class _Session:
     content: ContentStore = field(default_factory=ContentStore)
     #: Changeset URI -> catalogue entry, for the channels this session owns.
     changesets: dict[str, Changeset] = field(default_factory=dict)
+    #: Changeset URI -> the file ids a client has marked reviewed. Held here
+    #: because `changeset/contentChanged` replaces the file list wholesale, so
+    #: a republish has to restate them or the ticks vanish.
+    reviewed: dict[str, set[str]] = field(default_factory=dict)
     #: Opaque provider state a previous run persisted. Round-tripped, never
     #: interpreted: only the provider knows what it means.
     resume_state: Mapping[str, Any] | None = None
@@ -601,6 +605,13 @@ def _cwd_uri(path: str) -> str:
     if not candidate.is_absolute():
         return path
     return uri_from_path(candidate)
+
+
+def _entry_id(change: FileChange) -> str:
+    """The id `file_entry` will give this change. Kept in step with it."""
+    if change.after is not None:
+        return change.renamed_to or change.uri
+    return change.uri
 
 
 def _published_title(state: Any) -> str:
@@ -2281,7 +2292,11 @@ class Host:
         if session is None:
             raise errors.session_not_found(session_uri)
 
-        files = [file_entry(change, session.content) for change in changes]
+        already = session.reviewed.get(changeset.uri, set())
+        files = [
+            file_entry(change, session.content, reviewed=_entry_id(change) in already)
+            for change in changes
+        ]
         first = changeset.uri not in session.changesets
         session.changesets[changeset.uri] = changeset
         if first:
@@ -2305,7 +2320,7 @@ class Host:
         # files but no buttons.
         action: dict[str, Any] = {"type": "changeset/contentChanged", "files": files}
         if changeset.operations:
-            action["operations"] = [o.to_wire() for o in changeset.operations]
+            action["operations"] = self._operations_wire(session, changeset)
         await self.sequencer.publish(changeset.uri, action)
         await self.sequencer.publish(
             changeset.uri, {"type": "changeset/statusChanged", "status": "ready"}
@@ -2393,6 +2408,17 @@ class Host:
 
         target = self._operation_target(channel, operation, params.get("target"))
 
+        # Refused while the agent is writing. Committing or reverting mid-turn
+        # races the agent's own writes on the same files, and nothing on screen
+        # says so. The reference host both greys the buttons and refuses the
+        # invoke; greying alone is advisory, since the request can still arrive
+        # from a stale UI.
+        owner = next((s for s in self._sessions.values() if channel in s.changesets), None)
+        if owner is not None and owner.turn is not None and not owner.turn.done():
+            raise errors.invalid_params(
+                f"{operation!r} is disabled while a turn is active"
+            )
+
         await self.sequencer.publish(
             channel,
             {
@@ -2413,7 +2439,16 @@ class Host:
                     "error": {"message": f"{type(exc).__name__}: {exc}"},
                 },
             )
-            return {}
+            # AND fail the request. The client's operation mapper drops `error`
+            # entirely and computes enablement from `status !== "disabled" &&
+            # status !== "running"`, so an `error` status renders exactly like
+            # `idle` -- a failed operation was visually identical to one that
+            # did nothing, which is precisely the complaint. A rejected request
+            # is the one failure channel the client does surface.
+            raise errors.AhpError(
+                JSON_RPC_ERROR_CODES["InternalError"],
+                f"{operation} failed: {type(exc).__name__}: {exc}",
+            ) from exc
         await self.sequencer.publish(
             channel,
             {
@@ -2423,6 +2458,22 @@ class Host:
             },
         )
         return {}
+
+    def _operations_wire(self, session: _Session, changeset: Changeset) -> list[dict[str, Any]]:
+        """The operations, greyed out while the agent is writing.
+
+        `status: "disabled"` is what the client reads for enablement. Without
+        it a user can commit or revert mid-turn, racing the agent's own writes,
+        with nothing on screen to suggest they should not.
+        """
+        busy = session.turn is not None and not session.turn.done()
+        wire: list[dict[str, Any]] = []
+        for operation in changeset.operations:
+            entry = operation.to_wire()
+            if busy:
+                entry["status"] = "disabled"
+            wire.append(entry)
+        return wire
 
     def register_operation(self, operation_id: str, handler: OperationHandler) -> None:
         """Make an operation invocable. Explicit, per operation, by the embedder."""
@@ -2781,6 +2832,19 @@ class Host:
                 [d for d in requested if d not in servable],
             )
         requested = servable
+        if not requested and self.default_directory is not None:
+            # Fall back to the served root. A session with NO working directory
+            # is not merely cosmetic: the client builds `folders[0]` -- and
+            # therefore `gitRepository` and the `hasGitRepository` context key --
+            # from `summary.workingDirectories[0]`, and the changeset picker is
+            # gated on that key. With none, the dropdown that switches between
+            # changesets does not render at all, so only the first changeset is
+            # ever reachable.
+            #
+            # This is exactly the common path: VS Code sends `file:///` when it
+            # has no better answer, the jail correctly refuses it, and the
+            # session ends up with nothing.
+            requested = [self.default_directory]
         if self._multiroot() is None:
             # "Servers without that capability treat only the first entry as the
             # session's working directory and ignore the rest." Truncate rather
@@ -3379,6 +3443,9 @@ class Host:
         if action_type in _MCP_LIFECYCLE_ACTIONS:
             await self._react_to_mcp(channel, action)
             return
+        if action_type == "changeset/filesReviewChanged":
+            self._remember_review(channel, action)
+            return
         if action_type == "session/activeClientSet" and connection is not None:
             await self._react_to_active_client(connection, channel, action)
             return
@@ -3480,6 +3547,28 @@ class Host:
                 cols, rows = action.get("cols"), action.get("rows")
                 if isinstance(cols, int) and isinstance(rows, int):
                     await terminal.process.resize(cols, rows)
+
+    def _remember_review(self, channel: str, action: Mapping[str, Any]) -> None:
+        """Record which files a client marked reviewed.
+
+        The reducer applies the flag to the CURRENT file list, and
+        `changeset/contentChanged` replaces that list wholesale -- so without
+        remembering, every tick cleared on the next republish. From the outside
+        that reads as the checkbox being broken, which is exactly how it was
+        reported.
+        """
+        session = next((s for s in self._sessions.values() if channel in s.changesets), None)
+        if session is None:
+            return
+        reviewed = action.get("reviewed") is True
+        remembered = session.reviewed.setdefault(channel, set())
+        for identifier in action.get("files") or ():
+            if not isinstance(identifier, str):
+                continue
+            if reviewed:
+                remembered.add(identifier)
+            else:
+                remembered.discard(identifier)
 
     async def _react_to_active_client(
         self, connection: Connection, channel: str, action: Mapping[str, Any]

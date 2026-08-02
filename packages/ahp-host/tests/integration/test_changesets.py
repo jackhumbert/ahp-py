@@ -537,3 +537,193 @@ class TestOperationTargets:
         )
         await client.collect(seconds=0.3)
         assert seen == [None]
+
+
+class TestReviewSurvivesARepublish:
+    """Ticking Viewed then pressing any button cleared every tick.
+
+    `changeset/contentChanged` replaces the file list wholesale, so the
+    republish added so the buttons would visibly do something silently wiped
+    the flags with it. From the outside that is the checkbox being broken --
+    which is how it was reported.
+    """
+
+    async def test_a_reviewed_file_stays_reviewed(self, host: Host) -> None:
+        uri = "echo:/rev-1"
+        client = await _session(host, uri)
+        channel = await host.publish_changeset(
+            uri,
+            Changeset(label="c", reviewable=True),
+            [FileChange(uri="file:///work/a.txt", before=b"one\n", after=b"two\n")],
+        )
+        state = (await client.request("subscribe", {"channel": channel}))["result"]["snapshot"][
+            "state"
+        ]
+        file_id = state["files"][0]["id"]
+        assert not state["files"][0].get("reviewed")
+
+        await client.notify(
+            "dispatchAction",
+            {
+                "channel": channel,
+                "clientSeq": 1,
+                "action": {
+                    "type": "changeset/filesReviewChanged",
+                    "files": [file_id],
+                    "reviewed": True,
+                },
+            },
+        )
+        await client.collect(seconds=0.3)
+
+        # The republish an operation triggers.
+        await host.publish_changeset(
+            uri,
+            Changeset(label="c", reviewable=True),
+            [FileChange(uri="file:///work/a.txt", before=b"one\n", after=b"three\n")],
+        )
+        after = (await client.request("subscribe", {"channel": channel}))["result"]["snapshot"][
+            "state"
+        ]
+        assert after["files"][0]["reviewed"] is True, "the tick was wiped by the republish"
+
+    async def test_unreviewing_is_remembered_too(self, host: Host) -> None:
+        uri = "echo:/rev-2"
+        client = await _session(host, uri)
+        changeset = Changeset(label="c", reviewable=True)
+        change = FileChange(uri="file:///work/b.txt", before=b"x\n", after=b"y\n")
+        channel = await host.publish_changeset(uri, changeset, [change])
+        state = (await client.request("subscribe", {"channel": channel}))["result"]["snapshot"][
+            "state"
+        ]
+        file_id = state["files"][0]["id"]
+
+        for flag in (True, False):
+            await client.notify(
+                "dispatchAction",
+                {
+                    "channel": channel,
+                    "clientSeq": 1,
+                    "action": {
+                        "type": "changeset/filesReviewChanged",
+                        "files": [file_id],
+                        "reviewed": flag,
+                    },
+                },
+            )
+            await client.collect(seconds=0.2)
+
+        await host.publish_changeset(uri, changeset, [change])
+        after = (await client.request("subscribe", {"channel": channel}))["result"]["snapshot"][
+            "state"
+        ]
+        assert not after["files"][0].get("reviewed")
+
+
+class TestOperationsAreHonestAboutFailureAndTiming:
+    """Two complaints with one root: the client shows nothing on its own.
+
+    Its operation mapper drops `error` entirely and computes enablement from
+    `status !== "disabled" && status !== "running"`, so an `error` status
+    renders exactly like `idle`. A failed operation was indistinguishable from
+    one that did nothing.
+    """
+
+    async def test_a_failing_operation_fails_the_request(self, host: Host) -> None:
+        uri = "echo:/op-fail"
+        client = await _session(host, uri)
+
+        async def handler(changeset: str, operation: str, target: Mapping[str, Any] | None) -> None:
+            raise RuntimeError("upstream said no")
+
+        host.register_operation("risky", handler)
+        channel = await host.publish_changeset(
+            uri,
+            Changeset(label="c", operations=[ChangesetOperation(id="risky", label="Risky")]),
+            [_EDIT],
+        )
+        await client.request("subscribe", {"channel": channel})
+
+        response = await client.request(
+            "invokeChangesetOperation", {"channel": channel, "operationId": "risky"}
+        )
+        assert "error" in response, "a failed operation returned success"
+        assert "upstream said no" in response["error"]["message"]
+
+        # And the status still goes out, for every other subscriber.
+        await client.collect(seconds=0.3)
+        statuses = [
+            a["action"]["status"]
+            for a in client.actions(channel)
+            if a["action"]["type"] == "changeset/operationStatusChanged"
+        ]
+        assert "error" in statuses
+
+    async def test_operations_are_disabled_during_a_turn(self) -> None:
+        # A provider slow enough that the turn is genuinely in flight when the
+        # invoke arrives. With the default echo the turn finishes first and the
+        # invoke is legitimately allowed, which is not what this is testing.
+        host = Host(EchoProvider(delay=0.4), LoopbackSingleUserPolicy())
+        uri = "echo:/op-busy"
+        client = await _session(host, uri)
+        ran: list[str] = []
+
+        async def handler(changeset: str, operation: str, target: Mapping[str, Any] | None) -> None:
+            ran.append(operation)
+
+        host.register_operation("commit", handler)
+        changeset = Changeset(
+            label="c", operations=[ChangesetOperation(id="commit", label="Commit")]
+        )
+        channel = await host.publish_changeset(uri, changeset, [_EDIT])
+        state = (await client.request("subscribe", {"channel": uri}))["result"]["snapshot"]["state"]
+        chat = state["chats"][0]["resource"]
+        await client.request("subscribe", {"channel": chat})
+
+        # Start a turn and invoke while it runs.
+        await client.notify(
+            "dispatchAction",
+            {
+                "channel": chat,
+                "clientSeq": 1,
+                "action": {
+                    "type": "chat/turnStarted",
+                    "turnId": "t1",
+                    "startedAt": "1970-01-01T00:00:01.000Z",
+                    "message": {"text": "work", "origin": {"kind": "user"}},
+                },
+            },
+        )
+        # The turn starts on a NOTIFICATION, so let it actually begin --
+        # otherwise the invoke races ahead of it and is legitimately allowed.
+        await asyncio.sleep(0.15)
+        refused = await client.request(
+            "invokeChangesetOperation", {"channel": channel, "operationId": "commit"}
+        )
+        assert refused["error"]["code"] == -32602
+        assert not ran, "an operation raced the agent's own writes"
+        await host.aclose()
+
+    async def test_the_buttons_grey_out_while_a_turn_runs(self, host: Host) -> None:
+        """Refusing is the guarantee; greying is what tells the user."""
+        uri = "echo:/op-grey"
+        client = await _session(host, uri)
+        changeset = Changeset(
+            label="c", operations=[ChangesetOperation(id="commit", label="Commit")]
+        )
+        channel = await host.publish_changeset(uri, changeset, [_EDIT])
+        idle = (await client.request("subscribe", {"channel": channel}))["result"]["snapshot"][
+            "state"
+        ]
+        assert idle["operations"][0]["status"] == "idle"
+
+        session = host._sessions[uri]
+        session.turn = asyncio.create_task(asyncio.sleep(5))
+        try:
+            await host.publish_changeset(uri, changeset, [_EDIT])
+            busy = (await client.request("subscribe", {"channel": channel}))["result"]["snapshot"][
+                "state"
+            ]
+            assert busy["operations"][0]["status"] == "disabled"
+        finally:
+            session.turn.cancel()

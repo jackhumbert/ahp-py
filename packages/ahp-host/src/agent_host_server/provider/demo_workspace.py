@@ -48,11 +48,23 @@ _log = logging.getLogger(__name__)
 #: prompt on a misconfigured remote) must not hang a turn.
 _GIT_TIMEOUT = 15.0
 
+#: The buttons. **At most two changeset-scoped at once**, deliberately.
+#:
+#: The client flattens every `changeset`-scoped operation and, when there is
+#: more than one, wraps them in a single submenu labelled with the FIRST --
+#: rendered as one primary button with the rest behind a chevron. Four of them
+#: collapsed into one button reading "Stage all", and Commit, Revert and
+#: Mark-all-reviewed appeared not to exist at all. The reference host avoids
+#: this by gating operations so only one or two are ever present; so do we.
+#:
+#: `revert` is `resource`-scoped only, which is what the reference does for its
+#: own discard verb: it belongs on the file you are looking at, not on a bar
+#: where it sits one click away from everything.
 WORKSPACE_OPERATIONS = (
     ChangesetOperation(
         id="ahs-stage",
         label="Stage all",
-        description="git add -- <the files in this changeset>",
+        description="git add -- the files in this changeset",
         scopes=("changeset", "resource"),
         icon="add",
         group="1_git",
@@ -60,7 +72,7 @@ WORKSPACE_OPERATIONS = (
     ChangesetOperation(
         id="ahs-commit",
         label="Commit",
-        description="git commit the staged changes, with a generated message",
+        description="git commit the staged changes",
         scopes=("changeset",),
         icon="check",
         group="1_git",
@@ -68,18 +80,17 @@ WORKSPACE_OPERATIONS = (
     ChangesetOperation(
         id="ahs-revert",
         label="Revert",
-        description="Restore these files from HEAD and delete the ones the agent created.",
-        scopes=("changeset", "resource"),
+        description="Restore this file from HEAD, or delete it if HEAD never had it.",
+        scopes=("resource",),
         icon="discard",
         group="2_undo",
-        # It really does destroy the agent's work now, so it really does ask.
-        confirmation="Discard the agent's edits and restore these files from git?",
+        confirmation="Discard the agent's edits to this file and restore it from git?",
     ),
     ChangesetOperation(
         id="ahs-review",
-        label="Mark all reviewed",
-        description="Ticks every Viewed box. Changes no files.",
-        scopes=("changeset",),
+        label="Mark reviewed",
+        description="Ticks the Viewed box. Changes no files.",
+        scopes=("resource",),
         icon="eye",
         group="3_review",
     ),

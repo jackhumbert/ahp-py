@@ -238,7 +238,9 @@ def diff_counts(before: bytes | None, after: bytes | None) -> dict[str, int]:
     return {"added": additions, "removed": deletions}
 
 
-def file_entry(change: FileChange, store: ContentStore) -> dict[str, Any]:
+def file_entry(
+    change: FileChange, store: ContentStore, *, reviewed: bool = False
+) -> dict[str, Any]:
     """One `ChangesetFile`, with its content parked in the store.
 
     The id is the *destination* URI, or the source for a deletion -- which is
@@ -260,7 +262,16 @@ def file_entry(change: FileChange, store: ContentStore) -> dict[str, Any]:
     edit["diff"] = diff_counts(change.before, change.after)
 
     identity = change.renamed_to or change.uri if change.after is not None else change.uri
-    return {"id": identity, "edit": edit}
+    entry: dict[str, Any] = {"id": identity, "edit": edit}
+    if reviewed:
+        # Carried ACROSS a republish. `changeset/contentChanged` replaces the
+        # file list wholesale, so a republish that omitted this silently
+        # cleared every Viewed tick -- which is what happened the moment
+        # republish-after-every-operation was added so the buttons would
+        # visibly do something. The reference host does the same thing,
+        # recomputing review state and stamping it onto each file.
+        entry["reviewed"] = True
+    return entry
 
 
 def changes_summary(files: Sequence[Mapping[str, Any]]) -> dict[str, int]:
