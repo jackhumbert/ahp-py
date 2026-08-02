@@ -17,18 +17,33 @@ provider except `copilotcli`. This module exists to find out rather than assume.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 __all__ = ["demo_customizations", "demo_server_tools"]
 
-_BASE = "file:///ahs-demo"
+
+def _demo_root() -> str:
+    """The real directory behind this tree, as a `file:` URI.
+
+    A customization is only as real as the resource behind it: a client expands
+    a host-published plugin by reading its `uri` back through the `resource*`
+    family, so a plugin pointing at a path that exists nowhere renders as an
+    empty container. This tree used to point at `file:///ahs-demo/...` and did
+    exactly that -- the wire log showed a client asking 215 times and being told
+    NotFound every time.
+    """
+    return (Path(__file__).resolve().parents[3] / "examples" / "demo-plugin").as_uri()
+
+
+_BASE = _demo_root()
 
 
 def _agent(suffix: str, name: str, description: str, **extra: Any) -> dict[str, Any]:
     return {
         "type": "agent",
         "id": f"ahs-agent-{suffix}",
-        "uri": f"{_BASE}/agents/{suffix}.md",
+        "uri": f"{_BASE}/.github/agents/{suffix}.md",
         "name": name,
         "description": description,
         "enabled": True,
@@ -47,7 +62,7 @@ def demo_customizations() -> list[dict[str, Any]]:
         {
             "type": "plugin",
             "id": "ahs-plugin-main",
-            "uri": f"{_BASE}/plugins/ahs-toolkit",
+            "uri": f"{_BASE}/.github",
             "name": "AHS Toolkit Plugin",
             "version": "0.1.0",
             "enabled": True,
@@ -68,7 +83,7 @@ def demo_customizations() -> list[dict[str, Any]]:
                 {
                     "type": "skill",
                     "id": "ahs-skill-charlie",
-                    "uri": f"{_BASE}/skills/charlie/SKILL.md",
+                    "uri": f"{_BASE}/.github/skills/charlie.md",
                     "name": "AHS Skill Charlie",
                     "description": "A demo skill contributed by agent-host-server.",
                     "enabled": True,
@@ -76,7 +91,7 @@ def demo_customizations() -> list[dict[str, Any]]:
                 {
                     "type": "prompt",
                     "id": "ahs-prompt-delta",
-                    "uri": f"{_BASE}/prompts/delta.prompt.md",
+                    "uri": f"{_BASE}/.github/prompts/delta.md",
                     "name": "AHS Prompt Delta",
                     "description": (
                         "A demo prompt. VS Code hides the Prompts section "
@@ -87,7 +102,7 @@ def demo_customizations() -> list[dict[str, Any]]:
                 {
                     "type": "rule",
                     "id": "ahs-rule-echo",
-                    "uri": f"{_BASE}/rules/echo.md",
+                    "uri": f"{_BASE}/.github/instructions/echo.md",
                     "name": "AHS Instruction Echo",
                     "description": "A demo instruction/rule, applied to every request.",
                     "enabled": True,
@@ -96,7 +111,7 @@ def demo_customizations() -> list[dict[str, Any]]:
                 {
                     "type": "rule",
                     "id": "ahs-rule-foxtrot",
-                    "uri": f"{_BASE}/rules/foxtrot.md",
+                    "uri": f"{_BASE}/.github/instructions/echo.md",
                     "name": "AHS Instruction Foxtrot (globbed)",
                     "description": "A demo instruction scoped to Python files.",
                     "enabled": True,
@@ -105,7 +120,7 @@ def demo_customizations() -> list[dict[str, Any]]:
                 {
                     "type": "hook",
                     "id": "ahs-hook-golf",
-                    "uri": f"{_BASE}/hooks/golf.sh",
+                    "uri": f"{_BASE}/.github/hooks/golf.md",
                     "name": "AHS Hook Golf",
                     "enabled": True,
                 },
@@ -114,7 +129,7 @@ def demo_customizations() -> list[dict[str, Any]]:
         {
             "type": "directory",
             "id": "ahs-directory-skills",
-            "uri": f"{_BASE}/skills",
+            "uri": f"{_BASE}/.github/skills",
             "name": "AHS Skills Directory",
             # A directory declares which child type it holds, and whether a
             # client may write into it.
@@ -125,7 +140,7 @@ def demo_customizations() -> list[dict[str, Any]]:
                 {
                     "type": "skill",
                     "id": "ahs-skill-hotel",
-                    "uri": f"{_BASE}/skills/hotel/SKILL.md",
+                    "uri": f"{_BASE}/.github/skills/charlie.md",
                     "name": "AHS Skill Hotel",
                     "description": "A demo skill inside a directory container.",
                     "enabled": True,
@@ -135,7 +150,7 @@ def demo_customizations() -> list[dict[str, Any]]:
         {
             "type": "mcpServer",
             "id": "ahs-mcp-india",
-            "uri": f"{_BASE}/mcp/india",
+            "uri": f"{_BASE}/.github/mcp-india",
             "name": "AHS MCP Server India",
             "enabled": True,
             # `state` is a discriminated union on `kind`; `ready` is the

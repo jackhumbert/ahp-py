@@ -600,13 +600,23 @@ class TestRefusingBackend:
         assert raised.value.code == -32009
 
     @pytest.mark.anyio
-    async def test_the_refusal_says_why_and_what_to_do(self) -> None:
-        """A refusal a reader cannot act on is indistinguishable from a bug."""
+    async def test_the_refusal_reads_as_a_message_to_a_person(self) -> None:
+        """This string reaches a user-facing dialog.
+
+        VS Code renders it verbatim inside "The terminal process failed to
+        launch: …". It was once a paragraph of design rationale, which is how
+        a user found out that `Policy` cannot authenticate a peer. One line, no
+        implementation detail -- the reasoning lives in the module docstring.
+        """
         backend = RefusingTerminalBackend()
         request = TerminalRequest("ahp-terminal:/1", TerminalClientClaim("client-a"))
         with pytest.raises(AhpError) as raised:
             await backend.create(request, lambda data: None)
-        assert "TerminalBackend" in raised.value.message
+        message = raised.value.message
+        assert len(message) < 90, f"too long for a dialog: {message!r}"
+        assert "\n" not in message
+        for jargon in ("Policy", "wheel", "distribution", "import", "TerminalBackend"):
+            assert jargon not in message, f"implementation detail in a user dialog: {jargon}"
 
     @pytest.mark.anyio
     async def test_the_reason_is_replaceable(self) -> None:

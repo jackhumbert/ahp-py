@@ -572,6 +572,7 @@ class Host:
         telemetry: Mapping[str, str] | None = None,
         store: SessionStore | None = None,
         terminals: TerminalBackend | None = None,
+        default_directory: str | None = None,
     ) -> None:
         if policy is None:  # pragma: no cover - defensive; typing already forbids it
             raise ValueError("a Policy is required; there is no default")
@@ -624,6 +625,12 @@ class Host:
         # looks like -- advertising a channel nothing ever publishes to is
         # worse than advertising none.
         self.telemetry = dict(telemetry or {})
+        # `InitializeResult.defaultDirectory` -- "suggested default directory
+        # for remote filesystem browsing". Without it a client has no idea
+        # where this host's workspace is and browses from `/`: the measured VS
+        # Code trace asks for `file:///` and `file:///.vscode/settings.json`,
+        # which is the filesystem root, not anything anybody meant.
+        self.default_directory = default_directory
         # Tokens the agent needs for services IT talks to. Host-global, matching
         # the reference implementation -- `authenticate` carries no client
         # identity, so a per-connection store is not observable by a conformant
@@ -967,6 +974,8 @@ class Host:
         }
         if self.telemetry:
             result["telemetry"] = dict(self.telemetry)
+        if self.default_directory is not None:
+            result["defaultDirectory"] = self.default_directory
         return result
 
     async def _subscribe(self, connection: Connection, params: Mapping[str, Any]) -> dict[str, Any]:

@@ -692,14 +692,14 @@ def _is_hex(pair: bytes) -> bool:
 
 # ─── Backends ────────────────────────────────────────────────────────────────
 
-#: What :class:`RefusingTerminalBackend` says. A refusal a reader cannot act on
-#: is just a failure, so it names the fix.
-REFUSAL_REASON: Final = (
-    "this host has no terminal backend. Process execution is not shipped in "
-    "agent-host-server: Policy cannot authenticate a peer, so an importable "
-    "backend in the default wheel would be arbitrary command execution one "
-    "import away. Supply a TerminalBackend from a separate distribution."
-)
+#: What :class:`RefusingTerminalBackend` says.
+#:
+#: **This string ends up in a user-facing dialog.** VS Code renders it verbatim
+#: in "The terminal process failed to launch: …", so it has to read like a
+#: message to a person: one line, no rationale, no implementation detail. The
+#: reasoning belongs in this module's docstring and the README, where somebody
+#: who wants it can find it -- not in a toast somebody did not ask for.
+REFUSAL_REASON: Final = "no terminal backend is configured for this host"
 
 
 def terminal_refused(reason: str = REFUSAL_REASON) -> AhpError:

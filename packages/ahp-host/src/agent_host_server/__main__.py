@@ -132,6 +132,11 @@ async def _run() -> None:
         )
         if args.serve_directory
         else None,
+        # Told to the client, so it browses the directory we actually serve
+        # rather than `/`.
+        default_directory=Path(args.serve_directory).resolve().as_uri()
+        if args.serve_directory
+        else None,
         wire_log=Path(args.wire_log) if args.wire_log else None,
         sequence_file=Path(args.sequence_file) if args.sequence_file else None,
     )
