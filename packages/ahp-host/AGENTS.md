@@ -7,6 +7,12 @@ with zero context.
 actually does, with evidence), then [`docs/plan.md`](docs/plan.md) (what v0.1
 is), then [`docs/roadmap.md`](docs/roadmap.md) (everything after it), then
 [`UPSTREAM.md`](UPSTREAM.md) (what revision we target).
+[`docs/requests.md`](docs/requests.md) is the outside-in view: what an embedder
+deploying this behind a proxy for several users needed and could not get. The
+first five landed — `Host.serve(headers=, token=)`, `core/policies.py`,
+`core/audit.py`, `Host.counters()`, and one-host-one-provider decided. **Round
+two is open**, and its first item blocks the partitioning example from being
+usable at all.
 
 ## What this project is
 

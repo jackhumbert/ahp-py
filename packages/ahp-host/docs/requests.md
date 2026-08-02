@@ -186,3 +186,115 @@ reaching into private attributes. Whatever exposes them is the embedder's.
   of the current stance is that it is honest. Every request above is for
   material the embedder needs to make its *own* decision, not for the library to
   make one on its behalf.
+
+---
+
+# Round two — after the first five landed
+
+All five above shipped, and the same embedder then tried to actually wire the
+result: a multi-user deployment, sessions partitioned by principal, surviving a
+service restart. Two things stop that today, and both are small. The third and
+fourth are smaller still.
+
+## 6. Ownership cannot be registered, so `OwnedSessionPolicy` cannot be wired — blocking
+
+`OwnedSessionPolicy` keeps a channel→principal map and refuses anything unowned.
+**Nothing populates that map.** `claim()` (`core/policies.py:93`) has no caller
+in the library; its only call site anywhere is the test
+(`tests/integration/test_multi_user.py:76`), which builds sessions in-process
+and hands over `session.chat_uri` and `session.annotations_uri` straight off the
+object it just constructed.
+
+A deployment driven by clients never holds that object:
+
+- `createSession` arrives over the wire;
+- `may_create_session(info, params)` (`core/policy.py:73`) is consulted
+  **before** the host mints the chat and annotations channels, so at decision
+  time those URIs do not exist yet;
+- nothing informs the policy afterwards.
+
+The prefix walk in `owner_of` does not close the gap either. It matches
+`"<owned>/…"`, and a chat URI is `ahp-chat://<chatId>/<base64 session uri>` —
+the session URI appears *inside* it, not as its parent. So even an embedder that
+claims the session URI at `may_create_session` time owns nothing else the
+session goes on to create.
+
+The behaviour is at least fail-closed: `may_see_channel` refuses unowned
+channels, so the symptom is "a user cannot see their own chat", not a leak. It
+is still a shipped example that cannot be used for the thing it is an example
+of.
+
+**Request: a session-lifecycle notification to the embedder** — *this session,
+with these channels, was created on this connection*, and the matching disposal.
+Delivered before the first subscribe can arrive. Shape is open; what matters is
+that the channels a session owns are knowable by the layer making trust
+decisions, without parsing a URI (invariant 15) or reaching into private state.
+
+An alternative that would also work: let `Policy` see channel registration
+directly, since that is the moment ownership becomes expressible.
+
+## 7. `StoredSession` has no owner, so durability and partitioning do not compose
+
+`may_restore_session` (`core/policies.py:147`) refuses by default, and its
+docstring is exactly right about why: "a restored session has no owner until
+somebody claims it, and `may_see_channel` refuses unowned channels — so
+restoring one would produce a session nobody, including its author, can reach."
+
+That is a correct default for a missing capability rather than a design
+position. `StoredSession` carries channels, title, provider and resume state —
+everything except who it belongs to. So the two headline features of a
+multi-user deployment, partitioning and durability, cannot both be on.
+
+An embedder can keep ownership in a second store and re-claim before serving,
+which is what we will do in the meantime, and it means two records of the same
+fact with no mechanism keeping them in step.
+
+**Request: an embedder-owned `metadata` mapping on `StoredSession`**, round-
+tripped verbatim and never interpreted by the library — the same treatment
+`ProviderResumeState` already gets. Then ownership travels with the session it
+describes, and `may_restore_session` has something to decide on.
+
+## 8. The counters have no documented exposure
+
+Request 5 landed as `Host.counters()` (`core/host.py:3559`), which is the right
+API and explicitly "not a metrics endpoint — what scrapes this is the
+embedder's". Agreed, and every deployed host still needs the same twenty lines:
+a loopback HTTP listener that returns those counters and a readiness answer, so
+a supervisor, a health gate or a reverse proxy has something to call.
+
+**Request: not an endpoint — a worked example in `docs/guide/deploying.md`.**
+Its examples are executed as tests, so a shown pattern stays correct, and every
+embedder stops writing the same thing slightly differently. Readiness in
+particular deserves a defined answer: "restore finished, transport bound" is not
+guessable from outside.
+
+## 9. The per-connection outbox is unbounded
+
+`Connection._outbox` is an `asyncio.Queue()` with no `maxsize`
+(`core/connection.py:58`), and `enqueue` "never blocks, never reorders". A peer
+that stops reading — a suspended laptop, a wedged renderer, a client behind a
+stalled proxy — accumulates frames in host memory for the lifetime of that
+connection, with no backpressure and no drop policy.
+
+On a loopback single-user host this is nothing. On a host serving several people
+over a network it is a slow leak with an ordinary trigger, and the ordering
+guarantee makes it exactly the wrong place for an embedder to improvise.
+
+**Not a request for a specific fix** — the tradeoff belongs to whoever owns
+invariant 10. Dropping frames breaks replay expectations; closing a slow
+connection is a policy decision; a bound with a documented behaviour on
+overflow is probably the answer. Filed so the choice is deliberate rather than
+implicit, ideally with the limit stated in `docs/guide/deploying.md`.
+
+## Still deliberately not requested
+
+The list above holds, and one addition:
+
+- **Content in `AuditEvent`.** `toolcall.resolved` records who resolved which
+  call, and the type carries identifiers only, by construction. Recording *what
+  ran* — the approved tool input — belongs to the embedder's own trail, where it
+  is already subject to that deployment's retention rules. Two records, each
+  honest about its scope, is the right shape; putting tool input in the audit
+  event would quietly make the audit log a transcript, which is the mistake
+  `--wire-log` already documents.
+
