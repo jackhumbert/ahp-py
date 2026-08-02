@@ -89,6 +89,9 @@ ignore = [
 # make every one of them differ from the vocabulary the rest of the library
 # mirrors, for no gain: they all subclass `RpcError`, which has the suffix.
 "src/agent_host_client/client/errors.py" = ["N818"]
+# `HostShutDown` and `HostNotConnected` name a supervisor *state*, not a fault
+# type; both subclass `AhpClientError`, which carries the suffix.
+"src/agent_host_client/hosts/runtime.py" = ["N818"]
 "tests/**" = ["RUF059"]
 
 [tool.importlinter]
