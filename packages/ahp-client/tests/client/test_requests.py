@@ -262,6 +262,125 @@ async def test_inputs_yields_when_the_pending_set_changes() -> None:
     await host.stop()
 
 
+async def test_inputs_wakes_on_the_envelope_not_on_the_interval() -> None:
+    """Item 9. The proof that the clock is the envelope: *poll* is set far
+    beyond the test's own patience, so anything the interval could explain has
+    timed out long before. A 30 s ceiling that still answers in milliseconds is
+    only possible if the wake came from the session channel."""
+    host = _session_host()
+    await host.start()
+    async with connect(transport=host.transport()) as client:
+        session = await client.create_session(provider="echo")
+
+        async def raise_a_request() -> None:
+            await asyncio.sleep(0.05)
+            await host.push(
+                session.uri,
+                {
+                    "type": "session/inputNeededSet",
+                    "request": {
+                        "kind": "toolConfirmation",
+                        "id": f"{CHAT}#tc9",
+                        "chat": CHAT,
+                        "toolCall": {"toolCallId": "tc9", "status": "pending-confirmation"},
+                    },
+                },
+            )
+
+        driver = asyncio.get_running_loop().create_task(raise_a_request())
+        seen: list[list[Any]] = []
+
+        async def collect() -> None:
+            async for pending in session.inputs(poll=30.0):
+                seen.append(pending)
+                if pending:
+                    return
+
+        await asyncio.wait_for(collect(), 2)
+        await driver
+        assert seen[0] == []
+        assert seen[-1][0]["toolCall"]["toolCallId"] == "tc9"
+    await host.stop()
+
+
+async def test_the_input_clock_ignores_other_channels() -> None:
+    """Tested on the wait directly, and deliberately so.
+
+    Through `inputs()` this is invisible: an unfiltered wake re-reads the mirror,
+    finds the set unchanged and yields nothing, so a black-box test passes either
+    way and proves nothing. The filter is an efficiency property -- a busy chat
+    must not cost a mirror read and a list comparison per delta -- and the honest
+    place to assert an efficiency property is where it lives.
+    """
+    host = _session_host()
+    await host.start()
+    async with connect(transport=host.transport()) as client:
+        session = await client.create_session(provider="echo")
+        await session.chat()  # so the chat push below really does reach the reader
+        reader = client._runtime.events()
+
+        await host.push(CHAT, {"type": "chat/turnStarted", "turnId": "t1", "message": {}})
+        await asyncio.sleep(0.05)
+        waiting = asyncio.get_running_loop().create_task(
+            session._wait_for_input_change(reader, 30.0)
+        )
+        await asyncio.sleep(0.05)
+        assert not waiting.done(), "a chat envelope woke the session's input clock"
+
+        await host.push(
+            session.uri,
+            {
+                "type": "session/inputNeededSet",
+                "request": {
+                    "kind": "toolConfirmation",
+                    "id": f"{CHAT}#tc2",
+                    "chat": CHAT,
+                    "toolCall": {"toolCallId": "tc2", "status": "pending-confirmation"},
+                },
+            },
+        )
+        assert await asyncio.wait_for(waiting, 2) is True
+        await reader.aclose()
+    await host.stop()
+
+
+async def test_the_input_clock_falls_back_to_the_ceiling() -> None:
+    """The ceiling is a backstop for anything that moves `inputNeeded` without
+    an event scoped here -- a resubscribe snapshot after a reconnect. Nothing is
+    pushed, so only the ceiling can end this wait."""
+    host = _session_host()
+    await host.start()
+    async with connect(transport=host.transport()) as client:
+        session = await client.create_session(provider="echo")
+        reader = client._runtime.events()
+        assert await asyncio.wait_for(session._wait_for_input_change(reader, 0.05), 2) is True
+        await reader.aclose()
+    await host.stop()
+
+
+async def test_inputs_ends_when_the_event_stream_does() -> None:
+    """A generator that outlives its reader would hang on the ceiling forever
+    instead of ending."""
+    host = _session_host()
+    await host.start()
+    async with connect(transport=host.transport()) as client:
+        session = await client.create_session(provider="echo")
+        stream = session.inputs(poll=30.0)
+        assert await stream.__anext__() == []
+
+        drained = asyncio.get_running_loop().create_task(
+            _collect_remaining(stream)  # ends only when the stream does
+        )
+        await asyncio.sleep(0.05)
+        await client.aclose()
+        assert await asyncio.wait_for(drained, 2) == []
+    await host.stop()
+
+
+async def _collect_remaining(stream: Any) -> list[Any]:
+    return [item async for item in stream]
+
+
 # ── item 3: a rejected credential is not retried ─────────────────────────────
 
 

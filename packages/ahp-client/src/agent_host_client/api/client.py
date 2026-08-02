@@ -341,21 +341,71 @@ class Session:
             self._responder = InputResponder(self._client.protocol, self._client.mirror)
         return self._responder
 
-    async def inputs(self, *, poll: float = 0.05) -> AsyncIterator[list[JsonObject]]:
+    async def inputs(self, *, poll: float = 5.0) -> AsyncIterator[list[JsonObject]]:
         """Yield the pending set whenever it changes.
 
-        Derived from mirror state rather than from envelopes: ``inputNeeded``
-        moves for several reasons -- a request opening, another client answering
-        one, a turn ending -- and reconstructing the set from actions means
-        re-deriving what the session reducer already computed.
+        The set is read from ``SessionState.inputNeeded``, so the **reducer
+        stays the source of truth**: ``inputNeeded`` moves for several reasons
+        -- a request opening, another client answering one, a turn ending -- and
+        rebuilding it from ``session/inputNeededSet`` and
+        ``session/inputNeededRemoved`` means re-deriving what the session
+        reducer already computed.
+
+        That does not make an interval the mechanism, which is the false binary
+        this used to sit on. **The envelope is the clock and the mirror is the
+        source**: any event scoped to this session wakes a re-read, and nothing
+        is reconstructed from actions. Every other edge in this library is
+        edge-triggered, and an approval prompt is precisely the thing a human is
+        waiting on.
+
+        *poll* is therefore a **ceiling on staleness rather than the
+        mechanism** -- a backstop for anything that can move ``inputNeeded``
+        without an event scoped here, a resubscribe snapshot after a reconnect
+        being the case that matters. Lowering it does not make a prompt arrive
+        sooner; it only shortens the worst case when the clock is missed.
+
+        The reader is attached **before** the first read, so a request opening
+        while the caller is still setting up is buffered rather than missed.
         """
-        previous: list[JsonObject] | None = None
+        reader = self._client._runtime.events()
+        try:
+            previous: list[JsonObject] | None = None
+            while True:
+                current = self.pending_inputs()
+                if current != previous:
+                    previous = current
+                    yield current
+                if not await self._wait_for_input_change(reader, poll):
+                    return
+        finally:
+            await reader.aclose()
+
+    async def _wait_for_input_change(self, reader: Any, poll: float) -> bool:
+        """Block until something might have moved ``inputNeeded``.
+
+        Returns on the first event scoped to this session, on the *poll*
+        ceiling, or on end of stream -- ``False`` only for the last, which ends
+        the iteration. It never reports *what* moved: that is the mirror's
+        answer, and asking here would be the reconstruction this avoids.
+
+        Events on other channels do not wake a re-read, but they do consume the
+        remaining budget rather than restarting it, so a busy chat cannot
+        postpone the ceiling indefinitely.
+        """
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + poll
         while True:
-            current = self.pending_inputs()
-            if current != previous:
-                previous = current
-                yield current
-            await asyncio.sleep(poll)
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                return True
+            try:
+                tagged = await asyncio.wait_for(_next_or_none(reader), remaining)
+            except TimeoutError:
+                return True
+            if tagged is None:
+                return False
+            if tagged.channel == self.uri:
+                return True
 
     async def dispose(self) -> None:
         await self._client.protocol.dispose_session(self.uri)
@@ -503,6 +553,22 @@ class ChatWatch:
             await self._reader.aclose()
 
 
+async def _next_or_none(reader: Any) -> Any:
+    """Read one event, turning end-of-stream into a value.
+
+    `StopAsyncIteration` raised inside `asyncio.wait_for` finishes a task nobody
+    retrieves, which asyncio then reports at an unrelated moment with a stack
+    that points nowhere useful. Every timed read here goes through this.
+
+    Cancelling the wait is safe: a reader's cursor only advances once a value
+    has been taken, so a read abandoned mid-wait loses nothing.
+    """
+    try:
+        return await reader.__anext__()
+    except StopAsyncIteration:
+        return None
+
+
 def _markdown_text(turn: Mapping[str, Any]) -> str:
     parts = turn.get("responseParts")
     if not isinstance(parts, list):
@@ -642,16 +708,7 @@ class TurnStream:
             return event
 
     async def _next_tagged(self) -> Any:
-        """Read one event, turning end-of-stream into a value.
-
-        `StopAsyncIteration` raised inside `asyncio.wait_for` finishes a task
-        nobody retrieves, which asyncio then reports at an unrelated moment with
-        a stack that points nowhere useful.
-        """
-        try:
-            return await self._reader.__anext__()
-        except StopAsyncIteration:
-            return None
+        return await _next_or_none(self._reader)
 
     def _dispatch(self, channel: str, action: Mapping[str, Any]) -> None:
         """Adapt `AhpClient.dispatch` -- which returns a handle -- to the

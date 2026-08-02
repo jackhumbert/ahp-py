@@ -61,6 +61,17 @@ Under construction. `docs/plan.md` is the design and its §12 is the build order
   backoff interval against the proxy already rejecting it, while the surface
   showed `reconnecting` forever. `retry_everything` restores the old behaviour.
   ([`docs/requests.md`](docs/requests.md) item 3.)
+- **`Session.inputs()` wakes on the envelope rather than on an interval.** It
+  waits on the event reader filtered to the session's channel and re-reads
+  `pending_inputs()`; the mirror is still the source, the envelope is only the
+  clock. `poll` keeps its place in the signature and becomes a ceiling on
+  staleness — a backstop for anything that moves `inputNeeded` without an event
+  scoped here, a resubscribe snapshot after a reconnect being the case that
+  matters — and its default moves from `0.05` to `5.0` accordingly. A consumer
+  holding a connection per user was otherwise paying a mirror read and a list
+  comparison per session per 50 ms forever, on the one edge in this library
+  where latency was a guess and the thing waiting was a human.
+  ([`docs/requests.md`](docs/requests.md) item 9.)
 
 ### Notes
 

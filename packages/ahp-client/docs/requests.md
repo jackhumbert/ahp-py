@@ -22,7 +22,7 @@ it wrong is silent.
 Ordered by whether it blocks. Items 1–3 block a co-presence surface; 4–6 and 9
 are smaller; 7–8 are documentation.
 
-**Status: 1–4 are implemented.** 9 was filed afterwards, against the
+**Status: 1–4 and 9 are implemented.** 9 was filed afterwards, against the
 implementation of 2. Each section keeps its original text — the
 request is the record of *why*, and rewriting it into a description of what was
 built would lose the reasoning that justified it. What was actually done is
@@ -139,13 +139,17 @@ help someone who has no reason to look there.
 `Session.inputs()` as an async iterator yielding the pending set whenever it
 changes.
 
-`inputs()` is derived from **mirror state**, not from envelopes, and polls at a
-configurable interval rather than reconstructing the set from actions.
-`inputNeeded` moves for several reasons — a request opening, another client
-answering one, a turn ending — and rebuilding it from `session/inputNeededSet`
-and `session/inputNeededRemoved` means re-deriving what the session reducer
-already computed. That is the same argument the rest of this document makes, so
-it applies here too.
+`inputs()` is derived from **mirror state**, not from envelopes. `inputNeeded`
+moves for several reasons — a request opening, another client answering one, a
+turn ending — and rebuilding it from `session/inputNeededSet` and
+`session/inputNeededRemoved` means re-deriving what the session reducer already
+computed. That is the same argument the rest of this document makes, so it
+applies here too.
+
+It first shipped waking on an interval, which item 9 then took issue with — not
+with the mirror being the source, which is right and unchanged, but with the
+interval being the mechanism. It now wakes on the envelope and re-reads the
+mirror. See item 9.
 
 ---
 
@@ -386,6 +390,28 @@ staleness rather than the mechanism, so it can default to something like 5 s
 instead of 50 ms.
 
 `ChatWatch` already does the reader half of this correctly and is the model.
+
+**Implemented.** `Session.inputs()` now waits on the event reader, filtered to
+this session's channel, and re-reads `pending_inputs()` on a wake. The mirror is
+still the source; the envelope is only the clock. `poll` keeps its name and its
+place in the signature and becomes the staleness ceiling, defaulting to 5 s.
+
+Two notes on what the change turned up.
+
+The reader is attached **before** the first `pending_inputs()` read. The old
+loop had no reader at all, so this is new ground rather than a preserved
+property: a request opening between the first read and the first wait would have
+been missed until the next tick, which under a 5 s ceiling would have been a
+regression rather than the invisible 50 ms it was before. `ChatWatch._open`
+already had the same rule for the same reason.
+
+The channel filter is **not** observable through `inputs()`, and its test says
+so. An unfiltered wake re-reads the mirror, finds the set unchanged and yields
+nothing — so a black-box test of it passes whether the filter is there or not.
+It is an efficiency property (a busy chat must not cost a mirror read and a list
+comparison per delta), and it is asserted on `_wait_for_input_change` directly.
+The two properties that *are* observable — waking on the envelope, and ending
+when the stream ends — are tested through the public generator.
 
 ---
 
