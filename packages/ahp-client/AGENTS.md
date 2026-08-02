@@ -24,10 +24,16 @@ host — [`agent-host-server-py`][server] — and the two are meant to meet.
         agent-host-server   agent-host-client ← this repo
 ```
 
-**Current state: nothing is implemented.** The shared layer exists and is green
-([`agent-host-protocol-py`][protocol]: 247 reducer fixtures, 39 round-trips, the
-JS-semantics oracle, `mypy --strict`, `lint-imports`). The client's build order
-is `docs/plan.md` §12 and starts at M1.
+**Current state: M1–M8 of `docs/plan.md` §12 are done; M9 (release) is not.**
+202 tests, `mypy --strict`, `ruff`, `ruff format` and three import-linter
+contracts green. A full turn runs against the sibling Python host. The shared
+layer ([`agent-host-protocol-py`][protocol]) is green on 247 reducer fixtures,
+39 round-trips and the JS-semantics oracle.
+
+What is deliberately **not** built: the `mcp://` side-channel and `ahp-otlp:`
+telemetry (ADR 0007 — and therefore `mcpApps` is never advertised), a CLI
+entry point, a TUI, and a sync facade. The last three are ergonomics the plan
+scopes and M9 has not reached.
 
 ## Depend on the shared layer; do not fork it
 

@@ -317,7 +317,10 @@ def _install_defaults(host: FakeHost) -> None:
 
 def echo_host(**kwargs: Any) -> FakeHost:
     """A host that completes a handshake and answers the basics."""
-    host = FakeHost(agents=[{"id": "echo", "displayName": "Echo"}], **kwargs)
+    # `AgentInfo.provider`, not `.id`. The first draft of this fake used `id`
+    # and every test agreed with it; the interop run against the real sibling
+    # host is what disagreed.
+    host = FakeHost(agents=[{"provider": "echo", "displayName": "Echo"}], **kwargs)
     _install_defaults(host)
     return host
 

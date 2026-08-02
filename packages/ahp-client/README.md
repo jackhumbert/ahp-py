@@ -7,12 +7,40 @@ protocol for synchronized multi-client state over AI agent sessions.
 > Process.** The PyPI names `ahp` and `pyahp` belong to packages for the latter,
 > which is why this one is spelled out.
 
-> ### ⚠️ Status: under construction. Nothing is usable yet.
+> ### ⚠️ Status: working, pre-alpha. Not published.
 >
-> The design is [`docs/plan.md`](docs/plan.md) and the build order is its §12.
-> The shared protocol layer this stands on —
-> [`agent-host-protocol`][protocol] — exists and is green.
-> Not on PyPI.
+> M1–M8 of [`docs/plan.md`](docs/plan.md) §12 are done: the client core, all 27
+> commands, the state mirror with write-ahead reconciliation, the front door,
+> the per-host supervisor, the reverse direction, wire logs and `doctor`. A full
+> turn runs against the sibling Python host. Not on PyPI; the API is not stable.
+
+```python
+import asyncio
+from agent_host_client import connect, Delta, ToolCallReady, TurnCompleted
+
+
+async def main() -> None:
+    async with connect("ws://localhost:4321") as client:
+        async with await client.create_session(provider="echo", cwd=".") as session:
+            async for event in session.prompt("Summarise README.md"):
+                match event:
+                    case Delta(text=text):
+                        print(text, end="", flush=True)
+                    case ToolCallReady() as call:
+                        call.approve()
+                    case TurnCompleted():
+                        print()
+
+
+asyncio.run(main())
+```
+
+Or, if you do not care about streaming:
+
+```python
+result = await session.prompt("Summarise README.md", approvals="reads")
+print(result.text)
+```
 
 ## Why
 
@@ -64,7 +92,28 @@ python -m venv .venv
 .venv/bin/python -m pytest
 ```
 
-The whole suite runs offline: no model, no credentials, no network.
+The whole suite runs offline: no model, no credentials, no network. Install the
+sibling host as well (`pip install -e ../agent-host-server-py`) to include the
+interop test.
+
+## On conformance evidence, honestly
+
+Driving the sibling Python host is cheap, offline and high-coverage — and it is
+**not independent evidence**. Both peers share the same reducers from
+`agent-host-protocol` and were written from the same reading of the same spec,
+so a wrong-but-symmetric reducer passes both suites. It proves that our framing,
+handshake, subscriptions and reconciliation interoperate with a real host rather
+than only with a fake we also wrote. It proves nothing about whether our reading
+of the spec is right.
+
+It has already earned that much: the interop run is what discovered
+`AgentInfo.provider` is not `AgentInfo.id`, which the in-repo fake and every
+test agreeing with it had happily asserted.
+
+The one mechanism here that yields genuinely independent data is
+`agent_host_client.doctor` — a conformance probe you point at somebody else's
+host. Each check names the MUST or SHOULD it comes from, so a failure is a bug
+report rather than an opinion.
 
 ## Relationship to upstream
 

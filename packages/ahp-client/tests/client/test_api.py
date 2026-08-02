@@ -111,7 +111,7 @@ async def test_connect_over_a_supplied_transport() -> None:
     async with connect(transport=host.transport()) as client:
         assert client.protocol_version == "0.7.0"
         assert client.client_id
-        assert client.root["agents"] == [{"id": "echo", "displayName": "Echo"}]
+        assert client.root["agents"] == [{"provider": "echo", "displayName": "Echo"}]
     await host.stop()
 
 
