@@ -57,21 +57,39 @@ class AhpClientError(Exception):
 
 # ── transport ────────────────────────────────────────────────────────────────
 
-TransportErrorKind = Literal["closed", "io", "protocol"]
+TransportErrorKind = Literal["closed", "io", "protocol", "rejected"]
 
 
 class TransportError(AhpClientError):
     """The underlying stream failed.
 
-    ``kind`` matters to the supervisor, not just to logging: a ``closed`` from a
+    ``kind`` matters to the supervisor, not just to logging. A ``closed`` from a
     clean peer shutdown and an ``io`` mid-frame are the difference between "the
-    host went away on purpose" and "the network blinked", and only the second is
-    worth an immediate reconnect attempt.
+    host went away on purpose" and "the network blinked". ``rejected`` is the
+    third case and the one that used to be flattened into ``io``: the handshake
+    was *answered*, and the answer was no.
+
+    ``status`` carries the HTTP status when a proxy refused the upgrade. Without
+    it a 401 is indistinguishable from a connection reset, and a supervisor with
+    no way to tell them apart retries an expired credential forever -- one doomed
+    handshake per backoff interval against the very proxy rejecting it. A status
+    code discloses nothing; the credential is redacted separately.
     """
 
-    def __init__(self, kind: TransportErrorKind, message: str) -> None:
+    def __init__(
+        self,
+        kind: TransportErrorKind,
+        message: str,
+        *,
+        status: int | None = None,
+        close_code: int | None = None,
+    ) -> None:
         super().__init__(message)
         self.kind: Final = kind
+        #: HTTP status from a refused WebSocket upgrade, when there was one.
+        self.status: Final = status
+        #: WebSocket close code, when the peer closed rather than refused.
+        self.close_code: Final = close_code
 
 
 # ── lifecycle ────────────────────────────────────────────────────────────────

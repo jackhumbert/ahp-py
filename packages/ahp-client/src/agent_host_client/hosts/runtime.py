@@ -287,11 +287,22 @@ class HostRuntime:
             except asyncio.CancelledError:
                 raise
             except Exception as exc:  # a failed attempt is data, not a crash
-                self._transition(HostState("reconnecting", attempt, exc))
-                if self._config.reconnect_policy.exhausted(attempt):
+                policy = self._config.reconnect_policy
+                if not policy.should_retry(exc):
+                    # A permanent refusal -- an expired credential, a policy
+                    # close, a version disagreement. Retrying is not merely
+                    # futile: it is load against the peer already saying no,
+                    # while the surface above shows "reconnecting" forever and
+                    # nothing anywhere says "re-authenticate". `failed` is
+                    # broadcast on `state_changes()`, which is what an embedder
+                    # maps onto a re-login prompt.
                     self._transition(HostState("failed", attempt, exc))
                     return
-                delay = self._config.reconnect_policy.delay_with_jitter(attempt)
+                self._transition(HostState("reconnecting", attempt, exc))
+                if policy.exhausted(attempt):
+                    self._transition(HostState("failed", attempt, exc))
+                    return
+                delay = policy.delay_with_jitter(attempt)
                 async with link(self._shutdown, self._manual) as waiters:
                     with contextlib.suppress(asyncio.CancelledError):
                         await race(asyncio.sleep(delay), waiters)

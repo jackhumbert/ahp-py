@@ -22,6 +22,12 @@ it wrong is silent.
 Ordered by whether it blocks. Items 1–3 block a co-presence surface; 4–6 are
 smaller; 7–8 are documentation.
 
+**Status: 1–4 are implemented.** Each section keeps its original text — the
+request is the record of *why*, and rewriting it into a description of what was
+built would lose the reasoning that justified it. What was actually done is
+noted under each, including where it differs from the proposed shape. 5–8 are
+open.
+
 ---
 
 ## 1. A turn can only be watched by the client that started it — blocking
@@ -74,6 +80,18 @@ originator-only assumptions lifted:
 
 `TurnStream` stays exactly as it is. This is a sibling, not a rework.
 
+**Implemented.** `ChatWatch`, reached through `Chat.watch()` and
+`Session.watch()`, with `event_for` now in `__all__`.
+
+Two notes where the built thing differs from the request. The mid-turn entry
+event is a distinct `TurnInProgress` rather than a synthetic `TurnStarted`: a
+consumer that cannot tell "this began now" from "this began before you were
+looking" will replay an animation or log a start that already happened, and
+there is nothing in a forged `TurnStarted` to warn them. It carries the text so
+far, read from the mirror, so a bubble opens populated rather than empty. And
+`watch(from_start=False)` opts out, because a consumer that only wants the live
+tail should not have to filter out an event it never wanted.
+
 ---
 
 ## 2. Answering a request as a non-originating client is only reachable below the front door
@@ -115,6 +133,18 @@ help someone who has no reason to look there.
   answerable by any subscriber, not only by the turn's originator. The host
   arbitrates and `confirm_tool` already documents first-answer-wins
   (`serve/inputs.py:72`); it is the front door that does not say so.
+
+**Implemented.** `Session.pending_inputs()`, `Session.responder`, and
+`Session.inputs()` as an async iterator yielding the pending set whenever it
+changes.
+
+`inputs()` is derived from **mirror state**, not from envelopes, and polls at a
+configurable interval rather than reconstructing the set from actions.
+`inputNeeded` moves for several reasons — a request opening, another client
+answering one, a turn ending — and rebuilding it from `session/inputNeededSet`
+and `session/inputNeededRemoved` means re-deriving what the session reducer
+already computed. That is the same argument the rest of this document makes, so
+it applies here too.
 
 ---
 
@@ -172,6 +202,19 @@ missing piece is that some failures should not be retried at any polarity.
   exhausting a finite attempt budget. An embedder can then map "failed with a
   rejected credential" onto a re-login prompt, which is the whole ask.
 
+**Implemented, as proposed.** `TransportError` gained `kind="rejected"` plus
+`status` and `close_code`; `WebSocketClientTransport.connect` maps
+`websockets.InvalidStatus` rather than flattening it, and a 1008 close is
+classified as a refusal. `ReconnectPolicy.should_retry` defaults to
+`default_should_retry`, which declines HTTP 401/403, a 1008 close and `-32005`,
+and retries everything else. `retry_everything` restores the previous behaviour
+under a name rather than a lambda.
+
+One deliberate departure from "defaulting to today's behaviour so nothing
+changes": the default predicate **does** change behaviour for those three cases.
+A hook that ships inert is a hook nobody enables, and the three refusals it
+declines are the ones the request calls unambiguous.
+
 ---
 
 ## 4. `connect()` cannot be given a TLS configuration
@@ -200,6 +243,10 @@ position on certificate trust, which it should not.
 
 Client certificates fall out of the same parameter for free, which is the other
 half of the deployments that need it.
+
+**Implemented, as proposed.** `ssl: SSLContext | None` on both
+`WebSocketClientTransport.connect` and `connect()`, passed straight through. No
+`verify=False`, no CA-bundle path parsing.
 
 ---
 

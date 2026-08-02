@@ -28,6 +28,7 @@ from __future__ import annotations
 from agent_host_client.api import (
     ApprovalPolicy,
     Chat,
+    ChatWatch,
     Client,
     Delta,
     InputRequested,
@@ -44,6 +45,7 @@ from agent_host_client.api import (
     TurnCompleted,
     TurnEvent,
     TurnFailed,
+    TurnInProgress,
     TurnStarted,
     TurnStream,
     UnknownEvent,
@@ -52,6 +54,7 @@ from agent_host_client.api import (
     auto,
     connect,
     deny_all,
+    event_for,
 )
 from agent_host_client.client import (
     AhpClient,
@@ -72,6 +75,7 @@ __all__ = [
     "AhpClientError",
     "ApprovalPolicy",
     "Chat",
+    "ChatWatch",
     "Client",
     "ClientClosed",
     "ClientConfig",
@@ -94,6 +98,7 @@ __all__ = [
     "TurnCompleted",
     "TurnEvent",
     "TurnFailed",
+    "TurnInProgress",
     "TurnStarted",
     "TurnStream",
     "UnknownEvent",
@@ -103,5 +108,6 @@ __all__ = [
     "auto",
     "connect",
     "deny_all",
+    "event_for",
     "is_session_gone",
 ]

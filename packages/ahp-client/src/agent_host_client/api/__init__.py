@@ -9,7 +9,15 @@ from agent_host_client.api.approvals import (
     deny_all,
     resolve_policy,
 )
-from agent_host_client.api.client import Chat, Client, ClientContext, Session, TurnStream, connect
+from agent_host_client.api.client import (
+    Chat,
+    ChatWatch,
+    Client,
+    ClientContext,
+    Session,
+    TurnStream,
+    connect,
+)
 from agent_host_client.api.events import (
     Delta,
     InputRequested,
@@ -25,6 +33,7 @@ from agent_host_client.api.events import (
     TurnCompleted,
     TurnEvent,
     TurnFailed,
+    TurnInProgress,
     TurnStarted,
     UnknownEvent,
     Usage,
@@ -34,6 +43,7 @@ from agent_host_client.api.events import (
 __all__ = [
     "ApprovalPolicy",
     "Chat",
+    "ChatWatch",
     "Client",
     "ClientContext",
     "Delta",
@@ -51,6 +61,7 @@ __all__ = [
     "TurnCompleted",
     "TurnEvent",
     "TurnFailed",
+    "TurnInProgress",
     "TurnStarted",
     "TurnStream",
     "UnknownEvent",

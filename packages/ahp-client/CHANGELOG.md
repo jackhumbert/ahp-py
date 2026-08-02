@@ -40,6 +40,27 @@ Under construction. `docs/plan.md` is the design and its §12 is the build order
   credential redaction and no opt-out, `agent_host_client.doctor` as a
   conformance probe for someone else's host, and a full turn against the sibling
   Python host.
+- **Watching a turn this client did not start** — `Chat.watch()` /
+  `Session.watch()` returning a `ChatWatch` that dispatches nothing and filters
+  no turn id, with a synthetic `TurnInProgress` for mid-turn entry, and
+  `event_for` exported. ([`docs/requests.md`](docs/requests.md) item 1.)
+- **Answering somebody else's request from the front door** —
+  `Session.pending_inputs()`, `Session.responder`, and `Session.inputs()` as an
+  async iterator over the pending set. (item 2.)
+- **`ssl=` on `connect()`** and `WebSocketClientTransport.connect`, so a private
+  CA or a client certificate no longer forces a hand-written transport factory.
+  (item 4.)
+
+### Changed
+
+- **A permanent connection refusal is no longer retried forever.** `TransportError`
+  carries `kind="rejected"` with the HTTP `status` or WebSocket `close_code`
+  instead of flattening a refused upgrade into `"io"`, and
+  `ReconnectPolicy.should_retry` declines HTTP 401/403, a 1008 policy close and
+  `-32005`. Previously an expired token produced one doomed handshake per
+  backoff interval against the proxy already rejecting it, while the surface
+  showed `reconnecting` forever. `retry_everything` restores the old behaviour.
+  ([`docs/requests.md`](docs/requests.md) item 3.)
 
 ### Notes
 

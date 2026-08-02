@@ -25,6 +25,7 @@ import contextlib
 import os
 import uuid
 from collections.abc import AsyncIterator, Mapping, Sequence
+from ssl import SSLContext
 from types import TracebackType
 from typing import Any, Self
 
@@ -40,6 +41,7 @@ from agent_host_client.api.events import (
     TurnCompleted,
     TurnEvent,
     TurnFailed,
+    TurnInProgress,
     event_for,
 )
 from agent_host_client.client.client import AhpClient
@@ -47,9 +49,10 @@ from agent_host_client.client.errors import AhpClientError
 from agent_host_client.client.events import ActionEvent, ClientEvent
 from agent_host_client.client.mirror import StateMirror
 from agent_host_client.hosts.runtime import HostConfig, HostRuntime, TransportFactory
+from agent_host_client.serve.inputs import InputResponder, pending_inputs
 from agent_host_client.serve.router import ResourceServer
 
-__all__ = ["Chat", "Client", "ClientContext", "Session", "TurnStream", "connect"]
+__all__ = ["Chat", "ChatWatch", "Client", "ClientContext", "Session", "TurnStream", "connect"]
 
 
 class ClientContext:
@@ -86,6 +89,7 @@ def connect(
     transport_factory: TransportFactory | None = None,
     token: str | None = None,
     headers: Mapping[str, str] | None = None,
+    ssl: SSLContext | None = None,
     label: str | None = None,
     client_id: str | None = None,
     reconnect: bool = True,
@@ -100,6 +104,11 @@ def connect(
     composes it -- but the default composition is the supervised one, because a
     five-line script should not have to learn a supervisor to survive a laptop
     sleep. See ADR 0003.
+
+    *ssl* reaches the WebSocket handshake, which is what a private CA or a
+    client certificate needs. Without it the only way out is a hand-written
+    ``transport_factory``, which means reimplementing the token handling this
+    closure does -- and that is the security-sensitive part.
 
     Exactly one of *url*, *transport* or *transport_factory* is required.
     Passing a bare *transport* implies ``reconnect=False``: a transport can only
@@ -133,7 +142,9 @@ def connect(
         async def _dial() -> Transport:
             from agent_host_client.ws.transport import WebSocketClientTransport
 
-            return await WebSocketClientTransport.connect(str(url), token=token, headers=headers)
+            return await WebSocketClientTransport.connect(
+                str(url), token=token, headers=headers, ssl=ssl
+            )
 
         factory = _dial
 
@@ -272,6 +283,7 @@ class Session:
         self.provider = provider
         self._owned = owned
         self._chat: Chat | None = None
+        self._responder: InputResponder | None = None
 
     @property
     def state(self) -> JsonObject:
@@ -300,6 +312,50 @@ class Session:
 
     def prompt(self, text: str, **kwargs: Any) -> TurnStream:
         return _LazyTurnStream(self, text, kwargs)  # type: ignore[return-value]
+
+    async def watch(self, *, from_start: bool = True) -> ChatWatch:
+        """:meth:`Chat.watch` on the default chat."""
+        chat = await self.chat()
+        return chat.watch(from_start=from_start)
+
+    def pending_inputs(self) -> list[JsonObject]:
+        """Everything on this session waiting for a human.
+
+        Reads ``SessionState.inputNeeded``, the aggregate whose stated purpose
+        is that a client can answer **without subscribing to the chat** -- so a
+        session list can resolve a prompt without opening the conversation.
+        """
+        return pending_inputs(self._client.mirror, self.uri)
+
+    @property
+    def responder(self) -> InputResponder:
+        """Answers a request on this session, whoever started the turn.
+
+        A pending tool call is answerable by any subscriber; the host arbitrates
+        and the first answer wins. The front door teaches approvals through
+        `ToolCallReady.approve()` on a turn you started, which is why this is
+        stated here: answering somebody else's is not a lower-level operation,
+        it is the same one.
+        """
+        if self._responder is None:
+            self._responder = InputResponder(self._client.protocol, self._client.mirror)
+        return self._responder
+
+    async def inputs(self, *, poll: float = 0.05) -> AsyncIterator[list[JsonObject]]:
+        """Yield the pending set whenever it changes.
+
+        Derived from mirror state rather than from envelopes: ``inputNeeded``
+        moves for several reasons -- a request opening, another client answering
+        one, a turn ending -- and reconstructing the set from actions means
+        re-deriving what the session reducer already computed.
+        """
+        previous: list[JsonObject] | None = None
+        while True:
+            current = self.pending_inputs()
+            if current != previous:
+                previous = current
+                yield current
+            await asyncio.sleep(poll)
 
     async def dispose(self) -> None:
         await self._client.protocol.dispose_session(self.uri)
@@ -354,8 +410,108 @@ class Chat:
     def prompt(self, text: str, **kwargs: Any) -> TurnStream:
         return TurnStream(self._client, self, text, **kwargs)
 
+    def watch(self, *, from_start: bool = True) -> ChatWatch:
+        """Render whatever this chat is doing, starting now.
+
+        *from_start* emits a synthetic :class:`TurnInProgress` first when a turn
+        is already running, so attaching mid-turn has an entry point rather than
+        a silence until the next delta.
+        """
+        return ChatWatch(self._client, self, from_start=from_start)
+
     async def cancel(self) -> None:
         self._client.protocol.dispatch(self.uri, {"type": "chat/turnCancelled"})
+
+
+class ChatWatch:
+    """Every event on a chat, including turns this client did not start.
+
+    A sibling to :class:`TurnStream`, not a rework of it, with exactly the two
+    originator-only assumptions lifted: it dispatches nothing on entry, and it
+    filters no turn id. `TurnStarted` for somebody else's turn is an ordinary
+    event here rather than the one that never arrives.
+
+    Two clients rendering one live turn is the thing the protocol exists for.
+    Building it on `client.events()` means re-deriving the dispatch this already
+    performs -- that a terminal event must be *yielded* rather than raised past,
+    that authoritative text comes from confirmed state rather than accumulated
+    deltas, that a dropped connection means the turn *failed* -- each of which is
+    a comment in this repository explaining a mistake somebody already made.
+    """
+
+    def __init__(self, client: Client, chat: Chat, *, from_start: bool = True) -> None:
+        self._client = client
+        self._chat = chat
+        self._reader: Any = None
+        self._pending: list[TurnEvent] = []
+        self._from_start = from_start
+
+    def __aiter__(self) -> ChatWatch:
+        return self
+
+    def _open(self) -> None:
+        if self._reader is not None:
+            return
+        # Attached before the first read, so nothing arriving while the caller
+        # is still setting up is missed.
+        self._reader = self._client._runtime.events()
+        if not self._from_start:
+            return
+        active = self._active_turn()
+        if active is not None:
+            turn_id = str(active.get("id", ""))
+            # Synthetic, and typed as such: a UI needs something to open a
+            # bubble on, and a forged `TurnStarted` would be indistinguishable
+            # from a turn that really did begin now.
+            self._pending.append(
+                TurnInProgress(
+                    {"channel": self._chat.uri, "action": {"turnId": turn_id}},
+                    _markdown_text(active),
+                )
+            )
+
+    def _active_turn(self) -> Mapping[str, Any] | None:
+        state = self._client.mirror.state(self._chat.uri)
+        if not isinstance(state, Mapping):
+            return None
+        active = state.get("activeTurn")
+        return active if isinstance(active, Mapping) else None
+
+    async def __anext__(self) -> TurnEvent:
+        self._open()
+        if self._pending:
+            return self._pending.pop(0)
+        while True:
+            try:
+                tagged = await self._reader.__anext__()
+            except StopAsyncIteration:
+                raise StopAsyncIteration from None
+            if not isinstance(tagged.event, ActionEvent):
+                continue
+            envelope = tagged.event.envelope
+            if envelope.get("channel") != self._chat.uri:
+                continue
+            return event_for(envelope, self._dispatch)
+
+    def _dispatch(self, channel: str, action: Mapping[str, Any]) -> None:
+        """Adapt `dispatch` -- which returns a handle -- to the fire-and-forget
+        shape an event's `.approve()` needs."""
+        self._client.protocol.dispatch(channel, action)
+
+    async def aclose(self) -> None:
+        if self._reader is not None:
+            await self._reader.aclose()
+
+
+def _markdown_text(turn: Mapping[str, Any]) -> str:
+    parts = turn.get("responseParts")
+    if not isinstance(parts, list):
+        return ""
+    return "".join(
+        str(part.get("content", ""))
+        for part in parts
+        if isinstance(part, Mapping) and part.get("kind") == "markdown"
+    )
 
 
 class TurnStream:

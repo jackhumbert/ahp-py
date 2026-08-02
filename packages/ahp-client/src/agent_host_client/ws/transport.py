@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from ssl import SSLContext
 from typing import Any, Final
 from urllib.parse import quote
 
@@ -24,13 +25,16 @@ import websockets
 from agent_host_protocol.transport import TransportClosed
 from websockets.asyncio.client import ClientConnection
 
-from agent_host_client.client.errors import TransportError
+from agent_host_client.client.errors import TransportError, TransportErrorKind
 
 __all__ = ["WebSocketClientTransport", "WebSocketCloseInfo"]
 
 #: 1000 is a normal closure; 1005 means "no status", which is what a peer that
 #: closes without a code produces and is not an error either.
 _CLEAN_CLOSE_CODES: Final = frozenset({1000, 1005})
+
+#: "Policy violation": the peer is refusing this client rather than failing.
+_POLICY_VIOLATION: Final = 1008
 
 #: VS Code's connection-token query parameter. The token rides the URL because
 #: browsers cannot set headers on a WebSocket handshake -- which is also why it
@@ -63,6 +67,7 @@ class WebSocketClientTransport:
         headers: Mapping[str, str] | None = None,
         token: str | None = None,
         subprotocols: Sequence[str] | None = None,
+        ssl: SSLContext | None = None,
         open_timeout: float = 10.0,
         max_size: int = 16 * 1024 * 1024,
     ) -> WebSocketClientTransport:
@@ -73,6 +78,12 @@ class WebSocketClientTransport:
         limited to. It is percent-encoded, and it is never included in an
         exception message: ``websockets`` puts the URI in connection errors, so
         the failure path is exactly where a credential would leak.
+
+        *ssl* is passed straight through. An ``SSLContext`` is the standard
+        currency for a private CA or a client certificate, and it is the whole
+        interface -- no ``verify=False`` convenience flag, no CA-bundle path
+        parsing. Either would be this library taking a position on certificate
+        trust, which is the embedder's to hold.
         """
         target = _with_token(url, token)
         try:
@@ -80,9 +91,19 @@ class WebSocketClientTransport:
                 target,
                 additional_headers=dict(headers) if headers else None,
                 subprotocols=list(subprotocols) if subprotocols else None,  # type: ignore[arg-type]
+                ssl=ssl,
                 open_timeout=open_timeout,
                 max_size=max_size,
             )
+        except websockets.InvalidStatus as exc:
+            # The handshake was answered, and the answer was no. Flattening this
+            # into "io" is what makes an expired token retry forever.
+            status = exc.response.status_code
+            raise TransportError(
+                "rejected",
+                f"connect to {_redact(url)} refused with HTTP {status}",
+                status=status,
+            ) from exc
         except Exception as exc:
             raise TransportError(
                 "io", f"connect to {_redact(url)} failed: {_redact(str(exc))}"
@@ -132,8 +153,14 @@ class WebSocketClientTransport:
                 )
                 if self._close_info.clean:
                     return None
+                code = self._close_info.code
+                # 1008 is "policy violation" -- the peer is refusing us, not
+                # failing. Retrying it is the same doomed loop as an HTTP 401.
+                kind: TransportErrorKind = "rejected" if code == _POLICY_VIOLATION else "closed"
                 raise TransportError(
-                    "closed", f"connection closed abnormally: {self._close_info.code}"
+                    kind,
+                    f"connection closed abnormally: {code} {self._close_info.reason}".rstrip(),
+                    close_code=code,
                 ) from exc
             except OSError as exc:
                 raise TransportError("io", f"receive failed: {exc}") from exc

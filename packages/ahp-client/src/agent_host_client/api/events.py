@@ -33,6 +33,7 @@ __all__ = [
     "TurnCompleted",
     "TurnEvent",
     "TurnFailed",
+    "TurnInProgress",
     "TurnStarted",
     "UnknownEvent",
     "Usage",
@@ -64,6 +65,22 @@ class _Base:
 @dataclass(frozen=True, slots=True)
 class TurnStarted(_Base):
     pass
+
+
+@dataclass(frozen=True, slots=True)
+class TurnInProgress(_Base):
+    """A turn that was **already running** when we attached.
+
+    Synthetic: it corresponds to no envelope on the wire, and its ``envelope``
+    is assembled from the mirror. Deliberately a distinct type rather than a
+    fabricated :class:`TurnStarted` -- a consumer that cannot tell "this began
+    now" from "this began before you were looking" will replay an animation, or
+    log a turn start that already happened, and there is nothing in a forged
+    `TurnStarted` to warn them.
+    """
+
+    #: What the turn has produced so far, read from the mirror.
+    text: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -277,6 +294,7 @@ class UnknownEvent(_Base):
 
 TurnEvent: TypeAlias = (
     TurnStarted
+    | TurnInProgress
     | Delta
     | Reasoning
     | ResponsePartAdded
