@@ -862,20 +862,42 @@ not decide it now — and do not let it be decided by accretion either.
 
 ---
 
-## 10. Permanently out of scope
+## 10. Scope
 
-Measured against `docs/guide/doctrine.md:69-79`. These are not deferrals.
+**This section used to be called "permanently out of scope". It is not that any
+more.** The owner's direction is: build everything we can, and let the demo be a
+full exploration of the protocol. So the question for each item below is no
+longer *whether* but *how to ship it safely* and *what the default should be*.
+
+Two distinctions survive the change, because they are about defaults rather than
+about scope:
+
+1. **Executing and destroying are opt-in.** A feature that runs commands,
+   deletes work, or spends money is constructed by name and never arrives by
+   upgrading. `--terminal` (a real pty, shipped) and `--writable` (resource
+   writes) are the pattern: one flag, one clearly named danger, off by default.
+2. **A host must not claim what it cannot do.** Advertising a capability we do
+   not implement is worse than a gap, because a gap degrades and a false claim
+   fails. Nothing here justifies publishing a capability ahead of its
+   implementation.
+
+Status of the previously-excluded list:
+
+- **A PTY backend.** **DONE** — `core/pty_backend.py`, behind `--terminal`. The
+  original objection was that vendoring VS Code's shell-integration *injection*
+  scripts puts one vendor's shell hooks into a neutral library. That objection
+  still holds and is narrower than the whole feature: we run the shell, we parse
+  OSC 633, and we do not inject.
 
 - **An MCP client runtime.** Spawning or connecting MCP servers, transports,
   `tools/list`, `tools/call`, restart-on-crash. The anti-goals name "a universal
   backend tool registry or tool schema" and "how agents reason, plan, call
   tools". If `McpServerRegistry` spawns processes, it does not belong in this
   distribution.
-- **A PTY backend in core, and shell-integration injection.** The injection
-  scripts are a VS Code product artifact keyed on `VSCODE_*` env vars and a
-  nonce; vendoring them puts one vendor's shell hooks into a neutral library. The
-  OSC 633 *parser* is a different matter — the MUST-strip rule
-  (`terminal-channel.md:112`) applies whether or not we inject.
+- **Shell-integration INJECTION** (not the terminal itself) stays out: the
+  injection scripts are a VS Code product artifact keyed on `VSCODE_*` env vars
+  and a nonce, and vendoring them puts one vendor's shell hooks into a neutral
+  library. Parsing OSC 633 is a different matter and is implemented.
 - **Anything git.** `branch`/`uncommitted` change kinds, merge-base baselines,
   checkpoint refs, `refs/agents/<sid>/reviewed`. The anti-goal is explicit: "a
   requirement that every workspace has a local filesystem or Git repository."
@@ -894,10 +916,18 @@ Measured against `docs/guide/doctrine.md:69-79`. These are not deferrals.
 - **A headless terminal emulator.** Cursor-position emulation is
   terminal-emulator work, not protocol work. Document that programs querying
   terminal state may hang; do not fake it.
-- **`pickle`, `eval`, or any `__reduce__`-capable store format**, even as an
-  option. JSON only. This is the single most likely Python-shaped
-  remote-code-execution mistake in the whole roadmap, so it belongs in an ADR,
-  not only here.
+- **`pickle`, `eval`, or any `__reduce__`-capable store format** — the one entry
+  here that really is permanent, and the only one this section keeps. JSON only.
+  It is the single most likely Python-shaped remote-code-execution mistake in
+  the whole roadmap, and unlike everything else above there is no version of it
+  that is safe behind a flag: the danger is not the feature, it is the format.
+
+Everything else on the old list — an MCP client runtime, git-backed changesets
+and checkpoints, built-in changeset operations, model routing, agent-to-agent
+coordination, a headless terminal emulator — is now **open work**, to be costed
+and built. Where one of them destroys data (`discard-changes`) or spends money
+or credentials (`create-pr`), it gets its own flag and its own confirmation, on
+the `--terminal` pattern.
 
 ---
 
