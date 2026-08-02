@@ -100,6 +100,15 @@ def _parse_args() -> argparse.Namespace:
             "snapshots, on every reconnect, for the life of the host"
         ),
     )
+    parser.add_argument(
+        "--multi-chat",
+        action="store_true",
+        help=(
+            "advertise capabilities.multipleChats{fork,sideChat}: chat tabs, "
+            "fork-into-chat, and side chats. Without it a client refuses to "
+            "open a second chat at all"
+        ),
+    )
     parser.add_argument("-v", "--verbose", action="store_true", help="debug logging")
     return parser.parse_args()
 
@@ -124,6 +133,9 @@ async def _run() -> None:
             confirm_tools=args.confirm_tools,
             client_tools=args.client_tools,
             configurable=args.configurable,
+            capabilities=(
+                {"multipleChats": {"fork": True, "sideChat": True}} if args.multi_chat else None
+            ),
         ),
         LoopbackSingleUserPolicy(),
         info=HostInfo(name="agent-host-server (demo)"),

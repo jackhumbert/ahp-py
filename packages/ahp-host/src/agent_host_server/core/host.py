@@ -559,6 +559,19 @@ class _Session:
         return f"{self.uri}/annotations"
 
 
+def _with_origin(summary: dict[str, Any], origin: Mapping[str, Any] | None) -> dict[str, Any]:
+    """`ChatSummary.origin` -- where a forked or side chat came from.
+
+    On the SUMMARY, not only on the chat channel's own state. The client builds
+    its chat list from `SessionState.chats[]` and reads `origin` from there, so
+    a side chat whose origin lives only on its own channel opens correctly and
+    is then indistinguishable from an ordinary chat in the UI.
+    """
+    if origin is not None:
+        summary["origin"] = dict(origin)
+    return summary
+
+
 class Host:
     """An AHP host over one or more client connections.
 
@@ -1873,12 +1886,15 @@ class Host:
             session_uri,
             {
                 "type": "session/chatAdded",
-                "summary": {
-                    "resource": chat_uri,
-                    "title": state["title"],
-                    "status": _STATUS_IDLE,
-                    "modifiedAt": created_at,
-                },
+                "summary": _with_origin(
+                    {
+                        "resource": chat_uri,
+                        "title": state["title"],
+                        "status": _STATUS_IDLE,
+                        "modifiedAt": created_at,
+                    },
+                    origin,
+                ),
             },
         )
         self._audit("chat.created", connection, channel=chat_uri)

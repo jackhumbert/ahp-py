@@ -78,3 +78,31 @@ def test_no_two_customizations_share_a_uri() -> None:
     uris = _uris(demo_customizations())
     duplicates = {uri for uri in uris if uris.count(uri) > 1}
     assert not duplicates, f"these URIs are claimed twice: {sorted(duplicates)}"
+
+
+def test_the_model_only_agent_carries_the_field_a_client_reads() -> None:
+    """`disableUserInvocation` is declared by the spec and read by nobody.
+
+    VS Code 1.131.0 declares it on AgentCustomization
+    (channels-session/state.ts:907) and a grep of both shipping bundles finds
+    zero readers. The switch it actually consults is `_meta.userInvocable`, via
+    readAgentCustomizationMeta -> provideCustomAgents -> visibility.
+
+    So the demo sends both, and this asserts both: sending only the spec field
+    left the model-only agent selectable in the picker, which is the opposite
+    of what its own description promises.
+    """
+    agents = [
+        child
+        for entry in demo_customizations()
+        for child in entry.get("children") or []
+        if child.get("type") == "agent"
+    ]
+    hidden = [a for a in agents if a.get("disableUserInvocation")]
+    assert hidden, "the demo no longer shows a model-only agent"
+    for agent in hidden:
+        meta = agent.get("_meta")
+        assert isinstance(meta, dict), f"{agent['id']} has no _meta"
+        # A JSON boolean, not a string: the client's reader drops non-booleans,
+        # and "false" would leave the agent visible.
+        assert meta.get("userInvocable") is False, f"{agent['id']}"

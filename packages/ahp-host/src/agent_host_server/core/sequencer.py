@@ -138,6 +138,18 @@ class Sequencer:
         if reducer not in REDUCERS:
             raise ValueError(f"unknown reducer {reducer!r}")
         async with self._lock:
+            if uri in self._states:
+                # A backstop, not the gate. Every command that lets a client
+                # name a channel refuses a collision itself, with a proper
+                # `SessionAlreadyExists`; this catches the case where one of
+                # them stops doing so. `createSession` did stop -- it checked
+                # only its own session map -- and silently overwrote whatever
+                # channel the client named, `ahp-root://` included.
+                #
+                # Surfaces as -32603, which is the right shape for "the host
+                # has a bug", and the wrong shape for a client error. If a
+                # client ever sees this, the guard above it is missing.
+                raise ValueError(f"channel already registered: {uri!r}")
             self._states[uri] = initial_state
             self._reducers[uri] = reducer
 

@@ -84,7 +84,20 @@ def demo_customizations() -> list[dict[str, Any]]:
                     "bravo",
                     "AHS Agent Bravo (model-only)",
                     "Invocable by the model but not directly by a user.",
+                    # The spec's field. VS Code 1.131.0 DECLARES it
+                    # (channels-session/state.ts:907) and reads it nowhere --
+                    # a grep of both shipping bundles finds zero readers. Sent
+                    # for conformance, and on its own it does nothing: bravo
+                    # stayed selectable in the picker with this set.
                     disableUserInvocation=True,
+                    # The switch the client actually reads, via
+                    # readAgentCustomizationMeta -> provideCustomAgents ->
+                    # visibility.userInvocable -> refreshCustomPromptModes.
+                    # `_meta` is legal on every customization
+                    # (CustomizationBase, state.ts:683), so this is not schema
+                    # abuse. It must be a JSON boolean -- the reader drops
+                    # non-booleans, and the string "false" leaves it visible.
+                    **{"_meta": {"userInvocable": False}},
                 ),
                 {
                     "type": "skill",
