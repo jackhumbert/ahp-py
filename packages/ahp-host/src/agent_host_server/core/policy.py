@@ -24,7 +24,12 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Protocol, runtime_checkable
 
-__all__ = ["ConnectionInfo", "LoopbackSingleUserPolicy", "Policy"]
+__all__ = [
+    "ConnectionInfo",
+    "LoopbackSingleUserPolicy",
+    "Policy",
+    "TracksChannels",
+]
 
 
 @dataclass(frozen=True)
@@ -206,3 +211,61 @@ class LoopbackSingleUserPolicy:
         self, info: ConnectionInfo, session: str, directory: str
     ) -> bool:
         return True
+
+
+@runtime_checkable
+class TracksChannels(Protocol):
+    """A policy that needs to know which channels exist, and who made them.
+
+    Feature-detected, never required -- the same shape as
+    :class:`~agent_host_server.core.resources.WritableResourceProvider`. A
+    policy with no opinion about ownership implements nothing and is unaffected.
+
+    This exists because ownership was **inexpressible**.
+    :class:`~agent_host_server.core.policies.OwnedSessionPolicy` keeps a
+    channel-to-principal map and nothing could populate it:
+    :meth:`Policy.may_create_session` is consulted BEFORE the host mints a
+    session's chat and annotations channels, so at decision time those URIs do
+    not exist, and nothing told the policy afterwards. The shipped multi-user
+    example could not do the thing it was an example of.
+
+    The host calls these for every channel it registers or drops on a peer's
+    behalf, so the layer making trust decisions learns the URIs without parsing
+    one (invariant 15) or reaching into private state.
+    """
+
+    def channel_created(
+        self, info: ConnectionInfo | None, channel: str, *, session: str | None
+    ) -> None:
+        """A channel now exists.
+
+        *info* is the connection that caused it, or ``None`` when the host made
+        it on its own account -- the root channel, or a session restored from a
+        store before any peer connected. *session* is the session the channel
+        belongs to, or ``None`` for the session channel itself and for root.
+
+        Called BEFORE the first `subscribe` can arrive, so a policy that
+        refuses unowned channels never has a window where its own session is
+        unreachable.
+        """
+        ...
+
+    def channel_dropped(self, channel: str) -> None:
+        """A channel is gone. Forget anything recorded about it."""
+        ...
+
+    def session_metadata(self, session: str) -> Mapping[str, Any] | None:
+        """What to persist alongside this session, or ``None``.
+
+        Round-tripped verbatim onto :class:`StoredSession.metadata` and never
+        interpreted by the library -- the same treatment `resume_state` gets
+        for the provider. It comes back on the payload handed to
+        :meth:`Policy.may_restore_session`, which is where a policy re-claims
+        what it owned.
+
+        Without it, durability and partitioning could not both be on: a stored
+        session carried everything except who it belonged to, so a restored one
+        had no owner and `may_see_channel` refused it to everybody, including
+        its author.
+        """
+        ...

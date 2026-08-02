@@ -114,6 +114,70 @@ class OwnedSessionPolicy:
                 return principal
         return None
 
+    # ─── the host tells us what exists ───────────────────────────────────
+
+    def channel_created(
+        self, info: ConnectionInfo | None, channel: str, *, session: str | None
+    ) -> None:
+        """Claim a channel for whoever caused it.
+
+        This is what makes the class usable. Before it existed, `claim()` had
+        no caller in the library -- its only call site was a test that built
+        sessions in-process and read `session.chat_uri` off the object it had
+        just constructed. A deployment driven by clients never holds that
+        object, so every channel stayed unowned and `may_see_channel` refused
+        the peer its own chat.
+
+        Two sources of principal, in order:
+
+        * the CONNECTION that caused it, for anything a peer asked for;
+        * failing that, the SESSION it belongs to -- a changeset is published
+          by the provider out of band, with no connection in scope, and it
+          belongs to whoever owns the session.
+
+        Neither parses a URI (invariant 15).
+        """
+        principal = self.principal_of(info) if info is not None else None
+        if principal is None and session is not None:
+            principal = self._owners.get(session)
+        if principal is not None:
+            self._owners[channel] = principal
+
+    def channel_dropped(self, channel: str) -> None:
+        self._owners.pop(channel, None)
+
+    def session_metadata(self, session: str) -> dict[str, Any] | None:
+        """Persist the owner, so a restored session still has one."""
+        owner = self._owners.get(session)
+        return {"owner": owner} if owner is not None else None
+
+    def may_restore_session(self, stored: Mapping[str, Any]) -> bool:
+        """Re-claim what this session owned, and allow the restore.
+
+        The default in this module refuses, and its docstring was right about
+        why: a restored session with no owner is one `may_see_channel` refuses
+        to everybody. That was a correct answer to a MISSING CAPABILITY. With
+        the owner travelling on `metadata`, the answer changes -- and the
+        re-claim happens here because this is the one hook handed the whole
+        stored record, channels included.
+        """
+        metadata = stored.get("metadata")
+        owner = metadata.get("owner") if isinstance(metadata, Mapping) else None
+        if not isinstance(owner, str):
+            # Still refused: a session whose owner we cannot establish is one
+            # nobody can reach, and silently restoring it would leave a ghost
+            # in every session list.
+            return False
+        channels = stored.get("channels")
+        if isinstance(channels, Mapping):
+            for uri in channels:
+                if isinstance(uri, str):
+                    self._owners[uri] = owner
+        uri = stored.get("uri")
+        if isinstance(uri, str):
+            self._owners[uri] = owner
+        return True
+
     # ─── the hooks ───────────────────────────────────────────────────────
 
     def authorize_connection(self, info: ConnectionInfo) -> bool:
@@ -142,13 +206,6 @@ class OwnedSessionPolicy:
     def may_create_terminal(self, info: ConnectionInfo, params: Mapping[str, Any]) -> bool:
         """Refused. A terminal is arbitrary command execution and this policy
         exists for hosts serving people who do not trust each other."""
-        return False
-
-    def may_restore_session(self, session: Mapping[str, Any]) -> bool:
-        """Refused. A restored session has no owner until somebody claims it,
-        and `may_see_channel` refuses unowned channels -- so restoring one would
-        produce a session nobody, including its author, can reach. An embedder
-        that persists ownership alongside the session overrides this."""
         return False
 
     def may_push_token(self, info: ConnectionInfo, resource: str) -> bool:

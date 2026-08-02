@@ -88,7 +88,8 @@ class StoredSession:
     host registered them with, and come back bound to the same reducer.
 
     `resume_state` is the provider's, and opaque here: the host round-trips it
-    and never looks inside (ADR 0003).
+    and never looks inside (ADR 0003). `metadata` gets the same treatment for
+    the EMBEDDER.
     """
 
     uri: str
@@ -97,6 +98,20 @@ class StoredSession:
     channels: Mapping[str, Mapping[str, Any]]
     title: str | None = None
     resume_state: Mapping[str, Any] | None = None
+    #: The embedder's, round-tripped verbatim and never interpreted.
+    #:
+    #: This exists so durability and partitioning can both be on. Without it a
+    #: `StoredSession` carried channels, title, provider and resume state --
+    #: everything except WHO IT BELONGS TO -- so a restored session had no
+    #: owner, `may_see_channel` refused unowned channels, and restoring one
+    #: produced a session nobody could reach. `may_restore_session` refusing by
+    #: default was a correct answer to a missing capability, not a design
+    #: position.
+    #:
+    #: An embedder could keep ownership in a second store and re-claim before
+    #: serving, which is two records of the same fact with nothing keeping them
+    #: in step. Ownership belongs with the session it describes.
+    metadata: Mapping[str, Any] | None = None
 
     def to_json(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
@@ -112,6 +127,8 @@ class StoredSession:
             payload["title"] = self.title
         if self.resume_state is not None:
             payload["resumeState"] = dict(self.resume_state)
+        if self.metadata is not None:
+            payload["metadata"] = dict(self.metadata)
         return payload
 
     @classmethod
@@ -144,6 +161,9 @@ class StoredSession:
         resume_state = payload.get("resumeState")
         if resume_state is not None and not isinstance(resume_state, Mapping):
             raise ValueError("resumeState must be an object or absent")
+        metadata = payload.get("metadata")
+        if metadata is not None and not isinstance(metadata, Mapping):
+            raise ValueError("metadata must be an object or absent")
 
         return cls(
             uri=_required_string(payload, "uri"),
@@ -152,6 +172,7 @@ class StoredSession:
             channels=channels,
             title=title,
             resume_state=dict(resume_state) if resume_state is not None else None,
+            metadata=dict(metadata) if metadata is not None else None,
         )
 
 

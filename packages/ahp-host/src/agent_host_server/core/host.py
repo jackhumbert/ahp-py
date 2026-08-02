@@ -46,7 +46,7 @@ from agent_host_server.core.config import RootConfig, type_matches
 from agent_host_server.core.connection import Connection
 from agent_host_server.core.outbound import OutboundRequests
 from agent_host_server.core.pending import PendingRequests, RequestOutcome
-from agent_host_server.core.policy import Policy
+from agent_host_server.core.policy import Policy, TracksChannels
 from agent_host_server.core.resources import (
     NullResourceProvider,
     ResourceInfo,
@@ -834,6 +834,11 @@ class Host:
                     channels=channels,
                     title=session.title,
                     resume_state=session.resume_state,
+                    # The embedder's, asked for at write time rather than
+                    # cached: a policy that re-keys ownership between the
+                    # session starting and this write should not persist a
+                    # stale answer.
+                    metadata=self._session_metadata(session.uri),
                 )
             )
 
@@ -1675,6 +1680,7 @@ class Host:
         # three `agenthost-terminal:` forms and the spec's examples use a
         # fourth (invariant 15).
         await self.sequencer.register_channel(channel, state, "terminal")
+        self._channel_created(connection, channel)
         self._live_terminals[channel] = terminal
         # Nothing published `terminal/exited`, so a shell that ended left the
         # channel looking live forever and the client's tab never closed: the
@@ -1744,6 +1750,7 @@ class Host:
             return {}
         await terminal.close()
         await self.sequencer.drop_channel(channel)
+        self._channel_dropped(channel)
         await self._publish_terminal_catalogue()
         self._audit("terminal.disposed", connection, channel=channel)
         return {}
@@ -2069,6 +2076,7 @@ class Host:
         if directories is not None:
             state["workingDirectories"] = list(directories)
         await self.sequencer.register_channel(chat_uri, state, "chat")
+        self._channel_created(connection, chat_uri, session=session_uri)
         session.chat_uris.add(chat_uri)
 
         await self.sequencer.publish(
@@ -2200,11 +2208,39 @@ class Host:
         session.chat_uris.discard(chat_uri)
         await self.sequencer.publish(session.uri, {"type": "session/chatRemoved", "chat": chat_uri})
         await self.sequencer.drop_channel(chat_uri)
+        self._channel_dropped(chat_uri)
         self._audit("chat.disposed", connection, channel=chat_uri)
         await self._mirror_summary(session)
         return {}
 
     # ─── changesets ──────────────────────────────────────────────────────
+
+    # ─── telling the policy which channels exist ─────────────────────────
+
+    def _channel_created(
+        self, connection: Connection | None, channel: str, *, session: str | None = None
+    ) -> None:
+        """Tell a `TracksChannels` policy about a channel, if it wants to know.
+
+        Called at EVERY registration site rather than only at `createSession`,
+        because a session goes on to create chats, terminals, changesets and
+        watches, and a policy that only learned the session URI would refuse
+        all of them. The prefix walk cannot substitute: a chat URI is
+        `ahp-chat://<chatId>/<base64 session uri>`, so the session URI is
+        inside it, not its parent.
+        """
+        if isinstance(self.policy, TracksChannels):
+            info = connection.info if connection is not None else None
+            self.policy.channel_created(info, channel, session=session)
+
+    def _channel_dropped(self, channel: str) -> None:
+        if isinstance(self.policy, TracksChannels):
+            self.policy.channel_dropped(channel)
+
+    def _session_metadata(self, session: str) -> Mapping[str, Any] | None:
+        if isinstance(self.policy, TracksChannels):
+            return self.policy.session_metadata(session)
+        return None
 
     def _content_owner(self, uri: str) -> _Session | None:
         """The session whose store holds `uri`, if any."""
@@ -2236,6 +2272,10 @@ class Host:
             await self.sequencer.register_channel(
                 changeset.uri, {"status": "computing", "files": []}, "changeset"
             )
+            # No connection here -- a changeset is published by the PROVIDER,
+            # out of band. Ownership is inherited from the session it belongs
+            # to, which is why `session` is part of the signature.
+            self._channel_created(None, changeset.uri, session=session_uri)
             await self.sequencer.publish(
                 session_uri,
                 {
@@ -2418,6 +2458,7 @@ class Host:
         )
         channel = new_watch_channel()
         await self.sequencer.register_channel(channel, request.to_state(), "resourceWatch")
+        self._channel_created(connection, channel)
         self._watches[channel] = _Watch(request=request, owner=connection)
         return {"channel": channel}
 
@@ -2958,6 +2999,10 @@ class Host:
         if session_config is not None:
             session_state["config"] = session_config
         await self.sequencer.register_channel(channel, session_state, "session")
+        # Before the response goes out, so a policy that refuses unowned
+        # channels never has a window in which the peer's own session is
+        # unreachable.
+        self._channel_created(connection, channel)
         await self.sequencer.register_channel(
             chat_uri,
             {
@@ -2972,6 +3017,7 @@ class Host:
             },
             "chat",
         )
+        self._channel_created(connection, chat_uri, session=channel)
         # "Each session owns at most one annotations channel. The channel URI is
         # derived from the session URI by appending `/annotations`."
         #
@@ -2986,6 +3032,7 @@ class Host:
         await self.sequencer.register_channel(
             session.annotations_uri, {"annotations": []}, "annotations"
         )
+        self._channel_created(connection, session.annotations_uri, session=channel)
 
         # Bring-up runs after the response so the client can subscribe first.
         # Hold a reference: a bare create_task can be garbage-collected mid-flight.
@@ -3117,10 +3164,14 @@ class Host:
         del self._sessions[channel]
         for changeset_uri in session.changesets:
             await self.sequencer.drop_channel(changeset_uri)
+            self._channel_dropped(changeset_uri)
         for owned_chat in session.chat_uris:
             await self.sequencer.drop_channel(owned_chat)
+            self._channel_dropped(owned_chat)
         await self.sequencer.drop_channel(session.annotations_uri)
+        self._channel_dropped(session.annotations_uri)
         await self.sequencer.drop_channel(channel)
+        self._channel_dropped(channel)
 
         with contextlib.suppress(Exception):
             await self.store.delete(channel)

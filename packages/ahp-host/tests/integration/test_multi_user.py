@@ -239,15 +239,31 @@ class TestPartitioning:
     async def test_an_unclaimed_channel_is_refused_not_shared(
         self, shared: tuple[Host, OwnedSessionPolicy]
     ) -> None:
-        """The failure mode of the other choice is a leak."""
+        """The failure mode of the other choice is a leak.
+
+        This used to create a session and deliberately not claim it -- which
+        was only reachable because creation claimed NOTHING, the defect that
+        made `OwnedSessionPolicy` unusable. Creating a session now records its
+        ownership, so the way to reach an unowned channel is to name one the
+        host never told the policy about: a guessed URI.
+
+        That is the realistic leak, and it is still refused.
+        """
         host, _policy = shared
         alice = await _connect(host, "alice", "a1")
         await _initialize(alice, "a1")
-        # Created but deliberately never claimed.
-        await alice.request("createSession", {"channel": "echo:/unclaimed", "provider": "echo"})
+
+        guessed = await alice.request("subscribe", {"channel": "echo:/never-created"})
+        assert guessed["error"]["code"] == -32009
+
+        # And a plausible-looking derived name, since a chat URI CONTAINS the
+        # session URI -- a prefix walk that matched it would leak.
+        await alice.request("createSession", {"channel": "echo:/owned", "provider": "echo"})
         await alice.collect(seconds=0.3)
-        response = await alice.request("subscribe", {"channel": "echo:/unclaimed"})
-        assert response["error"]["code"] == -32009
+        derived = await alice.request(
+            "subscribe", {"channel": "ahp-chat://guessed/echo%3A%2Fowned"}
+        )
+        assert derived["error"]["code"] == -32009
 
 
 class TestCounters:
