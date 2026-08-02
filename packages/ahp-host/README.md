@@ -49,12 +49,42 @@ session creation, and a full turn. The details of what it sends — and the thre
 host bugs that finding out uncovered — are in
 [`docs/experiments.md`](docs/experiments.md) §E12.
 
-Expect a terminal-launch error if you open one. `createTerminal` **is**
-implemented — the host declines it because no `TerminalBackend` is installed,
-and this distribution deliberately ships none: a POSIX pty in the default wheel
-is arbitrary command execution one import away, in a library whose `Policy`
-cannot authenticate a peer. Supply a backend and terminals work; see
-[`core/terminals.py`](src/agent_host_server/core/terminals.py).
+### Demo flags
+
+The bare command is deliberately minimal. Each flag turns on one surface, and
+the ones that execute or destroy are separate from the ones that only read:
+
+| Flag | What it turns on |
+|---|---|
+| `--customizations` | Publish a demo plugin tree: agents, skills, prompts, rules, hooks, an MCP server |
+| `--configurable` | Both config schemas — the session one, and `RootState.config` so the client's own pushes stop being dropped |
+| `--elicit` | The agent stops mid-turn and asks a question (ADR 0005) |
+| `--confirm-tools` | The agent asks before running its tool, and honours edits to the input |
+| `--client-tools` | The agent delegates to a tool the **client** owns |
+| `--multi-chat` | Advertise `capabilities.multipleChats` — chat tabs, fork, and side chats |
+| `--serve-directory PATH` | Expose `PATH` over the `resource*` commands, jailed to that root |
+| `--writable` | **Also allow writes** under `--serve-directory`. A second opt-in, on purpose |
+| `--terminal` | Install a real pty backend. **This runs commands** |
+| `--changes` | The agent makes real git edits in `--serve-directory` and publishes changesets with working stage/commit/revert |
+| `--token [VALUE]` | Require a connection token on the upgrade; omit the value to generate one |
+| `--allow-remote` | Bind off-loopback. Read the security section first |
+| `--wire-log PATH` | Append every frame as ahp-inspector JSONL |
+| `--sequence-file PATH` | Persist `serverSeq` so it keeps increasing across a restart |
+| `--port PORT` | Listen here instead of 4321 |
+| `--bind ADDR` | Bind address. Loopback unless `--allow-remote` |
+| `--delay SECONDS` | Pause between echo deltas, so streaming is visible |
+| `--agent-name NAME` | `AgentInfo.displayName` — how clients label the agent |
+| `--model-name NAME` | The model name shown in the client's model picker |
+| `-v`, `--verbose` | Debug logging |
+
+`--elicit`, `--confirm-tools` and `--client-tools` are mutually exclusive: the
+demo provider takes the first one enabled and returns.
+
+A full exploration, against a scratch git repo you do not mind being edited:
+
+```bash
+python -m agent_host_server --customizations --configurable --multi-chat   --serve-directory /tmp/scratch --writable --terminal --changes
+```
 
 To see the wire:
 

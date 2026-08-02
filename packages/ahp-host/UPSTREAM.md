@@ -13,7 +13,7 @@ changes in MINOR bumps, so an unpinned implementation is unmaintainable.**
 | Spec tag | `spec/v0.7.0` |
 | Spec commit | `ea6fae670c4012721fdc02d587b3a46ecdc871c0` |
 | Working revision read during research | `bd27d354b39c1b2090fbcc6db392d406b743280c` (2026-07-31) |
-| **Protocol version implemented on the wire** | **`0.6.0`** |
+| **Protocol version negotiated on the wire** | **`0.7.0`** (we offer `0.7.0, 0.6.0`) |
 | Conformance corpus vendored from | `spec/v0.7.0` → `types/test-cases/` |
 | Reference client for interop tests | `@microsoft/agent-host-protocol@0.6.0` (npm) |
 

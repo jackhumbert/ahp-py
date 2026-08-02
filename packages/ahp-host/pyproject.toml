@@ -46,6 +46,10 @@ Issues = "https://github.com/jackhumbert/agent-host-server-py/issues"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/agent_host_server"]
+# `.github/` inside the demo tree is DATA, not repo config, and build backends
+# skip dot-directories by default -- so the demo shipped with every
+# customization pointing at a file that was not in the wheel.
+artifacts = ["src/agent_host_server/provider/demo_tree/**"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -16,7 +16,18 @@ import pytest
 
 from agent_host_server.provider.demo_customizations import demo_customizations
 
-_ROOT = Path(__file__).resolve().parents[2] / "examples" / "demo-plugin"
+#: The tree ships INSIDE the package. It used to live in `examples/`, which
+#: worked from a checkout and resolved to nothing once installed -- in a wheel
+#: the path became `<site-packages>/../examples/demo-plugin`, so every
+#: customization pointed at a missing file and rendered as an empty container.
+#: Keeping a second copy in `examples/` would just reintroduce the drift.
+_ROOT = (
+    Path(__file__).resolve().parents[2]
+    / "src"
+    / "agent_host_server"
+    / "provider"
+    / "demo_tree"
+)
 
 #: The directories a client expands under a plugin URI. Not a guess and not
 #: this project's choice -- it is what VS Code's own tests read
@@ -40,7 +51,7 @@ def _uris(entries: object) -> list[str]:
 
 
 def _relative(uri: str) -> str:
-    marker = "/examples/demo-plugin/"
+    marker = "/demo_tree/"
     assert marker in uri, f"demo URI escaped the demo tree: {uri}"
     return uri.split(marker, 1)[1]
 

@@ -39,7 +39,12 @@ def _demo_root() -> str:
     exactly that -- the wire log showed a client asking 215 times and being told
     NotFound every time.
     """
-    return (Path(__file__).resolve().parents[3] / "examples" / "demo-plugin").as_uri()
+    # Beside this module, NOT `../../../examples`. A repo-relative path works
+    # from a checkout and resolves to nothing once installed -- in a wheel it
+    # became `<site-packages>/../examples/demo-plugin`, which does not exist,
+    # so every customization pointed at a missing file and rendered as an empty
+    # container. Silently, again. `demo_tree/` ships as package data.
+    return (Path(__file__).resolve().parent / "demo_tree").as_uri()
 
 
 _BASE = _demo_root()
