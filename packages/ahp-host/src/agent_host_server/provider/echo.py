@@ -33,7 +33,10 @@ from agent_host_server.provider.demo_customizations import (
     demo_customizations,
     demo_server_tools,
 )
-from agent_host_server.provider.demo_workspace import DemoWorkspace, workspace_changeset
+from agent_host_server.provider.demo_workspace import (
+    DemoWorkspace,
+    publish_workspace_changesets,
+)
 
 __all__ = ["EchoProvider", "EchoSession"]
 
@@ -278,8 +281,8 @@ class EchoSession:
         # changeset is a record of what was done, so doing it first is not an
         # ordering nicety -- publishing first would describe a state that did
         # not exist yet.
-        changes = workspace.apply_demo_edits(message.text)
-        await publisher.changes_published(workspace_changeset(workspace.root), changes)
+        workspace.apply_demo_edits(message.text)
+        await publish_workspace_changesets(publisher, workspace, self.context.session_uri)
 
     async def cancel(self, reason: str | None = None) -> None:
         self._cancelled = True

@@ -2372,6 +2372,21 @@ class Host:
         """Make an operation invocable. Explicit, per operation, by the embedder."""
         self._operations[operation_id] = handler
 
+    def session_of_changeset(self, changeset_uri: str) -> str | None:
+        """Which session owns this changeset, if any.
+
+        An operation handler is given the CHANGESET uri, but republishing takes
+        the SESSION uri -- and an operation that changes the tree has to
+        republish, because the client discards the `invokeChangesetOperation`
+        result entirely and the changeset is the only feedback it renders.
+        Without this an embedder has to reach into private state to close that
+        loop.
+        """
+        for uri, session in self._sessions.items():
+            if changeset_uri in session.changesets:
+                return uri
+        return None
+
     # ─── resource watches ────────────────────────────────────────────────
 
     async def _create_resource_watch(

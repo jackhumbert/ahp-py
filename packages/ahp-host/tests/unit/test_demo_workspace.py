@@ -15,7 +15,11 @@ from urllib.parse import unquote, urlparse
 
 import pytest
 
-from agent_host_server.provider.demo_workspace import DemoWorkspace, workspace_changeset
+from agent_host_server.provider.demo_workspace import (
+    DemoWorkspace,
+    changeset_uris,
+    workspace_changeset,
+)
 
 
 def _sandbox(root: Path) -> DemoWorkspace:
@@ -145,10 +149,27 @@ class TestWithoutGit:
 
 
 def test_the_changeset_reports_an_honest_kind(tmp_path: Path) -> None:
-    assert workspace_changeset(tmp_path).change_kind == "uncommitted"
+    uncommitted, _staged = changeset_uris("echo:/s")
+    assert workspace_changeset(tmp_path, "Uncommitted", uncommitted).change_kind == "uncommitted"
 
 
-@pytest.mark.parametrize("operation", workspace_changeset(Path("/x")).operations)
+def test_changeset_uris_differ_per_session() -> None:
+    """Fixed constants here collided: a channel is registered globally, so the
+    SECOND session's publish raised `channel already registered` -- which
+    killed the turn AFTER the files were edited, leaving the tree changed and
+    the Changes view empty."""
+    a = changeset_uris("echo:/one")
+    b = changeset_uris("echo:/two")
+    assert a != b
+    assert a[0] != a[1]
+    # Stable within a session, so republishing REPLACES rather than appending
+    # a new changeset on every turn.
+    assert changeset_uris("echo:/one") == a
+
+
+@pytest.mark.parametrize(
+    "operation", workspace_changeset(Path("/x"), "l", changeset_uris("s")[0]).operations
+)
 def test_every_operation_is_well_formed(operation: object) -> None:
     """One malformed operation makes the client's derived throw, and a throwing
     derived is swallowed -- so they all vanish together."""

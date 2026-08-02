@@ -24,17 +24,21 @@ would eat work the demo did not create.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import shutil
 import subprocess
 from pathlib import Path
+from typing import Any
 
 from agent_host_server.core.changesets import Changeset, ChangesetOperation, FileChange
 
 __all__ = [
     "WORKSPACE_OPERATIONS",
     "DemoWorkspace",
+    "changeset_uris",
+    "publish_workspace_changesets",
     "workspace_changeset",
 ]
 
@@ -82,8 +86,24 @@ WORKSPACE_OPERATIONS = (
 )
 
 
-def workspace_changeset(root: Path, label: str = "Uncommitted changes") -> Changeset:
+def changeset_uris(session_uri: str) -> tuple[str, str]:
+    """The two changeset channels for one session: (uncommitted, staged).
+
+    Stable WITHIN a session, so republishing replaces the changeset rather
+    than appending a new one with a fresh random URI on every turn -- and
+    distinct ACROSS sessions, because a channel is registered globally and two
+    sessions sharing a constant URI collide on the second one. That collision
+    is not theoretical: fixed constants here made the second session's publish
+    raise `channel already registered`, which killed the turn AFTER the files
+    had been edited, so the tree changed and the Changes view stayed empty.
+    """
+    token = hashlib.sha256(session_uri.encode()).hexdigest()[:12]
+    return f"ahp-changeset:/{token}-uncommitted", f"ahp-changeset:/{token}-staged"
+
+
+def workspace_changeset(root: Path, label: str, uri: str) -> Changeset:
     return Changeset(
+        uri=uri,
         label=label,
         description=f"Real working-tree edits under {root}.",
         # These ARE uncommitted working-tree edits. Saying `session` would be
@@ -201,6 +221,75 @@ class DemoWorkspace:
 
         return changes
 
+    # ─── reading the tree, rather than remembering what we did ───────────
+
+    def _show(self, ref: str, relative: str) -> bytes | None:
+        """`git show <ref>:<path>`, or None when that ref has no such file."""
+        if self._git is None:
+            return None
+        result = subprocess.run(
+            [self._git, "show", f"{ref}:{relative}"],
+            cwd=self.root,
+            capture_output=True,
+            timeout=_GIT_TIMEOUT,
+            check=False,
+        )
+        return result.stdout if result.returncode == 0 else None
+
+    def _worktree(self, relative: str) -> bytes | None:
+        path = self.root / relative
+        try:
+            return path.read_bytes()
+        except OSError:
+            return None
+
+    def porcelain(self) -> list[tuple[str, str, str]]:
+        """`(index_status, worktree_status, path)` for everything git reports.
+
+        Read from git rather than remembered, which is the whole point: after
+        the user stages or commits, what the client renders has to come from
+        the tree, not from what the demo did three turns ago.
+        """
+        if not self.is_git:
+            return []
+        rows: list[tuple[str, str, str]] = []
+        for line in self.git("status", "--porcelain", "-z").stdout.split("\0"):
+            if len(line) < 4:
+                continue
+            rows.append((line[0], line[1], line[3:]))
+        return rows
+
+    def staged_changes(self) -> list[FileChange]:
+        """The index against HEAD -- "the staged index", one of the guide's own
+        examples of a changeset."""
+        changes: list[FileChange] = []
+        for index_status, _worktree_status, relative in self.porcelain():
+            if index_status in (" ", "?"):
+                continue
+            uri = (self.root / relative).as_uri()
+            before = None if index_status == "A" else self._show("HEAD", relative)
+            after = None if index_status == "D" else self._show("", relative)
+            changes.append(FileChange(uri=uri, before=before, after=after))
+        return changes
+
+    def uncommitted_changes(self) -> list[FileChange]:
+        """The working tree against the index: what is NOT yet staged.
+
+        Together with `staged_changes` this makes staging visible -- a file
+        moves from one changeset to the other, which is the only feedback the
+        client gives, because it discards the invoke result entirely.
+        """
+        changes: list[FileChange] = []
+        for index_status, worktree_status, relative in self.porcelain():
+            if worktree_status == " ":
+                continue
+            uri = (self.root / relative).as_uri()
+            untracked = index_status == "?"
+            before = None if untracked else self._show("", relative)
+            after = None if worktree_status == "D" else self._worktree(relative)
+            changes.append(FileChange(uri=uri, before=before, after=after))
+        return changes
+
     # ─── the operations ──────────────────────────────────────────────────
 
     def _relative(self, uri: str) -> str | None:
@@ -277,3 +366,30 @@ def _replace_assignment(text: str, name: str, value: str) -> str:
             lines[index] = f"{name} = {value}{ending}"
             break
     return "".join(lines)
+
+
+async def publish_workspace_changesets(
+    publisher: Any, workspace: DemoWorkspace, session_uri: str
+) -> None:
+    """Publish BOTH changesets from what git currently says.
+
+    Two, not one, because "the staged index" is one of the guide's own examples
+    of a changeset -- and because it is the only way staging is visible. The
+    client DISCARDS the `invokeChangesetOperation` result (it awaits the call
+    and assigns nothing), so a message or a followUp on the result would be
+    read by nobody. What it does render is the changeset, so the changeset has
+    to change.
+
+    Re-published after every operation, from `git status` rather than from what
+    the demo remembers doing: commit empties them, revert empties them, and
+    staging moves a file from one to the other.
+    """
+    uncommitted, staged = changeset_uris(session_uri)
+    await publisher.changes_published(
+        workspace_changeset(workspace.root, "Uncommitted changes", uncommitted),
+        workspace.uncommitted_changes(),
+    )
+    await publisher.changes_published(
+        workspace_changeset(workspace.root, "Staged changes", staged),
+        workspace.staged_changes(),
+    )

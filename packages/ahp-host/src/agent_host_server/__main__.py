@@ -25,7 +25,10 @@ from agent_host_server.core.pty_backend import PtyTerminalBackend
 from agent_host_server.core.resources import RootedFilesystemResourceProvider
 from agent_host_server.core.versions import DEFAULT_SUPPORTED_VERSIONS
 from agent_host_server.provider import EchoProvider
-from agent_host_server.provider.demo_workspace import DemoWorkspace
+from agent_host_server.provider.demo_workspace import (
+    DemoWorkspace,
+    publish_workspace_changesets,
+)
 from agent_host_server.ws import serve_websocket
 
 _log = logging.getLogger(__name__)
@@ -304,6 +307,21 @@ DEMO_ROOT_CONFIG_PROPERTIES: Final[dict[str, dict[str, Any]]] = {
 }
 
 
+class _HostPublisher:
+    """Just enough of `SessionPublisher` for the operation handlers.
+
+    They hold the Host rather than a provider's publisher, and republishing is
+    the one thing they need.
+    """
+
+    def __init__(self, host: Host, session_uri: str) -> None:
+        self._host = host
+        self._session_uri = session_uri
+
+    async def changes_published(self, changeset: Any, changes: Any) -> str:
+        return await self._host.publish_changeset(self._session_uri, changeset, changes)
+
+
 def _demo_operations(
     host: Host, workspace: DemoWorkspace
 ) -> Callable[[str, str, Mapping[str, Any] | None], Awaitable[None]]:
@@ -329,18 +347,29 @@ def _demo_operations(
         # exactly like a dead button, because that row does not change.
         resource = str(target.get("resource")) if target else None
 
+        if operation_id == "ahs-review":
+            await host.sequencer.publish(
+                changeset_uri,
+                {"type": "changeset/filesReviewChanged", "files": ids, "reviewed": True},
+            )
+            return
+
         if operation_id == "ahs-stage":
             _log.info("stage: %s", workspace.stage(ids, resource))
         elif operation_id == "ahs-commit":
             _log.info("commit: %s", workspace.commit("Changes from the AHP demo agent"))
         elif operation_id == "ahs-revert":
             _log.info("revert: %s", workspace.revert(ids, resource))
-        elif operation_id == "ahs-review":
-            await host.sequencer.publish(
-                changeset_uri,
-                {"type": "changeset/filesReviewChanged", "files": ids, "reviewed": True},
+
+        # Republish from git. The client DISCARDS the invoke result -- it
+        # awaits the call and assigns nothing -- so the changeset is the only
+        # feedback it renders. Without this the buttons worked and looked
+        # inert: commit landed a real commit while the file list sat unchanged.
+        session_uri = host.session_of_changeset(changeset_uri)
+        if session_uri is not None:
+            await publish_workspace_changesets(
+                _HostPublisher(host, session_uri), workspace, session_uri
             )
-            return
         _log.info("git status now:\n%s", workspace.status() or "(clean)")
 
     return invoke
