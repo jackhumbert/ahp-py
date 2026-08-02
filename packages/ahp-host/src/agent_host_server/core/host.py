@@ -16,6 +16,7 @@ import contextlib
 import copy
 import json
 import logging
+import time
 import uuid
 from collections.abc import Coroutine, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -232,6 +233,11 @@ class _Terminal:
     pending_command: str = ""
     command_id: str | None = None
     announced: bool = False
+    #: When the running command started, for `commandFinished.durationMs`.
+    started_ms: int = 0
+    #: Watches the child and publishes `terminal/exited`. Held so it is not
+    #: garbage-collected mid-flight.
+    reaper: asyncio.Task[None] | None = None
 
     async def close(self) -> None:
         if self.process is not None:
@@ -241,13 +247,24 @@ class _Terminal:
 
 
 def _terminal_info(state: Any) -> dict[str, Any]:
-    """The `TerminalInfo` fields the root catalogue carries."""
+    """The `TerminalInfo` fields the root catalogue carries.
+
+    `title` and `claim` are REQUIRED alongside `resource` (schema
+    `TerminalInfo.required`), and we sent neither reliably -- the catalogue
+    went out as `{resource, isPty}`, where `isPty` is not even a TerminalInfo
+    field. A client reading a required field that is absent has nothing to
+    render the row with.
+    """
     if not isinstance(state, Mapping):
-        return {}
-    info: dict[str, Any] = {}
-    for key in ("title", "cwd", "isPty"):
-        if key in state:
-            info[key] = state[key]
+        # Still valid: the caller supplies `resource`, and a title beats an
+        # entry the client cannot render at all.
+        return {"title": "Terminal", "claim": {}}
+    info: dict[str, Any] = {
+        "title": state.get("title") if isinstance(state.get("title"), str) else "Terminal",
+        "claim": state.get("claim") or {},
+    }
+    if "exitCode" in state:
+        info["exitCode"] = state["exitCode"]
     return info
 
 
@@ -564,6 +581,11 @@ class _Session:
         """ "The channel URI is derived from the session URI by appending
         `/annotations`." One per session, always."""
         return f"{self.uri}/annotations"
+
+
+def _unix_ms() -> int:
+    """Milliseconds since the epoch, as the terminal actions declare."""
+    return int(time.time() * 1000)
 
 
 def _cwd_uri(path: str) -> str:
@@ -1654,9 +1676,52 @@ class Host:
         # fourth (invariant 15).
         await self.sequencer.register_channel(channel, state, "terminal")
         self._live_terminals[channel] = terminal
+        # Nothing published `terminal/exited`, so a shell that ended left the
+        # channel looking live forever and the client's tab never closed: the
+        # last frame after `exit 7` was the input echo, and then silence.
+        terminal.reaper = asyncio.create_task(self._reap_terminal(terminal))
+        self._background.add(terminal.reaper)
+        terminal.reaper.add_done_callback(self._background.discard)
         await self._publish_terminal_catalogue()
         self._audit("terminal.created", connection, channel=channel)
         return {}
+
+    async def _reap_terminal(self, terminal: _Terminal) -> None:
+        """Wait for the child and announce its exit.
+
+        Ordering matters and is not a nicety: the parser is flushed FIRST, so
+        the tail of a burst -- everything the shell wrote between the last read
+        and its exit -- reaches the client before `terminal/exited`, rather
+        than after a frame that says there is nothing more coming.
+        """
+        process = terminal.process
+        if process is None:
+            return
+        try:
+            exit_code = await process.wait()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            _log.exception("terminal %s: waiting on the child failed", terminal.channel)
+            exit_code = None
+
+        if terminal.channel not in self._live_terminals:
+            # Disposed while we were waiting. `disposeTerminal` already dropped
+            # the channel, and publishing onto a dropped channel is a no-op --
+            # but announcing an exit for a terminal the client has forgotten is
+            # noise even when it is harmless.
+            return
+
+        # Feeding `b""` would NOT do this: `flush()` returns the held bytes,
+        # and re-parsing nothing discards them. Without it the tail of a burst
+        # -- everything written between the last read and the exit -- is lost.
+        await self._publish_terminal_items(terminal, terminal.parser.flush().items)
+        action: dict[str, Any] = {"type": "terminal/exited"}
+        if exit_code is not None:
+            action["exitCode"] = exit_code
+        await self.sequencer.publish(terminal.channel, action)
+        await self._publish_terminal_catalogue()
+        _log.info("terminal %s exited with %s", terminal.channel, exit_code)
 
     async def _dispose_terminal(
         self, connection: Connection, params: Mapping[str, Any]
@@ -1713,8 +1778,13 @@ class Host:
         (all text, then all events) would append the second half of the output
         to the wrong content part.
         """
+        await self._publish_terminal_items(terminal, terminal.parser.feed(chunk).items)
+
+    async def _publish_terminal_items(self, terminal: _Terminal, items: Sequence[Any]) -> None:
+        """Publish already-parsed output. Shared with the exit path, which has
+        a `flush()` result rather than a chunk to feed."""
         channel = terminal.channel
-        for item in terminal.parser.feed(chunk).items:
+        for item in items:
             if isinstance(item, str):
                 if item:
                     await self.sequencer.publish(channel, {"type": "terminal/data", "data": item})
@@ -1734,9 +1804,13 @@ class Host:
                         "type": "terminal/commandExecuted",
                         "commandId": terminal.command_id,
                         "commandLine": terminal.pending_command,
-                        "timestamp": now_iso(),
+                        # "Unix timestamp (ms)", declared `number`. We sent an
+                        # ISO string, which the client stores and then does
+                        # arithmetic on.
+                        "timestamp": _unix_ms(),
                     },
                 )
+                terminal.started_ms = _unix_ms()
                 terminal.pending_command = ""
             elif isinstance(item, CommandFinished) and terminal.command_id is not None:
                 await self.sequencer.publish(
@@ -1745,8 +1819,17 @@ class Host:
                         "type": "terminal/commandFinished",
                         "commandId": terminal.command_id,
                         "exitCode": item.exit_code,
+                        # The client renders `finish(exitCode, durationMs)` and
+                        # falls back to `??0`, so omitting it made every
+                        # command read as instantaneous.
+                        **(
+                            {"durationMs": max(0, _unix_ms() - terminal.started_ms)}
+                            if terminal.started_ms
+                            else {}
+                        ),
                     },
                 )
+                terminal.started_ms = 0
                 terminal.command_id = None
             elif isinstance(item, CwdReported):
                 # OSC 633 reports a PATH; `terminal/cwdChanged.cwd` is a URI,
@@ -3492,6 +3575,22 @@ class Host:
                     await session.turn
             if session.agent_session is not None:
                 await session.agent_session.aclose()
+        # Terminals die WITH the host. Without this the shells outlive it:
+        # measured, a child reparents to init and its own children survive, so
+        # a host that has opened terminals over its life leaves a pile of
+        # orphaned processes behind every time it stops.
+        #
+        # On SHUTDOWN only, never on connection close. VS Code drops a
+        # connection deliberately and re-attaches to the same terminal URIs
+        # (`reconnectTerminals` re-subscribes and never calls `createTerminal`)
+        # -- disposing on disconnect would turn a routine reconnect into "all
+        # your terminals died".
+        for terminal in list(self._live_terminals.values()):
+            if terminal.reaper is not None:
+                terminal.reaper.cancel()
+            with contextlib.suppress(Exception):
+                await terminal.close()
+        self._live_terminals.clear()
         for connection in list(self._connections):
             await connection.close()
         # Without this the last debounce window of a turn is lost -- which is

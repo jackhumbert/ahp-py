@@ -15,6 +15,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -225,3 +226,102 @@ class TestReportedCwdBecomesAUri:
         from agent_host_server.core.host import _cwd_uri
 
         assert _cwd_uri("relative/dir") == "relative/dir"
+
+
+class TestHangupNotTerminate:
+    """`kill()` sent SIGTERM, which an interactive shell IGNORES.
+
+    So it waited the full grace period every time and only then sent SIGKILL:
+    measured at 3.00s per terminal, which is a three-second stall on closing a
+    terminal tab. SIGHUP is what a terminal going away actually means, and a
+    shell exits on it at once.
+    """
+
+    @pytest.mark.parametrize("shell", ["/bin/zsh", "/bin/bash"])
+    async def test_disposing_an_interactive_shell_is_immediate(self, shell: str) -> None:
+        if not os.access(shell, os.X_OK):
+            pytest.skip(f"{shell} is not installed")
+        output = bytearray()
+        process = await PtyTerminalBackend().create(_request(command=[shell, "-i"]), output.extend)
+        await asyncio.sleep(0.5)
+
+        started = time.monotonic()
+        await process.kill()
+        await asyncio.wait_for(process.wait(), timeout=10)
+        elapsed = time.monotonic() - started
+
+        assert elapsed < 1.0, f"{shell} took {elapsed:.2f}s to dispose"
+
+    async def test_a_child_that_ignores_hangup_is_still_killed(self) -> None:
+        """The escalation is a backstop, not the normal path -- but it has to
+        work, or a stubborn child wedges the host."""
+        output = bytearray()
+        process = await PtyTerminalBackend().create(
+            _request(command=["/bin/sh", "-c", "trap '' HUP TERM; sleep 60"]),
+            output.extend,
+        )
+        await asyncio.sleep(0.4)
+        await process.kill()
+        assert await asyncio.wait_for(process.wait(), timeout=10) is not None
+
+
+class TestTerminalsDieWithTheHost:
+    """Shells outlived the host.
+
+    Measured before the fix: after the host stopped, the shell's children
+    reparented to init and survived, so a host that opened terminals over its
+    life left a pile of orphans behind every time it stopped.
+
+    On SHUTDOWN only. VS Code drops a connection deliberately and re-attaches
+    to the same terminal URIs, so disposing on DISCONNECT would turn a routine
+    reconnect into "all your terminals died" -- an agent proved that against
+    the shipping client, and it is why this is in `aclose` and nowhere else.
+    """
+
+    async def test_aclose_takes_the_shells_with_it(self) -> None:
+        from agent_host_server.core import Host, LoopbackSingleUserPolicy
+        from agent_host_server.provider import EchoProvider
+
+        def children() -> set[int]:
+            listing = subprocess.run(
+                ["ps", "-eo", "pid,ppid"], capture_output=True, text=True
+            ).stdout
+            mine = str(os.getpid())
+            found = set()
+            for line in listing.splitlines()[1:]:
+                parts = line.split()
+                if len(parts) >= 2 and parts[1] == mine:
+                    found.add(int(parts[0]))
+            return found
+
+        host = Host(EchoProvider(), LoopbackSingleUserPolicy(), terminals=PtyTerminalBackend())
+        started = set()
+        for index in range(3):
+            channel = f"ahp-terminal:/orphan-{index}"
+            process = await host.terminals.create(
+                _request(channel=channel, command=["/bin/sh", "-c", "sleep 400 & wait"]),
+                lambda _: None,
+            )
+            started.add(process._process.pid)  # type: ignore[attr-defined]
+            host._live_terminals[channel] = _LiveTerminal(channel, process)
+
+        await asyncio.sleep(0.6)
+        assert started & children(), "the shells never started"
+
+        await host.aclose()
+        await asyncio.sleep(0.8)
+
+        assert not (started & children()), "a shell outlived the host"
+
+
+class _LiveTerminal:
+    """Enough of `_Terminal` for `aclose` to shut it down."""
+
+    def __init__(self, channel: str, process: object) -> None:
+        self.channel = channel
+        self.process = process
+        self.reaper = None
+
+    async def close(self) -> None:
+        await self.process.kill()  # type: ignore[attr-defined]
+        await self.process.wait()  # type: ignore[attr-defined]

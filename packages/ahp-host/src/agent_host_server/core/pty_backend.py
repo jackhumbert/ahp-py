@@ -61,9 +61,10 @@ _log = logging.getLogger(__name__)
 #: is comfortably larger, so a burst of output is a few reads rather than many.
 _READ_SIZE = 65536
 
-#: Seconds between SIGTERM and SIGKILL. Long enough for a shell to run its exit
-#: traps, short enough that disposing a terminal feels immediate.
-_GRACE_SECONDS = 3.0
+#: Seconds between the hangup and SIGKILL. Short, because SIGHUP is the signal
+#: a shell is built to obey -- this is a backstop for a child that ignores it,
+#: not the normal path.
+_GRACE_SECONDS = 1.0
 
 #: The default environment. Small and explicit: everything here is needed for a
 #: shell to behave like a terminal, and nothing here carries a credential.
@@ -159,14 +160,29 @@ class PtyTerminalProcess:
     async def kill(self) -> None:
         if self._process.returncode is not None:
             return
-        # The GROUP, not the process. `start_new_session` made the child a
-        # group leader, so its own children are in that group -- signalling
+        # SIGHUP, not SIGTERM. An interactive shell IGNORES SIGTERM -- zsh and
+        # bash both do -- so the old code sent a signal nothing acted on and
+        # then waited the full grace period before SIGKILL. Measured at 3.00s
+        # per terminal, every time, which is a three-second stall on closing a
+        # terminal tab. A hangup is what a terminal going away actually means,
+        # and a shell exits on it immediately.
+        #
+        # The GROUP, not the process: `start_new_session` made the child a
+        # group leader, so its own children are in that group, and signalling
         # only the leader leaves them running on a pty nobody reads.
+        self._signal_group(signal.SIGHUP)
+        try:
+            await asyncio.wait_for(self._process.wait(), timeout=_GRACE_SECONDS)
+            return
+        except TimeoutError:
+            pass
         self._signal_group(signal.SIGTERM)
         try:
             await asyncio.wait_for(self._process.wait(), timeout=_GRACE_SECONDS)
         except TimeoutError:
             self._signal_group(signal.SIGKILL)
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(self._process.wait(), timeout=_GRACE_SECONDS)
 
     async def wait(self) -> int | None:
         await self._process.wait()

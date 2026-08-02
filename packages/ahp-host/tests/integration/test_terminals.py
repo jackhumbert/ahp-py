@@ -14,6 +14,7 @@ into the buffer, and the claim model.
 from __future__ import annotations
 
 import asyncio
+import os
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -366,3 +367,87 @@ class TestRefusal:
             {"channel": "agenthost-terminal:/bad", "claim": {"kind": "client", "clientId": 123}},
         )
         assert response["error"]["code"] == -32602
+
+
+class TestTheExitIsAnnounced:
+    """Nothing published `terminal/exited`, so a shell that ended left the
+    channel looking live forever and the client's tab never closed. Confirmed
+    on the wire: after `exit 7` the last frame was the input echo, then
+    silence.
+
+    Needs a real pty -- a fake backend cannot exit.
+    """
+
+    @pytest.fixture
+    def pty_host(self) -> Host:
+        from agent_host_server.core.pty_backend import PtyTerminalBackend
+
+        return Host(EchoProvider(), LoopbackSingleUserPolicy(), terminals=PtyTerminalBackend())
+
+    async def test_exiting_publishes_terminal_exited_with_the_code(self, pty_host: Host) -> None:
+        client = await _client(pty_host)
+        await client.request("createSession", {"channel": "echo:/t-exit"})
+        await client.collect(seconds=0.3)
+        channel = "ahp-terminal:/exit-1"
+        result = await client.request(
+            "createTerminal",
+            {
+                "channel": channel,
+                # A CLIENT claim, not a session one: `terminal/input` is
+                # claim-gated, so a terminal claimed by the session refuses
+                # keystrokes from every client -- which is correct, and is how
+                # a user-opened terminal differs from a tool-call one.
+                "claim": {"kind": "client", "clientId": "c1"},
+                "cwd": os.getcwd(),
+                "cols": 80,
+                "rows": 24,
+            },
+        )
+        assert "error" not in result, result.get("error")
+        await client.request("subscribe", {"channel": channel})
+
+        await client.notify(
+            "dispatchAction",
+            {
+                "channel": channel,
+                "clientSeq": 1,
+                "action": {"type": "terminal/input", "data": "exit 7\n"},
+            },
+        )
+        await client.collect(seconds=2.5)
+
+        exits = [
+            a["action"] for a in client.actions(channel) if a["action"]["type"] == "terminal/exited"
+        ]
+        assert exits, "the shell exited and nothing said so"
+        assert exits[-1]["exitCode"] == 7
+
+        # And the exit is LAST: the parser is flushed first, so the tail of the
+        # output arrives before the frame that says there is no more coming.
+        types = [a["action"]["type"] for a in client.actions(channel)]
+        assert types[-1] == "terminal/exited", types[-4:]
+
+    async def test_the_catalogue_carries_the_required_fields(self, pty_host: Host) -> None:
+        """`TerminalInfo` requires `resource`, `title` and `claim`. We sent
+        `{resource, isPty}` -- and `isPty` is not even a TerminalInfo field."""
+        client = await _client(pty_host)
+        await client.request("createSession", {"channel": "echo:/t-cat"})
+        await client.collect(seconds=0.3)
+        await client.request(
+            "createTerminal",
+            {
+                "channel": "ahp-terminal:/cat-1",
+                "claim": {"kind": "client", "clientId": "c1"},
+                "cwd": os.getcwd(),
+                "name": "named",
+            },
+        )
+        await client.collect(seconds=0.4)
+
+        root = (await client.request("subscribe", {"channel": ROOT_URI}))["result"]["snapshot"][
+            "state"
+        ]
+        entry = root["terminals"][0]
+        assert entry["resource"] == "ahp-terminal:/cat-1"
+        assert entry["title"] == "named"
+        assert entry["claim"] == {"kind": "client", "clientId": "c1"}

@@ -218,9 +218,27 @@ def demo_customizations() -> list[dict[str, Any]]:
 def demo_server_tools() -> list[dict[str, Any]]:
     """`SessionState.serverTools` -- NOT customizations, a separate field.
 
-    VS Code hides its Tools section for any provider other than `copilotcli`
-    (`hiddenSections` in `agentHostChatContribution.ts`), so these may not
-    render even locally.
+    **Nothing in VS Code 1.131.0 renders these, and no host-side change makes
+    it.** Two independent gates, either fatal on its own:
+
+    1. The field is reduced into state and read by no renderer. `serverTools`
+       occurs eight times in the shipping bundle -- an MCP-Apps capability
+       literal, the coalescing table, the reducer, an unrelated extension
+       cache, and the version table. VS Code's OWN host publishes the action
+       to itself and does not render it either.
+    2. The Tools list is built from `[...toolsService.toolSets, ...static]`
+       and nothing else, and the widget is constructed with the compile-time
+       constant `"agent-host-copilotcli"`. Our session type is
+       `remote-<authority>-<provider>`, so even its checkboxes write
+       enablement under a key our session never reads.
+
+    The comment that used to be here blamed `hiddenSections` and the
+    `copilotcli` provider id. That was real code and the WRONG path: remote
+    (ws://) hosts get `hiddenSections: [Models, McpServers]`, so Tools is not
+    hidden for us -- there is simply nothing that can go in it.
+
+    Kept because they are conformant, cost nothing, and another client may
+    read them.
     """
     return [
         {

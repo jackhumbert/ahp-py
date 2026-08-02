@@ -178,8 +178,19 @@ async def _run() -> None:
         # only honest advertisement. Naming "@" as well would open a picker
         # that is always empty.
         completion_trigger_characters=("#",),
+        # `Path(None)` crashed the host outright when --terminal was passed
+        # without --serve-directory. And the backend's own docstring says it
+        # "does not choose a working directory ... a backend that defaulted to
+        # the host's own directory would silently expose it" -- so the default
+        # is the SERVED root when there is one, and nothing when there is not.
+        # A client that sends no `cwd` then gets the host's directory from the
+        # OS, which is the one case this cannot prevent.
         terminals=(
-            PtyTerminalBackend(default_cwd=str(Path(args.serve_directory).resolve()))
+            PtyTerminalBackend(
+                default_cwd=(
+                    str(Path(args.serve_directory).resolve()) if args.serve_directory else None
+                )
+            )
             if args.terminal
             else None
         ),
