@@ -396,3 +396,29 @@ def test_applying_is_total_and_never_raises(seqs: list[int]) -> None:
     for seq in seqs:
         mirror.apply(_envelope(ROOT, {"type": "root/somethingFromTomorrow"}, server_seq=seq))
     assert mirror.confirmed(ROOT) == {"agents": []}
+
+
+def test_using_the_mirror_from_two_threads_fails_loudly() -> None:
+    """`asyncio.to_thread(mirror.apply, envelope)` breaks the module-global
+    clock invariant *silently* otherwise, producing wrong `modifiedAt` stamps
+    under a concurrent `frozen_clock`."""
+    import threading
+
+    mirror, _ = _mirror()
+    mirror.apply_snapshot(_snapshot(ROOT, {"agents": []}, from_seq=0))
+    caught: list[BaseException] = []
+
+    def other_thread() -> None:
+        try:
+            mirror.apply(
+                _envelope(ROOT, {"type": "root/agentsChanged", "agents": []}, server_seq=2)
+            )
+        except BaseException as exc:
+            caught.append(exc)
+
+    worker = threading.Thread(target=other_thread)
+    worker.start()
+    worker.join()
+    assert len(caught) == 1
+    assert isinstance(caught[0], RuntimeError)
+    assert "two threads" in str(caught[0])

@@ -20,6 +20,7 @@ Render ``optimistic``. Trust ``confirmed``.
 
 from __future__ import annotations
 
+import threading
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import Enum
@@ -148,6 +149,7 @@ class StateMirror:
         self._channels: dict[str, ChannelMirror] = {}
         self._stale: set[str] = set()
         self._last_server_seq = 0
+        self._thread: int | None = None
 
     # ── registration ─────────────────────────────────────────────────────────
 
@@ -229,6 +231,7 @@ class StateMirror:
         state-bearing channels, so a stateless channel in that list produces no
         entry and the arrays do not line up.
         """
+        self._assert_single_threaded()
         uri = str(snapshot.get("resource", ""))
         state = snapshot.get("state")
         raw_from = snapshot.get("fromSeq")
@@ -257,15 +260,38 @@ class StateMirror:
                 self.apply(envelope)
         return uri
 
+    def _assert_single_threaded(self) -> None:
+        """The reducers read a module-global clock.
+
+        That is safe because no mutation here spans an ``await`` -- a weaker and
+        more precise rule than "one task", since ``record_pending`` runs from
+        whichever task called ``dispatch``. It stops being true the moment
+        reduction happens off the event loop, and
+        ``asyncio.to_thread(mirror.apply, envelope)`` breaks it *silently*,
+        producing wrong ``modifiedAt`` stamps under a concurrent
+        ``frozen_clock``. One integer compare on the hot path buys a loud
+        failure instead.
+        """
+        current = threading.get_ident()
+        if self._thread is None:
+            self._thread = current
+        elif self._thread != current:
+            raise RuntimeError(
+                "StateMirror was used from two threads; the reducers read a "
+                "module-global clock and must never run off the event loop"
+            )
+
     def record_pending(self, uri: str, action: Mapping[str, Any], client_seq: int) -> None:
         """Apply one of our own dispatches optimistically."""
+        self._assert_single_threaded()
         channel = self._channels.get(uri)
         if channel is None:
             return
         channel.pending.append(PendingAction(client_seq, dict(action)))
 
     def apply(self, envelope: Mapping[str, Any]) -> ApplyOutcome:
-        """Fold one ``ActionEnvelope`` in. Never raises."""
+        """Fold one ``ActionEnvelope`` in. Never raises on protocol data."""
+        self._assert_single_threaded()
         uri = str(envelope.get("channel", ""))
         channel = self._channels.get(uri)
         server_seq = _server_seq(envelope)
