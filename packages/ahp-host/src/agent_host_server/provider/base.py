@@ -32,6 +32,7 @@ __all__ = [
     "ConfigValue",
     "ConfiguresSessions",
     "DescribesSession",
+    "ForkedFrom",
     "HandlesCustomizations",
     "InputOutcome",
     "InputQuestion",
@@ -190,6 +191,24 @@ class ToolResult:
 
 
 @dataclass(frozen=True)
+class ForkedFrom:
+    """The session this one was forked from, and the transcript it inherited.
+
+    A provider needs this because the host publishes the copied turns as the
+    new session's history: without it the agent is asked to continue a
+    conversation it has never seen, and answers the next message with no
+    context while the client shows a full transcript above it. State and agent
+    would silently disagree.
+
+    ``turns`` is the host's published shape, deliberately not translated into
+    provider terms -- the adapter knows what its model wants; the host does not.
+    """
+
+    session_uri: str
+    turns: Sequence[Mapping[str, Any]] = ()
+
+
+@dataclass(frozen=True)
 class AgentSessionContext:
     session_uri: str
     chat_uri: str
@@ -212,6 +231,9 @@ class AgentSessionContext:
     #: the client's process, so they are the one tool surface that needs no
     #: filesystem API on the host at all.
     client_tools: Sequence[Mapping[str, Any]] = ()
+    #: Set when this session was created with `createSession.fork`. The turns
+    #: it carries are already published as this session's history.
+    fork: ForkedFrom | None = None
 
 
 @runtime_checkable
@@ -493,21 +515,25 @@ class CompletionItem:
     """One suggestion. `range` is a half-open interval in the CURRENT input."""
 
     insert_text: str
-    label: str | None = None
-    detail: str | None = None
+    #: REQUIRED by the spec, not optional: "Associate the item's `attachment`
+    #: with the resulting Message" is the whole point of a completion. An item
+    #: without one inserts text that references nothing.
+    attachment: Mapping[str, Any]
     range_start: int | None = None
     range_end: int | None = None
-    attachment: Mapping[str, Any] | None = None
 
     def to_wire(self) -> dict[str, Any]:
-        wire: dict[str, Any] = {"insertText": self.insert_text}
-        for key, value in (
-            ("label", self.label),
-            ("detail", self.detail),
-            ("rangeStart", self.range_start),
-            ("rangeEnd", self.range_end),
-            ("attachment", self.attachment),
-        ):
+        # `label` and `detail` used to be emitted here. They are NOT spec
+        # fields on CompletionItem (channels-session/commands.ts:266-297) and
+        # no client reads them -- the display name comes from
+        # `attachment.label`, which the spec makes required on every
+        # attachment (channels-chat/state.ts:679-684). Sending our own two
+        # produced items that rendered blank.
+        wire: dict[str, Any] = {
+            "insertText": self.insert_text,
+            "attachment": dict(self.attachment),
+        }
+        for key, value in (("rangeStart", self.range_start), ("rangeEnd", self.range_end)):
             if value is not None:
                 wire[key] = value
         return wire

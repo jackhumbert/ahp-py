@@ -98,7 +98,7 @@ class TestCompletions:
                 {"channel": chat, "kind": "file", "text": "look at #re", "offset": 11},
             )
         )["result"]
-        assert [i["label"] for i in result["items"]] == ["readme.md", "recipe.txt"]
+        assert [i["attachment"]["label"] for i in result["items"]] == ["readme.md", "recipe.txt"]
         assert result["items"][0]["rangeStart"] == 8
 
     async def test_a_session_uri_is_accepted_too(self, host: Host) -> None:
@@ -112,7 +112,7 @@ class TestCompletions:
                 {"channel": "echo:/cmp-2", "kind": "file", "text": "#rec", "offset": 4},
             )
         )["result"]
-        assert [i["label"] for i in result["items"]] == ["recipe.txt"]
+        assert [i["attachment"]["label"] for i in result["items"]] == ["recipe.txt"]
 
     async def test_a_provider_with_no_completions_returns_an_empty_list(self) -> None:
         """Not a refusal: an empty picker and a broken host must look different."""
@@ -235,3 +235,104 @@ class TestTelemetry:
             )
         )["result"]
         assert not result.get("actions")
+
+
+class TestCompletionShape:
+    """The wire shape a client actually reads.
+
+    `label`/`detail` on the item were this project's invention -- not in
+    `CompletionItem` (channels-session/commands.ts:266-297) and read by
+    nothing. The display name lives on the attachment, where the spec makes it
+    required. The discriminant is `type` from MessageAttachmentKind, not
+    `kind`, and the shipping client's switch ends in a bare `default: return`,
+    so the wrong key dropped every suggestion in silence.
+    """
+
+    async def test_items_carry_a_spec_shaped_attachment(self, host: Host) -> None:
+        client, _chat = await _ready(host, "echo:/cmp-shape")
+        result = (
+            await client.request(
+                "completions",
+                {"channel": "echo:/cmp-shape", "kind": "file", "text": "#re", "offset": 3},
+            )
+        )["result"]
+
+        assert result["items"], "nothing to check"
+        for item in result["items"]:
+            attachment = item["attachment"]
+            assert attachment["type"] == "resource"
+            assert "kind" not in attachment
+            assert isinstance(attachment["label"], str)
+            assert attachment["label"]
+            # Ours, and not the spec's. Their presence meant a blank picker.
+            assert "label" not in item
+            assert "detail" not in item
+
+    async def test_the_trigger_characters_are_advertised(self) -> None:
+        """Otherwise `completions` is implemented and never called.
+
+        A client issues the request only for a character the host named, so an
+        unadvertised trigger leaves a complete implementation unreachable.
+        """
+        assert await _initialize_result(
+            Host(
+                EchoProvider(),
+                LoopbackSingleUserPolicy(),
+                completion_trigger_characters=("#",),
+            )
+        ) == ["#"]
+
+    async def test_a_provider_without_completions_advertises_nothing(self) -> None:
+        """A trigger character is a promise. Do not make one we cannot keep.
+
+        An advertised trigger a provider ignores opens an empty picker on every
+        keystroke, which reads as a broken host rather than as no results.
+        """
+
+        class Bare(EchoProvider):
+            complete = None  # type: ignore[assignment]
+
+        assert (
+            await _initialize_result(
+                Host(
+                    Bare(),
+                    LoopbackSingleUserPolicy(),
+                    completion_trigger_characters=("#",),
+                )
+            )
+            is None
+        )
+
+    async def test_the_terminal_prefix_is_absent_without_a_backend(self) -> None:
+        """ "Absence means the host does not support command prefixes."
+
+        With the refusing default backend, advertising `!` would make `!ls`
+        render as a terminal request the host then declines -- a working input
+        turned into a dead end.
+        """
+        host = Host(EchoProvider(), LoopbackSingleUserPolicy())
+        try:
+            client = await _client(host)
+            result = (await client.request("initialize", _INIT))["result"]
+            assert "terminalCommandPrefix" not in result
+        finally:
+            await host.aclose()
+
+
+_INIT = {
+    "channel": ROOT_URI,
+    "protocolVersions": ["0.7.0"],
+    "clientInfo": {"name": "shape", "version": "0"},
+    "capabilities": {},
+}
+
+
+async def _initialize_result(host: Host) -> list[str] | None:
+    """`completionTriggerCharacters` from a fresh host, or ``None`` if absent."""
+    try:
+        client = await _client(host)
+        result = (await client.request("initialize", _INIT))["result"]
+        value = result.get("completionTriggerCharacters")
+        return list(value) if value is not None else None
+    finally:
+        await host.aclose()

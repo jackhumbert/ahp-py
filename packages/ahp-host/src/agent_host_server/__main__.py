@@ -139,6 +139,10 @@ async def _run() -> None:
         ),
         LoopbackSingleUserPolicy(),
         info=HostInfo(name="agent-host-server (demo)"),
+        # Echo's `complete()` scans for "#" and nothing else, so "#" is the
+        # only honest advertisement. Naming "@" as well would open a picker
+        # that is always empty.
+        completion_trigger_characters=("#",),
         resources=RootedFilesystemResourceProvider(
             Path(args.serve_directory), writable=args.writable
         )

@@ -51,7 +51,17 @@ EXPECTED_INVALID = {"authenticate"}
 #: `resource*` family is meant to make: "this host has no such file" is a
 #: different answer from "this host does not do files", and a host does not
 #: acquire a filesystem by being upgraded.
-EXPECTED_ABSENT = {"resourceList", "resourceRead", "resourceResolve", "disposeTerminal"}
+#: `reconnect` is here because the capture OPENS with one, carrying a clientId
+#: from a previous window that this fresh host has never admitted. `NotFound`
+#: is the designed answer, not a failure: the client catches exactly that code
+#: and issues a fresh `initialize` ("Server forgot client ...; initializing a
+#: fresh connection" -- present in the shipping 1.131.0 bundles). Resuming a
+#: stranger instead looked successful and left the client without a
+#: `defaultDirectory`, because `initialize` is the only place it assigns one.
+#:
+#: `disposeTerminal` no longer errors at all -- disposal is idempotent -- so it
+#: is tolerated here rather than asserted.
+EXPECTED_ABSENT = {"resourceList", "resourceRead", "resourceResolve", "reconnect"}
 
 #: Implemented, but declined because this host installs no watcher. Same
 #: distinction as EXPECTED_ABSENT: "nothing to watch here" is not "this host

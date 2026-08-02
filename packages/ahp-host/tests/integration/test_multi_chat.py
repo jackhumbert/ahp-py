@@ -21,6 +21,7 @@ import pytest
 
 from agent_host_server.core import Host, LoopbackSingleUserPolicy
 from agent_host_server.core.channels import ROOT_URI
+from agent_host_server.core.errors import AHP_ERROR_CODES
 from agent_host_server.provider import EchoProvider
 from agent_host_server.transport import memory_pair
 from agent_host_server.types.protocol import SessionStatus
@@ -69,6 +70,30 @@ async def _session(host: Host, client: FakeClient, uri: str, **extra: Any) -> st
     state = (await client.request("subscribe", {"channel": uri}))["result"]["snapshot"]["state"]
     default: str = state["chats"][0]["resource"]
     return default
+
+
+async def _one_turn(
+    client: FakeClient, chat: str, *, turn_id: str = "t1", text: str = "hello"
+) -> str:
+    """Drive one complete turn and return its id."""
+    await client.request("subscribe", {"channel": chat})
+    await client.notify(
+        "dispatchAction",
+        {
+            "channel": chat,
+            "clientSeq": 1,
+            "action": {
+                "type": "chat/turnStarted",
+                "turnId": turn_id,
+                "startedAt": "1970-01-01T00:00:01.000Z",
+                "message": {"text": text, "origin": {"kind": "user"}},
+            },
+        },
+    )
+    await client.collect(seconds=0.6)
+    state = (await client.request("subscribe", {"channel": chat}))["result"]["snapshot"]["state"]
+    turn_id: str = state["turns"][-1]["id"]
+    return turn_id
 
 
 class TestCreateChat:
@@ -139,6 +164,10 @@ class TestCreateChat:
         client = await _client(multi)
         uri = "echo:/mc-5"
         default = await _session(multi, client, uri)
+        # A real turn: the origin's `turnId` is validated against the source
+        # chat now, because publishing a provenance pointing at a turn that
+        # does not exist is a claim nothing downstream ever rechecks.
+        turn_id = await _one_turn(client, default)
         selection = {"text": "the selected bit", "responsePartId": "p1"}
 
         await client.request(
@@ -149,7 +178,7 @@ class TestCreateChat:
                 "source": {
                     "kind": "sideChat",
                     "chat": default,
-                    "turnId": "t1",
+                    "turnId": turn_id,
                     "selection": selection,
                 },
             },
@@ -323,3 +352,144 @@ class TestAggregation:
 
         item = (await client.request("listSessions", {"channel": ROOT_URI}))["result"]["items"][0]
         assert item["status"] & SessionStatus.IS_READ
+
+
+class TestFork:
+    """`createSession.fork` used to be read by nobody.
+
+    The parameter was accepted, the command answered success, and the new
+    session came up EMPTY. Silence is the worst available outcome here: the
+    user watches their conversation not come across and has nothing to report,
+    because every frame on the wire said the fork worked.
+    """
+
+    async def test_a_fork_copies_turns_through_the_named_one(self, multi: Host) -> None:
+        client = await _client(multi)
+        source = await _session(multi, client, "echo:/fork-src")
+        first = await _one_turn(client, source, turn_id="t1", text="alpha")
+        await _one_turn(client, source, turn_id="t2", text="beta")
+
+        await client.request(
+            "createSession",
+            {
+                "channel": "echo:/fork-dst",
+                "provider": "echo",
+                "fork": {"session": "echo:/fork-src", "turnId": first},
+            },
+        )
+        await client.collect(seconds=0.3)
+
+        state = (await client.request("subscribe", {"channel": "echo:/fork-dst"}))["result"][
+            "snapshot"
+        ]["state"]
+        chat = (await client.request("subscribe", {"channel": state["chats"][0]["resource"]}))[
+            "result"
+        ]["snapshot"]["state"]
+        # Through and INCLUDING t1, and nothing after it.
+        assert [t["id"] for t in chat["turns"]] == ["t1"]
+
+    async def test_the_copy_is_independent(self, multi: Host) -> None:
+        """ "An independent copy" -- a later turn on the source must not appear."""
+        client = await _client(multi)
+        source = await _session(multi, client, "echo:/fork-ind")
+        await _one_turn(client, source, turn_id="t1", text="alpha")
+
+        await client.request(
+            "createSession",
+            {
+                "channel": "echo:/fork-ind2",
+                "provider": "echo",
+                "fork": {"session": "echo:/fork-ind", "turnId": "t1"},
+            },
+        )
+        await client.collect(seconds=0.3)
+        await _one_turn(client, source, turn_id="t2", text="added after the fork")
+
+        state = (await client.request("subscribe", {"channel": "echo:/fork-ind2"}))["result"][
+            "snapshot"
+        ]["state"]
+        chat = (await client.request("subscribe", {"channel": state["chats"][0]["resource"]}))[
+            "result"
+        ]["snapshot"]["state"]
+        assert [t["id"] for t in chat["turns"]] == ["t1"]
+
+    async def test_an_unknown_source_session_is_refused(self, multi: Host) -> None:
+        client = await _client(multi)
+        await _session(multi, client, "echo:/fork-u")
+        response = await client.request(
+            "createSession",
+            {
+                "channel": "echo:/fork-u2",
+                "provider": "echo",
+                "fork": {"session": "echo:/nope", "turnId": "t1"},
+            },
+        )
+        assert response["error"]["code"] == AHP_ERROR_CODES["SessionNotFound"]
+
+    async def test_a_turn_that_does_not_exist_is_refused(self, multi: Host) -> None:
+        """Not a silent empty copy: that is the bug this class exists for."""
+        client = await _client(multi)
+        await _session(multi, client, "echo:/fork-t")
+        response = await client.request(
+            "createSession",
+            {
+                "channel": "echo:/fork-t2",
+                "provider": "echo",
+                "fork": {"session": "echo:/fork-t", "turnId": "no-such-turn"},
+            },
+        )
+        assert response["error"]["code"] == -32602
+
+    async def test_a_fork_inherits_working_directories_and_ignores_the_clients(
+        self, multi: Host
+    ) -> None:
+        """ "Ignored for forked sessions -- a fork inherits ... from the source."
+
+        An override, not a fallback: VS Code computes and sends
+        workingDirectories on the fork call anyway.
+        """
+        client = await _client(multi)
+        source = await _session(
+            multi, client, "echo:/fork-wd", workingDirectories=["file:///from-source"]
+        )
+        await _one_turn(client, source, turn_id="t1", text="alpha")
+
+        await client.request(
+            "createSession",
+            {
+                "channel": "echo:/fork-wd2",
+                "provider": "echo",
+                "workingDirectories": ["file:///the-client-asked-for-this"],
+                "fork": {"session": "echo:/fork-wd", "turnId": "t1"},
+            },
+        )
+        await client.collect(seconds=0.3)
+
+        state = (await client.request("subscribe", {"channel": "echo:/fork-wd2"}))["result"][
+            "snapshot"
+        ]["state"]
+        assert state.get("workingDirectories") == ["file:///from-source"]
+
+    async def test_a_fork_carries_the_source_title(self, multi: Host) -> None:
+        """Otherwise every fork reads "New Session"."""
+        client = await _client(multi)
+        source = await _session(multi, client, "echo:/fork-ti")
+        await _one_turn(client, source, turn_id="t1", text="alpha")
+        await multi.sequencer.publish(
+            "echo:/fork-ti", {"type": "session/titleChanged", "title": "Something Specific"}
+        )
+
+        await client.request(
+            "createSession",
+            {
+                "channel": "echo:/fork-ti2",
+                "provider": "echo",
+                "fork": {"session": "echo:/fork-ti", "turnId": "t1"},
+            },
+        )
+        await client.collect(seconds=0.3)
+
+        state = (await client.request("subscribe", {"channel": "echo:/fork-ti2"}))["result"][
+            "snapshot"
+        ]["state"]
+        assert state["title"] == "Something Specific"

@@ -13,6 +13,7 @@ import asyncio
 import base64
 import binascii
 import contextlib
+import copy
 import json
 import logging
 import uuid
@@ -88,6 +89,7 @@ from agent_host_server.provider.base import (
     ConfigRequest,
     ConfiguresSessions,
     DescribesSession,
+    ForkedFrom,
     HandlesCustomizations,
     ManagesMcpServers,
     SessionPublisher,
@@ -559,6 +561,15 @@ class _Session:
         return f"{self.uri}/annotations"
 
 
+def _published_title(state: Any) -> str:
+    """`SessionState.title` as the sequencer holds it, or the default."""
+    if isinstance(state, Mapping):
+        title = state.get("title")
+        if isinstance(title, str) and title:
+            return title
+    return "New Session"
+
+
 def _with_origin(summary: dict[str, Any], origin: Mapping[str, Any] | None) -> dict[str, Any]:
     """`ChatSummary.origin` -- where a forked or side chat came from.
 
@@ -598,6 +609,7 @@ class Host:
         store: SessionStore | None = None,
         terminals: TerminalBackend | None = None,
         default_directory: str | None = None,
+        completion_trigger_characters: Sequence[str] | None = None,
     ) -> None:
         if policy is None:  # pragma: no cover - defensive; typing already forbids it
             raise ValueError("a Policy is required; there is no default")
@@ -656,11 +668,23 @@ class Host:
         # Code trace asks for `file:///` and `file:///.vscode/settings.json`,
         # which is the filesystem root, not anything anybody meant.
         self.default_directory = default_directory
+        # Advertised only when the provider can actually answer. A trigger
+        # character is a promise that typing it produces suggestions; promising
+        # one a provider ignores gives the user an empty picker on every
+        # keystroke, which reads as a broken host rather than as an empty
+        # result. Gated again at emit time on `Completes`.
+        self.completion_trigger_characters = tuple(completion_trigger_characters or ())
         # Tokens the agent needs for services IT talks to. Host-global, matching
         # the reference implementation -- `authenticate` carries no client
         # identity, so a per-connection store is not observable by a conformant
         # client. The consequence is real and gated: `Policy.may_push_token`.
         self.tokens = TokenStore()
+        #: Client ids THIS host instance has admitted through `initialize`.
+        #: `reconnect` resumes on a client-asserted id alone, so without this
+        #: any id is accepted and the client never learns the host has no idea
+        #: who it is. Host-scoped rather than connection-scoped: reconnecting
+        #: on a new socket is the whole point.
+        self._known_clients: set[str] = set()
         # No path chosen on the embedder's behalf, same as `sequence_file`. The
         # default keeps nothing, which is what a host whose sessions do not
         # outlive it should do.
@@ -978,6 +1002,10 @@ class Host:
             raise errors.AhpError(-32009, "Connection refused by policy")
 
         connection.initialized = True
+        if connection.client_id:
+            # Remembered so a later `reconnect` on this id can be told apart
+            # from one asserting an id this host has never seen.
+            self._known_clients.add(connection.client_id)
         self._audit("connection.admitted", connection, detail={"protocolVersion": chosen})
 
         snapshots: list[dict[str, Any]] = []
@@ -1001,6 +1029,20 @@ class Host:
             result["telemetry"] = dict(self.telemetry)
         if self.default_directory is not None:
             result["defaultDirectory"] = self.default_directory
+        if self.completion_trigger_characters and isinstance(self.provider, Completes):
+            # Without this the `completions` command is fully implemented and
+            # never called: the client only issues it for a character the host
+            # named, so an unadvertised trigger means the picker never opens.
+            # Note the client caches these at content-provider registration and
+            # does NOT re-read them on reconnect -- changing them needs a
+            # window reload, not just a host restart.
+            result["completionTriggerCharacters"] = list(self.completion_trigger_characters)
+        if self.terminals.__class__ is not RefusingTerminalBackend:
+            # "Absence means the host does not support command prefixes."
+            # Advertised only behind a real backend: with the refusing default,
+            # `!ls` would render as a terminal request this host then declines,
+            # turning a working input into a dead end.
+            result["terminalCommandPrefix"] = "!"
         return result
 
     async def _subscribe(self, connection: Connection, params: Mapping[str, Any]) -> dict[str, Any]:
@@ -1296,6 +1338,15 @@ class Host:
                 operation == "write" and not isinstance(self.resources, WritableResourceProvider)
             ) or not self.policy.may_access_resource(connection.info, operation, uri):
                 raise errors.AhpError(-32009, f"Not permitted to {operation} {uri}")
+            # The JAIL, as well as the policy. This asked the policy alone, and
+            # the default policy permits everything -- so the host granted
+            # access to paths the resource provider then refused, one command
+            # later. "After a successful `resourceRequest`, the caller MAY use
+            # the corresponding `resource*` commands": a grant that does not
+            # survive the next call is worse than a refusal, because the client
+            # was told asking again would help.
+            if not self._inside_the_jail(uri):
+                raise errors.AhpError(-32009, f"Not permitted to {operation} {uri}")
         return {}
 
     async def _resource_write(
@@ -1578,11 +1629,19 @@ class Host:
         channel = params.get("channel")
         if not isinstance(channel, str):
             raise errors.invalid_params("channel is required")
-        terminal = self._live_terminals.pop(channel, None)
-        if terminal is None:
-            raise errors.AhpError(-32008, f"No such terminal: {channel}")
+        # Authorized BEFORE anything is removed. Popping first meant an
+        # unauthorized caller still evicted the terminal from the live map on
+        # its way to being refused -- the refusal was returned and the damage
+        # was already done.
         if not self.policy.may_see_channel(connection.info, channel):
             raise errors.AhpError(-32009, f"Not permitted to dispose {channel}")
+        terminal = self._live_terminals.pop(channel, None)
+        if terminal is None:
+            # Disposal is idempotent. Erroring here made a client that failed
+            # to CREATE a terminal fail again trying to clean it up, which is
+            # how this host answered every one of VS Code's three disposals
+            # with an error after refusing all three creations.
+            return {}
         await terminal.close()
         await self.sequencer.drop_channel(channel)
         await self._publish_terminal_catalogue()
@@ -1873,7 +1932,15 @@ class Host:
             "title": "New Chat",
             "status": _STATUS_IDLE,
             "modifiedAt": created_at,
-            "turns": [],
+            # A forked CHAT inherits the source chat's transcript, exactly as a
+            # forked SESSION does; a side chat does not, because its whole
+            # point is a separate conversation that the client seeds with its
+            # own context. `_chat_origin` has already validated the turn id.
+            "turns": (
+                self._copy_turns(origin["chat"], origin.get("turnId"))
+                if origin is not None and origin["kind"] == "fork"
+                else []
+            ),
         }
         if origin is not None:
             state["origin"] = origin
@@ -1944,6 +2011,11 @@ class Host:
         origin: dict[str, Any] = {"kind": kind, "chat": source_chat}
         turn_id = source.get("turnId")
         if isinstance(turn_id, str):
+            # Validated, not just copied. Publishing an origin that names a
+            # turn the source chat does not have claims a provenance that never
+            # existed, and nothing downstream ever checks it -- the same class
+            # of silent lie as a fork that copies nothing and reports success.
+            self._copy_turns(source_chat, turn_id)
             origin["turnId"] = turn_id
         selection = source.get("selection")
         if kind == "sideChat" and isinstance(selection, Mapping):
@@ -2461,7 +2533,7 @@ class Host:
         # subsequent resource call is refused: a working directory the host
         # cannot read is worse than no working directory, because the client
         # has no way to tell the difference until each probe fails.
-        servable = [d for d in requested if self._servable_directory(d)]
+        servable = [d for d in requested if self._inside_the_jail(d)]
         if len(servable) != len(requested):
             # Logged, never silent. A session that quietly loses its working
             # directory is indistinguishable from one that never had it, and
@@ -2486,18 +2558,23 @@ class Host:
             if self.policy.may_grant_working_directory(connection.info, session, directory)
         ]
 
-    def _servable_directory(self, directory: str) -> bool:
+    def _inside_the_jail(self, uri: str) -> bool:
         """Whether the installed resource provider would actually serve this.
 
         Feature-detected rather than assumed: a provider that is not a rooted
         filesystem jail (an in-memory store, a git object database) has no
         `root` to compare against and is trusted with whatever it was given.
+
+        Note this is stricter than "resolves": strict ancestors of the root
+        resolve, so a directory picker can walk to it, but nothing under them
+        is served. A caller asking whether it may READ needs this answer, not
+        the resolvable one.
         """
         root = getattr(self.resources, "root", None)
         if root is None:
             return True
         try:
-            path = PurePosixPath(path_from_file_uri(directory))
+            path = PurePosixPath(path_from_file_uri(uri))
         except errors.AhpError:
             # Not a `file:` URI at all. Not this jail's business to judge.
             return True
@@ -2536,6 +2613,67 @@ class Host:
                 return "the primary working directory is immutable"
         return None
 
+    def _copy_turns(self, chat_uri: str, turn_id: Any) -> list[Any]:
+        """The source chat's turns up to and INCLUDING *turn_id*, deep-copied.
+
+        "The server populates the new session with content from the source
+        session up to and including the response of the specified turn"
+        (`SessionForkSource`). Deep-copied because the result is "an
+        independent copy": sharing the turn objects would make an edit in one
+        session appear in the other.
+
+        A `turn_id` that names no turn is `InvalidParams` rather than a silent
+        empty copy -- claiming to have branched from a turn that does not exist
+        is the same class of lie as returning success for a fork that copied
+        nothing. An ABSENT id copies the whole chat, which is what VS Code's
+        `/fork` command asks for: it forks at the last turn.
+
+        Note the stored turn's identity field is `id`; only the ACTION that
+        creates it carries `turnId`.
+        """
+        state = self.sequencer.state_of(chat_uri)
+        turns = state.get("turns") if isinstance(state, Mapping) else None
+        if not isinstance(turns, list):
+            return []
+        if turn_id is None:
+            return copy.deepcopy(turns)
+        if not isinstance(turn_id, str):
+            raise errors.invalid_params("fork turnId must be a string")
+        for index, turn in enumerate(turns):
+            if isinstance(turn, Mapping) and turn.get("id") == turn_id:
+                return copy.deepcopy(turns[: index + 1])
+        raise errors.invalid_params(f"no such turn in the source chat: {turn_id}")
+
+    def _fork_source(
+        self, connection: Connection, params: Mapping[str, Any]
+    ) -> tuple[_Session, list[Any]] | None:
+        """Resolve `createSession.fork`, or ``None`` when it is absent.
+
+        Until this existed the parameter was read by nobody: `createSession`
+        accepted a fork, answered success, and produced an EMPTY session. A
+        silent no-op is the worst available outcome -- the user watches their
+        conversation not come across and has nothing to report.
+        """
+        fork = params.get("fork")
+        if fork is None:
+            return None
+        if not isinstance(fork, Mapping):
+            raise errors.invalid_params("fork must be an object")
+        source_uri = fork.get("session")
+        if not isinstance(source_uri, str):
+            raise errors.invalid_params("fork.session is required")
+        source = self._sessions.get(source_uri)
+        if source is None:
+            raise errors.session_not_found(source_uri)
+        # A fork reads the source's whole transcript, so it is exactly as
+        # sensitive as observing the channel -- and must be gated the same way,
+        # or it becomes a way to read a session the connection may not see.
+        if not self.policy.may_see_channel(connection.info, source_uri):
+            raise errors.AhpError(-32009, f"Not permitted to observe {source_uri}")
+        # `turnIndex` is accepted and ignored: it is not in the type, and a
+        # client that sends one should not be failed over it.
+        return source, self._copy_turns(source.chat_uri, fork.get("turnId"))
+
     async def _create_session(self, connection: Connection, params: Mapping[str, Any]) -> None:
         channel = params.get("channel")
         if not isinstance(channel, str):
@@ -2562,19 +2700,51 @@ class Host:
             raise errors.AhpError(-32009, "Not permitted to create a session")
 
         provider_id = params.get("provider") or self.provider.agent.provider
-        working_directories = self._admit_working_directories(connection, channel, params)
+        forked = self._fork_source(connection, params)
+        if forked is None:
+            working_directories = self._admit_working_directories(connection, channel, params)
+        else:
+            # "Ignored for forked sessions -- a fork inherits its working
+            # directories from the source session." An OVERRIDE, not a
+            # fallback: VS Code computes and sends `workingDirectories` on the
+            # fork call anyway, so honouring the client's would quietly diverge
+            # the fork from its source.
+            source_state = self.sequencer.state_of(forked[0].uri)
+            inherited = (
+                source_state.get("workingDirectories")
+                if isinstance(source_state, Mapping)
+                else None
+            )
+            working_directories = list(inherited) if isinstance(inherited, list) else []
         # Resolved BEFORE the channel is registered, which is forced by the
         # protocol rather than chosen: `session/configChanged` carries values
         # only, and the reducer no-ops entirely when `SessionState.config` is
         # absent. A schema that is not in the initial state can never be added.
         session_config = await self._session_config_for(params)
+        if forked is not None:
+            # The client sends no `config` on a fork, so a configurable
+            # provider silently lost the user's answers on every one. Inherited
+            # from the source, which is what "an independent copy" means for
+            # everything else about the session.
+            source_state = self.sequencer.state_of(forked[0].uri)
+            if isinstance(source_state, Mapping) and "config" in source_state:
+                session_config = copy.deepcopy(source_state["config"])
         chat_uri = f"ahp-chat:/{uuid.uuid4()}"
         created_at = now_iso()
         session = _Session(
             uri=channel,
             chat_uri=chat_uri,
             provider_id=provider_id,
-            title="New Session",
+            # A fork carries its source's title. Read from the PUBLISHED
+            # state, not from the source's `_Session.title`: that field is only
+            # what the session was created with, and `session/titleChanged`
+            # updates the channel without writing back to it. The client labels
+            # a fork `forkedTitle || chatModel?.title || "Forked Session"`, so
+            # a stale read here makes every fork of a renamed session read
+            # "New Session".
+            title=_published_title(self.sequencer.state_of(forked[0].uri))
+            if forked is not None
+            else "New Session",
             created_at=created_at,
         )
         session.chat_uris.add(chat_uri)
@@ -2610,7 +2780,10 @@ class Host:
                 "title": session.title,
                 "status": _STATUS_IDLE,
                 "modifiedAt": created_at,
-                "turns": [],
+                # THE point of a fork. The client reads the transcript off the
+                # chat channel, so an empty list here is a fork that visibly
+                # lost the conversation while every command reported success.
+                "turns": forked[1] if forked is not None else [],
             },
             "chat",
         )
@@ -2632,7 +2805,7 @@ class Host:
         # Bring-up runs after the response so the client can subscribe first.
         # Hold a reference: a bare create_task can be garbage-collected mid-flight.
         self._audit("session.created", connection, channel=channel)
-        task = asyncio.create_task(self._bring_up(session, params, working_directories))
+        task = asyncio.create_task(self._bring_up(session, params, working_directories, forked))
         self._background.add(task)
         task.add_done_callback(self._background.discard)
         return
@@ -2642,6 +2815,7 @@ class Host:
         session: _Session,
         params: Mapping[str, Any],
         working_directories: Sequence[str],
+        forked: tuple[_Session, list[Any]] | None = None,
     ) -> None:
         try:
             active_client = _active_clients(params.get("activeClient"))
@@ -2656,6 +2830,15 @@ class Host:
                 # disagreed about what the session may touch -- and the
                 # provider got the wider of the two.
                 working_directories=tuple(working_directories),
+                # The provider is TOLD about the fork. Without this the host
+                # publishes N turns of history the agent has never seen, and
+                # the first reply after a fork answers with no context -- the
+                # published state and the agent silently disagree.
+                fork=(
+                    ForkedFrom(session_uri=forked[0].uri, turns=tuple(forked[1]))
+                    if forked is not None
+                    else None
+                ),
                 config=params.get("config") or {},
                 active_client_id=active_client[0]["clientId"] if active_client else None,
                 client_tools=tuple(active_client[0]["tools"]) if active_client else (),
@@ -2780,6 +2963,17 @@ class Host:
                 raise errors.AhpError(-32009, "Connection refused by policy")
             connection.initialized = True
             self._audit("connection.resumed", connection)
+
+        # An id this host has never admitted gets `NotFound`, which is the
+        # client's cue to start over: it catches exactly this code and issues a
+        # fresh `initialize` ("Server forgot client X; initializing a fresh
+        # connection"). Resuming a stranger instead looked successful and was
+        # not -- `initialize` is the ONLY place the client assigns
+        # `defaultDirectory`, so a host that always accepts a reconnect leaves
+        # every client permanently browsing from `/`, with no way to discover
+        # otherwise.
+        if connection.client_id not in self._known_clients:
+            raise errors.AhpError(-32008, "unknown clientId; initialize instead")
 
         requested = [uri for uri in params.get("subscriptions") or [] if isinstance(uri, str)]
         allowed = [uri for uri in requested if self.policy.may_see_channel(connection.info, uri)]

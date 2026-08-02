@@ -312,10 +312,19 @@ class EchoProvider:
         return [
             CompletionItem(
                 insert_text=f"#{name}",
-                label=name,
                 range_start=start,
                 range_end=request.offset,
-                attachment={"kind": "file", "uri": f"file:///demo/{name}"},
+                # `type`, not `kind`; `resource`, not `file`. The discriminant
+                # is MessageAttachmentKind (channels-chat/state.ts:530-541) and
+                # the shipping client's switch has a bare `default: return`, so
+                # the wrong key dropped every item silently. `label` is
+                # required on every attachment and is what the picker shows.
+                attachment={
+                    "type": "resource",
+                    "uri": f"file:///demo/{name}",
+                    "label": name,
+                    "displayKind": "document",
+                },
             )
             for name in ("readme.md", "recipe.txt")
             if name.startswith(typed)

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -15,6 +16,7 @@ import pytest
 from agent_host_server.core import Host, LoopbackSingleUserPolicy
 from agent_host_server.core.channels import ROOT_URI
 from agent_host_server.core.errors import AHP_ERROR_CODES
+from agent_host_server.core.resources import RootedFilesystemResourceProvider
 from agent_host_server.provider import EchoProvider
 from agent_host_server.transport import memory_pair
 
@@ -159,6 +161,11 @@ class TestUnimplemented:
                     "claim": {"kind": "session", "session": "echo:/s"},
                 },
             )
+            if "error" not in response:
+                # `disposeTerminal` succeeds for a terminal that is not there:
+                # disposal is idempotent, and erroring made a client that failed
+                # to CREATE one fail again cleaning it up.
+                continue
             assert response["error"]["code"] != -32601, method
 
     async def test_an_unknown_method_still_is_method_not_found(
@@ -438,13 +445,28 @@ class TestReconnectAsFirstRequest:
     """VS Code opens with `reconnect`, not `initialize`.
 
     Its runtime uses `reconnect` whenever it remembers a serverSeq and a
-    subscription set. Refusing it does not make VS Code fall back -- it retries
-    the same request forever, so the connection never establishes.
+    subscription set, and the committed capture opens with exactly that.
+
+    Refusing it with the WRONG code does not make VS Code fall back -- it
+    rethrows and retries, and the connection never establishes. Refusing with
+    `NotFound` specifically is a designed path: the client catches that one
+    code and issues a fresh `initialize` ("Server forgot client ...;
+    initializing a fresh connection", present in the shipping 1.131.0 bundles).
+
+    That distinction is load-bearing. `initialize` is the ONLY place the client
+    assigns `defaultDirectory`, so a host that resumes any asserted id leaves
+    every client permanently browsing from `/` with no way to discover
+    otherwise.
     """
 
-    async def test_reconnect_without_a_prior_initialize_is_accepted(
+    async def test_an_unknown_client_is_told_to_initialize(
         self, connected: tuple[Host, FakeClient]
     ) -> None:
+        """`NotFound`, so the client starts over rather than resuming a fiction.
+
+        "Client identifier from the original connection" -- if there was no
+        such connection there is nothing to resume.
+        """
         _, client = connected
         response = await client.request(
             "reconnect",
@@ -452,6 +474,24 @@ class TestReconnectAsFirstRequest:
                 "channel": ROOT_URI,
                 "clientId": "098d0783-37bd-47d5-b16e-c232e685c5d1",
                 "lastSeenServerSeq": 38,
+                "subscriptions": [ROOT_URI],
+            },
+        )
+        assert response["error"]["code"] == AHP_ERROR_CODES["NotFound"]
+
+    async def test_a_known_client_resumes_without_reinitializing(
+        self, connected: tuple[Host, FakeClient]
+    ) -> None:
+        """The case the class exists for: a dropped socket, same client."""
+        _, client = connected
+        await _initialize(client, clientId="known-1")
+
+        response = await client.request(
+            "reconnect",
+            {
+                "channel": ROOT_URI,
+                "clientId": "known-1",
+                "lastSeenServerSeq": 0,
                 "subscriptions": [ROOT_URI],
             },
         )
@@ -463,6 +503,7 @@ class TestReconnectAsFirstRequest:
     ) -> None:
         """A serverSeq from a previous process cannot be replayed."""
         _, client = connected
+        await _initialize(client, clientId="c1")
         result = (
             await client.request(
                 "reconnect",
@@ -511,6 +552,7 @@ class TestReconnectAcrossAHostRestart:
         self, connected: tuple[Host, FakeClient]
     ) -> None:
         _, client = connected
+        await _initialize(client, clientId="c1")
         result = (
             await client.request(
                 "reconnect",
@@ -1304,3 +1346,80 @@ class TestChannelOwnership:
         )
 
         assert response["error"]["code"] == AHP_ERROR_CODES["SessionAlreadyExists"]
+
+
+class TestGrantsMatchTheJail:
+    """`resourceRequest` must not grant what the next call refuses.
+
+    "After a successful `resourceRequest`, the caller MAY use the corresponding
+    `resource*` commands." This asked the POLICY only, and the default policy
+    permits everything -- so the host granted access to paths the provider then
+    refused one command later. A grant that does not survive the next call is
+    worse than a refusal: the client was told asking again would help.
+    """
+
+    async def test_a_grant_outside_the_jail_is_refused(self, tmp_path: Path) -> None:
+        root = tmp_path / "served"
+        root.mkdir()
+        host = Host(
+            EchoProvider(),
+            LoopbackSingleUserPolicy(),
+            resources=RootedFilesystemResourceProvider(root),
+        )
+        try:
+            client_transport, server_transport = memory_pair()
+            serve = asyncio.create_task(host.serve(server_transport))
+            client = FakeClient(client_transport)
+            await _initialize(client)
+            outside = (tmp_path / "elsewhere").as_uri()
+
+            granted = await client.request(
+                "resourceRequest", {"channel": ROOT_URI, "uri": outside, "read": True}
+            )
+            assert granted["error"]["code"] == -32009
+        finally:
+            serve.cancel()
+            await host.aclose()
+
+    async def test_a_grant_inside_the_jail_still_works(self, tmp_path: Path) -> None:
+        root = tmp_path / "served"
+        root.mkdir()
+        (root / "f.txt").write_text("hi")
+        host = Host(
+            EchoProvider(),
+            LoopbackSingleUserPolicy(),
+            resources=RootedFilesystemResourceProvider(root),
+        )
+        try:
+            client_transport, server_transport = memory_pair()
+            serve = asyncio.create_task(host.serve(server_transport))
+            client = FakeClient(client_transport)
+            await _initialize(client)
+            inside = (root / "f.txt").as_uri()
+
+            granted = await client.request(
+                "resourceRequest", {"channel": ROOT_URI, "uri": inside, "read": True}
+            )
+            assert "error" not in granted, granted.get("error")
+            # And the grant is honoured, which is the whole contract.
+            read = await client.request("resourceRead", {"channel": ROOT_URI, "uri": inside})
+            assert "error" not in read, read.get("error")
+        finally:
+            serve.cancel()
+            await host.aclose()
+
+
+class TestDisposalIsIdempotent:
+    async def test_disposing_a_terminal_that_never_existed_succeeds(
+        self, connected: tuple[Host, FakeClient]
+    ) -> None:
+        """It errored, so a client that failed to CREATE a terminal failed
+        again cleaning up -- which is how this host answered every one of VS
+        Code's three disposals with an error after refusing all three
+        creations."""
+        _, client = connected
+        await _initialize(client)
+        response = await client.request(
+            "disposeTerminal", {"channel": "ahp-terminal:/never-existed"}
+        )
+        assert response["result"] == {}
