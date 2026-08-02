@@ -32,6 +32,7 @@ from agent_host_server.core.changesets import (
     diff_counts,
     file_entry,
 )
+from agent_host_server.core.config import RootConfig
 
 
 class TestChangesetKeys:
@@ -109,3 +110,88 @@ class TestToolCallKeys:
         failed = _tool_result({"content": []}, False, "Echo failed")
         assert failed["success"] is False
         assert failed["pastTenseMessage"] == "Echo failed"
+
+
+class TestModelInfo:
+    """`SessionModelInfo.provider` is non-optional, and we omitted it.
+
+    The bare `{"id", "name"}` mapping was accepted in silence, so every adapter
+    copied from the demo shipped the same incomplete picker: no section header,
+    no "Max context" row, no usage meter, and image attachments refused.
+    """
+
+    def test_provider_defaults_to_the_owning_agent(self) -> None:
+        from agent_host_server.provider.base import AgentInfo, ModelInfo
+
+        wire = AgentInfo(
+            provider="echo",
+            display_name="Echo",
+            description="d",
+            models=(ModelInfo(id="m", name="M"),),
+        ).to_wire()
+        assert wire["models"][0]["provider"] == "echo"
+
+    def test_a_raw_mapping_still_gets_a_provider(self) -> None:
+        """An embedder already building wire dicts is not forced to migrate,
+        but is not left publishing an ungroupable model either."""
+        from agent_host_server.provider.base import AgentInfo
+
+        wire = AgentInfo(
+            provider="echo",
+            display_name="Echo",
+            description="d",
+            models=({"id": "m", "name": "M"},),
+        ).to_wire()
+        assert wire["models"][0]["provider"] == "echo"
+
+    def test_optional_fields_are_omitted_not_nulled(self) -> None:
+        from agent_host_server.provider.base import ModelInfo
+
+        assert ModelInfo(id="m", name="M").to_wire("p") == {
+            "id": "m",
+            "name": "M",
+            "provider": "p",
+        }
+
+    def test_the_demo_model_carries_token_limits(self) -> None:
+        """Their ABSENCE is what a reader of echo.py would copy."""
+        from agent_host_server.provider import EchoProvider
+
+        model = EchoProvider().agent.to_wire()["models"][0]
+        assert model["maxPromptTokens"] > 0
+        assert model["maxOutputTokens"] > 0
+        assert model["policyState"] == "enabled"
+
+
+class TestDemoRootConfig:
+    """The keys a client really pushes, so they stop being dropped."""
+
+    def test_every_observed_key_is_declared(self) -> None:
+        from agent_host_server.__main__ import DEMO_ROOT_CONFIG_PROPERTIES
+
+        # Captured from real connections. `terminalAutoApproveRules` and the two
+        # auto-approve booleans are the ONLY channel by which the user's
+        # auto-approve preferences reach a host at all.
+        observed = {
+            "telemetryLevel": "all",
+            "sessionSyncEnabled": False,
+            "terminalAutoApproveEnabled": True,
+            "globalAutoApproveEnabled": False,
+            "autoReplyEnabled": False,
+            "preferLongContextEnabled": False,
+            "systemProxyEnabled": True,
+            "terminalAutoApproveRules": {"ls": True},
+            "codexAgentEnabled": False,
+            "disableRepoInfoTelemetry": False,
+        }
+        config = RootConfig(properties=DEMO_ROOT_CONFIG_PROPERTIES)
+        for key, value in observed.items():
+            assert config.rejection(key, value) is None, f"{key} would be dropped"
+
+    def test_an_undeclared_key_is_still_refused(self) -> None:
+        """Accepting the ten does not mean accepting anything."""
+        from agent_host_server.__main__ import DEMO_ROOT_CONFIG_PROPERTIES
+
+        config = RootConfig(properties=DEMO_ROOT_CONFIG_PROPERTIES)
+        assert config.rejection("somethingElse", 1) is not None
+        assert config.rejection("telemetryLevel", "not-an-enum-member") is not None

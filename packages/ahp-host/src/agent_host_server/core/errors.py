@@ -22,6 +22,7 @@ __all__ = [
     "internal_error",
     "invalid_params",
     "method_not_found",
+    "provider_not_found",
     "session_not_found",
     "unsupported_protocol_version",
 ]
@@ -82,6 +83,18 @@ def unsupported_protocol_version(supported: tuple[str, ...]) -> AhpError:
         "No mutually supported protocol version",
         {"supportedProtocolVersions": list(supported)},
     )
+
+
+def provider_not_found(provider: str) -> AhpError:
+    """No agent serves this provider id.
+
+    The protocol has a dedicated code for it, and answering anything else --
+    including success -- is worse than it sounds: the client groups its session
+    list BY provider, so a session accepted under a name no agent answers to
+    files itself under an agent that does not exist while being served by the
+    default one.
+    """
+    return AhpError(AHP_ERROR_CODES["ProviderNotFound"], f"No agent for provider: {provider}")
 
 
 def session_not_found(uri: str) -> AhpError:

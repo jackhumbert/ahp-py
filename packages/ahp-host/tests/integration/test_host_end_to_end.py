@@ -1423,3 +1423,37 @@ class TestDisposalIsIdempotent:
             "disposeTerminal", {"channel": "ahp-terminal:/never-existed"}
         )
         assert response["result"] == {}
+
+
+class TestProviderIdentity:
+    async def test_an_unknown_provider_is_refused(self, connected: tuple[Host, FakeClient]) -> None:
+        """`ProviderNotFound`, not silent acceptance.
+
+        The id was copied through unchecked, so a session came up published
+        under a provider no agent answers to while the default one actually
+        served it. The client groups its session list BY provider, so those
+        rows filed themselves under an agent that does not exist.
+        """
+        _, client = connected
+        await _initialize(client)
+        response = await client.request(
+            "createSession", {"channel": "echo:/bogus", "provider": "not-a-real-provider"}
+        )
+        assert response["error"]["code"] == AHP_ERROR_CODES["ProviderNotFound"]
+
+    async def test_the_real_provider_is_accepted(self, connected: tuple[Host, FakeClient]) -> None:
+        _, client = connected
+        await _initialize(client)
+        response = await client.request(
+            "createSession", {"channel": "echo:/ok", "provider": "echo"}
+        )
+        assert "error" not in response, response.get("error")
+
+    async def test_an_omitted_provider_still_defaults(
+        self, connected: tuple[Host, FakeClient]
+    ) -> None:
+        """Optional in the params; only a WRONG one is an error."""
+        _, client = connected
+        await _initialize(client)
+        response = await client.request("createSession", {"channel": "echo:/default"})
+        assert "error" not in response, response.get("error")

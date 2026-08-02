@@ -38,6 +38,7 @@ __all__ = [
     "InputQuestion",
     "InputRequest",
     "ManagesMcpServers",
+    "ModelInfo",
     "ResumableAgentProvider",
     "SessionDescription",
     "SessionPublisher",
@@ -47,6 +48,62 @@ __all__ = [
     "TurnSink",
     "UserMessage",
 ]
+
+
+@dataclass(frozen=True)
+class ModelInfo:
+    """`SessionModelInfo`. A model in the client's picker.
+
+    Typed rather than a bare mapping because the mapping accepted ``{"id",
+    "name"}`` in silence, which is what this project shipped and what every
+    adapter copied from the demo would ship too. `provider` is declared
+    non-optional by the spec and was the field most often missing.
+
+    Each optional field below has a confirmed reader in the shipping client:
+
+    * ``provider`` -- picks the picker's section, which otherwise falls back
+      to a generic vendor bucket
+    * ``max_prompt_tokens`` -- ``maxInputTokens``, the "Max context" row and
+      the denominator of the usage meter; without it the meter cannot render
+    * ``max_output_tokens`` / ``max_context_window`` -- the rest of that row
+    * ``supports_vision`` -- gates image attachments; absent means refused
+    * ``policy_state`` -- ``"disabled"`` removes the model from the picker,
+      which is the only way to list a model while keeping it unselectable
+    """
+
+    id: str
+    name: str
+    #: Non-optional in the spec. Defaults to the owning agent's provider at
+    #: serialisation time rather than being required here, so the common case
+    #: stays a two-argument construction.
+    provider: str | None = None
+    max_context_window: int | None = None
+    max_prompt_tokens: int | None = None
+    max_output_tokens: int | None = None
+    supports_vision: bool | None = None
+    #: `"enabled"` | `"disabled"` | `"unconfigured"`.
+    policy_state: str | None = None
+    config_schema: Mapping[str, Any] | None = None
+    meta: Mapping[str, Any] | None = None
+
+    def to_wire(self, provider: str) -> dict[str, Any]:
+        wire: dict[str, Any] = {
+            "id": self.id,
+            "name": self.name,
+            "provider": self.provider or provider,
+        }
+        for key, value in (
+            ("maxContextWindow", self.max_context_window),
+            ("maxPromptTokens", self.max_prompt_tokens),
+            ("maxOutputTokens", self.max_output_tokens),
+            ("supportsVision", self.supports_vision),
+            ("policyState", self.policy_state),
+            ("configSchema", self.config_schema),
+            ("_meta", self.meta),
+        ):
+            if value is not None:
+                wire[key] = value
+        return wire
 
 
 @dataclass(frozen=True)
@@ -61,7 +118,11 @@ class AgentInfo:
     provider: str
     display_name: str
     description: str
-    models: Sequence[Mapping[str, Any]] = field(default_factory=tuple)
+    #: Accepts :class:`ModelInfo` or a raw mapping. A raw mapping is passed
+    #: through untouched apart from having `provider` filled in when absent --
+    #: an embedder that already builds wire dicts is not forced to migrate,
+    #: but is also not left publishing a model the picker cannot group.
+    models: Sequence[ModelInfo | Mapping[str, Any]] = field(default_factory=tuple)
     capabilities: Mapping[str, Any] = field(default_factory=dict)
     #: `AgentInfo.protectedResources` -- upstream services the AGENT talks to
     #: that need a credential. Plain wire dicts rather than
@@ -72,12 +133,19 @@ class AgentInfo:
     #: it means this agent does not front anything that asks for one.
     protected_resources: Sequence[Mapping[str, Any]] = field(default_factory=tuple)
 
+    def _model_wire(self, model: ModelInfo | Mapping[str, Any]) -> dict[str, Any]:
+        if isinstance(model, ModelInfo):
+            return model.to_wire(self.provider)
+        # A raw mapping still gets `provider`, which the spec declares
+        # non-optional and which decides the picker's section header.
+        return {"provider": self.provider, **dict(model)}
+
     def to_wire(self) -> dict[str, Any]:
         wire: dict[str, Any] = {
             "provider": self.provider,
             "displayName": self.display_name,
             "description": self.description,
-            "models": list(self.models),
+            "models": [self._model_wire(m) for m in self.models],
         }
         if self.capabilities:
             wire["capabilities"] = dict(self.capabilities)

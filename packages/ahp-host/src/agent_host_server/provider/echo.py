@@ -23,6 +23,7 @@ from agent_host_server.provider.base import (
     ConfigValue,
     InputQuestion,
     InputRequest,
+    ModelInfo,
     SessionDescription,
     ToolConfirmation,
     TurnSink,
@@ -252,7 +253,25 @@ class EchoProvider:
             provider=provider_id,
             display_name=display_name,
             description=description,
-            models=({"id": "echo-1", "name": model_name},),
+            models=(
+                ModelInfo(
+                    id="echo-1",
+                    name=model_name,
+                    # Not real numbers for a real model -- this agent has no
+                    # model -- but present, because their ABSENCE is what a
+                    # reader of this file would copy. Without token limits the
+                    # picker shows no "Max context" row and the usage meter has
+                    # no denominator to render against.
+                    max_prompt_tokens=128_000,
+                    max_output_tokens=4_096,
+                    max_context_window=128_000,
+                    # Explicitly false rather than omitted: absent is treated as
+                    # false anyway, and saying so documents that an echo agent
+                    # cannot read an image.
+                    supports_vision=False,
+                    policy_state="enabled",
+                ),
+            ),
             capabilities=dict(capabilities or {}),
         )
 

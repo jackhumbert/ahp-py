@@ -2700,6 +2700,13 @@ class Host:
             raise errors.AhpError(-32009, "Not permitted to create a session")
 
         provider_id = params.get("provider") or self.provider.agent.provider
+        if provider_id != self.provider.agent.provider:
+            # Checked rather than copied through. Unvalidated, a client could
+            # name any string and the host would publish the session under it
+            # while actually serving it with the default provider -- and the
+            # session list, which groups by provider, would show rows under an
+            # agent that does not exist.
+            raise errors.provider_not_found(str(provider_id))
         forked = self._fork_source(connection, params)
         if forked is None:
             working_directories = self._admit_working_directories(connection, channel, params)

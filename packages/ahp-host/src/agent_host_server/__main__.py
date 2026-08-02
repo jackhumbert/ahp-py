@@ -16,8 +16,10 @@ import json
 import logging
 import secrets
 from pathlib import Path
+from typing import Any, Final
 
 from agent_host_server.core import Host, HostInfo, LoopbackSingleUserPolicy
+from agent_host_server.core.config import RootConfig
 from agent_host_server.core.resources import RootedFilesystemResourceProvider
 from agent_host_server.core.versions import DEFAULT_SUPPORTED_VERSIONS
 from agent_host_server.provider import EchoProvider
@@ -79,7 +81,11 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--configurable",
         action="store_true",
-        help="publish a session config schema (reply style, prefix, dynamic greeting)",
+        help=(
+            "publish BOTH config schemas: the session one (reply style, prefix, "
+            "dynamic greeting) and RootState.config, so the ~10 root/configChanged "
+            "pushes a client sends on every connect stop being dropped"
+        ),
     )
     parser.add_argument(
         "--serve-directory",
@@ -143,6 +149,12 @@ async def _run() -> None:
         # only honest advertisement. Naming "@" as well would open a picker
         # that is always empty.
         completion_trigger_characters=("#",),
+        # Behind the same flag as the session config schema: both mean "this
+        # host is configurable", and a second flag for the other half would be
+        # a distinction only this file cares about.
+        root_config=(
+            RootConfig(properties=DEMO_ROOT_CONFIG_PROPERTIES) if args.configurable else None
+        ),
         resources=RootedFilesystemResourceProvider(
             Path(args.serve_directory), writable=args.writable
         )
@@ -192,6 +204,51 @@ async def _run() -> None:
             await asyncio.Event().wait()
 
     await host.aclose()
+
+
+#: `RootState.config` for the demo host: the keys VS Code actually pushes.
+#:
+#: Not invented. Every key below was observed arriving as `root/configChanged`
+#: on a real connection, and they arrive UNGATED -- the client sends them to a
+#: remote host whether or not a schema is advertised. Without a schema the
+#: reducer's own guard drops all of them, which is what this host did: ten
+#: pushes per connect, every one silently refused.
+#:
+#: Publishing the schema does NOT make the client send more. Its gated
+#: forwarder deliberately fans out only to a LOCAL agent host, on the grounds
+#: that a resolved shell path is local-machine-shaped and remote operators
+#: should configure server-side. What the schema buys is (1) the pushes stop
+#: being dropped, and (2) "Open Host Settings" opens a real document instead of
+#: an empty `{}` that cannot be saved.
+#:
+#: Three of these are load-bearing rather than cosmetic:
+#: `terminalAutoApproveEnabled`, `globalAutoApproveEnabled` and
+#: `terminalAutoApproveRules` are the ONLY channel by which the user's
+#: auto-approve preferences reach a host at all. A host that drops them cannot
+#: honour them, and the user has no way to tell.
+DEMO_ROOT_CONFIG_PROPERTIES: Final[dict[str, dict[str, Any]]] = {
+    "telemetryLevel": {
+        "type": "string",
+        "title": "Telemetry level",
+        "enum": ["all", "error", "crash", "off"],
+    },
+    "editTelemetryEnabled": {"type": "boolean", "title": "Edit telemetry"},
+    "sessionSyncEnabled": {"type": "boolean", "title": "Session sync"},
+    "terminalAutoApproveEnabled": {"type": "boolean", "title": "Auto-approve terminal commands"},
+    "globalAutoApproveEnabled": {"type": "boolean", "title": "Auto-approve everything"},
+    "terminalAutoApproveRules": {"type": "object", "title": "Terminal auto-approve rules"},
+    "autoReplyEnabled": {"type": "boolean", "title": "Auto reply"},
+    "preferLongContextEnabled": {"type": "boolean", "title": "Prefer long context"},
+    "systemProxyEnabled": {"type": "boolean", "title": "Use the system proxy"},
+    "copilotMultiRootEnabled": {"type": "boolean", "title": "Copilot multi-root"},
+    "claudeMultiRootEnabled": {"type": "boolean", "title": "Claude multi-root"},
+    "codexMultiRootEnabled": {"type": "boolean", "title": "Codex multi-root"},
+    "codexAgentEnabled": {"type": "boolean", "title": "Codex agent"},
+    "disableRepoInfoTelemetry": {"type": "boolean", "title": "Disable repo-info telemetry"},
+    # Not pushed by a remote client -- the forwarder keeps this one local -- but
+    # declared so the settings document can offer it to a human editor.
+    "defaultShell": {"type": "string", "title": "Shell for host-managed terminals"},
+}
 
 
 def main() -> None:
