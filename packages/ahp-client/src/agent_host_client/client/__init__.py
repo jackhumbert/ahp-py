@@ -1,0 +1,76 @@
+"""The single-shot protocol client: correlation, subscriptions, fan-out."""
+
+from __future__ import annotations
+
+from agent_host_client.client.client import (
+    AhpClient,
+    ClientConfig,
+    DispatchHandle,
+    ServerRequestHandler,
+    Subscription,
+)
+from agent_host_client.client.errors import (
+    AhpClientError,
+    ClientClosed,
+    ProtocolVersionError,
+    ProtocolViolation,
+    RequestTimeout,
+    RpcError,
+    TransportError,
+    is_session_gone,
+    rpc_error_from,
+)
+from agent_host_client.client.events import (
+    ActionEvent,
+    ActionRejected,
+    AuthRequiredEvent,
+    ClientEvent,
+    ConnectionState,
+    Diagnostic,
+    DroppedEvents,
+    MalformedFrame,
+    OtlpEvent,
+    ProgressEvent,
+    SequenceGap,
+    SessionAdded,
+    SessionRemoved,
+    SessionSummaryChanged,
+    SubscriptionEvent,
+    UnknownResponse,
+)
+from agent_host_client.client.queue import BroadcastQueue, BroadcastReader
+
+__all__ = [
+    "ActionEvent",
+    "ActionRejected",
+    "AhpClient",
+    "AhpClientError",
+    "AuthRequiredEvent",
+    "BroadcastQueue",
+    "BroadcastReader",
+    "ClientClosed",
+    "ClientConfig",
+    "ClientEvent",
+    "ConnectionState",
+    "Diagnostic",
+    "DispatchHandle",
+    "DroppedEvents",
+    "MalformedFrame",
+    "OtlpEvent",
+    "ProgressEvent",
+    "ProtocolVersionError",
+    "ProtocolViolation",
+    "RequestTimeout",
+    "RpcError",
+    "SequenceGap",
+    "ServerRequestHandler",
+    "SessionAdded",
+    "SessionRemoved",
+    "SessionSummaryChanged",
+    "Subscription",
+    "SubscriptionEvent",
+    "TransportError",
+    "UnknownResponse",
+    "is_session_gone",
+    "rpc_error_from",
+]

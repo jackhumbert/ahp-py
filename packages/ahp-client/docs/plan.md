@@ -370,7 +370,7 @@ dead, so recovery means a new transport and therefore a new client.
 @dataclass(frozen=True)
 class ClientConfig:
     request_timeout: float | None = 30.0
-    subscription_buffer: int = 0          # 0 = unbounded, per ADR 0003
+    subscription_buffer: int = 0  # 0 = unbounded, per ADR 0003
     event_buffer: int = 4096
     protocol_versions: tuple[str, ...] = DEFAULT_SUPPORTED_VERSIONS
     verify_negotiated_version: bool = True
@@ -429,8 +429,11 @@ the only working implementation.
 
 ```python
 class ApplyOutcome(Enum):
-    APPLIED = "applied"; REJECTED = "rejected"; BUFFERED = "buffered"
-    STALE = "stale"; NO_CHANNEL = "noChannel"
+    APPLIED = "applied"
+    REJECTED = "rejected"
+    BUFFERED = "buffered"
+    STALE = "stale"
+    NO_CHANNEL = "noChannel"
 ```
 
 Rules:
@@ -536,14 +539,19 @@ everything else serves it.
 import asyncio
 from agent_host_client import connect, Delta, ToolCallReady, TurnCompleted
 
+
 async def main() -> None:
     async with connect("ws://localhost:4321", token="…") as client:
         async with await client.create_session(provider="echo", cwd=".") as session:
             async for event in session.prompt("Summarise README.md"):
                 match event:
-                    case Delta(text=t):           print(t, end="", flush=True)
-                    case ToolCallReady() as call: await call.approve()
-                    case TurnCompleted():         print()
+                    case Delta(text=t):
+                        print(t, end="", flush=True)
+                    case ToolCallReady() as call:
+                        await call.approve()
+                    case TurnCompleted():
+                        print()
+
 
 asyncio.run(main())
 ```
@@ -875,16 +883,22 @@ what adoption means.
 
 ---
 
-## 13. ADRs to write before code
+## 13. ADRs
 
-0001 adopt the sibling's wire representation (plain dicts, TypedDict views) ·
-0002 extract the shared protocol distribution, with the version-coupling rule ·
-0003 lossless per-channel queues, lossy fan-in taps · 0004 supervised-by-default
-`connect()` · 0005 implement write-ahead reconciliation, following VS Code not
-the TS SDK · 0006 verify the negotiated version; detect gaps, never raise ·
-0007 the reverse direction is a first-class layer · 0008 reconnect
-`PendingPolicy` defaults to `VSCODE` · 0009 `mcpApps` and the `ahp-otlp:`
-channel are out of 0.1.0 and the capability is not advertised.
+Written before the code they justify. The wire-representation decision moved
+upstream into the shared package during M0 (it is that package's ADR 0001), and
+the extraction ADR lives there too, so this repository's series is seven rather
+than the nine originally scoped:
+
+| ADR | Decision |
+|---|---|
+| [0001](decisions/0001-depend-on-the-shared-protocol-layer.md) | Depend on `agent-host-protocol`; never fork it |
+| [0002](decisions/0002-lossless-per-channel-delivery.md) | Per-channel queues are lossless; only fan-in taps drop |
+| [0003](decisions/0003-supervised-by-default.md) | `connect()` is supervised by default |
+| [0004](decisions/0004-write-ahead-reconciliation.md) | Implement write-ahead reconciliation, following VS Code |
+| [0005](decisions/0005-verify-versions-observe-gaps.md) | Verify the negotiated version; observe gaps, never raise |
+| [0006](decisions/0006-reverse-direction-and-pending-policy.md) | The reverse direction is first-class; reconnect `PendingPolicy` defaults to `VSCODE` |
+| [0007](decisions/0007-out-of-scope-for-0-1-0.md) | `mcpApps` and `ahp-otlp:` are out of 0.1.0, and the capability is not advertised |
 
 ---
 

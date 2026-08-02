@@ -1,0 +1,135 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "agent-host-client"
+version = "0.1.0.dev0"
+description = "A client implementation of the Agent Host Protocol (AHP) for Python."
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.11"
+authors = [{ name = "agent-host-client contributors" }]
+keywords = ["ahp", "agent-host-protocol", "agent", "protocol", "json-rpc", "websocket"]
+classifiers = [
+  "Development Status :: 2 - Pre-Alpha",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Software Development :: Libraries",
+  "Typing :: Typed",
+]
+
+# The wire types, all seven reducers, version negotiation, the error taxonomy,
+# the transport ABC and the conformance corpora come from the shared layer --
+# the same one the sibling host stands on. Never fork it; see AGENTS.md.
+#
+# Compatible-release, not exact: a patch fix flows without a release here, while
+# a spec-shaped change is a deliberate upgrade. The spec breaks in MINOR bumps,
+# so a looser pin would be a trap.
+dependencies = ["agent-host-protocol~=0.1.0"]
+
+[project.optional-dependencies]
+# The core speaks to a `Transport`; a socket is one implementation of one. A
+# notebook reading a wire log should not pull a WebSocket stack.
+ws = ["websockets>=13"]
+
+[project.urls]
+Homepage = "https://github.com/jackhumbert/agent-host-client-py"
+Repository = "https://github.com/jackhumbert/agent-host-client-py"
+Issues = "https://github.com/jackhumbert/agent-host-client-py/issues"
+
+# PEP 735, not [project.optional-dependencies]: the latter is baked into the
+# wheel's Requires-Dist, and PyPI rejects metadata carrying a direct reference
+# (`name @ url`) -- which a local path to a sibling repo would be.
+[dependency-groups]
+dev = [
+  "pytest>=8",
+  "pytest-asyncio>=0.24",
+  "hypothesis>=6",
+  "mypy>=1.11",
+  "ruff>=0.6",
+  "import-linter>=2",
+  "websockets>=13",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/agent_host_client"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q --strict-markers"
+markers = [
+  "interop: drives a real third-party host; needs Node and a network install",
+]
+asyncio_mode = "auto"
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+files = ["src", "tests", "scripts"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N", "UP", "B", "A", "C4", "PT", "RET", "SIM", "TID", "RUF"]
+ignore = [
+  # The protocol's own field names are camelCase; mirroring them is correct.
+  "N815",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# The error classes carry the spec's own names for the spec's own codes --
+# `SessionNotFound` is -32001, `AuthRequired` is -32007. An `Error` suffix would
+# make every one of them differ from the vocabulary the rest of the library
+# mirrors, for no gain: they all subclass `RpcError`, which has the suffix.
+"src/agent_host_client/client/errors.py" = ["N818"]
+"tests/**" = ["RUF059"]
+
+[tool.importlinter]
+root_package = "agent_host_client"
+include_external_packages = true
+
+# Parenthesised layers are optional, so the contract holds while the upper
+# layers are still being built out (docs/plan.md §12).
+[[tool.importlinter.contracts]]
+name = "Layered: the front door sits above the protocol, never beside it"
+type = "layers"
+# `ws` sits ABOVE `client`, which reads backwards until you look at the
+# dependency: a concrete transport raises the client's `TransportError` so the
+# supervisor can tell a clean close from an I/O fault. The client never imports
+# `ws` -- it takes a `Transport` from the shared package -- so the arrow only
+# points one way, and it points up.
+layers = [
+  "(agent_host_client.cli)",
+  "(agent_host_client.sync)",
+  "(agent_host_client.api)",
+  "(agent_host_client.hosts)",
+  "(agent_host_client.serve)",
+  "(agent_host_client.ws)",
+  "agent_host_client.client",
+  "(agent_host_client.wirelog)",
+]
+
+# `client` DEFINES the inbound-request handler protocol; `serve` implements it;
+# `hosts` or the application wires them together. Without this contract the
+# natural thing to write is `client` importing a concrete resource server, which
+# inverts the layering and makes the reverse direction impossible to test alone.
+[[tool.importlinter.contracts]]
+name = "client does not reach up into its own callers"
+type = "forbidden"
+source_modules = ["agent_host_client.client"]
+forbidden_modules = ["agent_host_client.serve", "agent_host_client.hosts"]
+
+# A downstream test suite must stay offline. `testing` shipping a WebSocket
+# import would make every consumer's unit tests depend on a socket stack.
+[[tool.importlinter.contracts]]
+name = "the testing kit stays offline"
+type = "forbidden"
+source_modules = ["agent_host_client.testing"]
+forbidden_modules = ["agent_host_client.cli", "agent_host_client.ws", "websockets"]
