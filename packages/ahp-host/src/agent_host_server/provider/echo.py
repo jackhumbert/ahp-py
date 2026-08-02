@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Mapping, Sequence
-from typing import Any
+from typing import Any, Final
 
 from agent_host_server.provider.base import (
     AgentInfo,
@@ -46,6 +46,52 @@ def _text_of(tool_input: Any, fallback: str) -> str:
 def _first_active_client(context: AgentSessionContext) -> str | None:
     """The client this session was created by, if it published itself."""
     return context.active_client_id
+
+
+#: Tools worth asking a real client for, best first. Every one of these was
+#: observed on `activeClient.tools` from VS Code; `usages` is the safest --
+#: it reads, it needs only a symbol name, and it exists in every window.
+_PREFERRED_CLIENT_TOOLS: Final = ("usages", "toolSearch", "rename")
+
+
+def _pick_client_tool(context: AgentSessionContext) -> Mapping[str, Any] | None:
+    """A tool the client ACTUALLY published, never a name we made up.
+
+    The demo used to ask for a tool called `echo`, which no client has, so the
+    only thing this mode ever demonstrated was the client's own error path:
+    `Tool "echo" is not available on this client`. The whole point of client
+    tools is that the agent uses the editor's tools -- so the demo has to read
+    the list it was given.
+    """
+    published = {
+        tool.get("name"): tool for tool in context.client_tools if isinstance(tool, Mapping)
+    }
+    for name in _PREFERRED_CLIENT_TOOLS:
+        if name in published:
+            return published[name]
+    return next(iter(published.values()), None)
+
+
+def _demo_input_for(tool: Mapping[str, Any], text: str) -> dict[str, Any]:
+    """Something the chosen tool will accept, from its own input schema.
+
+    Only the required string properties are filled, with the user's message.
+    Cheap and wrong in general -- but a demo that sends an input the tool
+    rejects teaches nothing, and this at least respects the declared schema.
+    """
+    schema = tool.get("inputSchema")
+    if not isinstance(schema, Mapping):
+        return {}
+    properties = schema.get("properties")
+    required = schema.get("required")
+    if not isinstance(properties, Mapping) or not isinstance(required, list):
+        return {}
+    filled: dict[str, Any] = {}
+    for key in required:
+        declared = properties.get(key) if isinstance(key, str) else None
+        if isinstance(declared, Mapping) and declared.get("type") == "string":
+            filled[key] = text
+    return filled
 
 
 def _selected(answer: Any) -> str | None:
@@ -189,16 +235,22 @@ class EchoSession:
         if client_id is None:
             await sink.text_delta("(no active client to run a tool)")
             return
+        tool = _pick_client_tool(self.context)
+        if tool is None:
+            await sink.text_delta("(this client published no tools to run)")
+            return
+        name = str(tool.get("name"))
         result = await sink.run_client_tool(
             ClientToolCall(
                 call_id="client-tool-1",
-                name="echo",
-                display_name="Client Echo",
+                name=name,
+                display_name=str(tool.get("title") or tool.get("displayName") or name),
                 client_id=client_id,
-                tool_input={"text": message.text},
+                tool_input=_demo_input_for(tool, message.text),
+                invocation_message=f"Running the client's {name!r} tool",
             )
         )
-        await sink.text_delta(f"The client said: {result.value}")
+        await sink.text_delta(f"The client's {name!r} tool said: {result.value}")
 
     async def customization_toggled(self, customization_id: str, enabled: bool) -> None:
         """A client switched a customization on or off.
