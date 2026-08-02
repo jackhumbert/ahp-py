@@ -1,0 +1,85 @@
+{
+  "description": "session/mcpServerStateChanged replaces the state and channel of an McpServer customization nested inside a container",
+  "reducer": "session",
+  "initial": {
+    "provider": "copilot",
+    "title": "Test Session",
+    "status": 1,
+    "lifecycle": "ready",
+    "activeClients": [],
+    "chats": [],
+    "customizations": [
+      {
+        "type": "plugin",
+        "id": "plugin-a",
+        "uri": "https://plugins.example/a",
+        "name": "Plugin A",
+        "enabled": true,
+        "children": [
+          {
+            "type": "skill",
+            "id": "skill-1",
+            "uri": "https://plugins.example/a#skills/lint",
+            "name": "lint"
+          },
+          {
+            "type": "mcpServer",
+            "id": "mcp-child",
+            "uri": "https://plugins.example/a#mcp/search",
+            "name": "Search",
+            "enabled": true,
+            "state": {
+              "kind": "starting"
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "actions": [
+    {
+      "type": "session/mcpServerStateChanged",
+      "id": "mcp-child",
+      "state": {
+        "kind": "ready"
+      },
+      "channel": "mcp://search"
+    }
+  ],
+  "expected": {
+    "provider": "copilot",
+    "title": "Test Session",
+    "status": 1,
+    "lifecycle": "ready",
+    "activeClients": [],
+    "chats": [],
+    "customizations": [
+      {
+        "type": "plugin",
+        "id": "plugin-a",
+        "uri": "https://plugins.example/a",
+        "name": "Plugin A",
+        "enabled": true,
+        "children": [
+          {
+            "type": "skill",
+            "id": "skill-1",
+            "uri": "https://plugins.example/a#skills/lint",
+            "name": "lint"
+          },
+          {
+            "type": "mcpServer",
+            "id": "mcp-child",
+            "uri": "https://plugins.example/a#mcp/search",
+            "name": "Search",
+            "enabled": true,
+            "state": {
+              "kind": "ready"
+            },
+            "channel": "mcp://search"
+          }
+        ]
+      }
+    ]
+  }
+}
