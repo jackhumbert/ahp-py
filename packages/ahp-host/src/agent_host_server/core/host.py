@@ -18,7 +18,7 @@ import logging
 import uuid
 from collections.abc import Coroutine, Mapping, Sequence
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Final
 
 from agent_host_server.core import errors
@@ -49,6 +49,7 @@ from agent_host_server.core.resources import (
     NullResourceProvider,
     ResourceProvider,
     WritableResourceProvider,
+    path_from_file_uri,
 )
 from agent_host_server.core.seq import FileSequence
 from agent_host_server.core.sequencer import Sequencer
@@ -2435,6 +2436,28 @@ class Host:
     ) -> list[str]:
         """The directories `createSession` may seed, after capability and policy."""
         requested = [d for d in params.get("workingDirectories") or () if isinstance(d, str)]
+        # Anything the resource provider will not serve is dropped HERE, before
+        # it can become the session's working directory. Necessary because the
+        # ancestor chain of the served root is deliberately walkable
+        # (`resources._strict_ancestor`) so a client's directory picker can
+        # traverse it -- and a picker that can traverse a directory will let
+        # the user CHOOSE it. Accepting one produces a session whose every
+        # subsequent resource call is refused: a working directory the host
+        # cannot read is worse than no working directory, because the client
+        # has no way to tell the difference until each probe fails.
+        servable = [d for d in requested if self._servable_directory(d)]
+        if len(servable) != len(requested):
+            # Logged, never silent. A session that quietly loses its working
+            # directory is indistinguishable from one that never had it, and
+            # the operator is the only person who can tell whether the client
+            # asked for the wrong thing or --serve-directory is too narrow.
+            _log.warning(
+                "dropped %d working director%s outside the served root: %s",
+                len(requested) - len(servable),
+                "y" if len(requested) - len(servable) == 1 else "ies",
+                [d for d in requested if d not in servable],
+            )
+        requested = servable
         if self._multiroot() is None:
             # "Servers without that capability treat only the first entry as the
             # session's working directory and ignore the rest." Truncate rather
@@ -2446,6 +2469,23 @@ class Host:
             for directory in requested
             if self.policy.may_grant_working_directory(connection.info, session, directory)
         ]
+
+    def _servable_directory(self, directory: str) -> bool:
+        """Whether the installed resource provider would actually serve this.
+
+        Feature-detected rather than assumed: a provider that is not a rooted
+        filesystem jail (an in-memory store, a git object database) has no
+        `root` to compare against and is trusted with whatever it was given.
+        """
+        root = getattr(self.resources, "root", None)
+        if root is None:
+            return True
+        try:
+            path = PurePosixPath(path_from_file_uri(directory))
+        except errors.AhpError:
+            # Not a `file:` URI at all. Not this jail's business to judge.
+            return True
+        return path == PurePosixPath(root) or path.is_relative_to(PurePosixPath(root))
 
     def _validate_working_directory_action(
         self, connection: Connection, channel: str, action: Mapping[str, Any]
@@ -2485,8 +2525,21 @@ class Host:
         if not isinstance(channel, str):
             raise errors.invalid_params("channel is required")
         # The session URI is CLIENT-CHOSEN and opaque. Never parse or validate
-        # its shape: real clients use forms other than ahp-session:/<uuid>.
-        if channel in self._sessions:
+        # its SHAPE: real clients use forms other than ahp-session:/<uuid>.
+        #
+        # But opaque is not the same as unowned. Checking `_sessions` alone let
+        # a client name a channel this host had already registered for
+        # something else -- an annotations channel, a chat, a terminal, or
+        # `ahp-root://` itself -- and `register_channel` below would then
+        # overwrite its state, with `disposeSession` dropping it outright.
+        # Two ordinary commands from any admitted client permanently destroyed
+        # the connection-level channel, and a client whose `subscribe` comes
+        # back without a snapshot throws. Observed for real: a probe left the
+        # running host serving session state on `ahp-root://`.
+        #
+        # So the check is against the sequencer, which knows every channel,
+        # rather than against the session map, which knows only some of them.
+        if channel in self._sessions or self.sequencer.has_channel(channel):
             raise errors.already_exists(channel)
         if not self.policy.may_create_session(connection.info, params):
             self._audit("session.refused", connection, channel=channel, allowed=False)
@@ -2563,12 +2616,17 @@ class Host:
         # Bring-up runs after the response so the client can subscribe first.
         # Hold a reference: a bare create_task can be garbage-collected mid-flight.
         self._audit("session.created", connection, channel=channel)
-        task = asyncio.create_task(self._bring_up(session, params))
+        task = asyncio.create_task(self._bring_up(session, params, working_directories))
         self._background.add(task)
         task.add_done_callback(self._background.discard)
         return
 
-    async def _bring_up(self, session: _Session, params: Mapping[str, Any]) -> None:
+    async def _bring_up(
+        self,
+        session: _Session,
+        params: Mapping[str, Any],
+        working_directories: Sequence[str],
+    ) -> None:
         try:
             active_client = _active_clients(params.get("activeClient"))
             context = AgentSessionContext(
@@ -2576,7 +2634,12 @@ class Host:
                 session_uri=session.uri,
                 chat_uri=session.chat_uri,
                 provider_id=session.provider_id,
-                working_directories=tuple(params.get("workingDirectories") or ()),
+                # The ADMITTED list, not `params` again. Reading params here
+                # bypassed both the capability truncation and the policy gate,
+                # so the published SessionState and the provider's own context
+                # disagreed about what the session may touch -- and the
+                # provider got the wider of the two.
+                working_directories=tuple(working_directories),
                 config=params.get("config") or {},
                 active_client_id=active_client[0]["clientId"] if active_client else None,
                 client_tools=tuple(active_client[0]["tools"]) if active_client else (),

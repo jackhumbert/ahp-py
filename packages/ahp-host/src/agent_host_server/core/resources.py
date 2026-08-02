@@ -354,9 +354,54 @@ class RootedFilesystemResourceProvider:
     def _canonical_uri(self, resolved: PurePosixPath) -> str:
         return uri_from_path(Path(self.root) / resolved)
 
+    # ─── the ancestor chain ──────────────────────────────────────────────
+
+    def _strict_ancestor(self, uri: str) -> PurePosixPath | None:
+        """The path, if it is a **strict** ancestor of the root. Else ``None``.
+
+        A jail that refuses everything above its root is airtight and unusable.
+        VS Code's directory picker validates a typed path by stat-ing the
+        PARENT and the target inside one `try`
+        (`simpleFileDialog.ts:914-918`); the parent is stat-ed first, so a
+        refusal there throws before the target is ever looked at, both stats
+        are lost to the same `catch`, and the dialog concludes the path does
+        not exist. The user is told "Please enter a path that exists" about a
+        directory this host had just resolved successfully one call earlier.
+
+        So the ancestor chain is made to EXIST without being made readable:
+        `resolve` answers a bare `{type: "directory"}` and `list_dir` reveals
+        only the single next component toward the root. Reads, writes and
+        watches stay refused. The disclosure is the names of the directories
+        leading to a root the operator already chose to serve, which the client
+        can also derive from the root URI itself.
+        """
+        try:
+            path = PurePosixPath(path_from_file_uri(uri))
+        except errors.AhpError:
+            return None
+        if not path.is_absolute() or ".." in path.parts:
+            return None
+        root = PurePosixPath(self.root)
+        return path if path != root and root.is_relative_to(path) else None
+
+    @staticmethod
+    def _ancestor_info(path: PurePosixPath) -> ResourceInfo:
+        # Deliberately bare. Size, mtime and etag would describe a directory
+        # outside the served subtree, and this host does not disclose it -- the
+        # entry exists so a client can walk THROUGH it, not observe it.
+        return ResourceInfo(uri=uri_from_path(Path(path)), type="directory")
+
+    def _ancestor_entry(self, path: PurePosixPath) -> list[DirectoryEntry]:
+        """The one child on the way to the root -- never the real listing."""
+        remainder = PurePosixPath(self.root).relative_to(path).parts
+        return [DirectoryEntry(name=remainder[0], type="directory")]
+
     # ─── the provider surface ────────────────────────────────────────────
 
     async def resolve(self, uri: str, *, follow_symlinks: bool = True) -> ResourceInfo:
+        ancestor = self._strict_ancestor(uri)
+        if ancestor is not None:
+            return self._ancestor_info(ancestor)
         relative = self._relative(uri)
         if not follow_symlinks:
             # lstat semantics: describe the link, do not traverse it. Answered
@@ -419,6 +464,9 @@ class RootedFilesystemResourceProvider:
         return ResourceContent(data=data, content_type=mimetypes.guess_type(resolved.name)[0])
 
     async def list_dir(self, uri: str) -> Sequence[DirectoryEntry]:
+        ancestor = self._strict_ancestor(uri)
+        if ancestor is not None:
+            return self._ancestor_entry(ancestor)
         fd, stats, _resolved = self._walk(self._relative(uri))
         try:
             if not stat.S_ISDIR(stats.st_mode):

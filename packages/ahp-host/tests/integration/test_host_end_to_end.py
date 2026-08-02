@@ -14,6 +14,7 @@ import pytest
 
 from agent_host_server.core import Host, LoopbackSingleUserPolicy
 from agent_host_server.core.channels import ROOT_URI
+from agent_host_server.core.errors import AHP_ERROR_CODES
 from agent_host_server.provider import EchoProvider
 from agent_host_server.transport import memory_pair
 
@@ -1246,3 +1247,60 @@ class TestAnnotationsChannel:
         await client.request("disposeSession", {"channel": uri})
         response = await client.request("subscribe", {"channel": f"{uri}/annotations"})
         assert response["result"] == {}, "the channel outlived its session"
+
+
+class TestChannelOwnership:
+    """`createSession` may not take a channel the host already registered.
+
+    The session URI is client-chosen and opaque, and the collision check
+    consulted the session map alone -- which knows about sessions and nothing
+    else. So a client could name a channel already registered for an
+    annotations feed, a chat, a terminal, or `ahp-root://` itself, and
+    registration would overwrite its state while `disposeSession` dropped it
+    outright. Two ordinary commands from any admitted client permanently
+    destroyed the connection-level channel.
+
+    Found on a running host, not in theory: a probe left it publishing session
+    state on `ahp-root://`, and a client whose `subscribe` returns no snapshot
+    throws.
+    """
+
+    async def test_the_root_channel_cannot_be_seized(
+        self, connected: tuple[Host, FakeClient]
+    ) -> None:
+        host, client = connected
+        await _initialize(client)
+
+        response = await client.request("createSession", {"channel": ROOT_URI, "provider": "echo"})
+
+        assert "error" in response, "the root channel was handed to a client"
+        assert response["error"]["code"] == AHP_ERROR_CODES["SessionAlreadyExists"]
+        # And it still holds root state, not session state.
+        state = host.sequencer.state_of(ROOT_URI)
+        assert "agents" in state
+        assert "provider" not in state
+
+    async def test_an_existing_session_channel_cannot_be_seized(
+        self, connected: tuple[Host, FakeClient]
+    ) -> None:
+        _host, client = connected
+        await _initialize(client)
+        await client.request("createSession", {"channel": "echo:/a", "provider": "echo"})
+
+        response = await client.request("createSession", {"channel": "echo:/a", "provider": "echo"})
+
+        assert response["error"]["code"] == AHP_ERROR_CODES["SessionAlreadyExists"]
+
+    async def test_a_derived_channel_cannot_be_seized(
+        self, connected: tuple[Host, FakeClient]
+    ) -> None:
+        """Including the ones the host mints for a session, not just the session."""
+        _host, client = connected
+        await _initialize(client)
+        await client.request("createSession", {"channel": "echo:/a", "provider": "echo"})
+
+        response = await client.request(
+            "createSession", {"channel": "echo:/a/annotations", "provider": "echo"}
+        )
+
+        assert response["error"]["code"] == AHP_ERROR_CODES["SessionAlreadyExists"]

@@ -379,3 +379,77 @@ class TestWriting:
         await provider.move(_uri(root / "copy.txt"), _uri(root / "moved.txt"))
         assert (root / "moved.txt").read_text() == "hello"
         assert not (root / "copy.txt").exists()
+
+
+class TestAncestorChain:
+    """The chain above the root exists, and discloses almost nothing.
+
+    A jail that refuses everything above its root is airtight and unusable.
+    VS Code's directory picker validates a typed path by stat-ing the PARENT
+    and the target inside one `try` (`simpleFileDialog.ts:914-918`). The parent
+    is stat-ed first, so refusing it throws before the target is looked at,
+    both stats are lost to the same `catch`, and the dialog reports "Please
+    enter a path that exists" about a directory this host resolved
+    successfully one call earlier.
+
+    So ancestors resolve, and do nothing else.
+    """
+
+    @pytest.fixture
+    def rooted(self, tmp_path: Path) -> RootedFilesystemResourceProvider:
+        root = tmp_path / "outer" / "inner" / "served"
+        root.mkdir(parents=True)
+        (root / "kept.txt").write_text("in the jail")
+        (tmp_path / "outer" / "secret.txt").write_text("NOT in the jail")
+        (tmp_path / "outer" / "sibling").mkdir()
+        return RootedFilesystemResourceProvider(root)
+
+    async def test_a_strict_ancestor_resolves(
+        self, rooted: RootedFilesystemResourceProvider, tmp_path: Path
+    ) -> None:
+        info = await rooted.resolve((tmp_path / "outer" / "inner").as_uri())
+        assert info.type == "directory"
+
+    async def test_the_ancestor_carries_no_metadata(
+        self, rooted: RootedFilesystemResourceProvider, tmp_path: Path
+    ) -> None:
+        """It exists to be walked THROUGH, not observed."""
+        info = await rooted.resolve((tmp_path / "outer").as_uri())
+        assert info.to_wire() == {"uri": (tmp_path / "outer").as_uri(), "type": "directory"}
+
+    async def test_listing_an_ancestor_reveals_only_the_way_down(
+        self, rooted: RootedFilesystemResourceProvider, tmp_path: Path
+    ) -> None:
+        """Not the real listing -- `secret.txt` and `sibling` stay invisible."""
+        entries = await rooted.list_dir((tmp_path / "outer").as_uri())
+        assert [(e.name, e.type) for e in entries] == [("inner", "directory")]
+
+    async def test_an_ancestor_is_still_unreadable(
+        self, rooted: RootedFilesystemResourceProvider, tmp_path: Path
+    ) -> None:
+        with pytest.raises(AhpError) as caught:
+            await rooted.read((tmp_path / "outer" / "secret.txt").as_uri())
+        assert caught.value.code == -32009
+
+    async def test_a_sibling_of_the_root_is_not_an_ancestor(
+        self, rooted: RootedFilesystemResourceProvider, tmp_path: Path
+    ) -> None:
+        """Walkable is not the same as browsable. Only the chain opens."""
+        for target in ("outer/sibling", "outer/secret.txt"):
+            with pytest.raises(AhpError) as caught:
+                await rooted.resolve((tmp_path / target).as_uri())
+            assert caught.value.code == -32009, target
+
+    async def test_the_root_itself_is_real_not_synthetic(
+        self, rooted: RootedFilesystemResourceProvider
+    ) -> None:
+        """The root is served for real: it lists its actual contents."""
+        entries = await rooted.list_dir(rooted.root.as_uri())
+        assert [e.name for e in entries] == ["kept.txt"]
+
+    async def test_dotdot_is_not_a_way_into_the_ancestor_path(
+        self, rooted: RootedFilesystemResourceProvider
+    ) -> None:
+        with pytest.raises(AhpError) as caught:
+            await rooted.resolve(f"{rooted.root.as_uri()}/../..")
+        assert caught.value.code == -32009
