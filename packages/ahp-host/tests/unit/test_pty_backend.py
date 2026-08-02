@@ -15,6 +15,7 @@ import os
 import re
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -161,3 +162,66 @@ class TestTheEnvironmentIsNotInherited:
         # But it is still a usable terminal.
         assert "PATH=" in text
         assert "TERM=" in text
+
+
+class TestCwdIsAUri:
+    """The terminal channel is URIs throughout.
+
+    `CreateTerminalParams.cwd`, `TerminalState.cwd` and the `cwd` on
+    `terminal/cwdChanged` are all declared `URI`. Handing one to
+    `os.path.isdir` fails, and the failure is user-facing: VS Code renders the
+    refusal verbatim, so the user saw "The terminal process failed to launch:
+    Terminal refused: file:///Users/... is not a directory."
+
+    Missed because every probe written for this backend passed a plain path.
+    """
+
+    async def test_a_file_uri_cwd_is_accepted(self) -> None:
+        here = os.getcwd()
+        output = bytearray()
+        process = await PtyTerminalBackend().create(
+            _request(cwd=Path(here).as_uri(), command=["/bin/sh", "-c", "pwd"]),
+            output.extend,
+        )
+        await asyncio.wait_for(process.wait(), timeout=10)
+        assert here in output.decode(errors="replace")
+
+    async def test_a_plain_path_still_works(self) -> None:
+        """An embedder building a TerminalRequest by hand writes a path."""
+        here = os.getcwd()
+        output = bytearray()
+        process = await PtyTerminalBackend().create(
+            _request(cwd=here, command=["/bin/sh", "-c", "pwd"]), output.extend
+        )
+        await asyncio.wait_for(process.wait(), timeout=10)
+        assert here in output.decode(errors="replace")
+
+    async def test_a_bad_uri_is_refused_in_the_users_own_words(self) -> None:
+        """The message quotes what the user picked, not what we converted."""
+        missing = Path("/no/such/directory").as_uri()
+        with pytest.raises(AhpError) as caught:
+            await PtyTerminalBackend().create(
+                _request(cwd=missing, command=["/bin/sh"]), lambda _: None
+            )
+        assert missing in str(caught.value)
+
+
+class TestReportedCwdBecomesAUri:
+    """The mirror image: OSC 633 reports a PATH and the action declares a URI."""
+
+    def test_an_absolute_path_is_converted(self) -> None:
+        from agent_host_server.core.host import _cwd_uri
+
+        assert _cwd_uri("/Users/someone/work") == "file:///Users/someone/work"
+
+    def test_a_uri_is_left_alone(self) -> None:
+        from agent_host_server.core.host import _cwd_uri
+
+        assert _cwd_uri("file:///already/a/uri") == "file:///already/a/uri"
+
+    def test_a_relative_path_is_not_invented_into_a_uri(self) -> None:
+        """A shell reporting a relative cwd has told us something we cannot
+        convert. Passing it through beats inventing a root to resolve it."""
+        from agent_host_server.core.host import _cwd_uri
+
+        assert _cwd_uri("relative/dir") == "relative/dir"

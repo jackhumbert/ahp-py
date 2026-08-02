@@ -51,6 +51,7 @@ from agent_host_server.core.resources import (
     ResourceProvider,
     WritableResourceProvider,
     path_from_file_uri,
+    uri_from_path,
 )
 from agent_host_server.core.seq import FileSequence
 from agent_host_server.core.sequencer import Sequencer
@@ -559,6 +560,21 @@ class _Session:
         """ "The channel URI is derived from the session URI by appending
         `/annotations`." One per session, always."""
         return f"{self.uri}/annotations"
+
+
+def _cwd_uri(path: str) -> str:
+    """A shell-reported path as a `file:` URI, or unchanged if it is not one.
+
+    A relative path cannot become a URI, and a shell that reports one has told
+    us something we cannot convert -- passing it through unchanged is more
+    honest than inventing a root to resolve it against.
+    """
+    if path.startswith("file:"):
+        return path
+    candidate = Path(path)
+    if not candidate.is_absolute():
+        return path
+    return uri_from_path(candidate)
 
 
 def _published_title(state: Any) -> str:
@@ -1714,8 +1730,12 @@ class Host:
                 )
                 terminal.command_id = None
             elif isinstance(item, CwdReported):
+                # OSC 633 reports a PATH; `terminal/cwdChanged.cwd` is a URI,
+                # as is `TerminalState.cwd`. Publishing the path raw was the
+                # mirror image of the bug that made a client's `file:` URI
+                # unusable as a directory -- the same confusion, the other way.
                 await self.sequencer.publish(
-                    channel, {"type": "terminal/cwdChanged", "cwd": item.cwd}
+                    channel, {"type": "terminal/cwdChanged", "cwd": _cwd_uri(item.cwd)}
                 )
         self._trim_terminal(channel)
 

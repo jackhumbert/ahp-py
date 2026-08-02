@@ -45,6 +45,7 @@ import struct
 import termios
 from collections.abc import Mapping, Sequence
 
+from agent_host_server.core.resources import path_from_file_uri
 from agent_host_server.core.terminals import (
     OutputSink,
     TerminalProcess,
@@ -67,6 +68,27 @@ _GRACE_SECONDS = 3.0
 #: The default environment. Small and explicit: everything here is needed for a
 #: shell to behave like a terminal, and nothing here carries a credential.
 _SAFE_ENV_KEYS = ("PATH", "HOME", "LANG", "LC_ALL", "USER", "SHELL")
+
+
+def _as_local_path(value: str) -> str:
+    """A working directory as a filesystem path, from a URI or a path.
+
+    `CreateTerminalParams.cwd` is a **URI** -- so is `TerminalState.cwd`, and so
+    is the `cwd` on `terminal/cwdChanged`. The terminal channel is URIs
+    throughout. Passing one to `os.path.isdir` fails, and the failure is
+    user-facing: VS Code renders the refusal verbatim as "The terminal process
+    failed to launch: ... file:///Users/... is not a directory."
+
+    A bare path is accepted too. An embedder constructing a
+    :class:`~agent_host_server.core.terminals.TerminalRequest` by hand will
+    write a path, and refusing it would be pedantry about a string this backend
+    can read either way.
+    """
+    if not value.startswith("file:"):
+        # No scheme, or a scheme this backend does not mediate. A Windows drive
+        # letter (`C:\...`) also lands here, correctly.
+        return value
+    return str(path_from_file_uri(value))
 
 
 def _default_environment() -> dict[str, str]:
@@ -242,9 +264,12 @@ class PtyTerminalBackend:
             # already dead: the client renders this string to the user.
             raise terminal_refused(f"{argv[0]} is not executable")
 
-        cwd = request.cwd or self._default_cwd
+        requested_cwd = request.cwd or self._default_cwd
+        cwd = _as_local_path(requested_cwd) if requested_cwd is not None else None
         if cwd is not None and not os.path.isdir(cwd):
-            raise terminal_refused(f"{cwd} is not a directory")
+            # The ORIGINAL string in the message, not the converted one: the
+            # user recognises what they picked, not what we turned it into.
+            raise terminal_refused(f"{requested_cwd} is not a directory")
 
         environment = dict(request.env) if request.env is not None else None
         if environment is None:
