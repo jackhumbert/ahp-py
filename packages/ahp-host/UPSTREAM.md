@@ -1,9 +1,20 @@
 # Upstream pin
 
-This project implements an external specification. Everything protocol-shaped
-here — types, reducers, error codes, conformance fixtures — is derived from a
-single pinned upstream revision. **The spec moves weekly and lands breaking
-changes in MINOR bumps, so an unpinned implementation is unmaintainable.**
+This project implements an external specification, but it no longer vendors it.
+Everything protocol-shaped — types, reducers, error codes, conformance fixtures
+— lives in [`agent-host-protocol`](https://github.com/jackhumbert/agent-host-protocol-py),
+which this package depends on, and **that repository's `UPSTREAM.md` is the
+authority on the pin**. Bumping the spec is no longer a change to this
+repository.
+
+What stays here is the consequence: which protocol versions this host offers on
+the wire, and which client it is tested against. The table below is asserted by
+`tests/docs/test_readme_is_true.py`, so it fails when the dependency moves under
+it rather than going quietly stale.
+
+**The spec moves weekly and lands breaking changes in MINOR bumps**, which is
+why the dependency is pinned with `~=` rather than `>=`: a spec break must not
+be able to arrive as a patch upgrade.
 
 ## Current pin
 

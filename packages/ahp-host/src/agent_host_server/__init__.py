@@ -6,7 +6,7 @@ package layout. Everything else stays where it is: `agent_host_server.core` for
 the runtime internals, `agent_host_server.provider` for the adapter surface.
 
     from agent_host_server import AgentProvider, Host, LoopbackSingleUserPolicy
-    from agent_host_server.transport import memory_pair
+    from agent_host_protocol.transport import memory_pair
 
 Nothing was exported here at all until it was noticed that
 `from agent_host_server import Host` -- the first thing anyone types -- raised

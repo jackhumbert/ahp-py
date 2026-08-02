@@ -94,7 +94,7 @@ def test_upstream_pin_matches_what_we_negotiate() -> None:
     A pin document that drifts is worse than none: it is the file someone reads
     to find out what this implementation actually speaks.
     """
-    from agent_host_server.core.versions import DEFAULT_SUPPORTED_VERSIONS
+    from agent_host_protocol.versions import DEFAULT_SUPPORTED_VERSIONS
 
     upstream = (ROOT / "UPSTREAM.md").read_text()
     preferred = DEFAULT_SUPPORTED_VERSIONS[0]

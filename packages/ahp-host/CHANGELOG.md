@@ -10,6 +10,23 @@ versions each release speaks.
 
 ## [Unreleased]
 
+### Changed
+
+- **The protocol layer is now a separate package.** Wire types, the seven
+  reducers, the transports and the vendored conformance corpora moved to
+  [`agent-host-protocol`](https://github.com/jackhumbert/agent-host-protocol-py),
+  which this package depends on (`~=0.1.0`, tight because the spec lands
+  breaking changes in MINOR bumps). The reason is a Python *client*: the
+  1,161-line chat reducer has to exist exactly once, and a fork with
+  drift detection makes drift *detectable* rather than impossible.
+
+  Embedders importing `agent_host_server.types`, `.reducers`, `.transport`,
+  `.core.errors`, `.core.channels` or `.core.versions` should import
+  `agent_host_protocol.…` instead. Everything re-exported from
+  `agent_host_server` itself is unchanged.
+
+  Bumping the spec pin is no longer a change to this repository.
+
 ## [0.1.0] - 2026-08-02
 
 The first release. It speaks protocol versions **0.7.0 and 0.6.0**, answers all

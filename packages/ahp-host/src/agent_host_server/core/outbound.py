@@ -1,7 +1,7 @@
 """Requests the host sends *to* a client, and the responses that come back.
 
 Every `resource*` method "is symmetrical and MAY be sent in either direction"
-(`vendor/upstream/schema/commands.schema.json`, on all nine of them), and the
+(`commands.schema.json` in the vendored spec, on all nine of them), and the
 host genuinely needs the reverse direction: a client publishes its plugin
 content under its own `virtual://my-client/...` URIs, and nobody but that client
 can read them. VS Code serves the whole family.
@@ -109,8 +109,8 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Any, Final
 
-from agent_host_server.core.errors import AhpError, internal_error
-from agent_host_server.types import JSON_RPC_ERROR_CODES
+from agent_host_protocol.errors import AhpError, internal_error
+from agent_host_protocol.types import JSON_RPC_ERROR_CODES
 
 __all__ = ["DEFAULT_TIMEOUT", "OutboundRequests"]
 
@@ -210,7 +210,7 @@ class OutboundRequests:
         transport itself -- ordering is the connection's single writer task's
         property to keep (invariant 10).
 
-        Raises :class:`~agent_host_server.core.errors.AhpError`: the peer's own
+        Raises :class:`~agent_host_protocol.errors.AhpError`: the peer's own
         code and message for an error response, `InternalError` for a timeout, a
         dropped connection, or a response too malformed to interpret. The caller
         is a host method whose own failure path already turns an `AhpError` into

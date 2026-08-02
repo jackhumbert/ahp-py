@@ -126,7 +126,7 @@ class TestReplay:
         host = Host(EchoProvider(), LoopbackSingleUserPolicy())
         import asyncio
 
-        from agent_host_server.transport import memory_pair
+        from agent_host_protocol.transport import memory_pair
 
         client_transport, server_transport = memory_pair()
         serve = asyncio.create_task(host.serve(server_transport))
@@ -163,7 +163,7 @@ class TestReplay:
         """The end the user sees: create the session VS Code's way, run its turn."""
         import asyncio
 
-        from agent_host_server.transport import memory_pair
+        from agent_host_protocol.transport import memory_pair
 
         host = Host(EchoProvider(), LoopbackSingleUserPolicy())
         client_transport, server_transport = memory_pair()

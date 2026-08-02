@@ -86,8 +86,8 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Final, Literal
 
-from agent_host_server.core.errors import AhpError
-from agent_host_server.types import AHP_ERROR_CODES, ROOT_CHANNEL
+from agent_host_protocol.errors import AhpError
+from agent_host_protocol.types import AHP_ERROR_CODES, ROOT_CHANNEL
 
 __all__ = [
     "AUTH_REQUIRED_METHOD",

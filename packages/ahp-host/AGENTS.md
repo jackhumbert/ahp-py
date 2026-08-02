@@ -41,7 +41,7 @@ Run the demo host with `python -m agent_host_server`.
 ```bash
 uv sync --all-extras          # or: pip install -e '.[dev]'
 pytest                        # full suite, offline
-pytest tests/conformance      # the 247 + 39 upstream fixtures
+pytest tests/conformance      # every published frame, against the spec schemas
 ruff check . && ruff format --check .
 mypy --strict src
 lint-imports                  # enforces the layering rule below
@@ -53,32 +53,27 @@ The interop test needs Node:
 npm i --no-save @microsoft/agent-host-protocol@0.6.0 && pytest tests/interop
 ```
 
-Re-vendoring upstream (only when bumping the pin — see `UPSTREAM.md`):
+**The upstream pin is not this repository's concern any more.** The vendored
+corpora, the generated tables, the JS-semantics oracle and the re-vendoring
+script all live in
+[`agent-host-protocol`](https://github.com/jackhumbert/agent-host-protocol-py),
+which this package depends on. Bump the spec there.
+
+Until that package is on PyPI, install it from the sibling checkout:
 
 ```bash
-scripts/vendor_upstream.sh
-```
-
-Regenerating the JS-semantics oracle from the pinned TypeScript (also only on a
-pin bump; needs Node and `.research/agent-host-protocol`):
-
-```bash
-scripts/regenerate_js_semantics.sh
+pip install -e ../agent-host-protocol-py
 ```
 
 ## Layout
 
 | Path | Contents | May import |
 |---|---|---|
-| `src/agent_host_server/types/` | wire types, actions, state, errors | stdlib only |
-| `src/agent_host_server/reducers/` | the pure reducers + injectable clock + `js.py` | `types` |
-| `src/agent_host_server/conformance/` | fixture runners | `types`, `reducers` |
-| `src/agent_host_server/core/` | channels, sequencing, subscriptions, replay, policy | `types`, `reducers` |
-| `src/agent_host_server/provider/` | `AgentProvider` protocol + echo provider | `types` |
-| `src/agent_host_server/transport/` | transport protocol + in-memory pair | `types` |
-| `src/agent_host_server/ws/` | WebSocket implementation | `transport`, `types` |
-| `vendor/upstream/` | pinned fixtures, schemas and TS source of truth, **committed** | — |
-| `scripts/` | `vendor_upstream.sh` (re-pin), `generate_tables.py` (data tables) | — |
+| `agent_host_protocol` *(dependency)* | wire types, the seven reducers, transports, the vendored corpora | stdlib only |
+| `src/agent_host_server/core/` | sequencing, subscriptions, replay, policy, dispatch | the dependency |
+| `src/agent_host_server/provider/` | `AgentProvider` protocol + echo provider | the dependency |
+| `src/agent_host_server/ws/` | WebSocket implementation | `core`, the dependency |
+| `scripts/` | `smoke_wheel.py` (checks an *installed* wheel) | — |
 
 ## If a feature is not documented, it does not exist
 
@@ -182,7 +177,8 @@ failures in *clients*, not in our tests. Evidence for every item is in
       selects a different entry than the reference does, on data a peer controls.
     - `js.key_of` for a `Map`/`Set` key, `js.to_string` for JS `+` coercion.
 
-    New behaviour of this kind needs a case in `scripts/js_semantics_cases.py`
+    New behaviour of this kind needs a case in the protocol package's
+    `scripts/js_semantics_cases.py`
     and a regenerated `tests/conformance/fixtures/js-semantics.json`. The oracle
     is the reference reducer itself — never a hand-written expectation, because
     a hand-written one just restates the reading being tested.

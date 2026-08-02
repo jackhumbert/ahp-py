@@ -338,6 +338,27 @@ behind a flag.
 
 ---
 
+## The extraction
+
+Landed after the parity work, per `agent-host-client-py/docs/plan.md` §2: the
+protocol layer is a separate distribution so a Python client can share the
+reducers rather than fork them.
+
+The acceptance criterion the plan set — "the extraction is correct iff `pytest`
+passes with **zero changes to any test assertion**, only import lines move" —
+holds. The only non-import change to a surviving file is `tests/conformance/`
+`schemas.py` reading the schemas out of the dependency's corpus instead of a
+`vendor/` tree that no longer exists here. 830 tests pass in this repository and
+772 in the protocol package; the ones that left are the reducer, round-trip,
+wire, version, generated-table and JS-semantics suites, which moved with the
+code they cover.
+
+Still open, deliberately not done unilaterally: `tests/conformance/schemas.py`
+is duplicated in the protocol repository. It is a test helper rather than the
+reducer, so it is not the drift the split existed to kill — but it should be
+promoted into `agent_host_protocol.conformance` and imported by both, once the
+client work settles.
+
 ## Sequencing
 
 1. **Tier 0**, in order: 0.3 is a decision, so start it; 0.1 then 0.2 unblock the

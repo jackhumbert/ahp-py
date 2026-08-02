@@ -26,9 +26,9 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from agent_host_protocol.errors import AhpError
 
 import agent_host_server.core.terminals
-from agent_host_server.core.errors import AhpError
 from agent_host_server.core.terminals import (
     CLAIM_GATED_ACTIONS,
     STRICT_CLAIM_GATED_ACTIONS,

@@ -18,6 +18,7 @@ import json
 import traceback
 
 import pytest
+from agent_host_protocol.types import AHP_ERROR_CODES, ROOT_CHANNEL
 
 from agent_host_server.core.auth import (
     AUTH_REQUIRED_METHOD,
@@ -29,7 +30,6 @@ from agent_host_server.core.auth import (
     auth_required_params,
     scopes_satisfied,
 )
-from agent_host_server.types import AHP_ERROR_CODES, ROOT_CHANNEL
 
 RESOURCE = "https://api.example.invalid"
 SECRET = "gho_a_real_looking_secret"

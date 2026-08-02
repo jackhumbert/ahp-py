@@ -22,9 +22,11 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 import pytest
+from agent_host_protocol.channels import ROOT_URI
+from agent_host_protocol.transport import memory_pair
+from agent_host_protocol.types.protocol import SessionStatus
 
 from agent_host_server.core import Host, LoopbackSingleUserPolicy
-from agent_host_server.core.channels import ROOT_URI
 from agent_host_server.provider import EchoProvider
 from agent_host_server.provider.base import (
     AgentSessionContext,
@@ -33,8 +35,6 @@ from agent_host_server.provider.base import (
     UserMessage,
 )
 from agent_host_server.provider.echo import EchoSession
-from agent_host_server.transport import memory_pair
-from agent_host_server.types.protocol import SessionStatus
 
 from .test_host_end_to_end import FakeClient
 

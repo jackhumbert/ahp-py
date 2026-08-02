@@ -21,8 +21,8 @@ from collections.abc import Mapping
 from typing import Any
 
 import pytest
+from agent_host_protocol.errors import AhpError
 
-from agent_host_server.core.errors import AhpError
 from agent_host_server.core.outbound import OutboundRequests
 
 pytestmark = pytest.mark.anyio

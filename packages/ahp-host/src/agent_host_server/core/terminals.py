@@ -92,9 +92,9 @@ from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Final, Protocol, runtime_checkable
 
-from agent_host_server.core.errors import AhpError
-from agent_host_server.reducers import js
-from agent_host_server.types import AHP_ERROR_CODES, IS_CLIENT_DISPATCHABLE
+from agent_host_protocol.errors import AhpError
+from agent_host_protocol.reducers import js
+from agent_host_protocol.types import AHP_ERROR_CODES, IS_CLIENT_DISPATCHABLE
 
 __all__ = [
     "CLAIM_GATED_ACTIONS",
@@ -766,7 +766,7 @@ class TerminalBackend(Protocol):
     can see rather than an import.
 
     An implementation MUST raise :func:`terminal_refused` (or another
-    :class:`~agent_host_server.core.errors.AhpError`) rather than return a dead
+    :class:`~agent_host_protocol.errors.AhpError`) rather than return a dead
     process, and MUST NOT strip escape sequences itself -- output goes to the
     sink raw and through :class:`ShellIntegrationParser`, which is the only place
     that can survive a sequence split across two reads.

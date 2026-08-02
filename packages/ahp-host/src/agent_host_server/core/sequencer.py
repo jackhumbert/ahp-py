@@ -44,8 +44,9 @@ from collections import deque
 from collections.abc import Iterable, Mapping
 from typing import Any, Protocol
 
+from agent_host_protocol.reducers import REDUCERS
+
 from agent_host_server.core.seq import InMemorySequence, SequenceAllocator
-from agent_host_server.reducers import REDUCERS
 
 __all__ = ["Sequencer", "Subscriber", "SubscriptionObserver"]
 

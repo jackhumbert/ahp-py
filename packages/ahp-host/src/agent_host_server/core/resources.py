@@ -45,7 +45,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Literal, Protocol, runtime_checkable
 from urllib.parse import unquote, urlparse
 
-from agent_host_server.core import errors
+from agent_host_protocol import errors
 
 __all__ = [
     "DirectoryEntry",
@@ -118,7 +118,7 @@ class ResourceProvider(Protocol):
     in-memory blob store, a git object database, or a jailed directory, and only
     the last of those has paths at all.
 
-    Every method raises :class:`~agent_host_server.core.errors.AhpError` with
+    Every method raises :class:`~agent_host_protocol.errors.AhpError` with
     `NotFound` (-32008) or `PermissionDenied` (-32009); nothing here returns
     `None` for "no".
     """

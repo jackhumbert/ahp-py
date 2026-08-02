@@ -1,4 +1,4 @@
-"""A :class:`~agent_host_server.transport.base.Transport` over one WebSocket."""
+"""A :class:`~agent_host_protocol.transport.base.Transport` over one WebSocket."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ import json
 from collections.abc import Mapping
 from typing import Any
 
-from agent_host_server.transport.base import TransportClosed
+from agent_host_protocol.transport.base import TransportClosed
 
 __all__ = ["WebSocketTransport"]
 

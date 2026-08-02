@@ -69,7 +69,7 @@ subclass anything: if your object has the methods, it is one.
 ```python
 import asyncio
 
-from agent_host_server.transport import memory_pair
+from agent_host_protocol.transport import memory_pair
 
 
 async def main() -> None:
@@ -264,7 +264,7 @@ ProviderNotFound`, `-32003 SessionAlreadyExists`, `-32007 AuthRequired`,
 `-32011 Conflict`.
 
 ```python
-from agent_host_server.types import AHP_ERROR_CODES
+from agent_host_protocol.types import AHP_ERROR_CODES
 
 assert AHP_ERROR_CODES["PermissionDenied"] == -32009
 assert AHP_ERROR_CODES["NotFound"] == -32008

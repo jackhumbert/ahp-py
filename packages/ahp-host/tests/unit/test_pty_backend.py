@@ -19,8 +19,8 @@ import time
 from pathlib import Path
 
 import pytest
+from agent_host_protocol.errors import AhpError
 
-from agent_host_server.core.errors import AhpError
 from agent_host_server.core.pty_backend import PtyTerminalBackend
 from agent_host_server.core.terminals import TerminalRequest, TerminalSessionClaim
 

@@ -22,8 +22,9 @@ import logging
 from collections.abc import Mapping
 from typing import Any
 
+from agent_host_protocol.transport.base import Transport, TransportClosed
+
 from agent_host_server.core.policy import ConnectionInfo
-from agent_host_server.transport.base import Transport, TransportClosed
 
 #: Frames a connection may have outstanding before it is closed. Generous for
 #: a momentary stall -- a turn produces tens of frames, not thousands -- and

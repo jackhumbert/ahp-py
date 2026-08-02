@@ -23,6 +23,13 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
+      - uses: actions/checkout@v4
+        with:
+          repository: jackhumbert/agent-host-protocol-py
+          path: .protocol
+      # Until `agent-host-protocol` is on PyPI. The pin in
+      # pyproject.toml is the real declaration; this only supplies it.
+      - run: pip install -e .protocol
       - run: pip install -e '.[dev]'
 
       - name: Lint
@@ -51,6 +58,11 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
+      - uses: actions/checkout@v4
+        with:
+          repository: jackhumbert/agent-host-protocol-py
+          path: .protocol
+      - run: pip install -e .protocol
       - run: pip install -e '.[dev,ws]'
       # 0.6.0 is the newest published client; we negotiate 0.7.0 when offered.
       - run: npm i --no-save @microsoft/agent-host-protocol@0.6.0 ws
@@ -73,25 +85,40 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      - uses: actions/checkout@v4
+        with:
+          repository: jackhumbert/agent-host-protocol-py
+          path: .protocol
       - run: pip install build
       - run: python -m build --wheel --outdir dist
       - name: Install the wheel into a clean venv
         run: |
           python -m venv /tmp/fresh
-          /tmp/fresh/bin/pip install "$(echo dist/*.whl)[ws]"
+          # The dependency first, from the sibling checkout, until it is on
+          # PyPI. `--no-deps` on the wheel so pip does not then try to resolve
+          # the same name from an index that does not have it yet.
+          /tmp/fresh/bin/pip install ./.protocol
+          /tmp/fresh/bin/pip install --no-deps "$(echo dist/*.whl)" websockets
       - name: Smoke-test it from outside the checkout
         run: cd /tmp && /tmp/fresh/bin/python "$GITHUB_WORKSPACE/scripts/smoke_wheel.py"
 
-  codegen-is-reproducible:
-    # The generated tables are derived from the vendored upstream TypeScript.
-    # A stale checked-in copy would silently diverge from the pin.
+  protocol-main:
+    # Non-blocking. The dependency is pinned `~=0.1.0`, so this repository is
+    # insulated from the protocol package's main branch -- which is exactly why
+    # drift there would otherwise be invisible until a release. This makes it
+    # visible the day it lands, without failing a PR for someone else's commit.
     runs-on: ubuntu-latest
+    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: jackhumbert/agent-host-protocol-py
+          ref: main
+          path: .protocol
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      - run: pip install -e .protocol
       - run: pip install -e '.[dev]'
-      - run: python scripts/generate_tables.py
-      - name: Fail if _generated.py is stale
-        run: git diff --exit-code -- src/agent_host_server/types/_generated.py
+      - run: pytest

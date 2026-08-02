@@ -23,7 +23,14 @@ from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Any, Final
 
-from agent_host_server.core import errors
+from agent_host_protocol import errors
+from agent_host_protocol.channels import ROOT_URI
+from agent_host_protocol.reducers.clock import now_iso
+from agent_host_protocol.transport.base import Transport
+from agent_host_protocol.types import IS_CLIENT_DISPATCHABLE, JSON_RPC_ERROR_CODES
+from agent_host_protocol.types.protocol import SessionStatus, session_status_flags
+from agent_host_protocol.versions import DEFAULT_SUPPORTED_VERSIONS, negotiate
+
 from agent_host_server.core.audit import AuditEvent, AuditSink, emit
 from agent_host_server.core.auth import (
     AUTH_REQUIRED_METHOD,
@@ -41,7 +48,6 @@ from agent_host_server.core.changesets import (
     changes_summary,
     file_entry,
 )
-from agent_host_server.core.channels import ROOT_URI
 from agent_host_server.core.config import RootConfig, type_matches
 from agent_host_server.core.connection import DEFAULT_OUTBOX_LIMIT, Connection
 from agent_host_server.core.outbound import OutboundRequests
@@ -75,7 +81,6 @@ from agent_host_server.core.terminals import (
     trim_scrollback,
 )
 from agent_host_server.core.turn import ActionTurnSink, TurnRunner
-from agent_host_server.core.versions import DEFAULT_SUPPORTED_VERSIONS, negotiate
 from agent_host_server.core.watches import (
     DEFAULT_COALESCE_SECONDS,
     ResourceChange,
@@ -99,10 +104,6 @@ from agent_host_server.provider.base import (
     SessionPublisher,
     TruncatesHistory,
 )
-from agent_host_server.reducers.clock import now_iso
-from agent_host_server.transport.base import Transport
-from agent_host_server.types import IS_CLIENT_DISPATCHABLE, JSON_RPC_ERROR_CODES
-from agent_host_server.types.protocol import SessionStatus, session_status_flags
 
 __all__ = ["Host", "HostInfo"]
 

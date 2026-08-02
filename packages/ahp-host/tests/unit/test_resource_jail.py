@@ -21,8 +21,8 @@ import os
 from pathlib import Path
 
 import pytest
+from agent_host_protocol.errors import AhpError
 
-from agent_host_server.core.errors import AhpError
 from agent_host_server.core.resources import (
     NullResourceProvider,
     RootedFilesystemResourceProvider,

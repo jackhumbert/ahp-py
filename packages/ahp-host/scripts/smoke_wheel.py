@@ -78,13 +78,27 @@ if missing:
 else:
     check(f"__all__ resolves ({len(agent_host_server.__all__)} names)")
 
-# 4. py.typed, or every downstream type-checker silently treats us as Any.
+# 4. The protocol package must be a SEPARATE distribution that arrived on its
+#    own, not something vendored back into this wheel by accident. The whole
+#    point of the split is one copy of the reducers.
+try:
+    import agent_host_protocol
+
+    where = Path(agent_host_protocol.__file__).resolve().parent
+    if where.parent == installed.parent and where.name in {"types", "reducers"}:
+        fail("the protocol package is separate", f"found inside our own tree at {where}")
+    else:
+        check(f"agent_host_protocol resolves separately ({where.name})")
+except Exception as exc:
+    fail("agent_host_protocol imports", repr(exc))
+
+# 5. py.typed, or every downstream type-checker silently treats us as Any.
 if (installed / "py.typed").is_file():
     check("py.typed is packaged")
 else:
     fail("py.typed is packaged", "absent")
 
-# 5. The demo tree. Build backends skip dot-directories, so `.github/` inside it
+# 6. The demo tree. Build backends skip dot-directories, so `.github/` inside it
 #    was dropped from the wheel while the checkout looked fine.
 demo = installed / "provider" / "demo_tree"
 if not demo.is_dir():
@@ -97,7 +111,7 @@ else:
     else:
         check(f"demo tree is packaged ({len(list(demo.rglob('*')))} entries)")
 
-# 6. The optional extras have to be reachable by the names the docs give.
+# 7. The optional extras have to be reachable by the names the docs give.
 try:
     from agent_host_server.ws import serve_websocket  # noqa: F401
 
@@ -105,7 +119,7 @@ try:
 except Exception as exc:
     fail("agent_host_server.ws", repr(exc))
 
-# 7. The console script the README tells people to run.
+# 8. The console script the README tells people to run.
 try:
     from agent_host_server.__main__ import main  # noqa: F401
 
@@ -113,12 +127,13 @@ try:
 except Exception as exc:
     fail("console entry point", repr(exc))
 
-# 8. A real turn, end to end, in-process. Imports proving importable is not the
+# 9. A real turn, end to end, in-process. Imports proving importable is not the
 #    same as the thing working; this is cheap and it exercises the sequencer,
 #    the reducers and the transport against the installed code.
 try:
+    from agent_host_protocol.transport import memory_pair
+
     from agent_host_server.provider import EchoProvider
-    from agent_host_server.transport import memory_pair
 
     assert isinstance(EchoProvider(), AgentProvider)
     assert isinstance(LoopbackSingleUserPolicy(), Policy)

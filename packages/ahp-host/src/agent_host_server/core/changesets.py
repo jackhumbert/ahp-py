@@ -35,7 +35,8 @@ import hashlib
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from agent_host_server.core import errors
+from agent_host_protocol import errors
+
 from agent_host_server.core.resources import ResourceContent
 from agent_host_server.provider.changes import (
     Changeset,

@@ -19,11 +19,12 @@ from collections.abc import Awaitable, Callable, Mapping
 from pathlib import Path
 from typing import Any, Final
 
+from agent_host_protocol.versions import DEFAULT_SUPPORTED_VERSIONS
+
 from agent_host_server.core import Host, HostInfo, LoopbackSingleUserPolicy
 from agent_host_server.core.config import RootConfig
 from agent_host_server.core.pty_backend import PtyTerminalBackend
 from agent_host_server.core.resources import RootedFilesystemResourceProvider
-from agent_host_server.core.versions import DEFAULT_SUPPORTED_VERSIONS
 from agent_host_server.provider import EchoProvider
 from agent_host_server.provider.demo_workspace import (
     DemoWorkspace,
