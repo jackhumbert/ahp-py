@@ -29,11 +29,11 @@ from agent_host_server.provider.base import (
     TurnSink,
     UserMessage,
 )
-from agent_host_server.provider.demo_changes import demo_changeset, demo_file_changes
 from agent_host_server.provider.demo_customizations import (
     demo_customizations,
     demo_server_tools,
 )
+from agent_host_server.provider.demo_workspace import DemoWorkspace, workspace_changeset
 
 __all__ = ["EchoProvider", "EchoSession"]
 
@@ -117,7 +117,7 @@ class EchoSession:
         elicit: bool = False,
         confirm_tools: bool = False,
         client_tools: bool = False,
-        changes: bool = False,
+        workspace: DemoWorkspace | None = None,
     ) -> None:
         self.context = context
         self._delay = delay
@@ -125,7 +125,7 @@ class EchoSession:
         self._elicit = elicit
         self._confirm_tools = confirm_tools
         self._client_tools = client_tools
-        self._changes = changes
+        self._workspace = workspace
         self._cancelled = False
         #: What a client has toggled, for tests and for the demo host's log.
         self.toggled: dict[str, bool] = {}
@@ -144,7 +144,7 @@ class EchoSession:
 
     async def send_user_message(self, message: UserMessage, sink: TurnSink) -> None:
         self._cancelled = False
-        if self._changes:
+        if self._workspace is not None:
             # Published BEFORE the mode branches below, every one of which
             # returns early. A changeset that only appears in the default reply
             # path would vanish the moment any other demo flag is on.
@@ -271,9 +271,15 @@ class EchoSession:
 
     async def _publish_demo_changes(self, message: UserMessage) -> None:
         publisher = self.context.publisher
-        if publisher is None:
+        workspace = self._workspace
+        if publisher is None or workspace is None:
             return
-        await publisher.changes_published(demo_changeset(), demo_file_changes(message.text))
+        # The edits happen HERE, on disk, before anything is published. A
+        # changeset is a record of what was done, so doing it first is not an
+        # ordering nicety -- publishing first would describe a state that did
+        # not exist yet.
+        changes = workspace.apply_demo_edits(message.text)
+        await publisher.changes_published(workspace_changeset(workspace.root), changes)
 
     async def cancel(self, reason: str | None = None) -> None:
         self._cancelled = True
@@ -298,7 +304,7 @@ class EchoProvider:
         confirm_tools: bool = False,
         client_tools: bool = False,
         configurable: bool = False,
-        changes: bool = False,
+        workspace: DemoWorkspace | None = None,
         capabilities: Mapping[str, Any] | None = None,
     ) -> None:
         self._configurable = configurable
@@ -307,7 +313,7 @@ class EchoProvider:
         self._elicit = elicit
         self._confirm_tools = confirm_tools
         self._client_tools = client_tools
-        self._changes = changes
+        self._workspace = workspace
         # `display_name` is what a client labels the agent with; `models` become
         # entries in VS Code's chat model picker (AgentHostLanguageModelProvider
         # reads them straight out of root state). They are deliberately different
@@ -434,5 +440,5 @@ class EchoProvider:
             elicit=self._elicit,
             confirm_tools=self._confirm_tools,
             client_tools=self._client_tools,
-            changes=self._changes,
+            workspace=self._workspace,
         )

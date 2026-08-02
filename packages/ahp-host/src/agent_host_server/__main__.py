@@ -25,7 +25,7 @@ from agent_host_server.core.pty_backend import PtyTerminalBackend
 from agent_host_server.core.resources import RootedFilesystemResourceProvider
 from agent_host_server.core.versions import DEFAULT_SUPPORTED_VERSIONS
 from agent_host_server.provider import EchoProvider
-from agent_host_server.provider.demo_changes import reset_scratch
+from agent_host_server.provider.demo_workspace import DemoWorkspace
 from agent_host_server.ws import serve_websocket
 
 _log = logging.getLogger(__name__)
@@ -115,11 +115,10 @@ def _parse_args() -> argparse.Namespace:
         "--changes",
         action="store_true",
         help=(
-            "the demo agent really edits files on every turn, under "
-            "examples/demo-changes/scratch/ (gitignored), and publishes a "
-            "changeset describing what it did. A changeset is a RECORD of "
-            "working-tree changes, so the files have to exist for a client to "
-            "open them. Nothing outside that directory is written"
+            "the demo agent makes REAL edits in --serve-directory on every "
+            "turn and publishes a changeset describing them, with working "
+            "git stage/commit/revert buttons. Point --serve-directory at a "
+            "scratch git repo, not at anything you care about"
         ),
     )
     parser.add_argument(
@@ -155,6 +154,9 @@ async def _run() -> None:
     if token == "":
         token = secrets.token_urlsafe(24)
 
+    workspace = (
+        DemoWorkspace(Path(args.serve_directory)) if args.changes and args.serve_directory else None
+    )
     host = Host(
         EchoProvider(
             delay=args.delay,
@@ -165,7 +167,7 @@ async def _run() -> None:
             confirm_tools=args.confirm_tools,
             client_tools=args.client_tools,
             configurable=args.configurable,
-            changes=args.changes,
+            workspace=workspace,
             capabilities=(
                 {"multipleChats": {"fork": True, "sideChat": True}} if args.multi_chat else None
             ),
@@ -201,12 +203,12 @@ async def _run() -> None:
         sequence_file=Path(args.sequence_file) if args.sequence_file else None,
     )
 
-    if args.changes:
+    if workspace is not None:
         # Registered per operation, by name -- there is no "enable all
         # operations" switch, because an operation is a button that DOES
         # something and the embedder should have to say which.
-        invoke = _demo_operations(host)
-        for operation_id in ("ahs-approve", "ahs-annotate", "ahs-reset"):
+        invoke = _demo_operations(host, workspace)
+        for operation_id in ("ahs-stage", "ahs-commit", "ahs-revert", "ahs-review"):
             host.register_operation(operation_id, invoke)
 
     async with serve_websocket(
@@ -291,16 +293,18 @@ DEMO_ROOT_CONFIG_PROPERTIES: Final[dict[str, dict[str, Any]]] = {
 }
 
 
-def _demo_operations(host: Host) -> Callable[[str, str, Mapping[str, Any] | None], Awaitable[None]]:
-    """Build the changeset button handlers, closed over the host.
+def _demo_operations(
+    host: Host, workspace: DemoWorkspace
+) -> Callable[[str, str, Mapping[str, Any] | None], Awaitable[None]]:
+    """The changeset buttons, closed over the host and the workspace.
 
-    They DO things, visibly. A button that logs and returns looks broken --
-    the user clicks it, the status flickers idle -> running -> idle, and
-    nothing in the UI changes, which is indistinguishable from a handler that
-    failed silently.
+    They do REAL things. A button that logs and returns looks broken from the
+    outside -- the user clicks, the status flickers idle -> running -> idle,
+    and nothing changes, which is indistinguishable from a handler that failed
+    silently. That is what shipped, and the user reported it.
 
-    `reviewed` is the visible thing a host can change without touching a file:
-    the client renders it as the per-file "Viewed" checkbox.
+    Anything raised here becomes the operation's `error`, which the client
+    renders, so a failure is worth surfacing rather than swallowing.
     """
 
     async def invoke(
@@ -309,33 +313,24 @@ def _demo_operations(host: Host) -> Callable[[str, str, Mapping[str, Any] | None
         state = host.sequencer.state_of(changeset_uri)
         files = state.get("files") if isinstance(state, Mapping) else None
         ids = [f["id"] for f in files or [] if isinstance(f, Mapping) and "id" in f]
+        # `scopes` includes "resource" for stage and revert, so the client
+        # sends the file the user clicked. Acting on anything else looks
+        # exactly like a dead button, because that row does not change.
+        resource = str(target.get("resource")) if target else None
 
-        if operation_id == "ahs-approve":
-            # Every file marked reviewed. Visible immediately as ticked boxes.
+        if operation_id == "ahs-stage":
+            _log.info("stage: %s", workspace.stage(ids, resource))
+        elif operation_id == "ahs-commit":
+            _log.info("commit: %s", workspace.commit("Changes from the AHP demo agent"))
+        elif operation_id == "ahs-revert":
+            _log.info("revert: %s", workspace.revert(ids, resource))
+        elif operation_id == "ahs-review":
             await host.sequencer.publish(
                 changeset_uri,
                 {"type": "changeset/filesReviewChanged", "files": ids, "reviewed": True},
             )
-        elif operation_id == "ahs-annotate":
-            # THE FILE THE USER CLICKED. `scopes: ["resource"]` means the
-            # client sends a target, and acting on anything else -- the first
-            # file, say -- looks from the outside exactly like a button that
-            # does nothing, because the row you pressed does not change.
-            resource = target.get("resource") if target else None
-            chosen = [i for i in ids if i == resource] or ids[:1]
-            await host.sequencer.publish(
-                changeset_uri,
-                {"type": "changeset/filesReviewChanged", "files": chosen, "reviewed": True},
-            )
-        elif operation_id == "ahs-reset":
-            # The only handler that touches disk, and its blast radius is one
-            # gitignored directory. Clears the review flags too, so the demo
-            # can be run again from the top.
-            reset_scratch()
-            await host.sequencer.publish(
-                changeset_uri,
-                {"type": "changeset/filesReviewChanged", "files": ids, "reviewed": False},
-            )
+            return
+        _log.info("git status now:\n%s", workspace.status() or "(clean)")
 
     return invoke
 
