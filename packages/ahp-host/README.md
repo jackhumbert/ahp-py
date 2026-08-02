@@ -132,9 +132,16 @@ channels · **all seven reducers**, gated on upstream's whole 247-fixture corpus
 provider with an offline echo implementation · WebSocket transport behind a
 transport abstraction.
 
-Commands: `initialize`, `ping`, `subscribe`, `unsubscribe`, `listSessions`
-(paginated), `createSession`, `disposeSession`, `dispatchAction`, `reconnect`,
-`fetchTurns`.
+All 29 commands, and none of them a stub:
+
+`initialize` · `ping` · `subscribe` · `unsubscribe` · `reconnect` ·
+`listSessions` (paginated) · `createSession` (with `fork`) · `disposeSession` ·
+`dispatchAction` · `fetchTurns` · `createChat` · `disposeChat` ·
+`resolveSessionConfig` · `sessionConfigCompletions` · `completions` ·
+`authenticate` · `createTerminal` · `disposeTerminal` · `createResourceWatch` ·
+`invokeChangesetOperation` · `resourceResolve` · `resourceRead` ·
+`resourceList` · `resourceRequest` · `resourceWrite` · `resourceMkdir` ·
+`resourceDelete` · `resourceMove` · `resourceCopy`
 
 A provider can also **stop and wait for a human** — elicitation, tool-call
 confirmation, and handing a tool to a client to execute — all on one primitive
@@ -161,12 +168,12 @@ embedder supplied. That matters because `root/configChanged` is
 client-dispatchable, VS Code sends it about ten times per connect, and a
 permissive policy is the norm for a loopback host.
 
-The terminal, changeset and resource-watch **reducers** are complete and
-conformant, but their **channels are not registered** and their commands are not
-implemented. That ordering is deliberate: registering a channel whose reducer
-does not exist would broadcast client-dispatchable actions that nothing applies,
-which is exactly how this host's session state silently froze once already
-([`docs/experiments.md`](docs/experiments.md) §E12).
+**Terminals** run real commands on a POSIX pty behind `--terminal`, with shell
+integration parsed (never injected), process-group teardown on hangup, and
+`terminal/exited` announced so a client can close the tab. **Changesets** are
+driven from a real git working tree: two changesets (`uncommitted` and
+`session`), per-file review flags, and operations wired to `git add`,
+`git commit` and a scoped revert. **Resource watches** poll and coalesce.
 
 **The `resource*` family** is implemented, and exposes nothing by default. A
 host does not acquire a filesystem by being upgraded: install
@@ -200,26 +207,32 @@ appearing as an empty container.
 
 ### Not implemented
 
-Nothing in the protocol. What is deliberately absent is listed in
-[`docs/roadmap.md`](docs/roadmap.md) §10 and is absent on doctrine, not on
-effort: an MCP client runtime, a PTY backend in this distribution, anything git,
-built-in changeset operations, model routing.
+**No command answers `MethodNotFound`.** That used to be how this host declined
+a feature, since AHP has no server capability object. A refusal is specific
+now: `PermissionDenied` for something the host will not do, `NotFound` for
+something it does not have, `ProviderNotFound` for an agent that does not
+exist. Each tells a client more than "stop asking".
 
-**No command answers `MethodNotFound` any more.** That used to be how this host
-declined a feature, since AHP has no server capability object. Every method is
-now implemented, and a refusal is specific: `PermissionDenied` for something the
-host will not do, `NotFound` for something it does not have. Both tell a client
-more than "stop asking".
+What is genuinely absent, and why:
 
-Every one returns a proper JSON-RPC `MethodNotFound` (`-32601`). None are
-silently stubbed. Where the protocol says a host may decline, it declines
-loudly — see the terminal note under [Try it](#try-it).
+- **An MCP client runtime.** The lifecycle commands are answered and the
+  customization is published; nothing spawns or connects a server.
+- **Model routing.** `AgentInfo.models` is published for the client's picker
+  and `UserMessage.model` carries back what the user chose — the host is a
+  courier and never selects.
+- **`chat/usage`.** No producer, so no token counts or cost attribution.
+- **Checkpoints and plan review.** Not host-drivable: they are internal to
+  VS Code's own in-process host, with no channel, command, action or state
+  field in the protocol.
+- **`pickle`, `eval`, or any `__reduce__`-capable store format**, permanently.
+  JSON only. See [`docs/roadmap.md`](docs/roadmap.md) §10.
 
-Session state is in-memory: sessions do not survive a host restart. `serverSeq`
-*can* survive one, with `--sequence-file`; without it a reconnecting client is
-correctly told to take fresh snapshots, but it is told that on **every**
-reconnect thereafter, because the reference client records the sequence with a
-maximum and stays permanently ahead of a counter that restarted at zero.
+Session state is in-memory by default: sessions do not survive a host restart
+unless the embedder installs a `SessionStore`. `serverSeq` survives one with
+`--sequence-file`; without it a reconnecting client is correctly told to take
+fresh snapshots, but it is told that on **every** reconnect thereafter, because
+the reference client records the sequence with a maximum and stays permanently
+ahead of a counter that restarted at zero.
 
 ## Embedding it behind a proxy
 

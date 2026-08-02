@@ -21,13 +21,7 @@ from agent_host_server.provider.demo_customizations import demo_customizations
 #: the path became `<site-packages>/../examples/demo-plugin`, so every
 #: customization pointed at a missing file and rendered as an empty container.
 #: Keeping a second copy in `examples/` would just reintroduce the drift.
-_ROOT = (
-    Path(__file__).resolve().parents[2]
-    / "src"
-    / "agent_host_server"
-    / "provider"
-    / "demo_tree"
-)
+_ROOT = Path(__file__).resolve().parents[2] / "src" / "agent_host_server" / "provider" / "demo_tree"
 
 #: The directories a client expands under a plugin URI. Not a guess and not
 #: this project's choice -- it is what VS Code's own tests read

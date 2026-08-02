@@ -71,6 +71,38 @@ scripts/regenerate_js_semantics.sh
 | `vendor/upstream/` | pinned fixtures, schemas and TS source of truth, **committed** | — |
 | `scripts/` | `vendor_upstream.sh` (re-pin), `generate_tables.py` (data tables) | — |
 
+## If a feature is not documented, it does not exist
+
+**Complete the documentation update before committing.** Not after, not in a
+follow-up. A feature nobody can find is indistinguishable from one that was
+never built, and this repository has shipped several: the README listed ten
+commands while the host answered twenty-nine, claimed the terminal, changeset
+and resource-watch channels were "not registered and their commands not
+implemented" long after all three shipped, and carried "No command answers
+`MethodNotFound` any more" directly above "Every one returns a proper JSON-RPC
+`MethodNotFound`". Twelve CLI flags existed and were documented nowhere.
+
+Concretely, a change is not finished until:
+
+- **The README's claims still hold.** If you added a command, a flag, or a
+  surface, it is listed. If you removed one, it is gone.
+- **`docs/guide/` covers anything an embedder must do differently.** Its
+  examples are executed by `tests/docs/`, so an example that stops working is
+  a failing test, not stale prose.
+- **The docstring says why, not what.** The code says what it does; the comment
+  says why it is not the obvious thing. Every non-obvious line in this codebase
+  should carry the evidence that made it non-obvious — a spec sentence, an
+  offset in the client bundle, a wire frame.
+- **A claim that can be checked, is.** Prose contradicting itself is not
+  catchable. Prose contradicting the dispatcher, the CLI, or the version table
+  is — `tests/docs/test_readme_is_true.py` does exactly that, and every check
+  in it is derived from the code rather than kept in a list, because a list
+  never contains the thing someone just added.
+
+If you find yourself writing "I will document this next", stop and document it.
+The follow-up does not happen, and the next person reads the code instead and
+believes it.
+
 ## Invariants that must not break
 
 Each of these is load-bearing; breaking one produces silent, hard-to-diagnose
