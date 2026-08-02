@@ -26,6 +26,8 @@ from agent_host_server.core.versions import DEFAULT_SUPPORTED_VERSIONS
 from agent_host_server.provider import EchoProvider
 from agent_host_server.ws import serve_websocket
 
+_log = logging.getLogger(__name__)
+
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(prog="agent-host-server", description=__doc__)
@@ -108,6 +110,14 @@ def _parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--changes",
+        action="store_true",
+        help=(
+            "publish a demo changeset on every turn, so the Changes view has "
+            "something to show. Proposals only -- nothing is written to disk"
+        ),
+    )
+    parser.add_argument(
         "--terminal",
         action="store_true",
         help=(
@@ -150,6 +160,7 @@ async def _run() -> None:
             confirm_tools=args.confirm_tools,
             client_tools=args.client_tools,
             configurable=args.configurable,
+            changes=args.changes,
             capabilities=(
                 {"multipleChats": {"fork": True, "sideChat": True}} if args.multi_chat else None
             ),
@@ -184,6 +195,13 @@ async def _run() -> None:
         wire_log=Path(args.wire_log) if args.wire_log else None,
         sequence_file=Path(args.sequence_file) if args.sequence_file else None,
     )
+
+    if args.changes:
+        # Registered per operation, by name -- there is no "enable all
+        # operations" switch, because an operation is a button that DOES
+        # something and the embedder should have to say which.
+        for operation_id in ("ahs-approve", "ahs-annotate", "ahs-reset"):
+            host.register_operation(operation_id, _demo_operation)
 
     async with serve_websocket(
         host,
@@ -265,6 +283,23 @@ DEMO_ROOT_CONFIG_PROPERTIES: Final[dict[str, dict[str, Any]]] = {
     # declared so the settings document can offer it to a human editor.
     "defaultShell": {"type": "string", "title": "Shell for host-managed terminals"},
 }
+
+
+async def _demo_operation(changeset_uri: str, operation_id: str) -> None:
+    """A changeset button, invoked. Deliberately does nothing to the disk.
+
+    What it demonstrates is the round trip: the client renders the button from
+    `ChangesetOperation`, invokes it with `invokeChangesetOperation`, and the
+    host publishes the status back (idle -> running -> idle). Anything it
+    raises becomes the operation's `error`, which is the other half worth
+    seeing.
+
+    A demo whose "Reset" button actually destroyed work would be a poor thing
+    to ship behind a flag, and a poor thing for an adapter author to copy.
+    """
+    _log.info(
+        "demo operation %s invoked on %s (no files were touched)", operation_id, changeset_uri
+    )
 
 
 def main() -> None:

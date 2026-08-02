@@ -448,6 +448,9 @@ class _Publisher:
                 {"type": "session/serverToolsChanged", "tools": list(server_tools)},
             )
 
+    async def changes_published(self, changeset: Any, changes: Sequence[Any]) -> str:
+        return await self._host.publish_changeset(self._session.uri, changeset, changes)
+
     async def activity_changed(self, activity: str | None) -> None:
         action: dict[str, Any] = {"type": "session/activityChanged"}
         if activity is not None:

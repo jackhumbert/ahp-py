@@ -330,6 +330,22 @@ class SessionPublisher(Protocol):
         """ "Human-readable description of what the session is currently doing."\""""
         ...
 
+    async def changes_published(self, changeset: Any, changes: Sequence[Any]) -> str:
+        """Publish (or refresh) a changeset. Returns its channel URI.
+
+        The provider is the only thing that knows what the agent changed, and
+        until this existed it had no way to say so: `Host.publish_changeset`
+        was public but reachable only by an embedder holding the Host, so the
+        whole changeset feature was unreachable from inside a turn.
+
+        `changeset` is a :class:`~agent_host_server.core.changesets.Changeset`
+        and `changes` are
+        :class:`~agent_host_server.core.changesets.FileChange`. Typed as `Any`
+        here only because `provider/` sits below `core/` in the import
+        layering -- the objects are the real ones.
+        """
+        ...
+
     async def mcp_server_changed(
         self, customization_id: str, state: Mapping[str, Any], channel: str | None = None
     ) -> None:
