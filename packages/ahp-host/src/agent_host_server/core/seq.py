@@ -44,6 +44,16 @@ class SequenceAllocator(Protocol):
         """The next sequence number. MUST be strictly greater than the last."""
         ...
 
+    def current(self) -> int:
+        """The high-water mark: no number at or below this will be issued again.
+
+        Read once at construction so the sequencer starts where the previous
+        process stopped rather than at zero. It need not be a number that was
+        actually issued -- a block-reserving allocator returns its ceiling,
+        which is conservative in the safe direction.
+        """
+        ...
+
 
 class InMemorySequence:
     """Starts at 1 every time the process does.
@@ -57,6 +67,9 @@ class InMemorySequence:
 
     def next(self) -> int:
         self._value += 1
+        return self._value
+
+    def current(self) -> int:
         return self._value
 
 
@@ -108,4 +121,11 @@ class FileSequence:
         self._value += 1
         if self._value > self._ceiling:
             self._reserve()
+        return self._value
+
+    def current(self) -> int:
+        # The previous ceiling, not the last number issued -- the remainder of
+        # a reserved block is skipped on restart, so this is at or above every
+        # number ever handed out. Conservative in the safe direction: a client
+        # is never told a number is fresh when it has already seen it.
         return self._value

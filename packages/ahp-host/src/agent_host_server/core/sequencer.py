@@ -87,7 +87,15 @@ class Sequencer:
     ) -> None:
         self._lock = asyncio.Lock()
         self._allocator = allocator or InMemorySequence()
-        self._seq = 0
+        # Seeded from the allocator, NOT from zero. A durable allocator knows
+        # the high-water mark from before the restart, and starting at zero
+        # throws that away at exactly the moment it exists to help: the epoch
+        # check below compares `lastSeenServerSeq` against this number, so
+        # until the first publish every reconnecting client looks like it came
+        # from a previous epoch and is sent full snapshots -- the precise cost
+        # `core/seq.py` was written to avoid. It also made `fromSeq` a lie,
+        # reporting 0 for a snapshot taken at 3000.
+        self._seq = self._allocator.current()
         self._states: dict[str, Any] = {}
         #: channel URI -> reducer name, recorded when the channel is created.
         self._reducers: dict[str, str] = {}
@@ -366,10 +374,18 @@ class Sequencer:
             # The gap exceeds the replay buffer: fresh snapshots instead. This
             # is explicitly allowed, and is also the honest answer after a host
             # restart, when the counter no longer relates to what the client saw.
+            # `missing` belongs on BOTH branches. Omitting it here stranded
+            # every client that reconnected after a host restart: the snapshot
+            # path is the one a restart always takes, and a channel the host no
+            # longer knows was neither snapshotted nor reported gone -- so the
+            # client kept it in its local set and waited for state that would
+            # never arrive. Observed as three chats stuck loading forever, with
+            # nothing on the wire to explain it.
             return {
                 "type": "snapshot",
                 "snapshots": [
                     {"resource": uri, "state": self._states[uri], "fromSeq": self._seq}
                     for uri in known
                 ],
+                "missing": missing,
             }

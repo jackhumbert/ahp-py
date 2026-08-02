@@ -8,10 +8,12 @@ went unrecorded, gets told it is up to date across a hole.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 import pytest
 
+from agent_host_server.core.seq import FileSequence
 from agent_host_server.core.sequencer import Sequencer
 
 pytestmark = pytest.mark.anyio
@@ -154,3 +156,70 @@ class TestSubscriptionEdges:
         await sequencer.subscribe(subscriber, "c")
         # The lock is still free and the channel still works.
         assert await sequencer.publish("c", {"type": "chat/draftChanged", "draft": "x"})
+
+
+class TestReconnectAfterRestart:
+    """Two defects a real VS Code reconnect found that this suite did not.
+
+    Both are invisible unless the reconnect asks for a channel the host does
+    not have -- which is what every client does after a host restart, and
+    never what a test does unless it means to.
+    """
+
+    async def test_snapshot_reports_missing_channels(self) -> None:
+        """A channel the host does not know is REPORTED, not dropped.
+
+        `missing` was returned on the replay branch only. A restart always
+        takes the snapshot branch, so a client heard nothing about the channels
+        it had lost, kept them in its local set, and showed them loading
+        forever with nothing on the wire to explain it.
+        """
+        sequencer = Sequencer()
+        await sequencer.register_channel("kept://", {"n": 0}, "session")
+
+        result = await sequencer.replay(9_999, ["kept://", "gone://", "also-gone://"])
+
+        assert result["type"] == "snapshot"
+        assert [s["resource"] for s in result["snapshots"]] == ["kept://"]
+        assert set(result["missing"]) == {"gone://", "also-gone://"}
+
+    async def test_replay_still_reports_missing_channels(self) -> None:
+        """The branch that was already right stays right."""
+        sequencer = Sequencer()
+        await sequencer.register_channel("kept://", {"n": 0}, "session")
+
+        result = await sequencer.replay(0, ["kept://", "gone://"])
+
+        assert result["type"] == "replay"
+        assert result["missing"] == ["gone://"]
+
+    async def test_durable_allocator_seeds_the_sequence(self, tmp_path: Path) -> None:
+        """A restart resumes the count instead of presenting as brand new.
+
+        Left at zero, the epoch check saw every reconnecting client as being
+        from a previous epoch until the first publish -- forcing a full state
+        transfer on exactly the reconnect the durable counter exists to make
+        cheap.
+        """
+        path = tmp_path / "seq"
+        FileSequence(path).next()
+
+        resumed = Sequencer(allocator=FileSequence(path))
+        assert resumed.server_seq >= 1
+
+        await resumed.register_channel("chat://", {"n": 0}, "session")
+        result = await resumed.replay(1, ["chat://"])
+        assert result["type"] == "replay"
+
+    async def test_snapshot_from_seq_is_not_a_lie(self, tmp_path: Path) -> None:
+        """`fromSeq` says where the snapshot was taken, not zero."""
+        path = tmp_path / "seq"
+        FileSequence(path).next()
+        sequencer = Sequencer(allocator=FileSequence(path))
+        await sequencer.register_channel("chat://", {"n": 0}, "session")
+
+        result = await sequencer.replay(10**9, ["chat://"])
+
+        assert result["type"] == "snapshot"
+        assert result["snapshots"][0]["fromSeq"] == sequencer.server_seq
+        assert result["snapshots"][0]["fromSeq"] > 0
