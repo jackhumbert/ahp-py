@@ -142,8 +142,13 @@ def demo_customizations() -> list[dict[str, Any]]:
                 {
                     "type": "hook",
                     "id": "ahs-hook-golf",
-                    "uri": f"{_BASE}/.github/hooks/golf.md",
-                    "name": "AHS Hook Golf",
+                    # A hook manifest is JSON, not markdown, and `name` is the
+                    # FILE BASENAME rather than a friendly title -- VS Code
+                    # builds one as `{type, id, uri, name: basename(file)}`
+                    # (copilotAgent.ts:3846-3852). A plugin contributes hooks
+                    # through a single `hooks.json`.
+                    "uri": f"{_BASE}/.github/hooks.json",
+                    "name": "hooks.json",
                     "enabled": True,
                 },
             ],
@@ -165,6 +170,34 @@ def demo_customizations() -> list[dict[str, Any]]:
                     "uri": f"{_BASE}/.github/skills/hotel/SKILL.md",
                     "name": "AHS Skill Hotel",
                     "description": "A demo skill inside a directory container.",
+                    "enabled": True,
+                }
+            ],
+        },
+        {
+            # Hooks surface as a DIRECTORY container, not as plugin children.
+            # `.github/hooks` is a real discovery path
+            # (sessionCustomizationDiscovery.ts:147, recursive, writable) and
+            # the plan doc is explicit that "hooks stay child-only", with the
+            # containers being DirectoryCustomizations of `contents: Hook`.
+            #
+            # Worth knowing when this appears to do nothing: VS Code scans
+            # hooks from the PRIMARY working directory only (index 0), so a
+            # session whose working directory is not this repo will not find
+            # them however they are published.
+            "type": "directory",
+            "id": "ahs-directory-hooks",
+            "uri": f"{_BASE}/.github/hooks",
+            "name": "AHS Hooks Directory",
+            "contents": "hook",
+            "writable": True,
+            "enabled": True,
+            "children": [
+                {
+                    "type": "hook",
+                    "id": "ahs-hook-pre-tool",
+                    "uri": f"{_BASE}/.github/hooks/pre-tool.json",
+                    "name": "pre-tool.json",
                     "enabled": True,
                 }
             ],

@@ -106,3 +106,28 @@ def test_the_model_only_agent_carries_the_field_a_client_reads() -> None:
         # A JSON boolean, not a string: the client's reader drops non-booleans,
         # and "false" would leave the agent visible.
         assert meta.get("userInvocable") is False, f"{agent['id']}"
+
+
+def test_hooks_are_published_the_way_a_client_reads_them() -> None:
+    """A hook manifest is JSON, and `name` is the file's basename.
+
+    VS Code builds a HookCustomization as `{type, id, uri, name:
+    basename(file)}` (copilotAgent.ts:3846-3852) and surfaces hook containers
+    as directories of `contents: "hook"`, never as plugin children with
+    markdown bodies. The demo published `hooks/golf.md` under a plugin, which
+    was wrong on all three counts and rendered as nothing.
+    """
+    entries = demo_customizations()
+    hooks = [
+        child
+        for entry in entries
+        for child in [entry, *(entry.get("children") or [])]
+        if child.get("type") == "hook"
+    ]
+    assert hooks, "the demo no longer publishes a hook"
+    for hook in hooks:
+        assert hook["uri"].endswith(".json"), hook["id"]
+        assert hook["name"] == hook["uri"].rsplit("/", 1)[-1], hook["id"]
+
+    containers = [e for e in entries if e.get("contents") == "hook"]
+    assert containers, "hooks surface as a directory container, not only as children"

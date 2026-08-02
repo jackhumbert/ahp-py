@@ -20,6 +20,7 @@ It is what VS Code's own tests read
 | `commands/` | `*.md` | **Prompts live here** — not in `prompts/` |
 | `rules/` | `*.instructions.md`, `*.mdc` | Instructions, not `instructions/` |
 | `skills/<name>/` | `SKILL.md` + helpers | A skill is a **directory**, not a file |
+| `hooks/` | `*.json` | Manifests are **JSON**, and surface as a `directory` container of `contents: "hook"` — never as a plugin child with a markdown body. Scanned from the **primary working directory only** |
 
 Two of those four were wrong when guessed from the spec alone, which is why the
 wire log is the source of truth here and the prose is not.
