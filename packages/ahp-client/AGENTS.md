@@ -202,6 +202,18 @@ A change is not finished until:
 evidence, and `agent_host_client.testing` ships as **public API** — the fastest
 way to lose an adopter is for them to be unable to test their app.
 
+## Requests from an embedder
+
+[`docs/requests.md`](docs/requests.md) is written from the outside in, by an
+application building a **long-lived, server-side surface** on this library: one
+connection per end user, sessions it did not create, turns it did not start.
+Three items block that consumer — watching a turn started elsewhere, answering a
+request without being the originator, and a rejected credential retried forever.
+Read it before adding to `api/`; it is the clearest statement of where the front
+door stops.
+
+Its "deliberately not requested" section is as load-bearing as the requests.
+
 ## Conventions
 
 - Conventional commits. `CHANGELOG.md` from the first release.
