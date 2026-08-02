@@ -602,3 +602,63 @@ check each site against the source.
 survives a peer that is hostile, buggy, or merely written in a language whose
 serializer emits `null` where TypeScript omits a key. Both properties matter for
 a host, and only the first is testable against upstream's artifacts.
+
+## E14 — A second real client: `ahpx`
+
+**Question.** Everything so far has been verified against VS Code and the
+published Microsoft TypeScript client. Is there an independent implementation to
+check against, and does anything break on it?
+
+**Setup.** `ahpx` (`@tylerl0706/ahpx` 0.5.1) is a third-party AHP CLI built on
+the official TypeScript client. It pins `@microsoft/agent-host-protocol@^0.5.0`,
+which under semver's 0-major rule locks it to `0.5.x` -- and this host speaks
+`{0.7.0, 0.6.0}`, so it is refused with `-32005`. Overriding that dependency to
+`0.6.0` (the newest **published** client; 0.7.0 and 0.8.0 exist only in the
+source tree) makes it negotiate normally.
+
+**E14a — it connects, and runs a turn.** `connect` reported protocol `0.6.0`,
+the `echo` agent and its model; `exec "hello from ahpx"` streamed
+`You said: hello from ahpx` and completed. Second independent client to drive
+this host.
+
+**E14b — it exercises the reverse direction, unprompted.** `ahpx` discovers
+workspace customizations and publishes them on `session/activeClientSet`. The
+host issued `resourceList` back to it -- server-to-client requests, against a
+third-party implementation, without either side being written for the other.
+
+**E14c — and that found a defect.** `ahpx` publishes **one plugin per agent
+file**, with the file's own URI:
+
+```json
+{"id": "…/.github/agents/team-lead.md", "type": "plugin",
+ "uri": "…/.github/agents/team-lead.md", "name": "Agent: team-lead", …}
+```
+
+The spec says clients publish "always container-shaped plugins", so the host
+called `resourceList` on it and the client answered `ENOTDIR`. Every child was
+dropped and the plugin rendered empty -- the exact failure the reverse direction
+was built to fix, in a shape that had not occurred to me.
+
+Two things were wrong, and the second was worse:
+
+1. A file-shaped plugin was not handled at all. It is now read as its own single
+   child, which is what the publication plainly means.
+2. **Child type was derived only from a filename suffix** (`.agent.md`,
+   `.skill.md`). Real layouts carry it in the **directory** --
+   `.github/agents/foo.md` -- so even a correctly-shaped container would have
+   had every child dropped. That was a latent defect in the VS Code path too,
+   and no amount of re-reading the spec would have surfaced it.
+
+**After the fix**, re-run against the same client:
+
+```
+EXPANDED Agent: ahp-package-upgrader
+   child: agent | Agent: ahp-package-upgrader
+EXPANDED Agent: team-lead
+   child: agent | Agent: team-lead
+```
+
+**What this cost and bought.** One dependency override. It found a defect class
+that 1349 passing tests did not, because every one of those tests was written by
+the same person who wrote the code -- which is the whole argument for testing
+against something you did not write.

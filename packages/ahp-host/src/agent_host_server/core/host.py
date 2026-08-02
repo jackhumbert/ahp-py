@@ -246,16 +246,29 @@ def _terminal_info(state: Any) -> dict[str, Any]:
     return info
 
 
-#: File suffix -> the customization type a plugin child of that shape becomes.
-#: Open Plugins' own layout; a suffix this host does not recognise is skipped
-#: rather than guessed at, because a mislabelled child renders in the wrong
-#: section and cannot be corrected by the client that published it.
-_CHILD_TYPES: Final = {
+#: File suffix -> customization type. The explicit convention: a file that says
+#: what it is in its own name.
+_CHILD_SUFFIXES: Final = {
     ".prompt.md": "prompt",
     "skill.md": "skill",
     ".agent.md": "agent",
     ".instructions.md": "rule",
     ".rule.md": "rule",
+    ".hook.md": "hook",
+}
+
+#: Containing directory -> customization type. The OTHER half of the
+#: convention, and the one a real client actually uses: `.github/agents/foo.md`
+#: carries its type in the directory, not the filename. Found by pointing a
+#: third-party client at this host and watching every child get dropped for
+#: failing the suffix test.
+_CHILD_DIRECTORIES: Final = {
+    "agents": "agent",
+    "prompts": "prompt",
+    "instructions": "rule",
+    "rules": "rule",
+    "skills": "skill",
+    "hooks": "hook",
 }
 
 
@@ -268,7 +281,16 @@ def _child_customization(
     and two clients may publish a plugin containing the same file name.
     """
     lowered = name.lower()
-    kind = next((value for suffix, value in _CHILD_TYPES.items() if lowered.endswith(suffix)), None)
+    kind = next(
+        (value for suffix, value in _CHILD_SUFFIXES.items() if lowered.endswith(suffix)), None
+    )
+    if kind is None:
+        # Fall back to the containing directory. A filename that says nothing
+        # is the norm, not the exception -- and a type this host still cannot
+        # work out is skipped rather than guessed, because a mislabelled child
+        # renders in the wrong section and the client cannot correct that.
+        parts = uri.rstrip("/").split("/")
+        kind = _CHILD_DIRECTORIES.get(parts[-2].lower()) if len(parts) > 1 else None
     if kind is None:
         return None
     try:
@@ -1379,8 +1401,22 @@ class Host:
         if not isinstance(uri, str):
             return list(plugin.get("children") or [])
 
+        try:
+            entries = await self.list_client_resource(connection, uri)
+        except errors.AhpError:
+            # A plugin whose `uri` is a FILE, not a container. The spec says
+            # clients publish "always container-shaped plugins", but the only
+            # third-party client in the wild publishes one plugin per agent
+            # file and answers ENOTDIR to the list -- so a host that only
+            # handles containers renders every one of them empty.
+            #
+            # Read as a single child instead. That is what the publication
+            # plainly means, and being strict here would only make the feature
+            # not work.
+            return self._single_file_children(plugin, uri)
+
         children: list[Any] = []
-        for entry in await self.list_client_resource(connection, uri):
+        for entry in entries:
             if not isinstance(entry, Mapping):
                 continue
             name = entry.get("name")
@@ -1396,6 +1432,22 @@ class Host:
             if child is not None:
                 children.append(child)
         return children
+
+    def _single_file_children(self, plugin: Mapping[str, Any], uri: str) -> list[Any]:
+        """A file-shaped plugin's one child: the file, named for the plugin.
+
+        The name comes from the plugin rather than the filename, because a
+        client that published a file as a plugin already told us what to call
+        it -- and it is the string a user will recognise.
+        """
+        name = uri.rsplit("/", 1)[-1]
+        child = _child_customization(plugin, uri, name, b"")
+        if child is None:
+            return []
+        published = plugin.get("name")
+        if isinstance(published, str) and published:
+            child["name"] = published
+        return [child]
 
     # ─── terminals ───────────────────────────────────────────────────────
 

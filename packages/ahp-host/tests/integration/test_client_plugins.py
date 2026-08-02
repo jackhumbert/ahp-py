@@ -299,3 +299,77 @@ class TestOutboundLifetime:
         await client.transport.close()
         await asyncio.sleep(0.4)
         assert len(host.outbound) == 0
+
+
+class TestFileShapedPlugin:
+    """A plugin whose `uri` is a file, not a container.
+
+    The spec says clients publish "always container-shaped plugins". The only
+    third-party AHP client in the wild does not: `ahpx` publishes one plugin per
+    agent file, with the file's own URI, and answers `ENOTDIR` when a host tries
+    to list it. Found by pointing it at this host.
+
+    Being strict here would only make the feature not work, so the file is read
+    as the plugin's single child — which is what the publication plainly means.
+    """
+
+    async def test_a_file_uri_yields_one_child_rather_than_none(self, host: Host) -> None:
+        client = await _attach(host)
+        uri = "echo:/plugins-file"
+        await _session(host, client, uri)
+
+        file_plugin = {
+            "type": "plugin",
+            "id": "agents/team-lead.md",
+            "uri": "file:///repo/.github/agents/team-lead.md",
+            "name": "Team Lead",
+            "enabled": True,
+            "nonce": "n1",
+        }
+        await client.notify(
+            "dispatchAction",
+            {
+                "channel": uri,
+                "clientSeq": 1,
+                "action": {
+                    "type": "session/activeClientSet",
+                    "activeClient": {
+                        "clientId": "ahpx",
+                        "tools": [],
+                        "customizations": [file_plugin],
+                    },
+                },
+            },
+        )
+        # Answer the list with the same ENOTDIR the real client sends.
+        await _serve_enotdir(client, seconds=0.8)
+
+        state = (await client.request("subscribe", {"channel": uri}))["result"]["snapshot"]["state"]
+        plugin = next(c for c in state["customizations"] if c["id"] == "agents/team-lead.md")
+        assert len(plugin["children"]) == 1
+        child = plugin["children"][0]
+        assert child["type"] == "agent"
+        # Named for the plugin, because the client already said what to call it.
+        assert child["name"] == "Team Lead"
+
+
+async def _serve_enotdir(client: ServingClient, *, seconds: float) -> None:
+    """Answer every reverse request the way a real client answers a file."""
+    deadline = asyncio.get_running_loop().time() + seconds
+    while asyncio.get_running_loop().time() < deadline:
+        remaining = deadline - asyncio.get_running_loop().time()
+        try:
+            message = await asyncio.wait_for(client.transport.receive(), timeout=remaining)
+        except TimeoutError:
+            return
+        if message is None or "id" not in message or "method" not in message:
+            if message is not None:
+                client.notifications.append(message)
+            continue
+        await client.transport.send(
+            {
+                "jsonrpc": "2.0",
+                "id": message["id"],
+                "error": {"code": -32008, "message": "ENOTDIR: not a directory"},
+            }
+        )
