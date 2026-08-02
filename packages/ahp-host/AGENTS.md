@@ -6,7 +6,10 @@ with zero context.
 **Read first:** [`docs/research.md`](docs/research.md) (what the protocol
 actually does, with evidence), then [`docs/plan.md`](docs/plan.md) (what v0.1
 is), then [`docs/roadmap.md`](docs/roadmap.md) (everything after it), then
-[`UPSTREAM.md`](UPSTREAM.md) (what revision we target).
+[`UPSTREAM.md`](UPSTREAM.md) (what revision we target), then
+[`docs/release-plan.md`](docs/release-plan.md) (everything between here and
+`0.1.0`, in three tiers: what stops an embedder shipping, what "published"
+means, and parity with VS Code's own host).
 [`docs/requests.md`](docs/requests.md) is the outside-in view: what an embedder
 deploying this behind a proxy for several users needed and could not get. The
 first five landed — `Host.serve(headers=, token=)`, `core/policies.py`,
