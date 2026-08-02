@@ -55,6 +55,8 @@ from agent_host_protocol.versions import (
 
 #: This distribution's own version. Deliberately independent of the protocol's
 #: -- see :data:`UPSTREAM_PROTOCOL_VERSION` for the spec revision vendored here.
+#: The single source of truth. `pyproject.toml` reads it from here through
+#: hatchling's dynamic version, so there is no second place to forget.
 __version__ = "0.1.0"
 
 __all__ = [

@@ -8,6 +8,33 @@ the spec revision it targets.
 
 ## [Unreleased]
 
+### Added
+
+- **`agent_host_protocol.conformance.schemas`** — the vendored JSON Schemas as
+  an assertion, shipped rather than kept in `tests/`. A host and a client each
+  need to prove the same thing about opposite directions of the same wire, and
+  two copies of that file is exactly the drift this package exists to prevent.
+  `jsonschema` is imported at module scope and is deliberately NOT a dependency:
+  whether a missing validator should skip a test or fail a build is the caller's
+  policy, not ours.
+- `SECURITY.md`, and a disclosure path. This package performs no I/O, so its
+  surface is not what it can reach but what it computes for the peers that trust
+  it — the reducers, and `IS_CLIENT_DISPATCHABLE`, which is the table a host
+  uses to decide whether a peer may dispatch an action at all.
+- A tag-triggered publish workflow using PyPI trusted publishing (OIDC), with a
+  wheel that is installed and RUN from outside the checkout before it is
+  released (`scripts/smoke_wheel.py`).
+- A non-blocking CI job that builds and tests both consumers against this
+  package's `main`. It is a floor, not a leaf: a change here that breaks the
+  host or the client has broken the point of the extraction, and finding that
+  out at their next release is too late.
+
+### Changed
+
+- The version is single-sourced from `__init__.py` through hatchling's dynamic
+  version. It was declared in two places, which is how the sibling host shipped
+  `0.0.0` twice.
+
 Extracted from [`agent-host-server-py`](https://github.com/jackhumbert/agent-host-server-py),
 where all of this code was written. See [ADR 0002](docs/decisions/0002-extraction.md).
 

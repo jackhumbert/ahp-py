@@ -4,15 +4,18 @@ build-backend = "hatchling.build"
 
 [project]
 name = "agent-host-protocol"
-version = "0.1.0"
 description = "Wire types, pure reducers and the conformance corpora for the Agent Host Protocol (AHP)."
+# Single-sourced from the package, so the two cannot drift. There is no second
+# place to forget -- the host learned this one the hard way, shipping `0.0.0`
+# in two files.
+dynamic = ["version"]
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.11"
 authors = [{ name = "agent-host-protocol-py contributors" }]
 keywords = ["ahp", "agent-host-protocol", "agent", "protocol", "json-rpc", "reducers"]
 classifiers = [
-  "Development Status :: 2 - Pre-Alpha",
+  "Development Status :: 3 - Alpha",
   "Intended Audience :: Developers",
   "License :: OSI Approved :: MIT License",
   "Programming Language :: Python :: 3.11",
@@ -40,6 +43,7 @@ dev = [
   "pytest>=8",
   "mypy>=1.11",
   "ruff>=0.6",
+  "types-jsonschema",
   "import-linter>=2",
   "jsonschema>=4",
   "build>=1",
@@ -54,6 +58,9 @@ packages = ["src/agent_host_protocol"]
 # can disagree; leaving it out of the wheel would ship a corpus loader with no
 # corpus, which is the defect this package was extracted partly to fix.
 # `conformance/corpus.py::_corpus_root` reads whichever exists.
+[tool.hatch.version]
+path = "src/agent_host_protocol/__init__.py"
+
 [tool.hatch.build.targets.wheel.force-include]
 "vendor/upstream" = "agent_host_protocol/conformance/_upstream"
 

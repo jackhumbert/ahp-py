@@ -74,3 +74,54 @@ jobs:
           path: .sibling
       - name: Report drift from the sibling's copy
         run: python scripts/check_sibling_drift.py --sibling .sibling
+
+  wheel-is-installable:
+    # `tests/unit/test_packaging.py` looks INSIDE the built wheel from a source
+    # checkout. This installs it and runs it from a directory that is not the
+    # repository, which is the only way to catch a path that resolves via the
+    # source tree -- the exact defect that shipped a fixture loader with no
+    # fixtures in the repo this code came from.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install build
+      - run: python -m build --wheel --outdir dist
+      - name: Install the wheel into a clean venv
+        run: |
+          python -m venv /tmp/fresh
+          /tmp/fresh/bin/pip install "$(echo dist/*.whl)"
+      - name: Smoke-test it from outside the checkout
+        run: cd /tmp && /tmp/fresh/bin/python "$GITHUB_WORKSPACE/scripts/smoke_wheel.py"
+
+  consumers-still-build:
+    # This package is a FLOOR, not a leaf: a host and a client both stand on it,
+    # and its whole reason for existing is that they share one copy of the
+    # reducers. A change here that breaks either of them has broken the point of
+    # the extraction, and finding that out at their next release is too late.
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        consumer: [agent-host-server-py, agent-host-client-py]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: jackhumbert/${{ matrix.consumer }}
+          path: .consumer
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # This package first, so the consumer's own pin resolves to the working
+      # tree rather than to whatever is on PyPI.
+      - run: pip install -e .
+      # Both consumers declare dev requirements as an extra today. If one moves
+      # to a PEP 735 group this needs to follow it -- deliberately not written
+      # as a `||` fallback, which would hide the change rather than surface it.
+      - run: pip install -e '.consumer[dev]'
+      - run: pytest
+        working-directory: .consumer
