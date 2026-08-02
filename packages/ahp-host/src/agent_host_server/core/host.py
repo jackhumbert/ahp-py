@@ -48,6 +48,7 @@ from agent_host_server.core.pending import PendingRequests, RequestOutcome
 from agent_host_server.core.policy import Policy
 from agent_host_server.core.resources import (
     NullResourceProvider,
+    ResourceInfo,
     ResourceProvider,
     WritableResourceProvider,
     path_from_file_uri,
@@ -1315,8 +1316,23 @@ class Host:
         if owner is not None:
             if not self.policy.may_see_channel(connection.info, owner.uri):
                 raise errors.AhpError(-32009, f"Not permitted to read {uri}")
+            if method == "resourceResolve":
+                # A client STATS BEFORE IT READS. VS Code's filesystem provider
+                # calls `stat()` first, and refusing that meant the diff editor
+                # gave up before `resourceRead` was ever tried: "Unable to
+                # resolve nonexistent file ...?_ah=..." about content this host
+                # was holding and would happily have served.
+                content = owner.content.get(uri)
+                return ResourceInfo(
+                    uri=uri,
+                    type="file",
+                    size=len(content.data),
+                    content_type=content.content_type,
+                ).to_wire()
             if method != "resourceRead":
-                raise errors.invalid_params(f"{uri} is content, not a path")
+                # `resourceList` on content, which is a file and not a
+                # directory. Same answer the filesystem provider gives.
+                raise errors.invalid_params(f"{uri} is not a directory")
             return _read_result(owner.content.get(uri), params.get("encoding"))
 
         operation = {"resourceResolve": "resolve", "resourceRead": "read"}.get(method, "list")

@@ -467,3 +467,70 @@ class TestTheDemoActuallyPublishes:
             assert "MARKER" in read["result"]["data"]
         finally:
             await host.aclose()
+
+
+class TestContentIsStattable:
+    """A client STATS BEFORE IT READS.
+
+    Host-owned changeset content answered `resourceRead` and refused
+    everything else, so VS Code's filesystem provider called `stat()`, got
+    InvalidParams, and gave up before `resourceRead` was ever tried. The user
+    saw "Unable to resolve nonexistent file" about content this host was
+    holding and would happily have served -- and none of the seventeen
+    changeset tests noticed, because every one of them called `resourceRead`
+    directly, the way no client does.
+    """
+
+    async def test_resolve_answers_for_content(self, host: Host) -> None:
+        uri = "echo:/stat-1"
+        client = await _session(host, uri)
+        channel = await host.publish_changeset(
+            uri,
+            Changeset(label="c"),
+            [FileChange(uri="file:///work/a.txt", before=b"one\n", after=b"two\n")],
+        )
+        state = (await client.request("subscribe", {"channel": channel}))["result"]["snapshot"][
+            "state"
+        ]
+        content = state["files"][0]["edit"]["after"]["content"]["uri"]
+
+        resolved = await client.request("resourceResolve", {"channel": ROOT_URI, "uri": content})
+        assert "error" not in resolved, resolved.get("error")
+        assert resolved["result"]["type"] == "file"
+        assert resolved["result"]["size"] == len(b"two\n")
+        assert resolved["result"]["uri"] == content
+
+    async def test_the_stat_then_read_sequence_a_client_uses(self, host: Host) -> None:
+        """Both halves, in the order a filesystem provider does them."""
+        uri = "echo:/stat-2"
+        client = await _session(host, uri)
+        channel = await host.publish_changeset(
+            uri,
+            Changeset(label="c"),
+            [FileChange(uri="file:///work/b.txt", after=b"created\n")],
+        )
+        state = (await client.request("subscribe", {"channel": channel}))["result"]["snapshot"][
+            "state"
+        ]
+        content = state["files"][0]["edit"]["after"]["content"]["uri"]
+
+        assert "error" not in await client.request(
+            "resourceResolve", {"channel": ROOT_URI, "uri": content}
+        )
+        read = await client.request("resourceRead", {"channel": ROOT_URI, "uri": content})
+        assert read["result"]["data"] == "created\n"
+
+    async def test_listing_content_is_still_refused(self, host: Host) -> None:
+        """It is a file. Same answer a filesystem provider gives."""
+        uri = "echo:/stat-3"
+        client = await _session(host, uri)
+        channel = await host.publish_changeset(
+            uri, Changeset(label="c"), [FileChange(uri="file:///work/c.txt", after=b"x")]
+        )
+        state = (await client.request("subscribe", {"channel": channel}))["result"]["snapshot"][
+            "state"
+        ]
+        content = state["files"][0]["edit"]["after"]["content"]["uri"]
+
+        listed = await client.request("resourceList", {"channel": ROOT_URI, "uri": content})
+        assert listed["error"]["code"] == -32602
