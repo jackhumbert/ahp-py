@@ -585,7 +585,13 @@ class _Session:
     title: str
     created_at: str
     agent_session: AgentSession | None = None
-    turn: asyncio.Task[None] | None = None
+    #: The running turn PER CHAT. One slot for the whole session meant a second
+    #: chat's turn overwrote the first's handle, so `chat/turnCancelled` on chat
+    #: A cancelled whichever chat had started most recently -- with no terminal
+    #: action on the victim, which was then pinned at `activeTurn` forever and
+    #: rejected every later turn as "a turn is already active". Bricked, and
+    #: silently. Found by driving the Python client against this host.
+    turns: dict[str, asyncio.Task[None]] = field(default_factory=dict)
     meta: dict[str, Any] = field(default_factory=dict)
     #: The summary the root channel was last told about. `root/sessionSummaryChanged`
     #: carries only fields that changed, so the host has to remember what it sent.
@@ -613,6 +619,18 @@ class _Session:
     #: `(plugin id, nonce)` pairs already expanded, so a republication with an
     #: unchanged nonce does not cost a round trip per child file.
     expanded_plugins: set[tuple[Any, Any]] = field(default_factory=set)
+
+    def running(self, chat: str | None = None) -> list[asyncio.Task[None]]:
+        """Live turn tasks -- for one chat, or for the whole session.
+
+        Both scopes are real. A changeset commit races the agent's writes on
+        ANY chat, so it asks the session; a cancel addresses exactly one.
+        """
+        if chat is not None:
+            task = self.turns.get(chat)
+            return [task] if task is not None and not task.done() else []
+        return [t for t in self.turns.values() if not t.done()]
+
     #: Every chat this session owns, default included. A set rather than a
     #: single URI because `createChat` exists -- and because the summary rules
     #: aggregate across all of them, not just the default.
@@ -2263,16 +2281,21 @@ class Host:
             # Delivered as an ordinary turn, so the whole turn machinery --
             # sequencing, the suspending primitive, cancellation -- applies to a
             # forked chat exactly as it does to the default one.
-            await self.sequencer.publish(
-                chat_uri,
-                {
-                    "type": "chat/turnStarted",
-                    "turnId": f"t-{uuid.uuid4()}",
-                    "startedAt": created_at,
-                    "message": dict(initial),
-                },
-            )
-            await self._react(chat_uri, {"type": "chat/turnStarted"})
+            started = {
+                "type": "chat/turnStarted",
+                "turnId": f"t-{uuid.uuid4()}",
+                "startedAt": created_at,
+                "message": dict(initial),
+            }
+            await self.sequencer.publish(chat_uri, started)
+            # The action it just published, NOT a stub. `TurnRunner.run` reads
+            # `turnId` off what it is handed and returns on its first line when
+            # it is absent -- so a chat created with an `initialMessage` sat at
+            # `activeTurn` forever with the agent never having seen the message,
+            # and every later `chat/turnStarted` was rejected as "a turn is
+            # already active". Wedged from birth, and silently: `createChat`
+            # answered `{}`.
+            await self._react(chat_uri, started)
         await self._mirror_summary(session)
         return {}
 
@@ -2559,7 +2582,8 @@ class Host:
         # invoke; greying alone is advisory, since the request can still arrive
         # from a stale UI.
         owner = next((s for s in self._sessions.values() if channel in s.changesets), None)
-        if owner is not None and owner.turn is not None and not owner.turn.done():
+        # ANY chat: a commit races the agent's writes wherever they come from.
+        if owner is not None and owner.running():
             raise errors.invalid_params(f"{operation!r} is disabled while a turn is active")
 
         await self.sequencer.publish(
@@ -2609,7 +2633,7 @@ class Host:
         it a user can commit or revert mid-turn, racing the agent's own writes,
         with nothing on screen to suggest they should not.
         """
-        busy = session.turn is not None and not session.turn.done()
+        busy = bool(session.running())
         wire: list[dict[str, Any]] = []
         for operation in changeset.operations:
             entry = operation.to_wire()
@@ -2651,6 +2675,17 @@ class Host:
         # Resolved first, so the policy and the watch both name the canonical
         # target rather than whatever route the peer took to it.
         info = await self.resources.resolve(uri)
+        # THE JAIL, and it was missing here. `RootedFilesystemResourceProvider`
+        # lets a STRICT ANCESTOR of the served root resolve, so a directory
+        # picker can stat the parent of a path before the path itself -- and
+        # every other surface then refuses it. This one did not, so a recursive
+        # watch rooted at an ancestor (up to `file:///`) was accepted and the
+        # poller walked it, reporting names, existence and change timing for
+        # files the same peer is refused a read of. The provider's own docstring
+        # promises "reads, writes and watches stay refused"; two of three were
+        # true. Found by driving the Python client against this host.
+        if not self._inside_the_jail(info.uri):
+            raise errors.AhpError(-32009, f"Not permitted to watch {uri}")
         if not self.policy.may_access_resource(connection.info, "list", info.uri):
             raise errors.AhpError(-32009, f"Not permitted to watch {uri}")
 
@@ -3409,10 +3444,10 @@ class Host:
         if not self.policy.may_see_channel(connection.info, channel):
             raise errors.AhpError(-32009, f"Not permitted to dispose {channel}")
 
-        if session.turn is not None:
-            session.turn.cancel()
+        for task in session.running():
+            task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
-                await session.turn
+                await task
         if session.agent_session is not None:
             await session.agent_session.aclose()
 
@@ -3594,19 +3629,29 @@ class Host:
                 return "a turn is already active"
             if (
                 action_type in _TOOL_RESOLVING_ACTIONS
-                and self.pending.id_for_key(action.get("toolCallId")) is None
+                and self.pending.id_for_key(action.get("toolCallId"), channel=channel) is None
             ):
                 # A tool call the host is not waiting on. Rejected rather than
                 # ignored, so the client reverts its optimistic state instead of
                 # rendering a call as answered forever.
                 return "no tool call awaiting that id"
-            if action_type in _INPUT_ACTIONS and not self.pending.is_open(action.get("requestId")):
+            if action_type in _INPUT_ACTIONS and not self.pending.is_open(
+                action.get("requestId"), channel=channel
+            ):
                 # "Servers SHOULD reject client-dispatched input actions when no
                 # unresolved input-request part has the matching requestId."
                 # The reducers deliberately do not check this -- upstream states
                 # the rule in prose and leaves it to the host -- and without it a
                 # peer can answer a request that was never asked, or answer one
                 # twice and resolve a future the second time round.
+                #
+                # `channel=` because "no unresolved part" is PER-CHANNEL: the
+                # reducer searches only the dispatched channel's active turn,
+                # and ids are minted globally. Without it, answering chat A's
+                # question by dispatching to chat B resolved A's future while
+                # reading the answers out of B's state -- so the answers went
+                # nowhere, A's transcript still said unanswered, and A stayed
+                # pinned in `InputNeeded` until the session was disposed.
                 return "no open input request with that id"
         return None
 
@@ -3642,10 +3687,8 @@ class Host:
             await self._drain_queue(session, channel)
         elif action_type == "chat/truncated":
             await self._react_to_truncate(session, channel, action)
-        elif action_type == "chat/turnCancelled" and session.turn is not None:
-            session.turn.cancel()
-            if session.agent_session is not None:
-                await session.agent_session.cancel("client cancelled")
+        elif action_type == "chat/turnCancelled":
+            await self._cancel_turn(session, channel, "client cancelled")
         elif action_type == "chat/inputCompleted":
             # Resolved AFTER the reducer has applied the action (ADR 0005), so
             # the provider and the state every client can see never disagree
@@ -3975,7 +4018,7 @@ class Host:
             # Never reaches the provider. The user asked the HOST to run a
             # command; handing it to an agent as a message beginning with `!`
             # is what the prefix exists to stop.
-            session.turn = asyncio.create_task(
+            session.turns[channel] = asyncio.create_task(
                 self._run_terminal_command(session, channel, action, command)
             )
             return
@@ -3987,7 +4030,30 @@ class Host:
             session.uri,
             lambda: self._mirror_summary(session),
         )
-        session.turn = asyncio.create_task(self._run_turn(session, runner, action))
+        session.turns[channel] = asyncio.create_task(self._run_turn(session, runner, action))
+
+    async def _cancel_turn(self, session: _Session, chat: str, reason: str) -> None:
+        """Stop the turn running in ONE chat.
+
+        Cancelling the task is the real signal: the provider's
+        `send_user_message` coroutine runs inside it, so it takes a
+        `CancelledError` at its next await and its sink stops publishing.
+
+        `AgentSession.cancel()` is a courtesy on top -- and it is
+        SESSION-scoped, because a session has one agent session shared by every
+        chat. So it is only sent when nothing else in this session is still
+        running. A provider that treats it as "stop everything" (the shipped
+        `EchoProvider` sets a flag the whole session reads) would otherwise
+        truncate an innocent chat's answer because a different chat was
+        cancelled -- which is precisely the class of bug this method exists to
+        close, one layer down.
+        """
+        for task in session.running(chat):
+            task.cancel()
+        session.turns.pop(chat, None)
+        if session.agent_session is not None and not session.running():
+            with contextlib.suppress(Exception):
+                await session.agent_session.cancel(reason)
 
     async def _react_to_truncate(
         self, session: _Session, channel: str, action: Mapping[str, Any]
@@ -4004,11 +4070,9 @@ class Host:
         `_validate_truncate` has already refused this for a provider that cannot
         forget, so reaching here means one can.
         """
-        if session.turn is not None and not session.turn.done():
-            session.turn.cancel()
-            if session.agent_session is not None:
-                with contextlib.suppress(Exception):
-                    await session.agent_session.cancel("history truncated")
+        # THIS chat's turn. Truncating one chat's history must not abort a turn
+        # running in another.
+        await self._cancel_turn(session, channel, "history truncated")
         if not isinstance(session.agent_session, TruncatesHistory):
             return
         # Read EXACTLY as the reducer reads it. An absent key clears
@@ -4159,7 +4223,7 @@ class Host:
             self._spawn(self._mark_unread(session))
             # Detached, and after the turn task has released the channel: this
             # starts the NEXT turn, and starting it from inside the finally of
-            # the turn it follows would make `session.turn` overwrite itself
+            # the turn it follows would make this chat's slot overwrite itself
             # while this frame still owns it.
             self._spawn(self._drain_queue(session, runner.channel))
             with contextlib.suppress(Exception):
@@ -4205,9 +4269,7 @@ class Host:
         return {
             "connections": len(self._connections),
             "sessions": len(self._sessions),
-            "activeTurns": sum(
-                1 for s in self._sessions.values() if s.turn is not None and not s.turn.done()
-            ),
+            "activeTurns": sum(len(s.running()) for s in self._sessions.values()),
             "pendingRequests": len(self.pending),
             "watches": len(self._watches),
             "channels": self.sequencer.channel_count,
@@ -4222,10 +4284,10 @@ class Host:
 
     async def aclose(self) -> None:
         for session in self._sessions.values():
-            if session.turn is not None:
-                session.turn.cancel()
+            for task in session.running():
+                task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
-                    await session.turn
+                    await task
             if session.agent_session is not None:
                 await session.agent_session.aclose()
         # Terminals die WITH the host. Without this the shells outlive it:

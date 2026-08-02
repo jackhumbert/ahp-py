@@ -47,10 +47,13 @@ mypy --strict src
 lint-imports                  # enforces the layering rule below
 ```
 
-The interop test needs Node:
+The interop tests drive two independently-built clients. The TypeScript one
+needs Node; the Python one is an import:
 
 ```bash
-npm i --no-save @microsoft/agent-host-protocol@0.6.0 && pytest tests/interop
+npm i --no-save @microsoft/agent-host-protocol@0.6.0
+pip install -e ../agent-host-client-py
+pytest tests/interop
 ```
 
 **The upstream pin is not this repository's concern any more.** The vendored

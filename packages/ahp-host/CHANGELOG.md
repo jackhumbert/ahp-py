@@ -10,6 +10,34 @@ versions each release speaks.
 
 ## [Unreleased]
 
+### Fixed
+
+Found by driving the sibling Python client against this host — two
+implementations built independently from the same spec, meeting for the first
+time. All four needed a *second* chat or a *second* session to see, which is
+why a suite that had only ever run one of each was green through them:
+
+- **Cancelling one chat destroyed another.** The running-turn handle was one
+  slot per session, overwritten per chat, so `chat/turnCancelled` killed
+  whichever chat had started most recently — with no terminal action on the
+  victim, which was then pinned at `activeTurn` forever and rejected every
+  later turn. Unrecoverable short of disposing the session.
+- **`createChat` with an `initialMessage` wedged the new chat from birth.** The
+  turn was kicked with a stub action carrying no `turnId`, so the runner
+  returned on its first line: the agent never saw the message and the chat
+  could never be used. `createChat` answered `{}`.
+- **One chat could answer another's question.** Pending-request ids are minted
+  globally and the gate checked only that the id was live, so a misdirected
+  `chat/inputCompleted` resolved the victim's turn while reading the answers
+  out of the wrong channel — the answers reached nobody and the victim stayed
+  in `InputNeeded` until disposal. Both the input and tool-call gates are now
+  channel-scoped.
+- **`createResourceWatch` escaped the filesystem jail.** Strict ancestors of
+  the served root are resolvable so a directory picker can walk to them, and
+  every other surface refuses them — but the watch path never applied the jail
+  check, so a recursive watch on an ancestor (up to `file:///`) reported names,
+  existence and change timing for files the same peer is refused a read of.
+
 ### Changed
 
 - **The protocol layer is now a separate package.** Wire types, the seven

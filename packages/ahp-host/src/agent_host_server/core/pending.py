@@ -50,6 +50,10 @@ class PendingRequest:
     #: A second name the resolving action uses. Tool-call actions carry a
     #: `toolCallId`, not a request id, so they need one.
     key: str | None = None
+    #: The channel this request was asked on, and the ONLY one that may answer
+    #: it. Stored rather than parsed back out of `scope`: a chat URI is
+    #: client-chosen and opaque and may legally contain the separator.
+    channel: str | None = None
 
 
 class PendingRequests:
@@ -64,7 +68,14 @@ class PendingRequests:
     def __len__(self) -> int:
         return len(self._by_id)
 
-    def open(self, scope: str, kind: str, key: str | None = None) -> PendingRequest:
+    def open(
+        self,
+        scope: str,
+        kind: str,
+        key: str | None = None,
+        *,
+        channel: str | None = None,
+    ) -> PendingRequest:
         """Park a new request and return it, un-awaited.
 
         The id is minted **here**. A provider-chosen id lets two providers
@@ -73,6 +84,13 @@ class PendingRequests:
 
         *key* is an optional second name -- a `toolCallId` -- because the
         actions that resolve a tool call name the call, not the request.
+
+        *channel* is where the request was asked, and it is what makes
+        :meth:`is_open` and :meth:`id_for_key` answerable. Ids are minted
+        globally, so without it a peer could answer chat A's question by
+        dispatching to chat B -- which resolved the victim's future while
+        reading the answers out of the wrong channel's state, dropping them and
+        pinning the victim in `InputNeeded` until the session was disposed.
         """
         self._counter += 1
         request_id = f"{kind}-{self._counter}"
@@ -82,6 +100,7 @@ class PendingRequests:
             kind=kind,
             future=asyncio.get_running_loop().create_future(),
             key=key,
+            channel=channel,
         )
         self._by_id[request_id] = request
         self._by_scope.setdefault(scope, set()).add(request_id)
@@ -89,15 +108,26 @@ class PendingRequests:
             self._by_key[key] = request_id
         return request
 
-    def id_for_key(self, key: Any) -> str | None:
+    def id_for_key(self, key: Any, *, channel: str | None = None) -> str | None:
         """The live request registered under *key*, if any.
 
         Takes any value: the key comes off a client-dispatched action, so it may
         be a dict, a number, or missing entirely.
+
+        *channel*, when given, additionally requires the request to have been
+        asked there -- so a tool call in one chat cannot be resolved from
+        another. A request opened without a channel is answerable from anywhere,
+        which is what a bare sink in a test wants.
         """
         if not isinstance(key, str):
             return None
-        return self._by_key.get(key)
+        request_id = self._by_key.get(key)
+        if request_id is None or channel is None:
+            return request_id
+        request = self._by_id.get(request_id)
+        if request is None or request.channel not in (None, channel):
+            return None
+        return request_id
 
     def ids_of_kind(self, kind: str) -> list[str]:
         """Every live request of one kind.
@@ -112,10 +142,21 @@ class PendingRequests:
     def get(self, request_id: str) -> PendingRequest | None:
         return self._by_id.get(request_id)
 
-    def is_open(self, request_id: Any) -> bool:
+    def is_open(self, request_id: Any, *, channel: str | None = None) -> bool:
         """Whether this id names a live request. Takes any value: it is used to
-        validate a client-supplied `requestId`, which may be any JSON."""
-        return isinstance(request_id, str) and request_id in self._by_id
+        validate a client-supplied `requestId`, which may be any JSON.
+
+        *channel*, when given, additionally requires the request to have been
+        asked there. "No unresolved input-request part with the matching
+        requestId" is a PER-CHANNEL rule -- the reducer reads it that way, and
+        the host must too.
+        """
+        if not isinstance(request_id, str):
+            return False
+        request = self._by_id.get(request_id)
+        if request is None:
+            return False
+        return channel is None or request.channel in (None, channel)
 
     def resolve(self, request_id: str, outcome: RequestOutcome) -> bool:
         """Hand the outcome to the waiting provider. ``False`` if nothing waits.

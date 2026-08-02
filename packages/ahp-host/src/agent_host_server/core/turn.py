@@ -374,7 +374,9 @@ class ActionTurnSink:
         `chat/inputCompleted` against a request the registry does not know
         about yet, and the host would drop the answer.
         """
-        parked = self._pending.open(turn_scope(self._channel, self._turn_id), "input")
+        parked = self._pending.open(
+            turn_scope(self._channel, self._turn_id), "input", channel=self._channel
+        )
 
         wire: dict[str, Any] = {"id": parked.id}
         if request.message is not None:
@@ -416,7 +418,10 @@ class ActionTurnSink:
         provider calls `tool_call_started` first.
         """
         parked = self._pending.open(
-            turn_scope(self._channel, self._turn_id), "confirm", key=call.call_id
+            turn_scope(self._channel, self._turn_id),
+            "confirm",
+            key=call.call_id,
+            channel=self._channel,
         )
 
         action: dict[str, Any] = {
@@ -484,7 +489,10 @@ class ActionTurnSink:
         nothing about the MCP server's own state.
         """
         parked = self._pending.open(
-            turn_scope(self._channel, self._turn_id), "auth", key=f"auth:{call_id}"
+            turn_scope(self._channel, self._turn_id),
+            "auth",
+            key=f"auth:{call_id}",
+            channel=self._channel,
         )
         await self._sequencer.publish(
             self._channel,
@@ -529,7 +537,10 @@ class ActionTurnSink:
             raise LookupError(f"{call.client_id!r} is not an active client of this session")
 
         parked = self._pending.open(
-            turn_scope(self._channel, self._turn_id), "clienttool", key=call.call_id
+            turn_scope(self._channel, self._turn_id),
+            "clienttool",
+            key=call.call_id,
+            channel=self._channel,
         )
 
         action: dict[str, Any] = {

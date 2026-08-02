@@ -301,8 +301,9 @@ class TestTruncation:
         await client.collect(seconds=0.8)
 
         assert _state(slow, chat)["activeTurn"] is None
-        assert slow._sessions[uri].turn is not None
-        assert slow._sessions[uri].turn.done()  # type: ignore[union-attr]
+        # Cancelled and cleared: `_cancel_turn` pops the chat's slot, so the
+        # session no longer counts it as running.
+        assert not slow._sessions[uri].running(chat)
 
     async def test_a_provider_that_cannot_forget_is_refused(self) -> None:
         """A visible refusal beats a silent lie. Stricter than the spec, which

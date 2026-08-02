@@ -46,9 +46,11 @@ jobs:
         run: pytest
 
   interop:
-    # The real Microsoft TypeScript client against our host, over a socket. The
-    # reference client validates almost nothing, so this is one of only two
-    # checks that are genuinely independent of our own reading of the spec.
+    # Two independently-built clients against our host: the published Microsoft
+    # TypeScript one over a socket, and the sibling Python one in-process. The
+    # TypeScript client validates almost nothing; the Python one was written
+    # from the same spec by different hands, which makes disagreement between
+    # them evidence rather than opinion.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -62,7 +64,12 @@ jobs:
         with:
           repository: jackhumbert/agent-host-protocol-py
           path: .protocol
+      - uses: actions/checkout@v4
+        with:
+          repository: jackhumbert/agent-host-client-py
+          path: .client
       - run: pip install -e .protocol
+      - run: pip install -e .client
       - run: pip install -e '.[dev,ws]'
       # 0.6.0 is the newest published client; we negotiate 0.7.0 when offered.
       - run: npm i --no-save @microsoft/agent-host-protocol@0.6.0 ws

@@ -718,7 +718,10 @@ class TestOperationsAreHonestAboutFailureAndTiming:
         assert idle["operations"][0]["status"] == "idle"
 
         session = host._sessions[uri]
-        session.turn = asyncio.create_task(asyncio.sleep(5))
+        # Any chat: the mid-turn gate on a changeset operation is
+        # session-scoped, because a commit races the agent's writes wherever
+        # they come from.
+        session.turns["ahp-chat:/busy"] = asyncio.create_task(asyncio.sleep(5))
         try:
             await host.publish_changeset(uri, changeset, [_EDIT])
             busy = (await client.request("subscribe", {"channel": channel}))["result"]["snapshot"][
@@ -726,4 +729,4 @@ class TestOperationsAreHonestAboutFailureAndTiming:
             ]
             assert busy["operations"][0]["status"] == "disabled"
         finally:
-            session.turn.cancel()
+            session.turns["ahp-chat:/busy"].cancel()
