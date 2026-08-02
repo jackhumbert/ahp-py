@@ -78,6 +78,9 @@ class ActionTurnSink:
         self._reasoning_part_id: str | None = None
         self._activity: str | None = None
         self._segment: str | None = None
+        #: Calls still in `streaming`, i.e. announced but never moved on by a
+        #: `chat/toolCallReady`. See `_ensure_runnable`.
+        self._streaming: set[str] = set()
 
     def _open_segment(self, kind: str) -> None:
         """Start a new response part when the kind of output changes.
@@ -181,7 +184,36 @@ class ActionTurnSink:
         if tool_input is not None:
             action["toolInput"] = _encoded_tool_input(tool_input)
         await self._sequencer.publish(self._channel, action)
+        self._streaming.add(call_id)
         await self.set_activity(action["displayName"])
+
+    async def _ensure_runnable(self, call_id: str) -> None:
+        """Move a call out of `streaming` before anything tries to finish it.
+
+        `chat/toolCallStart` leaves a call in `streaming`, and the validation
+        table only accepts `chat/toolCallComplete` from `running`,
+        `pendingConfirmation` or `authRequired` -- so the simplest possible
+        provider, which announces a call and then completes it, had its
+        completion SILENTLY DROPPED and the call cancelled when the turn ended.
+        The reducer is right and fixture-verified; what was missing is the
+        transition, which the confirm and client-tool paths happened to publish
+        for their own reasons and nothing else did.
+
+        `confirmed: "not-needed"` is the spec's own wording for a call that
+        needs no approval: it "transitions directly to `running`".
+        """
+        if call_id not in self._streaming:
+            return
+        self._streaming.discard(call_id)
+        await self._sequencer.publish(
+            self._channel,
+            {
+                "type": "chat/toolCallReady",
+                "turnId": self._turn_id,
+                "toolCallId": call_id,
+                "confirmed": "not-needed",
+            },
+        )
 
     async def tool_call_delta(
         self,
@@ -293,6 +325,7 @@ class ActionTurnSink:
             # past-tense label and the row stayed in the present tense forever.
             "result": _tool_result(result, success, past_tense_message),
         }
+        await self._ensure_runnable(call_id)
         await self._sequencer.publish(self._channel, action)
         # Back to the client's fallback rather than to a guess. What the agent
         # does between tool calls is something only the provider knows.
@@ -399,6 +432,7 @@ class ActionTurnSink:
             # partial fix is worse than none, because the surface that still
             # works hides the one that does not.
             action["toolInput"] = _encoded_tool_input(call.tool_input)
+        self._streaming.discard(call.call_id)
         if call.confirmation_title is not None:
             action["confirmationTitle"] = call.confirmation_title
         if call.editable:
@@ -530,6 +564,7 @@ class ActionTurnSink:
         }
         if call.tool_input is not None:
             ready["toolInput"] = _encoded_tool_input(call.tool_input)
+        self._streaming.discard(call.call_id)
         await self._sequencer.publish(self._channel, ready)
 
         await self._mirror_input_needed(

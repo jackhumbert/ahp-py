@@ -172,6 +172,14 @@ you:
   soon as the chat goes idle, and run as its own turn — you do not poll for it.
   Steering messages are *not* consumed: they are meant to be injected into the
   running turn, which only a provider can do.
+- **`!command`**, when a terminal backend is installed. A message starting with
+  `!` never reaches you: the host runs the rest in a one-shot terminal and
+  reports it as a tool call. Without a backend the prefix is not advertised and
+  the message is ordinary text, so you still see it.
+- **The `chat/toolCallReady` transition.** A call you announce and then complete
+  is moved out of `streaming` for you — the validation table refuses a
+  completion from that state, so without it your call would be silently dropped
+  and cancelled at the end of the turn.
 
 - **The chat catalogue.** `SessionState.chats[]` is kept in step with each
   chat channel, so a client's chat tabs show real titles, statuses and

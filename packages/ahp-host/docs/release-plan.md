@@ -274,7 +274,38 @@ default chat is seeded with a non-empty title, which pins its tab. And
 visually while the agent still remembers everything — the most *dangerous* of
 these, because the user is told a thing that is not true.
 
-### 2E. Small correctness — ranked 25, 26, 27
+### 2E. Small correctness — ranked 25, 26, 27 — **done**, and two of them were wrong
+
+**25 was real, and not latent.** `chat/toolCallStart` leaves a call in
+`streaming`, and the validation table only accepts `chat/toolCallComplete` from
+`running`, `pendingConfirmation` or `authRequired` — so the SIMPLEST possible
+provider, which announces a call and then finishes it, had its completion
+silently dropped and the call cancelled when the turn ended. Our providers all
+emit a Ready, which is why nothing caught it; that is the shape a first adapter
+has, not an exotic one. The reducer is right and fixture-verified. The sink now
+publishes the transition with `confirmed: "not-needed"`, the spec's own wording
+for a call that "transitions directly to `running`".
+
+**26 was wrong.** "Actions on a non-existent channel **MUST** be silently
+ignored with no echo" (`docs/research.md` §506). The pinned overlay is real and
+it is what the spec asks for; echoing would break a MUST to fix a symptom.
+
+**27 was wrong.** `RootState.activeSessions` is the "number of active
+(**non-disposed**) sessions on the server" — `len(self._sessions)`, which is
+what we publish. Counting only sessions with a running turn would have been the
+regression.
+
+**`terminalCommandPrefix` is implemented.** It was advertised behind a real
+backend and acted on nowhere, so the input box promised a shortcut that silently
+went to the agent instead. `!command` now runs in a one-shot terminal claimed by
+the session, reported as a tool call — which is what it is, something with an
+input and an output, and the shape that can carry `_meta.ptyTerminal`. The
+advertisement and the behaviour read the same constant, so the host cannot
+promise a shortcut it does not honour.
+
+Both refutations have tests, so nobody "fixes" them later.
+
+The original findings:
 
 A tool call that goes Start → Complete with no Ready is silently swallowed
 (latent: our providers always emit a Ready). A `dispatchAction` to an unknown
@@ -302,11 +333,8 @@ the protocol. `SessionState.serverTools` is rendered by nothing in any build.
 danger is the format, not the feature, so there is no version of it that is safe
 behind a flag.
 
-**Advertised and unimplemented, which is worse than absent:**
-`terminalCommandPrefix: "!"` makes the input box promise a terminal command that
-never runs. Either implement it or stop advertising it — currently we only
-advertise it behind a real terminal backend, which is the right shape, but the
-demo now ships one.
+**Advertised and unimplemented, which is worse than absent:** ~~`terminalCommandPrefix`~~
+— implemented, see 2E.
 
 ---
 

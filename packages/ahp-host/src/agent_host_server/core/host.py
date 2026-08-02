@@ -69,11 +69,12 @@ from agent_host_server.core.terminals import (
     TerminalBackend,
     TerminalProcess,
     TerminalRequest,
+    TerminalSessionClaim,
     claim_from_wire,
     terminal_dispatch_rejection,
     trim_scrollback,
 )
-from agent_host_server.core.turn import TurnRunner
+from agent_host_server.core.turn import ActionTurnSink, TurnRunner
 from agent_host_server.core.versions import DEFAULT_SUPPORTED_VERSIONS, negotiate
 from agent_host_server.core.watches import (
     DEFAULT_COALESCE_SECONDS,
@@ -134,6 +135,11 @@ _MAX_PAGE = 200
 #: What a session is called before anything names it. The reference host's own
 #: string, so a client that special-cases it still recognises ours.
 _DEFAULT_SESSION_TITLE: Final = "New Session"
+
+#: "Currently the standardized convention is `"!"`". Advertised in `initialize`
+#: and acted on in `_start_turn` -- from the same constant, so the host cannot
+#: promise a shortcut it does not honour.
+TERMINAL_COMMAND_PREFIX: Final = "!"
 
 #: And what a chat is called. The DEFAULT chat used to be given the session's
 #: title instead, which is a different thing: a chat tab reading "New Session"
@@ -652,6 +658,16 @@ def _published_title(state: Any) -> str:
         if isinstance(title, str) and title:
             return title
     return _DEFAULT_SESSION_TITLE
+
+
+def _first_working_directory(state: Any) -> str | None:
+    """The session's first working directory, as a URI, or None."""
+    if not isinstance(state, Mapping):
+        return None
+    directories = state.get("workingDirectories")
+    if not isinstance(directories, list):
+        return None
+    return next((d for d in directories if isinstance(d, str)), None)
 
 
 def _promotion_rank(bits: int) -> int:
@@ -1179,12 +1195,12 @@ class Host:
             # does NOT re-read them on reconnect -- changing them needs a
             # window reload, not just a host restart.
             result["completionTriggerCharacters"] = list(self.completion_trigger_characters)
-        if self.terminals.__class__ is not RefusingTerminalBackend:
+        if self._advertised_prefix():
             # "Absence means the host does not support command prefixes."
             # Advertised only behind a real backend: with the refusing default,
             # `!ls` would render as a terminal request this host then declines,
             # turning a working input into a dead end.
-            result["terminalCommandPrefix"] = "!"
+            result["terminalCommandPrefix"] = TERMINAL_COMMAND_PREFIX
         return result
 
     async def _subscribe(self, connection: Connection, params: Mapping[str, Any]) -> dict[str, Any]:
@@ -3828,8 +3844,140 @@ class Host:
                 customization_id, bool(action.get("enabled"))
             )
 
+    def _terminal_command(self, action: Mapping[str, Any]) -> str | None:
+        """The command a `!`-prefixed message asks for, if this host runs them.
+
+        "Prefix that the host recognizes at the start of a user `Message.text`
+        as a shorthand for executing the remainder as a terminal command."
+        Advertised in `initialize` behind a real backend -- and until now
+        advertised and not implemented, which is worse than absent: the input
+        box promises a shortcut that silently goes to the agent instead.
+        """
+        if TERMINAL_COMMAND_PREFIX not in self._advertised_prefix():
+            return None
+        message = action.get("message")
+        text = message.get("text") if isinstance(message, Mapping) else None
+        if not isinstance(text, str) or not text.startswith(TERMINAL_COMMAND_PREFIX):
+            return None
+        command = text[len(TERMINAL_COMMAND_PREFIX) :].strip()
+        return command or None
+
+    def _advertised_prefix(self) -> str:
+        """`!` when a real backend is installed, else the empty string.
+
+        Read from the same condition `initialize` publishes, so the two cannot
+        say different things.
+        """
+        return (
+            TERMINAL_COMMAND_PREFIX
+            if self.terminals.__class__ is not RefusingTerminalBackend
+            else ""
+        )
+
+    async def _run_terminal_command(
+        self, session: _Session, channel: str, action: Mapping[str, Any], command: str
+    ) -> None:
+        """Execute a `!command` and report it as a tool call on the chat.
+
+        A tool call rather than a bare text part, for two reasons: it is what
+        the thing IS -- something ran, with an input and an output -- and it is
+        the shape that carries `_meta.ptyTerminal`, which is what makes a client
+        render a terminal instead of a paragraph of escape sequences.
+
+        The terminal is created and disposed here rather than being left on the
+        session. `!ls` is a one-shot; a peer that wants a terminal it can type
+        into calls `createTerminal`.
+        """
+        turn_id = action.get("turnId")
+        if not isinstance(turn_id, str):
+            return
+        sink = ActionTurnSink(
+            self.sequencer,
+            channel,
+            turn_id,
+            self.pending,
+            session.uri,
+            lambda: self._mirror_summary(session),
+        )
+        call_id = f"terminal-{uuid.uuid4()}"
+        started = time.monotonic()
+        await sink.tool_call_started(
+            call_id,
+            "terminal",
+            {"command": command},
+            display_name=command,
+            intention=f"Run {command!r}",
+        )
+
+        # A session claim, tied to the turn and the call that produced it: this
+        # terminal belongs to the command, not to a client, so it dies with the
+        # session rather than with whoever happened to type the `!`.
+        claim = TerminalSessionClaim(session.uri, turn_id, call_id)
+        chunks: list[bytes] = []
+        terminal_uri = f"ahp-terminal:/{uuid.uuid4()}"
+        request = TerminalRequest(
+            channel=terminal_uri,
+            claim=claim,
+            name=command,
+            # The session's own first working directory, so `!ls` lists what the
+            # user is looking at rather than wherever the host happens to run.
+            cwd=_first_working_directory(self.sequencer.state_of(session.uri)),
+            command=["/bin/sh", "-c", command],
+        )
+        try:
+            process = await self.terminals.create(request, chunks.append)
+        except Exception as exc:
+            await sink.tool_call_completed(
+                call_id,
+                {"content": [{"type": "text", "text": f"{type(exc).__name__}: {exc}"}]},
+                success=False,
+                past_tense_message=f"Could not run {command!r}",
+            )
+            await self._settle_turn(session, channel, turn_id, started)
+            return
+
+        code = await process.wait()
+        # Decoded with `replace`: a command that writes invalid UTF-8 -- which
+        # any binary output is -- must not take the turn down with it.
+        output = b"".join(chunks).decode("utf-8", "replace")
+        with contextlib.suppress(Exception):
+            await process.kill()
+        await sink.tool_call_completed(
+            call_id,
+            {"content": [{"type": "text", "text": output}]},
+            success=code == 0,
+            past_tense_message=f"Ran {command!r}" + ("" if code == 0 else f" (exit {code})"),
+        )
+        await self._settle_turn(session, channel, turn_id, started)
+
+    async def _settle_turn(
+        self, session: _Session, channel: str, turn_id: str, started: float
+    ) -> None:
+        """Complete a turn the host ran itself, and do the turn-end chores."""
+        await self.sequencer.publish(
+            channel,
+            {
+                "type": "chat/turnComplete",
+                "turnId": turn_id,
+                "duration": max(0, int((time.monotonic() - started) * 1000)),
+            },
+        )
+        self._spawn(self._mark_unread(session))
+        self._spawn(self._drain_queue(session, channel))
+        with contextlib.suppress(Exception):
+            await self._mirror_summary(session)
+
     async def _start_turn(self, session: _Session, channel: str, action: Mapping[str, Any]) -> None:
         """Run *action* as a turn on *channel*."""
+        command = self._terminal_command(action)
+        if command is not None:
+            # Never reaches the provider. The user asked the HOST to run a
+            # command; handing it to an agent as a message beginning with `!`
+            # is what the prefix exists to stop.
+            session.turn = asyncio.create_task(
+                self._run_terminal_command(session, channel, action, command)
+            )
+            return
         await self._seed_title(session, channel, action)
         runner = TurnRunner(
             self.sequencer,

@@ -39,6 +39,9 @@ no model in here — you write a provider, and routing is yours.
   (`session/inputNeeded`, unread, activity) that nothing else in the stack
   enforces; `createSession.fork`; tool calls with confirmation, client-executed
   tools, and elicitation.
+- **`terminalCommandPrefix`.** `!command` runs in a one-shot terminal claimed
+  by the session and is reported as a tool call. It was advertised and acted on
+  nowhere, so the input box promised a shortcut that silently went to the agent.
 - **A chat catalogue that keeps up.** `SessionState.chats[]` is mirrored from
   the chat channels, so chat tabs show real titles, statuses and timestamps
   instead of whatever they were created with; and the default chat is called
@@ -142,6 +145,10 @@ feature look identical:
 - Six wire shapes a client silently dropped, and a further six sequencer and
   reducer defects found by differential audit against the reference.
 - A failed turn rendered `Error: (undefined) …` — `errorType` is required.
+- A tool call that went straight from start to completion was **silently
+  dropped** and cancelled when the turn ended — the shape a first provider has,
+  missing only the `chat/toolCallReady` transition that the confirmation and
+  client-tool paths happened to publish for their own reasons.
 - `changeKind` is the changeset's *identity* in the client, so two changesets
   sharing one kind collapse into one.
 - A changeset is a **record** of changes already made, not a proposal: clients
