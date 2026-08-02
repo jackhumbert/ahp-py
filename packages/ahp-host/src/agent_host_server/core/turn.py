@@ -26,6 +26,7 @@ from agent_host_server.provider.base import (
     ClientToolCall,
     InputOutcome,
     InputRequest,
+    ModelSelection,
     ToolConfirmation,
     ToolConfirmationOutcome,
     ToolResult,
@@ -401,6 +402,14 @@ class ActionTurnSink:
         )
 
 
+def _agent_uri(value: Any) -> str | None:
+    """`AgentSelection.uri`, which is the whole of that type."""
+    if isinstance(value, Mapping):
+        uri = value.get("uri")
+        return uri if isinstance(uri, str) else None
+    return None
+
+
 def _encoded_tool_input(value: Any) -> Any:
     """`ToolInput = string | ContentRef`, so a bare object is not valid.
 
@@ -465,7 +474,15 @@ class TurnRunner:
         text = message.get("text") if isinstance(message, Mapping) else None
         try:
             await agent_session.send_user_message(
-                UserMessage(text=text if isinstance(text, str) else "", raw=message),
+                UserMessage(
+                    text=text if isinstance(text, str) else "",
+                    raw=message,
+                    # Lifted out of `raw` and named. The client sends both on
+                    # every turn; leaving them buried meant no adapter could
+                    # find them without knowing the wire format.
+                    model=ModelSelection.from_wire(message.get("model")),
+                    agent_uri=_agent_uri(message.get("agent")),
+                ),
                 sink,
             )
         except Exception as exc:

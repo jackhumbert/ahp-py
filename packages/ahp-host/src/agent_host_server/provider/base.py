@@ -39,6 +39,7 @@ __all__ = [
     "InputRequest",
     "ManagesMcpServers",
     "ModelInfo",
+    "ModelSelection",
     "ResumableAgentProvider",
     "SessionDescription",
     "SessionPublisher",
@@ -155,11 +156,49 @@ class AgentInfo:
 
 
 @dataclass(frozen=True)
+class ModelSelection:
+    """`ModelSelection` -- the model the USER picked for this message.
+
+    Distinct from :class:`ModelInfo`, which is a model the host OFFERS. This is
+    the answer to the picker.
+    """
+
+    id: str
+    #: Model-specific values from the model's own `configSchema`. JSON
+    #: primitives: mostly strings, sometimes numbers or booleans, carried
+    #: through as-is.
+    config: Mapping[str, Any] = field(default_factory=dict)
+
+    @classmethod
+    def from_wire(cls, value: Any) -> ModelSelection | None:
+        if not isinstance(value, Mapping):
+            return None
+        identifier = value.get("id")
+        if not isinstance(identifier, str):
+            return None
+        config = value.get("config")
+        return cls(id=identifier, config=dict(config) if isinstance(config, Mapping) else {})
+
+
+@dataclass(frozen=True)
 class UserMessage:
     """One user turn request, in provider terms."""
 
     text: str
     raw: Mapping[str, Any] = field(default_factory=dict)
+    #: The model the user picked, if any. **Carried, not obeyed.** This host is
+    #: a courier: it hands the selection to the provider and never decides what
+    #: to do with it. An adapter that fronts several models reads this; one
+    #: that fronts a single model ignores it. Absent means "the host's default
+    #: applies", which is the spec's own wording.
+    #:
+    #: It arrived on every turn and was dropped on the floor, surviving only as
+    #: an unnamed key inside `raw` -- so changing the model in the picker
+    #: appeared to work, because the state round-tripped, and did nothing.
+    model: ModelSelection | None = None
+    #: `AgentSelection` -- the custom agent the user picked, as a URI matching
+    #: an `AgentCustomization.uri`. Same courier rule.
+    agent_uri: str | None = None
 
 
 @dataclass(frozen=True)
