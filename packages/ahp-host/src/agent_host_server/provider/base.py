@@ -467,6 +467,26 @@ class HandlesCustomizations(Protocol):
 
 
 @runtime_checkable
+class TruncatesHistory(Protocol):
+    """An agent session that can forget part of its own conversation.
+
+    The reducer drops the turns from the state every client can see, so
+    edit-and-resend *looks* right without this. What it cannot do is make the
+    agent forget them -- and an agent that still remembers a transcript the user
+    was shown being rewound is the most dangerous of these gaps, because the
+    user was told something untrue and will act on it.
+
+    A provider that cannot truncate should not implement this. The host then
+    leaves the state alone rather than pretending: see
+    `guide/writing-a-provider.md`.
+    """
+
+    async def history_truncated(self, chat: str, turn_id: str | None) -> None:
+        """Forget everything after *turn_id*, or everything if it is None."""
+        ...
+
+
+@runtime_checkable
 class TurnSink(Protocol):
     """What a provider may report while a turn runs.
 

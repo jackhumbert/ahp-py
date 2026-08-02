@@ -173,6 +173,10 @@ you:
   Steering messages are *not* consumed: they are meant to be injected into the
   running turn, which only a provider can do.
 
+- **The chat catalogue.** `SessionState.chats[]` is kept in step with each
+  chat channel, so a client's chat tabs show real titles, statuses and
+  timestamps rather than whatever they were created with.
+
 If you want to say something better than the tool's name, call
 `context.activity_changed("Editing core.py")` — it is on `AgentSessionContext`
 and works outside a turn too. Note the host clears the activity when a tool call
@@ -184,6 +188,42 @@ The three suspending methods are the interesting ones — see
 turn until a human answers, and they raise `asyncio.CancelledError` if the turn
 ends first, which is the same way ordinary cancellation reaches you. An adapter
 that already handles cancellation needs no new code for them.
+
+## Truncation, and the one thing you must not fake
+
+`chat/truncated` is how edit-and-resend works: a client drops the turns after a
+point and sends a new message. The reducer rewrites the state, so it *looks*
+right whatever your provider does — and if your agent still remembers those
+turns, the user has been shown a conversation being rewound that was not.
+
+So the host refuses `chat/truncated` unless the session implements
+`history_truncated`:
+
+```python
+from agent_host_server.provider.base import TruncatesHistory
+
+
+class ForgetfulSession:
+    def __init__(self) -> None:
+        self.history: list[str] = []
+
+    async def history_truncated(self, chat: str, turn_id: str | None) -> None:
+        """Forget everything after `turn_id`, or everything if it is None."""
+        if turn_id is None:
+            self.history.clear()
+
+
+assert isinstance(ForgetfulSession(), TruncatesHistory)  # structural, as always
+```
+
+The refusal is stricter than the spec, which gates the action on nothing. It is
+deliberate: a visible refusal beats a silent lie, and this is the only place in
+the protocol where getting it wrong actively misinforms the user rather than
+merely underserving them.
+
+If there is a turn running when truncation arrives, the host cancels it — "if
+there is an active turn it is silently dropped and the chat status returns to
+`idle`" — so your `cancel` is called as usual.
 
 ## What the host does not do for you
 

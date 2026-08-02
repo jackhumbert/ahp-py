@@ -241,7 +241,32 @@ is explicitly "no usage, no gauge". And no sink method for streaming tool
 arguments or progressive output, so a long command shows a static row then dumps
 everything at once.
 
-### 2D. Chat tabs and truncation — ranked 9, 10, 17
+### 2D. Chat tabs and truncation — ranked 9, 10, 17 — **done**
+
+The `session/chatUpdated` finding was bigger than "renaming is a dead button".
+The action is server-only, and the catalogue entry was written once at
+`session/chatAdded` and never touched again — so `SessionState.chats[]`, which
+is what a client renders its chat tabs from, showed every chat idle, unnamed and
+stamped with the moment it was created however much work happened inside it.
+`ChatState` "inlines (denormalizes) every field" the entry carries, so the two
+can disagree and only the host can stop them. `_mirror_chats` is the chat-level
+counterpart of `_mirror_summary`, and it runs *before* the summary's early
+return: a chat's own title can move without the session summary moving.
+
+The default chat is now called "New Chat" like every other chat. It was given
+`session.title` — so its tab read "New Session", the name of the thing that
+contains it. `ChatSummary.title` is REQUIRED, so it could not simply be omitted.
+
+Truncation is refused for a provider that cannot forget. The reducer drops the
+turns whatever the provider does, so edit-and-resend looks right while the agent
+goes on remembering — the one gap in this list where the user is actively
+misinformed rather than merely underserved. `TruncatesHistory` is the opt-in;
+the host also cancels a running turn ("if there is an active turn it is silently
+dropped"), and reads `turnId` exactly as the reducer does, because an absent key
+and an explicit null mean different things and collapsing them would produce
+this same defect with the sides swapped.
+
+The original findings:
 
 `session/chatUpdated` is never emitted, so renaming a chat is a dead button. The
 default chat is seeded with a non-empty title, which pins its tab. And

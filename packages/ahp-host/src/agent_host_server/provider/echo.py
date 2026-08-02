@@ -143,6 +143,8 @@ class EchoSession:
         self._cancelled = False
         #: What a client has toggled, for tests and for the demo host's log.
         self.toggled: dict[str, bool] = {}
+        #: `(chat, turnId)` for every truncation, same purpose.
+        self.truncated: list[tuple[str, str | None]] = []
 
     async def describe(self) -> SessionDescription:
         """Contribute a fully-populated customization tree, when asked to.
@@ -337,6 +339,17 @@ class EchoSession:
 
     async def cancel(self, reason: str | None = None) -> None:
         self._cancelled = True
+
+    async def history_truncated(self, chat: str, turn_id: str | None) -> None:
+        """Forget everything after *turn_id*, or everything if it is None.
+
+        Echo keeps no history -- each message is answered from itself -- so
+        there is nothing to drop, and this is recorded rather than done. It is
+        implemented anyway because the host REFUSES `chat/truncated` for a
+        provider that does not: a transcript the client rewinds while the agent
+        still remembers it tells the user something untrue.
+        """
+        self.truncated.append((chat, turn_id))
 
     async def aclose(self) -> None:
         self._cancelled = True

@@ -96,6 +96,7 @@ from agent_host_server.provider.base import (
     HandlesCustomizations,
     ManagesMcpServers,
     SessionPublisher,
+    TruncatesHistory,
 )
 from agent_host_server.reducers.clock import now_iso
 from agent_host_server.transport.base import Transport
@@ -133,6 +134,22 @@ _MAX_PAGE = 200
 #: What a session is called before anything names it. The reference host's own
 #: string, so a client that special-cases it still recognises ours.
 _DEFAULT_SESSION_TITLE: Final = "New Session"
+
+#: And what a chat is called. The DEFAULT chat used to be given the session's
+#: title instead, which is a different thing: a chat tab reading "New Session"
+#: is a tab labelled with the name of the thing that contains it.
+_DEFAULT_CHAT_TITLE: Final = "New Chat"
+
+#: The mutable half of a `ChatSummary`. `resource` is identity and "MUST NOT be
+#: carried in `changes`"; `origin` never changes after creation.
+_CHAT_SUMMARY_FIELDS: Final = (
+    "title",
+    "status",
+    "activity",
+    "modifiedAt",
+    "interactivity",
+    "workingDirectories",
+)
 
 #: How long a title seeded from the first message may be. The session list is a
 #: narrow column; past this it is truncated by the renderer anyway, and a title
@@ -566,6 +583,11 @@ class _Session:
     #: The summary the root channel was last told about. `root/sessionSummaryChanged`
     #: carries only fields that changed, so the host has to remember what it sent.
     published_summary: dict[str, Any] = field(default_factory=dict)
+    #: The same, per chat, for `session/chatUpdated`. Without it the entries in
+    #: `SessionState.chats[]` were written once at `session/chatAdded` and never
+    #: again, so a client rendering its chat tabs from that list showed every
+    #: chat idle, unnamed and stamped with its creation time forever.
+    published_chats: dict[str, dict[str, Any]] = field(default_factory=dict)
     #: Handed to the provider, and kept here so the host can publish on the
     #: session's behalf too.
     publisher: SessionPublisher | None = None
@@ -1292,6 +1314,11 @@ class Host:
         changed matters: the client caches a session list and a no-op
         notification per streamed delta would be a notification per token.
         """
+        # BEFORE the early return below. A chat's own title or activity can
+        # change without moving anything the session summary projects, and
+        # gating the chat catalogue on the session summary would drop exactly
+        # those updates.
+        await self._mirror_chats(session)
         current = self._project_summary(session)
         changes = {
             key: value
@@ -1308,6 +1335,37 @@ class Host:
             "root/sessionSummaryChanged",
             {"channel": ROOT_URI, "session": session.uri, "changes": changes},
         )
+
+    async def _mirror_chats(self, session: _Session) -> None:
+        """Bring `SessionState.chats[]` back in step with the chat channels.
+
+        `ChatState` "inlines (denormalizes) every field" the catalogue entry
+        carries, which means the two can disagree and only the host can stop
+        them. Nothing did: the entry was written once at `session/chatAdded` and
+        never touched again, so a client that renders its chat tabs from the
+        catalogue -- which is what the catalogue is for -- showed every chat
+        idle, unnamed, and stamped with the moment it was created.
+
+        Partial, like the session summary it mirrors: "only fields present in
+        `changes` are written; omitted fields are preserved", and `resource`
+        "MUST NOT be carried in `changes`" because it is identity, not data.
+        """
+        for chat_uri in [session.chat_uri, *sorted(session.chat_uris - {session.chat_uri})]:
+            state = self.sequencer.state_of(chat_uri)
+            if not isinstance(state, Mapping):
+                continue
+            current = {
+                key: state[key] for key in _CHAT_SUMMARY_FIELDS if state.get(key) is not None
+            }
+            published = session.published_chats.get(chat_uri, {})
+            changes = {k: v for k, v in current.items() if published.get(k) != v}
+            if not changes:
+                continue
+            session.published_chats[chat_uri] = current
+            await self.sequencer.publish(
+                session.uri,
+                {"type": "session/chatUpdated", "chat": chat_uri, "changes": changes},
+            )
 
     def _session_for(self, channel: str) -> _Session | None:
         """The session owning a session, chat or annotations channel.
@@ -2140,7 +2198,7 @@ class Host:
         created_at = now_iso()
         state: dict[str, Any] = {
             "resource": chat_uri,
-            "title": "New Chat",
+            "title": _DEFAULT_CHAT_TITLE,
             "status": _STATUS_IDLE,
             "modifiedAt": created_at,
             # A forked CHAT inherits the source chat's transcript, exactly as a
@@ -2161,6 +2219,11 @@ class Host:
         self._channel_created(connection, chat_uri, session=session_uri)
         session.chat_uris.add(chat_uri)
 
+        session.published_chats[chat_uri] = {
+            "title": state["title"],
+            "status": _STATUS_IDLE,
+            "modifiedAt": created_at,
+        }
         await self.sequencer.publish(
             session_uri,
             {
@@ -2794,6 +2857,26 @@ class Host:
                 return None if entry.reviewable else "this changeset is not reviewable"
         return "unknown changeset"
 
+    def _validate_truncate(self, channel: str) -> str | None:
+        """Refuse to rewind a transcript the agent will still remember.
+
+        The reducer drops the turns, so edit-and-resend *looks* right without a
+        provider that can forget them -- and that is the problem. The user is
+        shown a conversation being rewound, acts as though it was, and the agent
+        answers from a history nobody can see any more.
+
+        Refusing is stricter than the spec, which gates `chat/truncated` on
+        nothing. It is the same choice made everywhere else here: a visible
+        refusal beats a silent lie, and this is the one gap in the parity list
+        where the user is actively misinformed rather than merely underserved.
+        """
+        session = next((s for s in self._sessions.values() if channel in s.chat_uris), None)
+        if session is None:
+            return None
+        if isinstance(session.agent_session, TruncatesHistory):
+            return None
+        return "this agent cannot forget part of a conversation"
+
     def _validate_root_config(
         self, connection: Connection, action: Mapping[str, Any]
     ) -> str | None:
@@ -3150,7 +3233,11 @@ class Host:
             chat_uri,
             {
                 "resource": chat_uri,
-                "title": session.title,
+                # A CHAT's name, not the session's. `ChatState` inlines every
+                # field of the catalogue entry, so the two have to agree -- and
+                # `session.title` here made the default chat's tab read "New
+                # Session", which is the name of the thing that contains it.
+                "title": _DEFAULT_CHAT_TITLE,
                 "status": _STATUS_IDLE,
                 "modifiedAt": created_at,
                 # THE point of a fork. The client reads the transcript off the
@@ -3242,7 +3329,15 @@ class Host:
         )
         chat_summary = {
             "resource": session.chat_uri,
-            "title": session.title,
+            # Not `session.title`. A chat tab reading "New Session" is a tab
+            # labelled with the name of the thing that contains it, and
+            # `ChatSummary.title` is REQUIRED so it cannot simply be omitted.
+            "title": _DEFAULT_CHAT_TITLE,
+            "status": _STATUS_IDLE,
+            "modifiedAt": session.created_at,
+        }
+        session.published_chats[session.chat_uri] = {
+            "title": _DEFAULT_CHAT_TITLE,
             "status": _STATUS_IDLE,
             "modifiedAt": session.created_at,
         }
@@ -3462,6 +3557,9 @@ class Host:
         if action_type == "changeset/filesReviewChanged":
             return self._validate_review(channel)
 
+        if action_type == "chat/truncated":
+            return self._validate_truncate(channel)
+
         if action_type == "session/configChanged":
             return self._validate_session_config(connection, channel, action)
 
@@ -3525,6 +3623,8 @@ class Host:
             await self._start_turn(session, channel, action)
         elif action_type == "chat/pendingMessageSet":
             await self._drain_queue(session, channel)
+        elif action_type == "chat/truncated":
+            await self._react_to_truncate(session, channel, action)
         elif action_type == "chat/turnCancelled" and session.turn is not None:
             session.turn.cancel()
             if session.agent_session is not None:
@@ -3739,6 +3839,43 @@ class Host:
             lambda: self._mirror_summary(session),
         )
         session.turn = asyncio.create_task(self._run_turn(session, runner, action))
+
+    async def _react_to_truncate(
+        self, session: _Session, channel: str, action: Mapping[str, Any]
+    ) -> None:
+        """Make the agent forget what the client just stopped showing.
+
+        Two halves. "If there is an active turn it is silently dropped and the
+        chat status returns to `idle`" -- the reducer does the status, this does
+        the actual task, which would otherwise keep publishing deltas into a
+        transcript that no longer has a turn to hang them on. Then the provider
+        is told, because the reducer can only rewrite state and only the
+        provider owns the agent's memory.
+
+        `_validate_truncate` has already refused this for a provider that cannot
+        forget, so reaching here means one can.
+        """
+        if session.turn is not None and not session.turn.done():
+            session.turn.cancel()
+            if session.agent_session is not None:
+                with contextlib.suppress(Exception):
+                    await session.agent_session.cancel("history truncated")
+        if not isinstance(session.agent_session, TruncatesHistory):
+            return
+        # Read EXACTLY as the reducer reads it. An absent key clears
+        # everything; an explicit null is not the same thing -- the reducer
+        # searches for a turn with that id, finds none and no-ops -- and a
+        # string truncates after that turn. Collapsing null into absent here
+        # would have the agent forget a whole conversation the client still
+        # shows, which is the same defect as this one with the sides swapped.
+        if "turnId" not in action:
+            target: str | None = None
+        elif isinstance(action["turnId"], str):
+            target = action["turnId"]
+        else:
+            return
+        with contextlib.suppress(Exception):
+            await session.agent_session.history_truncated(channel, target)
 
     async def _drain_queue(self, session: _Session, channel: str) -> None:
         """Consume the next queued message, if the chat is free to run it.

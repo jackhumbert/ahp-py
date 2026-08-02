@@ -39,6 +39,10 @@ no model in here — you write a provider, and routing is yours.
   (`session/inputNeeded`, unread, activity) that nothing else in the stack
   enforces; `createSession.fork`; tool calls with confirmation, client-executed
   tools, and elicitation.
+- **A chat catalogue that keeps up.** `SessionState.chats[]` is mirrored from
+  the chat channels, so chat tabs show real titles, statuses and timestamps
+  instead of whatever they were created with; and the default chat is called
+  "New Chat" rather than being given the session's name.
 - **Turn fidelity.** Queued follow-ups are consumed as soon as the chat goes
   idle instead of sitting in their chip forever; response parts are segmented by
   kind, so prose written after a tool call renders below it; `chat/usage` makes
@@ -112,6 +116,11 @@ no model in here — you write a provider, and routing is yours.
 
 ### Security
 
+- **`chat/truncated` is refused unless the agent can actually forget.** The
+  reducer drops the turns whatever the provider does, so edit-and-resend looks
+  right while the agent goes on remembering — the user is shown a conversation
+  being rewound that was not. Implement `TruncatesHistory` to opt in. Stricter
+  than the spec, deliberately: a visible refusal beats a silent lie.
 - **Every dangerous surface is off by default.** No filesystem access without a
   resource provider; no writes without a second, separate `writable=True`; no
   command execution without a terminal backend, which is constructed by name and
