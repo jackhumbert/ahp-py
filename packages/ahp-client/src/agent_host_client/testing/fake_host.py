@@ -56,7 +56,7 @@ class FakeHost:
         *,
         agents: list[JsonObject] | None = None,
         protocol_version: str = "0.7.0",
-        server_seq: int = 1,
+        server_seq: int = 0,
     ) -> None:
         self.protocol_version = protocol_version
         self.root_state: JsonObject = {"agents": agents or [], "activeSessions": 0}
@@ -103,9 +103,16 @@ class FakeHost:
     # ── pushing ──────────────────────────────────────────────────────────────
 
     def next_server_seq(self) -> int:
-        seq = self._server_seq
+        """Allocate the next action's number.
+
+        `_server_seq` is the last number ISSUED, so a snapshot reporting it as
+        `fromSeq` is strictly below every subsequent action -- which is the
+        protocol's only formal ordering rule. Reporting the *next* number
+        instead makes the first action look already-included, and a client that
+        honours `fromSeq` correctly then drops it.
+        """
         self._server_seq += 1
-        return seq
+        return self._server_seq
 
     async def push(
         self,

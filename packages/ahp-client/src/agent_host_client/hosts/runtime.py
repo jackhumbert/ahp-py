@@ -440,11 +440,25 @@ class HostRuntime:
         return "snapshot", acknowledged
 
     async def _drain(self, events: BroadcastReader[ClientEvent]) -> None:
+        async def next_event() -> ClientEvent | None:
+            """End-of-stream as a value, not an exception.
+
+            A `StopAsyncIteration` raised inside a racing task finishes a task
+            nobody retrieves, which asyncio then reports at an unrelated moment
+            with a stack pointing nowhere useful.
+            """
+            try:
+                return await events.__anext__()
+            except StopAsyncIteration:
+                return None
+
         async with link(self._shutdown, self._manual) as waiters:
             while True:
                 try:
-                    event = await race(events.__anext__(), waiters)
-                except (StopAsyncIteration, asyncio.CancelledError):
+                    event = await race(next_event(), waiters)
+                except asyncio.CancelledError:
+                    return
+                if event is None:
                     return
                 self._track(event)
                 self._events.publish(event)

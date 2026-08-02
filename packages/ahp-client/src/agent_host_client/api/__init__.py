@@ -1,0 +1,64 @@
+"""The ergonomic surface. Everything below it stays reachable."""
+
+from __future__ import annotations
+
+from agent_host_client.api.approvals import (
+    ApprovalPolicy,
+    approve_all,
+    auto,
+    deny_all,
+    resolve_policy,
+)
+from agent_host_client.api.client import Chat, Client, ClientContext, Session, TurnStream, connect
+from agent_host_client.api.events import (
+    Delta,
+    InputRequested,
+    Reasoning,
+    Reconnected,
+    ResponsePartAdded,
+    TitleChanged,
+    ToolCallCompleted,
+    ToolCallReady,
+    ToolCallResultReview,
+    ToolCallStarted,
+    TurnCancelled,
+    TurnCompleted,
+    TurnEvent,
+    TurnFailed,
+    TurnStarted,
+    UnknownEvent,
+    Usage,
+    event_for,
+)
+
+__all__ = [
+    "ApprovalPolicy",
+    "Chat",
+    "Client",
+    "ClientContext",
+    "Delta",
+    "InputRequested",
+    "Reasoning",
+    "Reconnected",
+    "ResponsePartAdded",
+    "Session",
+    "TitleChanged",
+    "ToolCallCompleted",
+    "ToolCallReady",
+    "ToolCallResultReview",
+    "ToolCallStarted",
+    "TurnCancelled",
+    "TurnCompleted",
+    "TurnEvent",
+    "TurnFailed",
+    "TurnStarted",
+    "TurnStream",
+    "UnknownEvent",
+    "Usage",
+    "approve_all",
+    "auto",
+    "connect",
+    "deny_all",
+    "event_for",
+    "resolve_policy",
+]
