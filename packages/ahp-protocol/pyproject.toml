@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "agent-host-protocol"
-version = "0.1.0.dev0"
+version = "0.1.0"
 description = "Wire types, pure reducers and the conformance corpora for the Agent Host Protocol (AHP)."
 readme = "README.md"
 license = "MIT"

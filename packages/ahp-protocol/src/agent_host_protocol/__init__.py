@@ -55,7 +55,7 @@ from agent_host_protocol.versions import (
 
 #: This distribution's own version. Deliberately independent of the protocol's
 #: -- see :data:`UPSTREAM_PROTOCOL_VERSION` for the spec revision vendored here.
-__version__ = "0.1.0.dev0"
+__version__ = "0.1.0"
 
 __all__ = [
     "ACTION_INTRODUCED_IN",

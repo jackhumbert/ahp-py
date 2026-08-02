@@ -39,6 +39,14 @@ git -C "$CHECKOUT" archive "$SPEC_TAG" \
   types/action-origin.generated.ts \
   types/common/actions.ts \
   types/common/errors.ts \
+  types/common/messages.ts \
+  types/common/commands.ts \
+  types/channels-root/commands.ts \
+  types/channels-session/commands.ts \
+  types/channels-chat/commands.ts \
+  types/channels-terminal/commands.ts \
+  types/channels-changeset/commands.ts \
+  types/channels-resource-watch/commands.ts \
   types/channels-session/state.ts \
   schema \
   | tar -x -C "$DEST"
@@ -50,6 +58,18 @@ mv "$DEST/types/version/registry.ts"        "$DEST/ts/registry.ts"
 mv "$DEST/types/action-origin.generated.ts" "$DEST/ts/action-origin.generated.ts"
 mv "$DEST/types/common/actions.ts"          "$DEST/ts/actions.ts"
 mv "$DEST/types/common/errors.ts"           "$DEST/ts/errors.ts"
+# messages.ts carries CommandMap / ServerCommandMap and the notification maps --
+# the authority for "how many commands are there, in which direction". A peer's
+# parity matrix is derived from it rather than from a hand-kept list.
+mv "$DEST/types/common/messages.ts"        "$DEST/ts/messages.ts"
+# Every `*Params` interface, so a peer can derive which commands are pinned to
+# `ahp-root://` instead of remembering. Seventeen of twenty-seven are, and the
+# ten that are not include `completions` -- forcing that one to root silently
+# breaks every @-mention picker.
+mv "$DEST/types/common/commands.ts"        "$DEST/ts/commands.ts"
+for ch in root session chat terminal changeset resource-watch; do
+  mv "$DEST/types/channels-$ch/commands.ts" "$DEST/ts/commands-$ch.ts"
+done
 mv "$DEST/types/channels-session/state.ts"  "$DEST/ts/session-state.ts"
 rm -rf "$DEST/types"
 
