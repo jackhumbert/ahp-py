@@ -117,7 +117,10 @@ def demo_customizations() -> list[dict[str, Any]]:
                 {
                     "type": "rule",
                     "id": "ahs-rule-foxtrot",
-                    "uri": f"{_BASE}/.github/rules/echo.instructions.md",
+                    # Its own file, not a second pointer at echo's. A client
+                    # renders one entry per FILE, so two customizations sharing
+                    # a URI collapse into one and the second silently vanishes.
+                    "uri": f"{_BASE}/.github/rules/foxtrot.instructions.md",
                     "name": "AHS Instruction Foxtrot (globbed)",
                     "description": "A demo instruction scoped to Python files.",
                     "enabled": True,
@@ -146,7 +149,7 @@ def demo_customizations() -> list[dict[str, Any]]:
                 {
                     "type": "skill",
                     "id": "ahs-skill-hotel",
-                    "uri": f"{_BASE}/.github/skills/charlie/SKILL.md",
+                    "uri": f"{_BASE}/.github/skills/hotel/SKILL.md",
                     "name": "AHS Skill Hotel",
                     "description": "A demo skill inside a directory container.",
                     "enabled": True,

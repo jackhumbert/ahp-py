@@ -65,3 +65,16 @@ def test_a_skill_is_a_directory_holding_skill_md() -> None:
     for child in (_ROOT / ".github" / "skills").iterdir():
         assert child.is_dir(), f"{child.name}: a skill is a directory, not a file"
         assert (child / "SKILL.md").is_file(), f"{child.name}/SKILL.md is missing"
+
+
+def test_no_two_customizations_share_a_uri() -> None:
+    """One file, one rendered entry.
+
+    A client builds the tree from what is on disk, so a second customization
+    pointing at a URI another already claims does not render at all -- and
+    nothing anywhere reports an error. That is how the globbed rule went
+    missing from the demo while every test passed.
+    """
+    uris = _uris(demo_customizations())
+    duplicates = {uri for uri in uris if uris.count(uri) > 1}
+    assert not duplicates, f"these URIs are claimed twice: {sorted(duplicates)}"
