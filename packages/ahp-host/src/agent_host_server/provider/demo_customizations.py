@@ -6,7 +6,13 @@ shows VS Code's own built-in customizations.
 The shape is a two-level tree, which is easy to get wrong from the section
 names alone: the top-level ``Customization`` union is only three variants --
 ``plugin``, ``directory`` and ``mcpServer``. Agents, skills, prompts, rules and
-hooks are **children** of a container, never top-level entries. ``ToolDefinition``
+hooks are **children** of a container, never top-level entries.
+
+Every ``uri`` here points at a file that really exists under
+``examples/demo-plugin``, because a client does not take the declared
+``children`` on faith -- VS Code re-expands a plugin by listing ``agents``,
+``commands``, ``rules`` and ``skills`` under the plugin's own URI and reading
+what it finds. A declared child whose URI 404s renders as nothing at all. ``ToolDefinition``
 is not a customization at all; it lives on ``SessionState.serverTools``.
 
 Whether any of this renders for a *remote* host is an open question: VS Code's
@@ -83,7 +89,7 @@ def demo_customizations() -> list[dict[str, Any]]:
                 {
                     "type": "skill",
                     "id": "ahs-skill-charlie",
-                    "uri": f"{_BASE}/.github/skills/charlie.md",
+                    "uri": f"{_BASE}/.github/skills/charlie/SKILL.md",
                     "name": "AHS Skill Charlie",
                     "description": "A demo skill contributed by agent-host-server.",
                     "enabled": True,
@@ -91,7 +97,7 @@ def demo_customizations() -> list[dict[str, Any]]:
                 {
                     "type": "prompt",
                     "id": "ahs-prompt-delta",
-                    "uri": f"{_BASE}/.github/prompts/delta.md",
+                    "uri": f"{_BASE}/.github/commands/delta.md",
                     "name": "AHS Prompt Delta",
                     "description": (
                         "A demo prompt. VS Code hides the Prompts section "
@@ -102,7 +108,7 @@ def demo_customizations() -> list[dict[str, Any]]:
                 {
                     "type": "rule",
                     "id": "ahs-rule-echo",
-                    "uri": f"{_BASE}/.github/instructions/echo.md",
+                    "uri": f"{_BASE}/.github/rules/echo.instructions.md",
                     "name": "AHS Instruction Echo",
                     "description": "A demo instruction/rule, applied to every request.",
                     "enabled": True,
@@ -111,7 +117,7 @@ def demo_customizations() -> list[dict[str, Any]]:
                 {
                     "type": "rule",
                     "id": "ahs-rule-foxtrot",
-                    "uri": f"{_BASE}/.github/instructions/echo.md",
+                    "uri": f"{_BASE}/.github/rules/echo.instructions.md",
                     "name": "AHS Instruction Foxtrot (globbed)",
                     "description": "A demo instruction scoped to Python files.",
                     "enabled": True,
@@ -140,7 +146,7 @@ def demo_customizations() -> list[dict[str, Any]]:
                 {
                     "type": "skill",
                     "id": "ahs-skill-hotel",
-                    "uri": f"{_BASE}/.github/skills/charlie.md",
+                    "uri": f"{_BASE}/.github/skills/charlie/SKILL.md",
                     "name": "AHS Skill Hotel",
                     "description": "A demo skill inside a directory container.",
                     "enabled": True,

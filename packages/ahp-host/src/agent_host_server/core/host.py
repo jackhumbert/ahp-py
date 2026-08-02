@@ -257,16 +257,27 @@ _CHILD_SUFFIXES: Final = {
     ".hook.md": "hook",
 }
 
-#: Containing directory -> customization type. The OTHER half of the
-#: convention, and the one a real client actually uses: `.github/agents/foo.md`
-#: carries its type in the directory, not the filename. Found by pointing a
-#: third-party client at this host and watching every child get dropped for
-#: failing the suffix test.
+#: Containing directory -> customization type, and the one a real client
+#: actually uses: `.github/agents/foo.md` carries its type in the directory,
+#: not the filename.
+#:
+#: The names are **not** the obvious ones, and guessing got two of four wrong.
+#: They are what VS Code's own tests read
+#: (`chat/test/browser/actions/createPluginAction.test.ts`):
+#:
+#:   agents/    -> agent
+#:   commands/  -> prompt   NOT `prompts/`
+#:   rules/     -> rule     NOT `instructions/`
+#:   skills/    -> skill    a DIRECTORY per skill, holding SKILL.md
+#:
+#: `prompts` and `instructions` are kept as aliases because they are what a
+#: reader of the spec would write, and accepting both costs nothing.
 _CHILD_DIRECTORIES: Final = {
     "agents": "agent",
+    "commands": "prompt",
     "prompts": "prompt",
-    "instructions": "rule",
     "rules": "rule",
+    "instructions": "rule",
     "skills": "skill",
     "hooks": "hook",
 }
@@ -1429,7 +1440,15 @@ class Host:
             if not isinstance(entry, Mapping):
                 continue
             name = entry.get("name")
-            if not isinstance(name, str) or entry.get("type") != "file":
+            if not isinstance(name, str):
+                continue
+            if entry.get("type") == "directory":
+                # A skill is a directory holding `SKILL.md`, not a file. Only
+                # that one shape recurses; a general walk would follow a plugin
+                # into whatever it happened to contain.
+                nested = await self._skill_in_directory(connection, plugin, uri, name)
+                if nested is not None:
+                    children.append(nested)
                 continue
             child_uri = f"{uri.rstrip('/')}/{name}"
             try:
@@ -1441,6 +1460,21 @@ class Host:
             if child is not None:
                 children.append(child)
         return children
+
+    async def _skill_in_directory(
+        self, connection: Connection, plugin: Mapping[str, Any], uri: str, name: str
+    ) -> dict[str, Any] | None:
+        """`skills/<name>/SKILL.md` -- the one child shape that is a directory."""
+        skill_uri = f"{uri.rstrip('/')}/{name}/SKILL.md"
+        try:
+            content = await self.read_client_resource(connection, skill_uri)
+        except Exception:
+            return None
+        child = _child_customization(plugin, skill_uri, "SKILL.md", content)
+        if child is not None and not _title_of(content.decode(errors="replace")):
+            # No front-matter name: the directory names the skill.
+            child["name"] = name
+        return child
 
     def _single_file_children(self, plugin: Mapping[str, Any], uri: str) -> list[Any]:
         """A file-shaped plugin's one child: the file, named for the plugin.

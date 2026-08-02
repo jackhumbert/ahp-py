@@ -1,4 +1,5 @@
 ---
 name: AHS Agent Alpha
+description: A demo agent contributed by agent-host-server.
 ---
-A demo agent contributed by agent-host-server. Does nothing; exists to be seen.
+Does nothing. Exists to be seen.
