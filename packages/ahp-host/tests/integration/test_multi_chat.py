@@ -92,8 +92,8 @@ async def _one_turn(
     )
     await client.collect(seconds=0.6)
     state = (await client.request("subscribe", {"channel": chat}))["result"]["snapshot"]["state"]
-    turn_id: str = state["turns"][-1]["id"]
-    return turn_id
+    started: str = state["turns"][-1]["id"]
+    return started
 
 
 class TestCreateChat:

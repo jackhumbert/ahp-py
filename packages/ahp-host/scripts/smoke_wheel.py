@@ -21,6 +21,7 @@ from __future__ import annotations
 import asyncio
 import sys
 from pathlib import Path
+from typing import Any
 
 failures: list[str] = []
 
@@ -145,12 +146,13 @@ try:
                 }
             )
             while True:
-                frame = await asyncio.wait_for(client.receive(), timeout=10)
-                if frame.get("id") != 1:
+                frame: Any = await asyncio.wait_for(client.receive(), timeout=10)
+                if not isinstance(frame, dict) or frame.get("id") != 1:
                     continue
                 if "error" in frame:
                     raise AssertionError(frame["error"])
-                return str((frame.get("result") or {}).get("protocolVersion"))
+                result = frame.get("result")
+                return str(result.get("protocolVersion") if isinstance(result, dict) else None)
         finally:
             serve.cancel()
             await host.aclose()

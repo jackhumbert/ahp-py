@@ -161,7 +161,27 @@ agent's own writes), the list is static rather than derived from live git state
 `computing` so there is no refresh progress, and there is no `turn` changeset so
 "Last Turn Changes" never appears.
 
-### 2B. The session list looks dead — ranked 8, 12, 13, 21
+### 2B. The session list looks dead — ranked 8, 12, 13, 21 — **done**
+
+All four landed. Titles are seeded from the user's first message (the default
+chat only, and never over a client's own rename); `session/activityChanged`
+carries the running tool's display name and is cleared when it finishes,
+including when the turn is cancelled mid-tool; the host clears
+`session/isReadChanged` when the agent answers a session nobody is looking at;
+and `InProgress` promotes from a side chat like `InputNeeded` and `Error`
+already did — by **rank** rather than by iteration order, since the non-default
+chats are walked in URI order and first-wins would hand the activity string to
+whichever sorted earliest.
+
+Two things fell out of building it. The mirror seam: activity only renders in
+the session list, which is fed by `root/sessionSummaryChanged`, so publishing to
+the session channel alone would have changed nothing a user can see — the sink
+takes a callback for exactly that, and the turn's ordinary output still is not
+mirrored per action. And `Idle` is now cleared when anything promotes, because
+a session whose default chat is idle and whose side chat is working reported
+`Idle | InProgress` and a client testing either bit was right either way.
+
+The original finding, for the record:
 
 Every session is called **"New Session"**, so with more than one open they are
 indistinguishable. The reference generates a title with a small model, which we

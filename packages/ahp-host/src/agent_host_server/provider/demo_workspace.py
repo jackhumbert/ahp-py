@@ -32,7 +32,11 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
-from agent_host_server.core.changesets import Changeset, ChangesetOperation, FileChange
+from agent_host_server.provider.changes import (
+    Changeset,
+    ChangesetOperation,
+    FileChange,
+)
 
 __all__ = [
     "WORKSPACE_OPERATIONS",

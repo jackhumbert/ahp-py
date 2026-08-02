@@ -29,7 +29,7 @@ from .test_host_end_to_end import FakeClient
 
 pytestmark = pytest.mark.anyio
 
-_SCHEMA = {
+_SCHEMA: dict[str, dict[str, Any]] = {
     "theme": {"type": "string", "title": "Theme", "enum": ["light", "dark"]},
     "verbose": {"type": "boolean", "title": "Verbose"},
     "build": {"type": "string", "title": "Build", "readOnly": True},

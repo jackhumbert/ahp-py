@@ -303,7 +303,7 @@ class TestTerminalsDieWithTheHost:
                 lambda _: None,
             )
             started.add(process._process.pid)  # type: ignore[attr-defined]
-            host._live_terminals[channel] = _LiveTerminal(channel, process)
+            host._live_terminals[channel] = _LiveTerminal(channel, process)  # type: ignore[assignment]
 
         await asyncio.sleep(0.6)
         assert started & children(), "the shells never started"

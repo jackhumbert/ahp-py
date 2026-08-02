@@ -12,6 +12,7 @@ adapter's business, and routing between models stays out of the host.
 from __future__ import annotations
 
 import asyncio
+from typing import Any
 
 import pytest
 
@@ -55,6 +56,7 @@ class TestParsingTheSelection:
 
     def test_junk_off_the_wire_does_not_become_a_selection(self) -> None:
         """It comes off a client-dispatched action, so it may be any JSON."""
+        value: Any
         for value in ({}, {"id": 7}, {"id": None}, [], "gpt-5", 42):
             assert ModelSelection.from_wire(value) is None
 
@@ -106,7 +108,7 @@ class TestItReachesTheProvider:
             )
             while True:
                 message = await asyncio.wait_for(client_transport.receive(), timeout=5)
-                if message.get("id") == 2:
+                if isinstance(message, dict) and message.get("id") == 2:
                     break
             await asyncio.sleep(0.3)
             chat = host.sequencer.state_of("echo:/m1")["chats"][0]["resource"]

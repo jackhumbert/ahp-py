@@ -12,6 +12,10 @@ from typing import Any, Final
 
 from agent_host_server.types import AHP_ERROR_CODES, JSON_RPC_ERROR_CODES
 
+#: Re-exported: this is the module that raises with these, so it is where a
+#: caller looks for them. Explicit, or a strict checker refuses the import.
+__all__ = ["AHP_ERROR_CODES", "JSON_RPC_ERROR_CODES", "AhpError"]
+
 __all__ = [
     "EACCES",
     "ELOOP",

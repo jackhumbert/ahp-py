@@ -16,7 +16,7 @@ from __future__ import annotations
 import json
 import time
 import uuid
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from typing import Any
 
 from agent_host_server.core.pending import PendingRequest, PendingRequests
@@ -35,6 +35,13 @@ from agent_host_server.provider.base import (
 )
 
 __all__ = ["ActionTurnSink", "TurnRunner", "turn_scope"]
+
+#: Called after the sink changes something the *session summary* projects, so
+#: the host can re-mirror it. A turn's ordinary output is deliberately not
+#: mirrored per action -- that would be one root notification per token -- but
+#: activity changes at most once per tool call, and the session list is the only
+#: place it renders.
+SessionChanged = Callable[[], Awaitable[None]]
 
 
 def turn_scope(channel: str, turn_id: str) -> str:
@@ -57,6 +64,7 @@ class ActionTurnSink:
         turn_id: str,
         pending: PendingRequests | None = None,
         session_uri: str | None = None,
+        session_changed: SessionChanged | None = None,
     ) -> None:
         self._sequencer = sequencer
         self._channel = channel
@@ -65,8 +73,10 @@ class ActionTurnSink:
         #: Where `session/inputNeeded` entries are mirrored. Optional so a bare
         #: sink stays constructible in a test without a session around it.
         self._session_uri = session_uri
+        self._session_changed = session_changed
         self._markdown_part_id: str | None = None
         self._reasoning_part_id: str | None = None
+        self._activity: str | None = None
 
     async def _ensure_markdown_part(self) -> str:
         if self._markdown_part_id is None:
@@ -146,6 +156,7 @@ class ActionTurnSink:
         if tool_input is not None:
             action["toolInput"] = _encoded_tool_input(tool_input)
         await self._sequencer.publish(self._channel, action)
+        await self.set_activity(action["displayName"])
 
     async def tool_call_completed(
         self,
@@ -165,6 +176,9 @@ class ActionTurnSink:
             "result": _tool_result(result, success, past_tense_message),
         }
         await self._sequencer.publish(self._channel, action)
+        # Back to the client's fallback rather than to a guess. What the agent
+        # does between tool calls is something only the provider knows.
+        await self.set_activity(None)
 
     async def turn_failed(
         self, message: str, error_type: str = "agent.turn", duration_ms: int = 0
@@ -429,6 +443,30 @@ class ActionTurnSink:
             isinstance(entry, Mapping) and entry.get("clientId") == client_id for entry in clients
         )
 
+    async def set_activity(self, activity: str | None) -> None:
+        """Publish what the session is doing right now, or clear it.
+
+        A session with no activity renders as the client's own literal fallback,
+        "Working...", which is the same for every session in the list. The
+        reference host writes something better here with a small model; we
+        cannot, so the only honest string we have is the tool's own display
+        name -- which the provider already chose for a human to read.
+
+        So this is set when a tool call starts and cleared when it finishes,
+        rather than being invented for the gaps. `activity` is omitted rather
+        than nulled to clear it: the schema says "or `undefined` to clear", and
+        the field is optional.
+        """
+        if self._session_uri is None or activity == self._activity:
+            return
+        self._activity = activity
+        action: dict[str, Any] = {"type": "session/activityChanged"}
+        if activity is not None:
+            action["activity"] = activity
+        await self._sequencer.publish(self._session_uri, action)
+        if self._session_changed is not None:
+            await self._session_changed()
+
     async def _mirror_input_needed(self, request_id: str, request: dict[str, Any]) -> None:
         """Publish one `session/inputNeeded` entry for a parked request."""
         if self._session_uri is None:
@@ -512,24 +550,38 @@ class TurnRunner:
         channel: str,
         pending: PendingRequests | None = None,
         session_uri: str | None = None,
+        session_changed: SessionChanged | None = None,
     ) -> None:
         self._sequencer = sequencer
         self._channel = channel
         self._pending = pending if pending is not None else PendingRequests()
         self._session_uri = session_uri
+        self._session_changed = session_changed
         #: Requests still parked when the turn ended. The caller retracts their
         #: `session/inputNeeded` entries -- not this class, because the turn task
         #: is frequently the one being cancelled and cannot be relied on to
         #: finish another await.
         self.abandoned: list[PendingRequest] = []
+        #: The sink this turn published through, once it has one. The caller
+        #: clears its activity, for the same reason it retracts the requests.
+        self.sink: ActionTurnSink | None = None
 
     async def run(self, agent_session: AgentSession | None, started: Mapping[str, Any]) -> None:
         turn_id = started.get("turnId")
         if not isinstance(turn_id, str):
             return
         sink = ActionTurnSink(
-            self._sequencer, self._channel, turn_id, self._pending, self._session_uri
+            self._sequencer,
+            self._channel,
+            turn_id,
+            self._pending,
+            self._session_uri,
+            self._session_changed,
         )
+        # However the turn ends -- return, raise or cancellation -- the session
+        # must not be left advertising a tool that is no longer running. A
+        # cancelled turn is exactly the case that would strand it.
+        self.sink = sink
 
         started_at = time.monotonic()
 

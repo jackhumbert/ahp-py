@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import os
 from collections.abc import AsyncIterator
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -59,7 +60,8 @@ class Recorder:
             assert message is not None
             self.frames.append(message)
             if message.get("id") == request_id:
-                return message
+                found: dict[str, Any] = message
+                return found
 
     async def notify(self, method: str, params: dict[str, Any]) -> None:
         await self.transport.send({"jsonrpc": "2.0", "method": method, "params": params})
@@ -152,7 +154,7 @@ async def recorder() -> AsyncIterator[tuple[Host, Recorder]]:
     host = Host(
         EchoProvider(customizations=True, delay=0.01),
         LoopbackSingleUserPolicy(),
-        resources=RootedFilesystemResourceProvider(os.getcwd()),
+        resources=RootedFilesystemResourceProvider(Path.cwd()),
         terminals=PtyTerminalBackend(),
         default_directory="file://" + os.getcwd(),
         completion_trigger_characters=("#",),

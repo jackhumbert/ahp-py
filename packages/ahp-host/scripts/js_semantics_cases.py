@@ -8,11 +8,12 @@ from __future__ import annotations
 
 import json
 import sys
+from typing import Any
 
-CASES: list[dict] = []
+CASES: list[dict[str, Any]] = []
 
 
-def case(name: str, reducer: str, initial, actions: list[dict]) -> None:
+def case(name: str, reducer: str, initial: Any, actions: list[dict[str, Any]]) -> None:
     CASES.append({"name": name, "reducer": reducer, "initial": initial, "actions": actions})
 
 

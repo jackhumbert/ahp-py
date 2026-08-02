@@ -138,6 +138,28 @@ So a host that wants to be usable must:
 | `confirm_tool_call(confirmation)` | **Suspends.** Ask before running a tool. |
 | `run_client_tool(call)` | **Suspends.** Ask the *client* to run one of its own tools. |
 
+### What the host publishes for you
+
+Some of what a session list shows is derived from the turn rather than asked of
+you:
+
+- **The session's title**, from the text of the first message on the default
+  chat. Only while the session is still called "New Session" — a client can
+  rename a session, and that rename wins from then on.
+- **`session/activityChanged`**, from `tool_call_started`: the `display_name`
+  you passed becomes what the session list shows the session doing, and it is
+  cleared when the call completes or the turn ends. Without it every working
+  session reads as the client's own literal fallback, "Working...".
+- **The unread flag.** The host marks a session unread when a turn ends on a
+  session no client has open, which is the half of `session/isReadChanged` that
+  is the server's.
+
+If you want to say something better than the tool's name, call
+`context.activity_changed("Editing core.py")` — it is on `AgentSessionContext`
+and works outside a turn too. Note the host clears the activity when a tool call
+completes and when the turn ends, so a string you set *during* a call is cleared
+along with it; set yours after, or between calls.
+
 The three suspending methods are the interesting ones — see
 [ADR 0005](../decisions/0005-suspending-provider-requests.md). They park the
 turn until a human answers, and they raise `asyncio.CancelledError` if the turn

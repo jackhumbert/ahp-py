@@ -130,6 +130,15 @@ _SUMMARY_FIELDS: Final = (
 #: whole thing into a single response.
 _MAX_PAGE = 200
 
+#: What a session is called before anything names it. The reference host's own
+#: string, so a client that special-cases it still recognises ours.
+_DEFAULT_SESSION_TITLE: Final = "New Session"
+
+#: How long a title seeded from the first message may be. The session list is a
+#: narrow column; past this it is truncated by the renderer anyway, and a title
+#: cut where we can see the words is better than one cut where we cannot.
+_TITLE_LIMIT: Final = 60
+
 #: Client-dispatchable, and between them they name the filesystem roots the
 #: agent gets tool access to.
 _WORKING_DIRECTORY_ACTIONS: Final = frozenset(
@@ -620,7 +629,44 @@ def _published_title(state: Any) -> str:
         title = state.get("title")
         if isinstance(title, str) and title:
             return title
-    return "New Session"
+    return _DEFAULT_SESSION_TITLE
+
+
+def _promotion_rank(bits: int) -> int:
+    """How strongly a chat's activity bits claim the session summary. 0 = not.
+
+    `InputNeeded` shares a bit with `InProgress` -- it is `(1 << 3) | (1 << 4)`
+    -- so it is tested as a whole, never by equality, and it has to be tested
+    before `InProgress` or every blocked chat reads as merely busy.
+    """
+    if bits & SessionStatus.INPUT_NEEDED == SessionStatus.INPUT_NEEDED:
+        return 3
+    if bits & SessionStatus.ERROR:
+        return 2
+    if bits & SessionStatus.IN_PROGRESS:
+        return 1
+    return 0
+
+
+def _title_from(text: str) -> str | None:
+    """A session title from the user's first message, or None if there is none.
+
+    Deliberately dumb: the first line, whitespace collapsed, cut at a word
+    boundary. A summary is what a model is for; this is a label, and a rough
+    label beats three rows all reading "New Session".
+    """
+    first = next((line.strip() for line in text.splitlines() if line.strip()), "")
+    collapsed = " ".join(first.split())
+    if not collapsed:
+        return None
+    if len(collapsed) <= _TITLE_LIMIT:
+        return collapsed
+    cut = collapsed[: _TITLE_LIMIT + 1]
+    # Break on the last space so a title never ends mid-word -- unless the
+    # first word is itself longer than the limit, where there is no boundary
+    # to find and a hard cut is the only option.
+    spaced = cut.rsplit(" ", 1)[0]
+    return f"{spaced if len(spaced) >= _TITLE_LIMIT // 2 else collapsed[:_TITLE_LIMIT]}…"
 
 
 def _with_origin(summary: dict[str, Any], origin: Mapping[str, Any] | None) -> dict[str, Any]:
@@ -1152,12 +1198,12 @@ class Host:
         # Aggregation across chats, spelled out because upstream states it as
         # producer SHOULDs rather than as a reducer, so nothing enforces it:
         #
-        #   status:     activity bits from the DEFAULT chat, but PROMOTE
-        #               InputNeeded if ANY chat needs input and Error if ANY
-        #               chat errored. The promotion is the whole point -- it is
-        #               what makes a blocked worker chat visible in a session
-        #               list that only ever renders the default one.
-        #   activity:   the default chat's, or the chat that won the promotion.
+        #   status:     activity bits from the DEFAULT chat, but PROMOTE from
+        #               ANY chat that needs input, errored, or is working. The
+        #               promotion is the whole point -- it is what makes a
+        #               worker chat visible in a session list that only ever
+        #               renders the default one.
+        #   activity:   the default chat's, or the highest-ranked promotion's.
         #   modifiedAt: the max across every chat.
         #
         # Session-scoped flag bits (IsRead, IsArchived) stay with the session
@@ -1166,6 +1212,7 @@ class Host:
         flags = session_flags if isinstance(session_flags, int) else _STATUS_IDLE
         activity_bits = 0
         promoted_from: Mapping[str, Any] | None = None
+        promoted_rank = 0
         modified = session.created_at
 
         for chat_uri in [session.chat_uri, *sorted(session.chat_uris - {session.chat_uri})]:
@@ -1177,18 +1224,26 @@ class Host:
                 bits = status & SessionStatus.ACTIVITY_MASK
                 if chat_uri == session.chat_uri:
                     activity_bits = bits
-                # `InputNeeded` shares a bit with `InProgress` -- it is
-                # `(1 << 3) | (1 << 4)` -- so it is tested as a whole, never by
-                # equality.
-                needs_input = bits & SessionStatus.INPUT_NEEDED == SessionStatus.INPUT_NEEDED
-                errored = bool(bits & SessionStatus.ERROR)
-                if needs_input or errored:
+                rank = _promotion_rank(bits)
+                if rank:
                     activity_bits |= bits
-                    if promoted_from is None and chat_uri != session.chat_uri:
-                        promoted_from = chat
+                    # By RANK, not by iteration order: the chats after the
+                    # default are walked in URI order, so first-wins would hand
+                    # the activity string to whichever chat happened to sort
+                    # earliest. A chat waiting on a human outranks one that is
+                    # merely busy.
+                    if chat_uri != session.chat_uri and rank > promoted_rank:
+                        promoted_from, promoted_rank = chat, rank
             when = chat.get("modifiedAt")
             if isinstance(when, str):
                 modified = max(modified, when)
+
+        # A promotion means something is happening, so `Idle` cannot also be
+        # true. Without this a session whose default chat is idle and whose side
+        # chat is working reports `Idle | InProgress`, and a client testing
+        # either bit is right either way.
+        if activity_bits & ~SessionStatus.IDLE:
+            activity_bits &= ~SessionStatus.IDLE
 
         summary["status"] = session_status_flags(
             (flags & ~SessionStatus.ACTIVITY_MASK) | activity_bits
@@ -3467,7 +3522,14 @@ class Host:
         if session is None:
             return
         if action_type == "chat/turnStarted":
-            runner = TurnRunner(self.sequencer, channel, self.pending, session.uri)
+            await self._seed_title(session, channel, action)
+            runner = TurnRunner(
+                self.sequencer,
+                channel,
+                self.pending,
+                session.uri,
+                lambda: self._mirror_summary(session),
+            )
             session.turn = asyncio.create_task(self._run_turn(session, runner, action))
         elif action_type == "chat/turnCancelled" and session.turn is not None:
             session.turn.cancel()
@@ -3672,6 +3734,61 @@ class Host:
                 customization_id, bool(action.get("enabled"))
             )
 
+    async def _seed_title(self, session: _Session, channel: str, action: Mapping[str, Any]) -> None:
+        """Name a still-unnamed session after the message that started it.
+
+        Every session is called "New Session", so a list with three of them is
+        three identical rows. The reference host writes a real title with a
+        small model, which needs credentials we do not have -- but the first
+        thing the user said is the same information in a rougher form, and it is
+        right here.
+
+        Only for a session nobody has named. A client can dispatch
+        `session/titleChanged` to rename one, and overwriting that would make
+        the rename look like it failed. The default chat only, too: a side chat
+        asking "what does this do?" must not become the session's name.
+        """
+        if channel != session.chat_uri:
+            return
+        if _published_title(self.sequencer.state_of(session.uri)) != _DEFAULT_SESSION_TITLE:
+            return
+        message = action.get("message")
+        text = message.get("text") if isinstance(message, Mapping) else None
+        title = _title_from(text if isinstance(text, str) else "")
+        if title is None:
+            return
+        await self.sequencer.publish(session.uri, {"type": "session/titleChanged", "title": title})
+        await self._mirror_summary(session)
+
+    async def _mark_unread(self, session: _Session) -> None:
+        """Return the unread dot after the agent has answered.
+
+        `session/isReadChanged` is a two-party protocol: a client dispatches it
+        with `true` when a human looks at the session, and the host is what
+        turns it back to `false` when something new arrives. Implementing only
+        the client's half means the dot appears exactly once, on a session that
+        has never been opened, and never again however many times the agent
+        answers.
+
+        Not while somebody is watching. `activeClients` is the session's own
+        record of which clients have it open; marking one of those unread would
+        put a badge on the session currently on screen.
+        """
+        state = self.sequencer.state_of(session.uri)
+        if not isinstance(state, Mapping):
+            return
+        clients = state.get("activeClients")
+        if isinstance(clients, list) and clients:
+            return
+        status = state.get("status")
+        if not isinstance(status, int) or not status & SessionStatus.IS_READ:
+            return
+        with contextlib.suppress(Exception):
+            await self.sequencer.publish(
+                session.uri, {"type": "session/isReadChanged", "isRead": False}
+            )
+            await self._mirror_summary(session)
+
     async def _run_turn(
         self, session: _Session, runner: TurnRunner, action: Mapping[str, Any]
     ) -> None:
@@ -3692,6 +3809,13 @@ class Host:
             # nobody can answer stays `InputNeeded` until it is disposed.
             if runner.abandoned:
                 self._spawn(self._retract_all(session, [r.id for r in runner.abandoned]))
+            # Detached for the same reason, and unconditional: a turn cancelled
+            # mid-tool would otherwise leave the session list advertising a tool
+            # that stopped running, with nothing that ever comes back to clear
+            # it. `set_activity` is a no-op when there is nothing to clear.
+            if runner.sink is not None:
+                self._spawn(runner.sink.set_activity(None))
+            self._spawn(self._mark_unread(session))
             with contextlib.suppress(Exception):
                 await self._mirror_summary(session)
 

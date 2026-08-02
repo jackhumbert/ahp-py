@@ -39,6 +39,12 @@ no model in here — you write a provider, and routing is yours.
   (`session/inputNeeded`, unread, activity) that nothing else in the stack
   enforces; `createSession.fork`; tool calls with confirmation, client-executed
   tools, and elicitation.
+- **A session list that moves.** Sessions are named from the user's first
+  message rather than all being called "New Session"; `session/activityChanged`
+  carries the running tool's name instead of the client's "Working..."
+  fallback; the host clears `session/isReadChanged` when the agent answers, so
+  the unread dot comes back; and a side chat that is *working* promotes the
+  session summary, not only one that is blocked or errored.
 - The `resource*` family with a **jail that walks** — `openat` with `O_NOFOLLOW`,
   one component at a time, each resolved symlink re-checked against the root.
   Deliberately not realpath-then-open, which has a swap window; there is a test
@@ -151,8 +157,6 @@ feature look identical:
   nothing in any build). Picking a *local* folder in the Agents window will never
   offer a remote host — the two `resolveWorkspace` gates are mutually exclusive.
   Browse through the host's own picker instead; the guide explains why.
-- Session titles, `session/activityChanged` and unread-clearing are not yet
-  published, so a multi-session list looks less alive than the reference's.
 - Requires POSIX for the pty backend. Everything else is portable.
 
 
