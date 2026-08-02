@@ -15,6 +15,7 @@ import functools
 import json
 import logging
 import secrets
+from collections.abc import Awaitable, Callable, Mapping
 from pathlib import Path
 from typing import Any, Final
 
@@ -24,6 +25,7 @@ from agent_host_server.core.pty_backend import PtyTerminalBackend
 from agent_host_server.core.resources import RootedFilesystemResourceProvider
 from agent_host_server.core.versions import DEFAULT_SUPPORTED_VERSIONS
 from agent_host_server.provider import EchoProvider
+from agent_host_server.provider.demo_changes import reset_scratch
 from agent_host_server.ws import serve_websocket
 
 _log = logging.getLogger(__name__)
@@ -113,8 +115,11 @@ def _parse_args() -> argparse.Namespace:
         "--changes",
         action="store_true",
         help=(
-            "publish a demo changeset on every turn, so the Changes view has "
-            "something to show. Proposals only -- nothing is written to disk"
+            "the demo agent really edits files on every turn, under "
+            "examples/demo-changes/scratch/ (gitignored), and publishes a "
+            "changeset describing what it did. A changeset is a RECORD of "
+            "working-tree changes, so the files have to exist for a client to "
+            "open them. Nothing outside that directory is written"
         ),
     )
     parser.add_argument(
@@ -200,8 +205,9 @@ async def _run() -> None:
         # Registered per operation, by name -- there is no "enable all
         # operations" switch, because an operation is a button that DOES
         # something and the embedder should have to say which.
+        invoke = _demo_operations(host)
         for operation_id in ("ahs-approve", "ahs-annotate", "ahs-reset"):
-            host.register_operation(operation_id, _demo_operation)
+            host.register_operation(operation_id, invoke)
 
     async with serve_websocket(
         host,
@@ -285,21 +291,53 @@ DEMO_ROOT_CONFIG_PROPERTIES: Final[dict[str, dict[str, Any]]] = {
 }
 
 
-async def _demo_operation(changeset_uri: str, operation_id: str) -> None:
-    """A changeset button, invoked. Deliberately does nothing to the disk.
+def _demo_operations(host: Host) -> Callable[[str, str, Mapping[str, Any] | None], Awaitable[None]]:
+    """Build the changeset button handlers, closed over the host.
 
-    What it demonstrates is the round trip: the client renders the button from
-    `ChangesetOperation`, invokes it with `invokeChangesetOperation`, and the
-    host publishes the status back (idle -> running -> idle). Anything it
-    raises becomes the operation's `error`, which is the other half worth
-    seeing.
+    They DO things, visibly. A button that logs and returns looks broken --
+    the user clicks it, the status flickers idle -> running -> idle, and
+    nothing in the UI changes, which is indistinguishable from a handler that
+    failed silently.
 
-    A demo whose "Reset" button actually destroyed work would be a poor thing
-    to ship behind a flag, and a poor thing for an adapter author to copy.
+    `reviewed` is the visible thing a host can change without touching a file:
+    the client renders it as the per-file "Viewed" checkbox.
     """
-    _log.info(
-        "demo operation %s invoked on %s (no files were touched)", operation_id, changeset_uri
-    )
+
+    async def invoke(
+        changeset_uri: str, operation_id: str, target: Mapping[str, Any] | None
+    ) -> None:
+        state = host.sequencer.state_of(changeset_uri)
+        files = state.get("files") if isinstance(state, Mapping) else None
+        ids = [f["id"] for f in files or [] if isinstance(f, Mapping) and "id" in f]
+
+        if operation_id == "ahs-approve":
+            # Every file marked reviewed. Visible immediately as ticked boxes.
+            await host.sequencer.publish(
+                changeset_uri,
+                {"type": "changeset/filesReviewChanged", "files": ids, "reviewed": True},
+            )
+        elif operation_id == "ahs-annotate":
+            # THE FILE THE USER CLICKED. `scopes: ["resource"]` means the
+            # client sends a target, and acting on anything else -- the first
+            # file, say -- looks from the outside exactly like a button that
+            # does nothing, because the row you pressed does not change.
+            resource = target.get("resource") if target else None
+            chosen = [i for i in ids if i == resource] or ids[:1]
+            await host.sequencer.publish(
+                changeset_uri,
+                {"type": "changeset/filesReviewChanged", "files": chosen, "reviewed": True},
+            )
+        elif operation_id == "ahs-reset":
+            # The only handler that touches disk, and its blast radius is one
+            # gitignored directory. Clears the review flags too, so the demo
+            # can be run again from the top.
+            reset_scratch()
+            await host.sequencer.publish(
+                changeset_uri,
+                {"type": "changeset/filesReviewChanged", "files": ids, "reviewed": False},
+            )
+
+    return invoke
 
 
 def main() -> None:

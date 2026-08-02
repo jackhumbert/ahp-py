@@ -9,7 +9,7 @@ is served through a scoped `resourceRead`, so a diff needs the bytes as they wer
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from typing import Any
 
 import pytest
@@ -274,7 +274,7 @@ class TestOperations:
         client = await _session(host, uri)
         ran: list[str] = []
 
-        async def handler(changeset: str, operation: str) -> None:
+        async def handler(changeset: str, operation: str, target: Mapping[str, Any] | None) -> None:
             ran.append(operation)
 
         host.register_operation("publish", handler)
@@ -306,7 +306,7 @@ class TestOperations:
         uri = "echo:/cs-o3"
         client = await _session(host, uri)
 
-        async def handler(changeset: str, operation: str) -> None:
+        async def handler(changeset: str, operation: str, target: Mapping[str, Any] | None) -> None:
             raise RuntimeError("upstream said no")
 
         host.register_operation("risky", handler)
@@ -339,7 +339,9 @@ class TestOperations:
             uri = "echo:/cs-o4"
             client = await _session(blocked, uri)
 
-            async def handler(changeset: str, operation: str) -> None:
+            async def handler(
+                changeset: str, operation: str, target: Mapping[str, Any] | None
+            ) -> None:
                 raise AssertionError("the policy should have stopped this")
 
             blocked.register_operation("publish", handler)
@@ -392,7 +394,9 @@ class TestTheDemoActuallyPublishes:
             catalogue = state.get("changesets") or []
             assert catalogue, "a turn published no changeset"
             entry = catalogue[0]
-            assert entry["changeKind"] == "session"
+            # `uncommitted` is the honest kind: these ARE working-tree edits
+            # that happened and are not committed.
+            assert entry["changeKind"] == "uncommitted"
 
             changeset = (await client.request("subscribe", {"channel": entry["uriTemplate"]}))[
                 "result"
@@ -534,3 +538,121 @@ class TestContentIsStattable:
 
         listed = await client.request("resourceList", {"channel": ROOT_URI, "uri": content})
         assert listed["error"]["code"] == -32602
+
+
+class TestOperationTargets:
+    """A per-file operation must be told WHICH file.
+
+    `invokeChangesetOperation.target` is "required iff the chosen scope is
+    `resource` or `range`", and the host dropped it: the handler was told a
+    button had been pressed but not where. A per-file operation could only
+    guess, and guessing wrong is indistinguishable from a button that does
+    nothing -- the row you clicked does not change.
+    """
+
+    async def test_the_target_reaches_the_handler(self, host: Host) -> None:
+        uri = "echo:/cs-t1"
+        client = await _session(host, uri)
+        seen: list[Any] = []
+
+        async def handler(changeset: str, operation: str, target: Mapping[str, Any] | None) -> None:
+            seen.append(target)
+
+        host.register_operation("annotate", handler)
+        channel = await host.publish_changeset(
+            uri,
+            Changeset(
+                label="c",
+                operations=[
+                    ChangesetOperation(id="annotate", label="Annotate", scopes=("resource",))
+                ],
+            ),
+            [_EDIT],
+        )
+        await client.request("subscribe", {"channel": channel})
+        await client.request(
+            "invokeChangesetOperation",
+            {
+                "channel": channel,
+                "operationId": "annotate",
+                "target": {"kind": "resource", "resource": "file:///work/a.txt"},
+            },
+        )
+        await client.collect(seconds=0.3)
+
+        assert seen == [{"kind": "resource", "resource": "file:///work/a.txt"}]
+
+    async def test_a_resource_scoped_operation_requires_a_target(self, host: Host) -> None:
+        """An embedder writing a per-file operation should be able to trust
+        that a target is there when the scope says it will be."""
+        uri = "echo:/cs-t2"
+        client = await _session(host, uri)
+
+        async def handler(changeset: str, operation: str, target: Mapping[str, Any] | None) -> None:
+            raise AssertionError("should not run without a target")
+
+        host.register_operation("annotate", handler)
+        channel = await host.publish_changeset(
+            uri,
+            Changeset(
+                label="c",
+                operations=[
+                    ChangesetOperation(id="annotate", label="Annotate", scopes=("resource",))
+                ],
+            ),
+            [_EDIT],
+        )
+        response = await client.request(
+            "invokeChangesetOperation", {"channel": channel, "operationId": "annotate"}
+        )
+        assert response["error"]["code"] == -32602
+
+    async def test_a_target_kind_outside_the_declared_scopes_is_refused(self, host: Host) -> None:
+        """"The `kind` MUST match one of the operation's declared `scopes`.""" ""
+        uri = "echo:/cs-t3"
+        client = await _session(host, uri)
+
+        async def handler(changeset: str, operation: str, target: Mapping[str, Any] | None) -> None:
+            raise AssertionError("should not run")
+
+        host.register_operation("wide", handler)
+        channel = await host.publish_changeset(
+            uri,
+            Changeset(
+                label="c",
+                operations=[ChangesetOperation(id="wide", label="Wide", scopes=("changeset",))],
+            ),
+            [_EDIT],
+        )
+        response = await client.request(
+            "invokeChangesetOperation",
+            {
+                "channel": channel,
+                "operationId": "wide",
+                "target": {"kind": "resource", "resource": "file:///work/a.txt"},
+            },
+        )
+        assert response["error"]["code"] == -32602
+
+    async def test_a_changeset_scoped_operation_still_needs_no_target(self, host: Host) -> None:
+        uri = "echo:/cs-t4"
+        client = await _session(host, uri)
+        seen: list[Any] = []
+
+        async def handler(changeset: str, operation: str, target: Mapping[str, Any] | None) -> None:
+            seen.append(target)
+
+        host.register_operation("approve", handler)
+        channel = await host.publish_changeset(
+            uri,
+            Changeset(
+                label="c",
+                operations=[ChangesetOperation(id="approve", label="Approve")],
+            ),
+            [_EDIT],
+        )
+        await client.request(
+            "invokeChangesetOperation", {"channel": channel, "operationId": "approve"}
+        )
+        await client.collect(seconds=0.3)
+        assert seen == [None]

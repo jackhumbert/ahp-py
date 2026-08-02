@@ -164,9 +164,18 @@ class ChangesetOperation:
         return wire
 
 
-#: Invoked with the changeset URI and the operation id. Anything it raises
-#: becomes the operation's `error`.
-OperationHandler = Callable[[str, str], Awaitable[None]]
+#: Invoked with the changeset URI, the operation id, and the TARGET the client
+#: chose -- `None` for a changeset-scoped operation, otherwise
+#: `{"kind": "resource"|"range", "resource": URI, ...}`.
+#:
+#: The target used to be dropped, which made every `resource`- and
+#: `range`-scoped operation useless: the handler was told a button had been
+#: pressed but not which file it was pressed on, so a per-file operation could
+#: only ever guess. From the outside that looks exactly like a button that does
+#: nothing.
+#:
+#: Anything the handler raises becomes the operation's `error`.
+OperationHandler = Callable[[str, str, Mapping[str, Any] | None], Awaitable[None]]
 
 
 @dataclass

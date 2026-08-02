@@ -1,14 +1,28 @@
 # Demo changes
 
-Real files, so the `--changes` demo diffs against something that exists.
+`--changes` makes the demo agent perform real edits, so the Changes view has
+something truthful to show.
 
-The host **never writes here.** A changeset is a *proposal*: `before` is what
-is on disk, `after` is what the agent suggests, and both are carried as content
-the host serves back through `resourceRead`. Nothing on disk moves unless an
-embedder makes it move.
+## A changeset is a RECORD, not a proposal
 
-That is also why the demo's operations — the buttons on the Changes view — are
-deliberately inert. They demonstrate the invoke round trip (idle -> running ->
-idle, with the status reaching the client) and touch no files. An operation
-named `discard-changes` that actually destroyed work would be a poor thing to
-put behind a demo flag.
+That is the thing this directory exists to get right. The guide's own examples
+are "uncommitted working-tree edits, the diff between two turns, the cumulative
+changes for the whole session, the staged index" — every one a view of changes
+that have **already happened**. `FileEdit.before` is even documented as absent
+"for in-place file edits", which only makes sense if `after` is the file on
+disk.
+
+So a client opens `after.uri` and expects to find a file there. Publishing a
+changeset for a file that does not exist gets you *"The editor could not be
+opened because the file was not found."*
+
+## What actually happens
+
+- `baseline/` is committed. It is the "before" state, and the demo never
+  modifies it.
+- `scratch/` is gitignored. On every turn the demo resets it from `baseline/`,
+  then really does the work: edits two files, deletes one, creates one.
+- The changeset reports what it did, with `before` read from the baseline and
+  `after` being the file now on disk.
+
+Nothing outside `scratch/` is ever written.

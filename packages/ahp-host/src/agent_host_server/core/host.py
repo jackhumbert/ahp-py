@@ -2190,6 +2190,45 @@ class Host:
         self.sequencer._states[session.uri] = {**state, "changes": summary}
         await self._mirror_summary(session)
 
+    def _operation_target(
+        self, channel: str, operation: str, target: Any
+    ) -> Mapping[str, Any] | None:
+        """Validate `invokeChangesetOperation.target` against declared scopes.
+
+        "Required iff the chosen scope is `resource` or `range`", and "the
+        `kind` MUST match one of the operation's declared `scopes`". Checked
+        here rather than left to each handler: an embedder writing a per-file
+        operation should be able to trust that a target is present when the
+        scope says it will be.
+        """
+        declared = self._declared_scopes(channel, operation)
+        if target is None:
+            if declared and "changeset" not in declared:
+                raise errors.invalid_params(f"{operation!r} requires a target")
+            return None
+        if not isinstance(target, Mapping):
+            raise errors.invalid_params("target must be an object")
+        kind = target.get("kind")
+        if kind not in ("resource", "range"):
+            raise errors.invalid_params(f"unknown target kind {kind!r}")
+        if declared and kind not in declared:
+            raise errors.invalid_params(f"{operation!r} does not declare the {kind!r} scope")
+        if not isinstance(target.get("resource"), str):
+            raise errors.invalid_params("target.resource is required")
+        return target
+
+    def _declared_scopes(self, channel: str, operation: str) -> set[str]:
+        """What the published operation says about itself, or an empty set."""
+        state = self.sequencer.state_of(channel)
+        operations = state.get("operations") if isinstance(state, Mapping) else None
+        for entry in operations or ():
+            if isinstance(entry, Mapping) and entry.get("id") == operation:
+                scopes = entry.get("scopes")
+                return (
+                    {s for s in scopes if isinstance(s, str)} if isinstance(scopes, list) else set()
+                )
+        return set()
+
     async def _invoke_changeset_operation(
         self, connection: Connection, params: Mapping[str, Any]
     ) -> dict[str, Any]:
@@ -2213,6 +2252,8 @@ class Host:
         if handler is None:
             raise errors.invalid_params(f"unknown operation {operation!r}")
 
+        target = self._operation_target(channel, operation, params.get("target"))
+
         await self.sequencer.publish(
             channel,
             {
@@ -2222,7 +2263,7 @@ class Host:
             },
         )
         try:
-            await handler(channel, operation)
+            await handler(channel, operation, target)
         except Exception as exc:
             await self.sequencer.publish(
                 channel,
