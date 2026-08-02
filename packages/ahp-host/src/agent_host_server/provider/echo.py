@@ -144,7 +144,9 @@ class EchoSession:
     async def _echo_via_confirmed_tool(self, message: UserMessage, sink: TurnSink) -> None:
         """Ask before "running" a tool, then honour whatever was approved."""
         call_id = "echo-tool-1"
-        await sink.tool_call_started(call_id, "echo_tool", {"text": message.text})
+        await sink.tool_call_started(
+            call_id, "echo_tool", {"text": message.text}, display_name="Echo Tool"
+        )
         outcome = await sink.confirm_tool_call(
             ToolConfirmation(
                 call_id=call_id,
@@ -158,7 +160,10 @@ class EchoSession:
         )
         if not outcome.approved:
             await sink.tool_call_completed(
-                call_id, {"content": [{"kind": "text", "text": "denied"}]}
+                call_id,
+                {"content": [{"type": "text", "text": "denied"}]},
+                success=False,
+                past_tense_message="Echo was denied",
             )
             await sink.text_delta("(denied)")
             return
@@ -166,7 +171,11 @@ class EchoSession:
         # client rewrite the parameters, and running the original would execute
         # something nobody agreed to.
         text = _text_of(outcome.tool_input, message.text)
-        await sink.tool_call_completed(call_id, {"content": [{"kind": "text", "text": text}]})
+        await sink.tool_call_completed(
+            call_id,
+            {"content": [{"type": "text", "text": text}]},
+            past_tense_message="Echoed the message back",
+        )
         await sink.text_delta(f"You said: {text}")
 
     async def _echo_via_client_tool(self, message: UserMessage, sink: TurnSink) -> None:

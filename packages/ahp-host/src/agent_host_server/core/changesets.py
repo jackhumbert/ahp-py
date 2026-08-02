@@ -129,11 +129,38 @@ class ChangesetOperation:
     id: str
     label: str
     description: str | None = None
+    #: REQUIRED by the protocol. Where the verb may be invoked:
+    #: `changeset` | `resource` | `range`. Omitting it made the client's
+    #: operations derived throw, and a derived that throws is swallowed by
+    #: `onBugIndicatingError` -- so ONE malformed operation silently discarded
+    #: the entire operations list for the changeset and logged an error nobody
+    #: was reading.
+    scopes: Sequence[str] = ("changeset",)
+    #: REQUIRED. `idle` | `running` | `failed`, and the reason a failed one
+    #: carries rides on `operationStatusChanged`, not here.
+    status: str = "idle"
+    #: Rendered as the button's icon and grouping. Both are read by the
+    #: shipping client, and both cost nothing to send.
+    icon: str | None = None
+    group: str | None = None
+    #: When set, the client confirms with this text before invoking.
+    confirmation: str | None = None
 
     def to_wire(self) -> dict[str, Any]:
-        wire: dict[str, Any] = {"id": self.id, "label": self.label}
-        if self.description is not None:
-            wire["description"] = self.description
+        wire: dict[str, Any] = {
+            "id": self.id,
+            "label": self.label,
+            "scopes": list(self.scopes),
+            "status": self.status,
+        }
+        for key, value in (
+            ("description", self.description),
+            ("icon", self.icon),
+            ("group", self.group),
+            ("confirmation", self.confirmation),
+        ):
+            if value is not None:
+                wire[key] = value
         return wire
 
 
@@ -150,7 +177,13 @@ class Changeset:
     #: Minted by the host, never parsed. A variable-free template "is itself a
     #: subscribable URI", so this doubles as the channel.
     uri: str = field(default_factory=lambda: f"ahp-changeset:/{secrets.token_urlsafe(12)}")
-    kind: str = "session"
+    #: Serialised as `changeKind`, NOT `kind`. The client's Changes-view
+    #: builder switches on `changeKind` and pushes nothing for a value it does
+    #: not recognise, so `kind` produced an empty view -- no tree, no diff, no
+    #: review -- with nothing logged. Required by the spec, and no conformance
+    #: fixture could have caught it: the session reducer copies `changesets`
+    #: wholesale without inspecting a single key.
+    change_kind: str = "session"
     description: str | None = None
     reviewable: bool = False
     operations: Sequence[ChangesetOperation] = ()
@@ -159,7 +192,7 @@ class Changeset:
         entry: dict[str, Any] = {
             "label": self.label,
             "uriTemplate": self.uri,
-            "kind": self.kind,
+            "changeKind": self.change_kind,
         }
         if self.description is not None:
             entry["description"] = self.description
@@ -179,7 +212,7 @@ def diff_counts(before: bytes | None, after: bytes | None) -> dict[str, int]:
         old = before.decode() if before else ""
         new = after.decode() if after else ""
     except UnicodeDecodeError:
-        return {"additions": 0, "deletions": 0}
+        return {"added": 0, "removed": 0}
 
     additions = deletions = 0
     for line in difflib.unified_diff(
@@ -189,7 +222,11 @@ def diff_counts(before: bytes | None, after: bytes | None) -> dict[str, int]:
             additions += 1
         elif line.startswith("-") and not line.startswith("---"):
             deletions += 1
-    return {"additions": additions, "deletions": deletions}
+    # `added`/`removed`, which is what `FileEdit.diff` declares. We sent
+    # `additions`/`deletions` -- the names `SessionSummary.changes` uses -- so
+    # every file in every changeset rendered +0 -0 in the Changes view and the
+    # multi-diff editor. The two structures genuinely differ; do not unify them.
+    return {"added": additions, "removed": deletions}
 
 
 def file_entry(change: FileChange, store: ContentStore) -> dict[str, Any]:
@@ -228,6 +265,11 @@ def changes_summary(files: Sequence[Mapping[str, Any]]) -> dict[str, int]:
         edit = entry.get("edit")
         diff = edit.get("diff") if isinstance(edit, Mapping) else None
         if isinstance(diff, Mapping):
-            additions += int(diff.get("additions") or 0)
-            deletions += int(diff.get("deletions") or 0)
+            # READ `added`/`removed` (FileEdit.diff), EMIT
+            # `additions`/`deletions` (SessionSummary.changes). The two
+            # structures really do use different names, and renaming the
+            # per-file keys without touching this silently zeroed the roll-up
+            # in the session list.
+            additions += int(diff.get("added") or 0)
+            deletions += int(diff.get("removed") or 0)
     return {"files": len(files), "additions": additions, "deletions": deletions}

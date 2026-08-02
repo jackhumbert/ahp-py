@@ -181,6 +181,9 @@ class ClientToolCall:
     client_id: str
     tool_input: Any = None
     display_name: str | None = None
+    #: Shown while the client runs it. `chat/toolCallReady.invocationMessage`
+    #: is required, so the host defaults one rather than omitting the frame.
+    invocation_message: str | None = None
 
 
 @dataclass(frozen=True)
@@ -354,9 +357,31 @@ class TurnSink(Protocol):
 
     async def reasoning_delta(self, text: str) -> None: ...
 
-    async def tool_call_started(self, call_id: str, name: str, tool_input: Any = None) -> None: ...
+    async def tool_call_started(
+        self,
+        call_id: str,
+        name: str,
+        tool_input: Any = None,
+        *,
+        display_name: str | None = None,
+    ) -> None:
+        """Announce a call. *display_name* is what the user sees; it defaults
+        to *name* because the wire field is required and a blank row is worse
+        than a technical one."""
+        ...
 
-    async def tool_call_completed(self, call_id: str, result: Any = None) -> None: ...
+    async def tool_call_completed(
+        self,
+        call_id: str,
+        result: Any = None,
+        *,
+        success: bool = True,
+        past_tense_message: str | None = None,
+    ) -> None:
+        """Finish a call. `success` and `pastTenseMessage` are REQUIRED by the
+        protocol, so they are keyword arguments with defaults rather than
+        something an adapter can forget."""
+        ...
 
     async def turn_failed(self, message: str) -> None: ...
 

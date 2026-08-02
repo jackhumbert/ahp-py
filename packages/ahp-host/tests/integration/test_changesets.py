@@ -94,7 +94,7 @@ class TestPublishing:
         state = (await client.request("subscribe", {"channel": channel}))["result"]["snapshot"][
             "state"
         ]
-        assert state["files"][0]["edit"]["diff"] == {"additions": 1, "deletions": 0}
+        assert state["files"][0]["edit"]["diff"] == {"added": 1, "removed": 0}
 
     async def test_the_session_summary_carries_the_roll_up(self, host: Host) -> None:
         """Summed from the per-file diffs the host already computed, so the
@@ -165,7 +165,11 @@ class TestPublishing:
         state = (await client.request("subscribe", {"channel": channel}))["result"]["snapshot"][
             "state"
         ]
-        assert state["files"][0]["edit"]["diff"] == {"additions": 0, "deletions": 0}
+        # `added`/`removed`: what FileEdit.diff declares. Not the
+        # `additions`/`deletions` of SessionSummary.changes -- the two
+        # structures use different names, and sending the summary's names
+        # per file rendered every file as +0 -0.
+        assert state["files"][0]["edit"]["diff"] == {"added": 0, "removed": 0}
 
     async def test_identical_content_is_stored_once(self, host: Host) -> None:
         """Addressed by hash, so re-publishing an unchanged file does not grow

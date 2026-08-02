@@ -13,6 +13,7 @@ to know that; here it is impossible to get wrong.
 
 from __future__ import annotations
 
+import json
 import uuid
 from collections.abc import Mapping
 from typing import Any
@@ -119,7 +120,14 @@ class ActionTurnSink:
             },
         )
 
-    async def tool_call_started(self, call_id: str, name: str, tool_input: Any = None) -> None:
+    async def tool_call_started(
+        self,
+        call_id: str,
+        name: str,
+        tool_input: Any = None,
+        *,
+        display_name: str | None = None,
+    ) -> None:
         # `chat/toolCallStart` creates its own toolCall response part; emitting
         # an extra `chat/responsePart` for it would duplicate the part.
         action: dict[str, Any] = {
@@ -127,19 +135,33 @@ class ActionTurnSink:
             "turnId": self._turn_id,
             "toolCallId": call_id,
             "toolName": name,
+            # REQUIRED and non-optional in the action type. A call that sits in
+            # `streaming` for any length of time -- which is what
+            # `chat/toolCallDelta` exists for -- renders unlabelled without it,
+            # and the client drops it from its tool-label map entirely.
+            "displayName": display_name or name,
         }
         if tool_input is not None:
-            action["toolInput"] = tool_input
+            action["toolInput"] = _encoded_tool_input(tool_input)
         await self._sequencer.publish(self._channel, action)
 
-    async def tool_call_completed(self, call_id: str, result: Any = None) -> None:
+    async def tool_call_completed(
+        self,
+        call_id: str,
+        result: Any = None,
+        *,
+        success: bool = True,
+        past_tense_message: str | None = None,
+    ) -> None:
         action: dict[str, Any] = {
             "type": "chat/toolCallComplete",
             "turnId": self._turn_id,
             "toolCallId": call_id,
+            # Both REQUIRED by `ToolCallResult`. Omitting them left the client
+            # computing `completed && success` as falsey, so it never used the
+            # past-tense label and the row stayed in the present tense forever.
+            "result": _tool_result(result, success, past_tense_message),
         }
-        if result is not None:
-            action["result"] = result
         await self._sequencer.publish(self._channel, action)
 
     async def turn_failed(self, message: str) -> None:
@@ -312,8 +334,30 @@ class ActionTurnSink:
             "contributor": {"kind": "client", "clientId": call.client_id},
         }
         if call.tool_input is not None:
-            action["toolInput"] = call.tool_input
+            action["toolInput"] = _encoded_tool_input(call.tool_input)
         await self._sequencer.publish(self._channel, action)
+
+        # WITHOUT THIS THE TOOL NEVER RUNS. The client's executor reads
+        # `"toolInput" in call`, and on a call still in `streaming` it returns
+        # without invoking anything -- so the host parked on `parked.future`
+        # forever and the turn hung until someone cancelled it. Client-provided
+        # tools are exactly the case the spec calls out: "the server typically
+        # sets `confirmed` to `'not-needed'` so the tool transitions directly
+        # to `running`, where the owning client can begin execution".
+        ready: dict[str, Any] = {
+            "type": "chat/toolCallReady",
+            "turnId": self._turn_id,
+            "toolCallId": call.call_id,
+            "invocationMessage": call.invocation_message
+            or f"Running {call.display_name or call.name}",
+            "confirmed": "not-needed",
+            # "MUST NOT change execution ownership established at
+            # `chat/toolCallStart`" -- same clientId, deliberately repeated.
+            "contributor": {"kind": "client", "clientId": call.client_id},
+        }
+        if call.tool_input is not None:
+            ready["toolInput"] = _encoded_tool_input(call.tool_input)
+        await self._sequencer.publish(self._channel, ready)
 
         await self._mirror_input_needed(
             parked.id,
@@ -355,6 +399,34 @@ class ActionTurnSink:
                 "request": {**request, "id": request_id, "chat": self._channel},
             },
         )
+
+
+def _encoded_tool_input(value: Any) -> Any:
+    """`ToolInput = string | ContentRef`, so a bare object is not valid.
+
+    We published the parameters as a JSON OBJECT. The shipping client requires
+    `JSON.parse(toolInput)` to yield an object, and when the value is not a
+    string it aborts the invocation and synthesises a failure -- which is why
+    client-contributed tool execution, a feature this host advertises, could
+    never actually run. A ContentRef (an object with a `uri`) is the one
+    object form the type allows, so it passes through untouched.
+    """
+    if isinstance(value, str):
+        return value
+    if isinstance(value, Mapping) and "uri" in value:
+        return dict(value)
+    return json.dumps(value)
+
+
+def _tool_result(result: Any, success: bool, past_tense_message: str | None) -> dict[str, Any]:
+    """A `ToolCallResult` with the two fields the protocol makes mandatory."""
+    wire: dict[str, Any] = dict(result) if isinstance(result, Mapping) else {}
+    wire.setdefault("success", success)
+    wire.setdefault(
+        "pastTenseMessage",
+        past_tense_message or ("Ran the tool" if success else "The tool failed"),
+    )
+    return wire
 
 
 class TurnRunner:
