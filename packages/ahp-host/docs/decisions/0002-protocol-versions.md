@@ -82,3 +82,37 @@ version it can speak, or refuse.
 `UnsupportedProtocolVersion` error to offer a one-click server upgrade. It is for
 hosts spawned by the VS Code CLI; upstream states servers without a managing CLI
 omit it. A well-formed `-32005` still renders a proper incompatibility message.
+
+## Measured, later
+
+Two facts found while looking for a second client to test against, both of
+which bear on whether `{0.7.0, 0.6.0}` is the right set.
+
+**The reference client speaks five versions**, not two --
+`SUPPORTED_PROTOCOL_VERSIONS` in upstream's `types/version/registry.ts` is
+`['0.8.0', '0.7.0', '0.6.0', '0.5.2', '0.5.1']`. A client built from current
+sources therefore negotiates with us happily; the floor only bites clients
+pinned to an older package.
+
+**One is.** `ahpx`, the only third-party AHP client found in the wild, depends
+on `@microsoft/agent-host-protocol@^0.5.0`, which under semver's 0-major rule
+locks it to `0.5.x`. Against this host it is refused with `-32005`.
+
+That is *not* a reason to widen the floor. `versioning.md:24` is explicit that
+two pre-1.0 MINORs are not compatible, so adding `0.5.x` would be a claim that
+these reducers are correct for a MINOR whose semantics nothing here has
+verified -- bought to make one test pass. Supporting `0.6.0` alongside `0.7.0`
+is already such a claim, and it is defensible only because the 0.7.0 additions
+are additive: a 0.6.0 client never sends the working-directory actions or a
+refined tool-call contributor, so those reducer arms never fire for it. Nobody
+has established the same for `0.5.x`.
+
+**The earlier checkpoint asked whether `0.6.0` could be dropped.** The answer is
+no, and for a reason the checkpoint did not anticipate: real clients lag the
+spec by a full MINOR or more, and a host that speaks only the newest one is a
+host most clients cannot reach. If anything the pressure is the other way --
+but any widening has to come with evidence that the reducers hold for that
+MINOR, not with a version string.
+
+**Upstream is developing `0.8.0`** (`PROTOCOL_VERSION` is bumped in main). Our
+pin stays at `spec/v0.7.0` until absorbed deliberately, per `UPSTREAM.md`.
