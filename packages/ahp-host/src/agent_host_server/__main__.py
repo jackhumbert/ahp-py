@@ -20,6 +20,7 @@ from typing import Any, Final
 
 from agent_host_server.core import Host, HostInfo, LoopbackSingleUserPolicy
 from agent_host_server.core.config import RootConfig
+from agent_host_server.core.pty_backend import PtyTerminalBackend
 from agent_host_server.core.resources import RootedFilesystemResourceProvider
 from agent_host_server.core.versions import DEFAULT_SUPPORTED_VERSIONS
 from agent_host_server.provider import EchoProvider
@@ -107,6 +108,16 @@ def _parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--terminal",
+        action="store_true",
+        help=(
+            "install a REAL pty backend: `createTerminal` runs a shell. This is "
+            "arbitrary command execution for anyone who can complete `initialize`, "
+            "which on this demo means anyone who can reach the loopback port with "
+            "the token. Off by default, and deliberately its own flag"
+        ),
+    )
+    parser.add_argument(
         "--multi-chat",
         action="store_true",
         help=(
@@ -149,6 +160,11 @@ async def _run() -> None:
         # only honest advertisement. Naming "@" as well would open a picker
         # that is always empty.
         completion_trigger_characters=("#",),
+        terminals=(
+            PtyTerminalBackend(default_cwd=str(Path(args.serve_directory).resolve()))
+            if args.terminal
+            else None
+        ),
         # Behind the same flag as the session config schema: both mean "this
         # host is configurable", and a second flag for the other half would be
         # a distinction only this file cares about.
