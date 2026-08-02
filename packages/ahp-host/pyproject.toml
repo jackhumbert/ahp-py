@@ -34,6 +34,10 @@ dev = [
   "mypy>=1.11",
   "ruff>=0.6",
   "import-linter>=2",
+  # The vendored upstream JSON Schemas are the only mechanical check that what
+  # we PUT ON THE WIRE matches what the spec declares. Dev-only: the library
+  # itself still has no runtime dependencies.
+  "jsonschema>=4",
 ]
 
 [project.scripts]

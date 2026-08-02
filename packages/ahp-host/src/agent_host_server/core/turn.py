@@ -261,7 +261,12 @@ class ActionTurnSink:
             "invocationMessage": call.invocation_message,
         }
         if call.tool_input is not None:
-            action["toolInput"] = call.tool_input
+            # Encoded, like every other site. This one was missed when the
+            # other three were fixed, so the CONFIRM path alone kept publishing
+            # a bare object where `ToolInput = string | ContentRef` -- and a
+            # partial fix is worse than none, because the surface that still
+            # works hides the one that does not.
+            action["toolInput"] = _encoded_tool_input(call.tool_input)
         if call.confirmation_title is not None:
             action["confirmationTitle"] = call.confirmation_title
         if call.editable:
@@ -277,7 +282,17 @@ class ActionTurnSink:
                     "toolCallId": call.call_id,
                     "toolName": call.name,
                     "displayName": call.display_name or call.name,
-                    "status": "pendingConfirmation",
+                    # REQUIRED by ToolCallPendingConfirmationState, and omitted
+                    # -- so the whole `session/inputNeeded` entry failed its
+                    # own declared shape. The session-level mirror is what a
+                    # client renders when the approval is surfaced OUTSIDE the
+                    # chat, so a malformed one loses the approval entirely.
+                    "invocationMessage": call.invocation_message,
+                    # KEBAB-case. The enum is `pending-confirmation`, and we
+                    # sent `pendingConfirmation` -- every other discriminant
+                    # nearby is camelCase, which is exactly why this was not
+                    # noticed. Same for `auth-required`.
+                    "status": "pending-confirmation",
                 },
             },
         )
@@ -287,7 +302,10 @@ class ActionTurnSink:
         # The APPROVED input, not the proposed one: `editable` lets a client
         # rewrite the parameters, and running the original would execute
         # something nobody agreed to.
-        edited = payload.get("toolInput", call.tool_input)
+        # DECODED on the way back. The client edits the string we sent, so what
+        # returns is a JSON string, not the object an adapter expects -- the
+        # encoding is a wire concern and must not leak into the provider API.
+        edited = _decoded_tool_input(payload.get("toolInput", call.tool_input))
         return ToolConfirmationOutcome(approved=outcome.response == "accept", tool_input=edited)
 
     async def request_authentication(self, call_id: str, challenge: AuthChallenge) -> None:
@@ -316,7 +334,7 @@ class ActionTurnSink:
             {
                 "kind": "toolAuthentication",
                 "turnId": self._turn_id,
-                "toolCall": {"toolCallId": call_id, "status": "authRequired"},
+                "toolCall": {"toolCallId": call_id, "status": "auth-required"},
             },
         )
         await parked.future
@@ -456,6 +474,22 @@ def _encoded_tool_input(value: Any) -> Any:
     if isinstance(value, Mapping) and "uri" in value:
         return dict(value)
     return json.dumps(value)
+
+
+def _decoded_tool_input(value: Any) -> Any:
+    """The inverse of :func:`_encoded_tool_input`, for a value coming back.
+
+    A client that edits an `editable` tool call returns the JSON STRING it was
+    given. A provider asked for a mapping and should get one; leaving the
+    string to leak through means every adapter has to know the wire encoding.
+    Anything that is not JSON is returned untouched rather than being lost.
+    """
+    if not isinstance(value, str):
+        return value
+    try:
+        return json.loads(value)
+    except ValueError:
+        return value
 
 
 def _tool_result(result: Any, success: bool, past_tense_message: str | None) -> dict[str, Any]:

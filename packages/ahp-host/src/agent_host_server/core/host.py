@@ -500,7 +500,7 @@ class _Publisher:
                         "kind": "toolAuthentication",
                         "id": f"mcp:{customization_id}",
                         "chat": self._session.chat_uri,
-                        "toolCall": {"toolCallId": customization_id, "status": "authRequired"},
+                        "toolCall": {"toolCallId": customization_id, "status": "auth-required"},
                     },
                 },
             )
