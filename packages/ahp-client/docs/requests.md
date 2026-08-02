@@ -19,10 +19,11 @@ below can be built on them today. The point of each request is that building it
 means re-deriving something the library already knows, in a place where getting
 it wrong is silent.
 
-Ordered by whether it blocks. Items 1–3 block a co-presence surface; 4–6 are
-smaller; 7–8 are documentation.
+Ordered by whether it blocks. Items 1–3 block a co-presence surface; 4–6 and 9
+are smaller; 7–8 are documentation.
 
-**Status: 1–4 are implemented.** Each section keeps its original text — the
+**Status: 1–4 are implemented.** 9 was filed afterwards, against the
+implementation of 2. Each section keeps its original text — the
 request is the record of *why*, and rewriting it into a description of what was
 built would lose the reasoning that justified it. What was actually done is
 noted under each, including where it differs from the proposed shape. 5–8 are
@@ -348,6 +349,43 @@ Neither is wrong; both surprise a server-side consumer.
   explains well. Worth stating the consequence for a host that answers neither
   `ready` nor `creating`: 30 s of 10 ms polling before an error. Hosts with slow
   bring-up exist, and the fix is a parameter the caller already has.
+
+---
+
+## 9. `Session.inputs()` polls, and the choice that forced it is a false binary
+
+Filed after reading the implementation of item 2, which is otherwise exactly
+right.
+
+`Session.inputs()` (`api/client.py:344`) loops on `pending_inputs()` every
+`poll` seconds, default 0.05. The reasoning given for it — that `inputNeeded`
+moves for several reasons and rebuilding the set from
+`session/inputNeededSet` / `session/inputNeededRemoved` re-derives what the
+session reducer already computed — **is correct, and this request does not
+dispute it.** The mirror should stay the source of truth.
+
+But "read the mirror" and "wake on envelopes" are not the two ends of one axis.
+The third option is to do both: block on the event reader, and on any envelope
+for this session's channel, re-read `pending_inputs()` and yield if it differs.
+The reducer still computes the set; the envelope is only the *clock*. Nothing is
+reconstructed from actions, and no interval is guessed.
+
+**Why it is worth a follow-up rather than a shrug.** A 50 ms poll is invisible
+for one session and is not what this consumer runs: a surface holding a
+connection per user, each watching several sessions, pays a wakeup per session
+per 50 ms forever — 20 Hz of mirror reads and list comparisons whose overwhelmingly
+common answer is "nothing changed". It is also the one place in this library
+where latency is a *guess*: everything else here is edge-triggered, and an
+approval prompt is precisely the thing a user is waiting on.
+
+**Proposed shape.** Keep the signature, keep the mirror as the source, replace
+the sleep with a wait on the event reader filtered to the session channel.
+`poll` stays as a fallback interval — a belt-and-braces tick for anything that
+mutates `inputNeeded` without an envelope this client sees — but as a ceiling on
+staleness rather than the mechanism, so it can default to something like 5 s
+instead of 50 ms.
+
+`ChatWatch` already does the reader half of this correctly and is the model.
 
 ---
 
