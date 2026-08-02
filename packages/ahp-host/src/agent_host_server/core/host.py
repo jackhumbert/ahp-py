@@ -2292,12 +2292,22 @@ class Host:
         if session is None:
             raise errors.session_not_found(session_uri)
 
+        first = changeset.uri not in session.changesets
+        if not first:
+            # Back to `computing` before the list is replaced. Without it the
+            # file list swaps under the user with nothing to say a refresh
+            # happened, and the client's progress bar -- which it renders for
+            # exactly this status -- never appears. Only on a REFRESH: the
+            # first publish already registers the channel in `computing`.
+            await self.sequencer.publish(
+                changeset.uri, {"type": "changeset/statusChanged", "status": "computing"}
+            )
+
         already = session.reviewed.get(changeset.uri, set())
         files = [
             file_entry(change, session.content, reviewed=_entry_id(change) in already)
             for change in changes
         ]
-        first = changeset.uri not in session.changesets
         session.changesets[changeset.uri] = changeset
         if first:
             await self.sequencer.register_channel(
@@ -2415,9 +2425,7 @@ class Host:
         # from a stale UI.
         owner = next((s for s in self._sessions.values() if channel in s.changesets), None)
         if owner is not None and owner.turn is not None and not owner.turn.done():
-            raise errors.invalid_params(
-                f"{operation!r} is disabled while a turn is active"
-            )
+            raise errors.invalid_params(f"{operation!r} is disabled while a turn is active")
 
         await self.sequencer.publish(
             channel,

@@ -18,6 +18,7 @@ import pytest
 
 from agent_host_server.provider.demo_workspace import (
     DemoWorkspace,
+    available_operations,
     changeset_uris,
     workspace_changeset,
 )
@@ -234,3 +235,51 @@ class TestTheTwoChangesetsAreDistinguishable:
 
         assert workspace.uncommitted_changes() == []
         assert workspace.session_changes("echo:/s"), "the session's work vanished"
+
+
+class TestOperationsFollowGitState:
+    """A button that cannot work is not offered.
+
+    Clicking Commit with nothing staged runs `git commit`, gets "nothing to
+    commit", and looks exactly like a button that did nothing -- which is the
+    complaint this whole cluster came from. Gating also keeps the
+    changeset-scoped count low enough that the client does not collapse them
+    into a submenu labelled with whichever happened to be first.
+    """
+
+    def test_a_clean_tree_offers_neither_stage_nor_commit(self, tmp_path: Path) -> None:
+        workspace = _sandbox(tmp_path)
+        offered = {o.id for o in available_operations(workspace)}
+        assert "ahs-stage" not in offered
+        assert "ahs-commit" not in offered
+
+    def test_unstaged_work_offers_stage_but_not_commit(self, tmp_path: Path) -> None:
+        workspace = _sandbox(tmp_path)
+        workspace.apply_demo_edits("howdy")
+        offered = {o.id for o in available_operations(workspace)}
+        assert "ahs-stage" in offered
+        assert "ahs-commit" not in offered, "commit with nothing staged does nothing"
+
+    def test_staged_work_offers_commit(self, tmp_path: Path) -> None:
+        workspace = _sandbox(tmp_path)
+        changes = workspace.apply_demo_edits("howdy")
+        workspace.stage([c.uri for c in changes])
+        assert "ahs-commit" in {o.id for o in available_operations(workspace)}
+
+    def test_never_more_than_two_changeset_scoped_at_once(self, tmp_path: Path) -> None:
+        """The client collapses more than one into a submenu; more than two
+        would be a bar nobody can read."""
+        workspace = _sandbox(tmp_path)
+        for step in ("clean", "edited", "staged"):
+            if step == "edited":
+                changes = workspace.apply_demo_edits("howdy")
+            if step == "staged":
+                workspace.stage([c.uri for c in changes])
+            scoped = [o for o in available_operations(workspace) if "changeset" in o.scopes]
+            assert len(scoped) <= 2, f"{step}: {[o.id for o in scoped]}"
+
+    def test_a_plain_directory_offers_nothing(self, tmp_path: Path) -> None:
+        """No git, no git buttons -- rather than buttons that always fail."""
+        (tmp_path / "src" / "greeter").mkdir(parents=True)
+        (tmp_path / "src" / "greeter" / "core.py").write_text('GREETING = "hello"\n')
+        assert available_operations(DemoWorkspace(tmp_path)) == ()

@@ -37,6 +37,7 @@ from agent_host_server.core.changesets import Changeset, ChangesetOperation, Fil
 __all__ = [
     "WORKSPACE_OPERATIONS",
     "DemoWorkspace",
+    "available_operations",
     "changeset_uris",
     "publish_workspace_changesets",
     "workspace_changeset",
@@ -112,7 +113,37 @@ def changeset_uris(session_uri: str) -> tuple[str, str]:
     return f"ahp-changeset:/{token}-uncommitted", f"ahp-changeset:/{token}-session"
 
 
-def workspace_changeset(root: Path, label: str, uri: str, change_kind: str) -> Changeset:
+def available_operations(workspace: DemoWorkspace) -> tuple[ChangesetOperation, ...]:
+    """The operations that can actually do something right now.
+
+    A button that cannot work is still offered otherwise: clicking Commit with
+    nothing staged runs `git commit`, gets "nothing to commit", and looks
+    exactly like a button that did nothing -- which is the complaint this
+    whole cluster came from. The reference host gates the same way, which is
+    also how it keeps the changeset-scoped count low enough that the client
+    does not collapse them into a submenu.
+    """
+    if not workspace.is_git:
+        return ()
+    staged = bool(workspace.git("diff", "--cached", "--name-only").stdout.strip())
+    unstaged = bool(workspace.status().strip())
+    available: list[ChangesetOperation] = []
+    for operation in WORKSPACE_OPERATIONS:
+        if operation.id == "ahs-stage" and not unstaged:
+            continue
+        if operation.id == "ahs-commit" and not staged:
+            continue
+        available.append(operation)
+    return tuple(available)
+
+
+def workspace_changeset(
+    root: Path,
+    label: str,
+    uri: str,
+    change_kind: str,
+    operations: tuple[ChangesetOperation, ...] | None = None,
+) -> Changeset:
     return Changeset(
         uri=uri,
         label=label,
@@ -127,7 +158,7 @@ def workspace_changeset(root: Path, label: str, uri: str, change_kind: str) -> C
         # back. `session`, `branch`, `uncommitted` and `turn` are the four.
         change_kind=change_kind,
         reviewable=True,
-        operations=WORKSPACE_OPERATIONS,
+        operations=operations if operations is not None else WORKSPACE_OPERATIONS,
     )
 
 
@@ -428,11 +459,17 @@ async def publish_workspace_changesets(
     staging moves a file from one to the other.
     """
     uncommitted_uri, session_scoped_uri = changeset_uris(session_uri)
+    # Recomputed on every publish, from git rather than from a constant.
+    operations = available_operations(workspace)
     await publisher.changes_published(
-        workspace_changeset(workspace.root, "Uncommitted changes", uncommitted_uri, "uncommitted"),
+        workspace_changeset(
+            workspace.root, "Uncommitted changes", uncommitted_uri, "uncommitted", operations
+        ),
         workspace.uncommitted_changes(),
     )
     await publisher.changes_published(
-        workspace_changeset(workspace.root, "Session changes", session_scoped_uri, "session"),
+        workspace_changeset(
+            workspace.root, "Session changes", session_scoped_uri, "session", operations
+        ),
         workspace.session_changes(session_uri),
     )
