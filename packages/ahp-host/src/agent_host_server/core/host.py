@@ -3522,15 +3522,9 @@ class Host:
         if session is None:
             return
         if action_type == "chat/turnStarted":
-            await self._seed_title(session, channel, action)
-            runner = TurnRunner(
-                self.sequencer,
-                channel,
-                self.pending,
-                session.uri,
-                lambda: self._mirror_summary(session),
-            )
-            session.turn = asyncio.create_task(self._run_turn(session, runner, action))
+            await self._start_turn(session, channel, action)
+        elif action_type == "chat/pendingMessageSet":
+            await self._drain_queue(session, channel)
         elif action_type == "chat/turnCancelled" and session.turn is not None:
             session.turn.cancel()
             if session.agent_session is not None:
@@ -3734,6 +3728,67 @@ class Host:
                 customization_id, bool(action.get("enabled"))
             )
 
+    async def _start_turn(self, session: _Session, channel: str, action: Mapping[str, Any]) -> None:
+        """Run *action* as a turn on *channel*."""
+        await self._seed_title(session, channel, action)
+        runner = TurnRunner(
+            self.sequencer,
+            channel,
+            self.pending,
+            session.uri,
+            lambda: self._mirror_summary(session),
+        )
+        session.turn = asyncio.create_task(self._run_turn(session, runner, action))
+
+    async def _drain_queue(self, session: _Session, channel: str) -> None:
+        """Consume the next queued message, if the chat is free to run it.
+
+        "If the chat is idle when a queued message is set, the server SHOULD
+        immediately consume it and start a new turn" -- and
+        `chat/pendingMessageRemoved` is "dispatched ... by the server when it
+        consumes a message". We did neither, so a follow-up typed while the
+        agent worked stayed in the chip forever: the client showed it queued and
+        waited for a host that was never coming back for it.
+
+        Called at both ends -- when a message is queued, and when a turn
+        finishes -- because "idle" is a race either way round.
+        """
+        state = self.sequencer.state_of(channel)
+        if not isinstance(state, Mapping) or state.get("activeTurn") is not None:
+            return
+        queued = state.get("queuedMessages")
+        if not isinstance(queued, list) or not queued:
+            return
+        entry = queued[0]
+        if not isinstance(entry, Mapping):
+            return
+        message = entry.get("message")
+        if not isinstance(message, Mapping):
+            return
+        # Removed BEFORE the turn starts, and awaited. The entry has to leave
+        # the queue while the chat is still idle: once `chat/turnStarted`
+        # lands, a second `_drain_queue` would find the same entry, see a turn
+        # already active, and leave it -- but a removal published *after* the
+        # turn ended would race the next drain and run it twice.
+        await self.sequencer.publish(
+            channel,
+            {"type": "chat/pendingMessageRemoved", "kind": "queued", "id": entry.get("id")},
+        )
+        started = {
+            "type": "chat/turnStarted",
+            "turnId": f"queued-{uuid.uuid4()}",
+            "startedAt": now_iso(),
+            "message": dict(message),
+        }
+        # PUBLISHED, then run. A client-dispatched turn is published by the
+        # dispatch path before `_react` runs it; a turn the host starts by
+        # itself has no such path, and running it without publishing leaves the
+        # chat with no turn at all -- the deltas arrive against a turn no client
+        # has ever heard of. Not routed back through `_react`, which would run
+        # it a second time.
+        await self.sequencer.publish(channel, started)
+        await self._start_turn(session, channel, started)
+
     async def _seed_title(self, session: _Session, channel: str, action: Mapping[str, Any]) -> None:
         """Name a still-unnamed session after the message that started it.
 
@@ -3816,6 +3871,11 @@ class Host:
             if runner.sink is not None:
                 self._spawn(runner.sink.set_activity(None))
             self._spawn(self._mark_unread(session))
+            # Detached, and after the turn task has released the channel: this
+            # starts the NEXT turn, and starting it from inside the finally of
+            # the turn it follows would make `session.turn` overwrite itself
+            # while this frame still owns it.
+            self._spawn(self._drain_queue(session, runner.channel))
             with contextlib.suppress(Exception):
                 await self._mirror_summary(session)
 

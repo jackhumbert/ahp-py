@@ -16,7 +16,7 @@ from __future__ import annotations
 import json
 import time
 import uuid
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from typing import Any
 
 from agent_host_server.core.pending import PendingRequest, PendingRequests
@@ -77,8 +77,25 @@ class ActionTurnSink:
         self._markdown_part_id: str | None = None
         self._reasoning_part_id: str | None = None
         self._activity: str | None = None
+        self._segment: str | None = None
+
+    def _open_segment(self, kind: str) -> None:
+        """Start a new response part when the kind of output changes.
+
+        The client renders parts in the order they were created, and appends a
+        delta to whichever part its id names -- so one markdown part per turn
+        put prose written *after* a tool call above it, out of order with the
+        thing it was commenting on. A run of the same kind still shares a part;
+        only the switch is a boundary.
+        """
+        if kind == self._segment:
+            return
+        self._segment = kind
+        self._markdown_part_id = None
+        self._reasoning_part_id = None
 
     async def _ensure_markdown_part(self) -> str:
+        self._open_segment("markdown")
         if self._markdown_part_id is None:
             self._markdown_part_id = f"md-{uuid.uuid4()}"
             await self._sequencer.publish(
@@ -108,6 +125,7 @@ class ActionTurnSink:
         )
 
     async def reasoning_delta(self, text: str) -> None:
+        self._open_segment("reasoning")
         if self._reasoning_part_id is None:
             self._reasoning_part_id = f"re-{uuid.uuid4()}"
             await self._sequencer.publish(
@@ -139,9 +157,12 @@ class ActionTurnSink:
         tool_input: Any = None,
         *,
         display_name: str | None = None,
+        intention: str | None = None,
+        meta: Mapping[str, Any] | None = None,
     ) -> None:
         # `chat/toolCallStart` creates its own toolCall response part; emitting
         # an extra `chat/responsePart` for it would duplicate the part.
+        self._open_segment("tool")
         action: dict[str, Any] = {
             "type": "chat/toolCallStart",
             "turnId": self._turn_id,
@@ -153,10 +174,107 @@ class ActionTurnSink:
             # and the client drops it from its tool-label map entirely.
             "displayName": display_name or name,
         }
+        if intention is not None:
+            action["intention"] = intention
+        if meta:
+            action["_meta"] = dict(meta)
         if tool_input is not None:
             action["toolInput"] = _encoded_tool_input(tool_input)
         await self._sequencer.publish(self._channel, action)
         await self.set_activity(action["displayName"])
+
+    async def tool_call_delta(
+        self,
+        call_id: str,
+        content: str | None = None,
+        *,
+        invocation_message: str | None = None,
+        meta: Mapping[str, Any] | None = None,
+    ) -> None:
+        """Stream a tool call's parameters, or update its progress line.
+
+        Without this a call that takes a while renders as one static row and
+        then everything at once. `content` appends to the parameters as the
+        model produces them; `invocation_message` replaces the line under the
+        tool's name, which is where progress belongs -- it is a *message*, not
+        an appended log.
+        """
+        action: dict[str, Any] = {
+            "type": "chat/toolCallDelta",
+            "turnId": self._turn_id,
+            "toolCallId": call_id,
+        }
+        if content is not None:
+            action["content"] = content
+        if invocation_message is not None:
+            action["invocationMessage"] = invocation_message
+        if meta:
+            action["_meta"] = dict(meta)
+        await self._sequencer.publish(self._channel, action)
+
+    async def tool_call_output(
+        self,
+        call_id: str,
+        content: Sequence[Mapping[str, Any]],
+        *,
+        meta: Mapping[str, Any] | None = None,
+    ) -> None:
+        """Show what a still-running tool has produced so far.
+
+        REPLACES the running call's content rather than appending to it -- the
+        action is `contentChanged`, and the reducer assigns. A caller streaming
+        a command's output passes everything so far each time.
+
+        `meta` is where the well-known `ptyTerminal` key goes: "a `ptyTerminal`
+        key with `{ input: string; output: string }` indicates the tool operated
+        on a terminal", which is what makes a client render the terminal widget
+        instead of a plain row.
+        """
+        action: dict[str, Any] = {
+            "type": "chat/toolCallContentChanged",
+            "turnId": self._turn_id,
+            "toolCallId": call_id,
+            "content": [dict(item) for item in content],
+        }
+        if meta:
+            action["_meta"] = dict(meta)
+        await self._sequencer.publish(self._channel, action)
+
+    async def usage(
+        self,
+        *,
+        input_tokens: int | None = None,
+        output_tokens: int | None = None,
+        cache_read_tokens: int | None = None,
+        model: str | None = None,
+        meta: Mapping[str, Any] | None = None,
+    ) -> None:
+        """Report the turn's token usage.
+
+        The client's rule for the context gauge is literally "no usage, no
+        gauge" -- it renders nothing at all rather than a zero -- so a host that
+        never publishes this has a UI element that does not exist as far as its
+        users can tell.
+
+        Every field is optional because a provider that knows only some of them
+        should send what it has. Sending none of them is still meaningful: it
+        says a turn happened and the numbers are unknown.
+        """
+        usage: dict[str, Any] = {}
+        for key, value in (
+            ("inputTokens", input_tokens),
+            ("outputTokens", output_tokens),
+            ("cacheReadTokens", cache_read_tokens),
+            ("model", model),
+        ):
+            if value is not None:
+                usage[key] = value
+        if meta:
+            usage["_meta"] = dict(meta)
+        await self._sequencer.publish(
+            self._channel,
+            {"type": "chat/usage", "turnId": self._turn_id, "usage": usage},
+        )
 
     async def tool_call_completed(
         self,
@@ -557,6 +675,9 @@ class TurnRunner:
         self._pending = pending if pending is not None else PendingRequests()
         self._session_uri = session_uri
         self._session_changed = session_changed
+        #: The chat this turn ran on. The caller drains that chat's queue when
+        #: the turn ends, and it should not have to remember which one.
+        self.channel = channel
         #: Requests still parked when the turn ended. The caller retracts their
         #: `session/inputNeeded` entries -- not this class, because the turn task
         #: is frequently the one being cancelled and cannot be relied on to

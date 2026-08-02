@@ -39,6 +39,12 @@ no model in here — you write a provider, and routing is yours.
   (`session/inputNeeded`, unread, activity) that nothing else in the stack
   enforces; `createSession.fork`; tool calls with confirmation, client-executed
   tools, and elicitation.
+- **Turn fidelity.** Queued follow-ups are consumed as soon as the chat goes
+  idle instead of sitting in their chip forever; response parts are segmented by
+  kind, so prose written after a tool call renders below it; `chat/usage` makes
+  the client's context gauge exist at all; and `chat/toolCallDelta` /
+  `chat/toolCallContentChanged` let a slow tool show progress rather than a
+  static row followed by everything at once.
 - **A session list that moves.** Sessions are named from the user's first
   message rather than all being called "New Session"; `session/activityChanged`
   carries the running tool's name instead of the client's "Working..."

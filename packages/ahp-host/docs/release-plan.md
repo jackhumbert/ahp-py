@@ -196,7 +196,35 @@ is a two-party protocol and we only implement the client's half. And a streaming
 side chat does not promote the session summary, so `--multi-chat` work is
 invisible in the list.
 
-### 2C. Turn fidelity — ranked 3, 4, 15, 16, 19, 24
+### 2C. Turn fidelity — ranked 3, 4, 15, 16, 19, 24 — **done**
+
+The queued-message drain was confirmed rather than assumed, and it is not a
+VS Code nicety: the schema states it. "If the chat is idle when a queued message
+is set, the server SHOULD immediately consume it and start a new turn", and
+`chat/pendingMessageRemoved` is "dispatched ... by the server when it consumes a
+message". Both ends are implemented — on queue and on turn end — and the
+synthesized `chat/turnStarted` is **published** before it is run, which a
+client-dispatched turn gets for free and a host-started one does not. Steering
+messages are deliberately left alone: they belong in the running turn, which
+only a provider can do.
+
+Response parts are now segmented by kind, so prose after a tool call renders
+below it. A run of one kind still shares a part — a part per delta would be a
+part per token.
+
+`chat/usage`, `chat/toolCallDelta` and `chat/toolCallContentChanged` are all on
+the sink, and the demo emits all three. The `_meta` well-known key is
+**`ptyTerminal`**, with `{input, output}` — not `toolKind`, which this document
+previously guessed; the schema names it exactly. The library carries `_meta`
+through and there is a test for it, but the demo does not claim a terminal it
+never touched.
+
+The one item that turned out to be already fixed: `toolCallReady.toolInput` is
+encoded on **both** publication sites. There is now a test asserting every
+action carrying a `toolInput` carries a string, so a fourth site cannot regress
+quietly.
+
+The original findings:
 
 **Queued messages are never drained.** Type a follow-up while the agent works
 and it sits in the chip forever. (The verifier partly refuted this for remote

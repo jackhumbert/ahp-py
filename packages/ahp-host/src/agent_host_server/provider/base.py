@@ -487,10 +487,64 @@ class TurnSink(Protocol):
         tool_input: Any = None,
         *,
         display_name: str | None = None,
+        intention: str | None = None,
+        meta: Mapping[str, Any] | None = None,
     ) -> None:
         """Announce a call. *display_name* is what the user sees; it defaults
         to *name* because the wire field is required and a blank row is worse
-        than a technical one."""
+        than a technical one.
+
+        *meta* is the protocol's `_meta`, where the well-known keys live -- in
+        particular `ptyTerminal: {"input": ..., "output": ...}`, which is what
+        makes a client render a shell command as a terminal rather than a row.
+        """
+        ...
+
+    async def tool_call_delta(
+        self,
+        call_id: str,
+        content: str | None = None,
+        *,
+        invocation_message: str | None = None,
+        meta: Mapping[str, Any] | None = None,
+    ) -> None:
+        """Stream a call's parameters, or update the line under its name.
+
+        Optional, and only interesting for a call that takes long enough to
+        watch. Without it such a call is one static row and then everything at
+        once.
+        """
+        ...
+
+    async def tool_call_output(
+        self,
+        call_id: str,
+        content: Sequence[Mapping[str, Any]],
+        *,
+        meta: Mapping[str, Any] | None = None,
+    ) -> None:
+        """Show what a still-running call has produced so far.
+
+        REPLACES the running call's content each time rather than appending, so
+        pass everything so far. Optional, like `tool_call_delta`.
+        """
+        ...
+
+    async def usage(
+        self,
+        *,
+        input_tokens: int | None = None,
+        output_tokens: int | None = None,
+        cache_read_tokens: int | None = None,
+        model: str | None = None,
+        meta: Mapping[str, Any] | None = None,
+    ) -> None:
+        """Report the turn's token usage.
+
+        The client's rule is "no usage, no gauge" -- it renders nothing rather
+        than a zero -- so a provider that never calls this has a context gauge
+        its users cannot see at all.
+        """
         ...
 
     async def tool_call_completed(

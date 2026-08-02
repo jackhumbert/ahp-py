@@ -131,12 +131,27 @@ So a host that wants to be usable must:
 |---|---|
 | `text_delta(text)` | Append to the visible answer. Call repeatedly. |
 | `reasoning_delta(text)` | Append to the reasoning/thinking part. |
-| `tool_call_started(id, name, input, *, display_name=...)` | Announce a call. `display_name` is what the user reads. |
+| `tool_call_started(id, name, input, *, display_name=, intention=, meta=)` | Announce a call. `display_name` is what the user reads. |
+| `tool_call_delta(id, content=, *, invocation_message=)` | Stream the parameters, or move the progress line under the tool's name. |
+| `tool_call_output(id, content, *, meta=)` | What a still-running call has produced. **Replaces**, so pass everything so far. |
 | `tool_call_completed(id, result, *, success=, past_tense_message=)` | Finish it. Both keyword fields are **required by the protocol**. |
 | `turn_failed(message, error_type=, duration_ms=)` | End in error. `error_type` is required — omitting it renders `Error: (undefined) …`. |
+| `usage(*, input_tokens=, output_tokens=, cache_read_tokens=, model=)` | Report the turn's tokens. No usage, no context gauge — the client renders nothing rather than a zero. |
 | `request_input(request)` | **Suspends.** Ask a human and wait. |
 | `confirm_tool_call(confirmation)` | **Suspends.** Ask before running a tool. |
 | `run_client_tool(call)` | **Suspends.** Ask the *client* to run one of its own tools. |
+
+Three of those are optional and easy to skip, and each is invisible in a
+different way. Without `tool_call_delta`/`tool_call_output`, a call that takes
+thirty seconds is one static row and then everything at once. Without `usage`,
+the context gauge does not appear at all. And `meta` is where the protocol's
+well-known keys go — `ptyTerminal: {"input": …, "output": …}` is what makes a
+client render a shell command as a terminal instead of a row.
+
+Parts are segmented for you: switching between text, reasoning and tool calls
+starts a new response part, so prose written *after* a tool call renders below
+it rather than being appended to the part that came first. A run of the same
+kind still shares one part.
 
 ### What the host publishes for you
 
@@ -153,6 +168,10 @@ you:
 - **The unread flag.** The host marks a session unread when a turn ends on a
   session no client has open, which is the half of `session/isReadChanged` that
   is the server's.
+- **Queued messages.** A follow-up typed while you are working is consumed as
+  soon as the chat goes idle, and run as its own turn — you do not poll for it.
+  Steering messages are *not* consumed: they are meant to be injected into the
+  running turn, which only a provider can do.
 
 If you want to say something better than the tool's name, call
 `context.activity_changed("Editing core.py")` — it is on `AgentSessionContext`

@@ -98,6 +98,17 @@ def _demo_input_for(tool: Mapping[str, Any], text: str) -> dict[str, Any]:
     return filled
 
 
+def _rough_tokens(text: str) -> int:
+    """Characters over four. Not tokens, and not pretending to be.
+
+    There is no tokenizer in this package and no model behind this provider, so
+    the only honest options were this or omitting the counts entirely -- and
+    omitting them means the client renders no context gauge, which is the thing
+    the demo exists to show.
+    """
+    return max(1, len(text) // 4)
+
+
 def _selected(answer: Any) -> str | None:
     """The chosen option id out of a `single-select` answer, or None.
 
@@ -147,6 +158,26 @@ class EchoSession:
 
     async def send_user_message(self, message: UserMessage, sink: TurnSink) -> None:
         self._cancelled = False
+        await self._reply(message, sink)
+        # After a normal return, deliberately NOT in a `finally`: a cancelled
+        # turn cannot be relied on to finish another await, and usage for a turn
+        # the user stopped is a nicety.
+        #
+        # The client's rule for the context gauge is "no usage, no gauge", so a
+        # host that never sends this has a UI element its users cannot see at
+        # all. There is NO TOKENIZER here -- an echo agent has no model -- so
+        # these are characters over four, the usual rough estimate, wrong in the
+        # usual ways. A real adapter reports what its model returned.
+        await sink.usage(
+            input_tokens=_rough_tokens(message.text),
+            output_tokens=_rough_tokens(message.text),
+            # What the user picked for THIS message, falling back to what the
+            # session was created with. Both are carried, neither is obeyed --
+            # there is no model here to route to.
+            model=message.model.id if message.model is not None else self.context.model,
+        )
+
+    async def _reply(self, message: UserMessage, sink: TurnSink) -> None:
         if self._workspace is not None:
             # Published BEFORE the mode branches below, every one of which
             # returns early. A changeset that only appears in the default reply
@@ -229,11 +260,31 @@ class EchoSession:
         # client rewrite the parameters, and running the original would execute
         # something nobody agreed to.
         text = _text_of(outcome.tool_input, message.text)
+
+        # A call that finishes in one frame renders as a static row and then
+        # everything at once, which is what a long tool looks like when the
+        # host has nothing to say in between. These two are what a real adapter
+        # emits while its tool runs: `tool_call_delta` moves the line under the
+        # tool's name, `tool_call_output` REPLACES the content produced so far.
+        words = text.split() or [text]
+        for index in range(1, len(words) + 1):
+            if self._cancelled:
+                return
+            if self._delay:
+                await asyncio.sleep(self._delay)
+            await sink.tool_call_delta(call_id, invocation_message=f"Echoing word {index}")
+            await sink.tool_call_output(
+                call_id, [{"type": "text", "text": " ".join(words[:index])}]
+            )
+
         await sink.tool_call_completed(
             call_id,
             {"content": [{"type": "text", "text": text}]},
             past_tense_message="Echoed the message back",
         )
+        # Deliberately AFTER the call: the client renders response parts in
+        # creation order, so this is the case that used to appear above the
+        # tool it is commenting on.
         await sink.text_delta(f"You said: {text}")
 
     async def _echo_via_client_tool(self, message: UserMessage, sink: TurnSink) -> None:
