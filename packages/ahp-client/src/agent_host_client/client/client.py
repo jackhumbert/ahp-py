@@ -50,6 +50,7 @@ from agent_host_client.client.events import (
     SubscriptionEvent,
     UnknownResponse,
 )
+from agent_host_client.client.mirror import StateMirror
 from agent_host_client.client.queue import BroadcastQueue, BroadcastReader
 
 __all__ = [
@@ -164,6 +165,7 @@ class AhpClient(CommandsMixin):
         self._handler: ServerRequestHandler | None = None
         self._malformed = 0
         self._last_seen_server_seq = 0
+        self._mirror: StateMirror | None = None
         self._offered: tuple[str, ...] = ()
 
     # ── observation ──────────────────────────────────────────────────────────
@@ -187,6 +189,24 @@ class AhpClient(CommandsMixin):
     def diagnostics(self) -> BroadcastReader[Diagnostic]:
         """Recoverable faults: gaps, drops, rejections, malformed frames."""
         return self._diagnostics.reader()
+
+    def set_state_mirror(self, mirror: StateMirror | None) -> None:
+        """Feed a mirror on the **read path**, before any fan-out.
+
+        This is what makes bounding the event taps safe (ADR 0002): state is
+        applied before a single consumer is notified, so a consumer that has
+        stopped draining -- or was never attached -- costs itself events and
+        never costs anyone correctness. Every other client fans out first and
+        lets consumers update mirrors afterwards, which is why their own docs
+        admit a dropped envelope desyncs state permanently.
+
+        Mutation happens from more than one task: this path, and
+        `record_pending` from whichever task called `dispatch`. That is safe
+        because **no mutation spans an await**, which is a weaker and more
+        precise rule than "one task" -- and the rule to preserve. Never reduce
+        in a thread pool.
+        """
+        self._mirror = mirror
 
     def set_server_request_handler(self, handler: ServerRequestHandler | None) -> None:
         """Install the answer to host-initiated requests.
@@ -401,6 +421,11 @@ class AhpClient(CommandsMixin):
         # An explicit seq still advances the counter, so a caller mixing both
         # forms cannot collide with itself.
         self._next_client_seq = max(self._next_client_seq, seq + 1)
+        if self._mirror is not None:
+            # Optimistic apply happens before the frame is enqueued, so a UI
+            # reading the mirror never observes a window where the action has
+            # been sent but not yet reflected.
+            self._mirror.record_pending(channel, action, seq)
         self.notify("dispatchAction", {"channel": channel, "clientSeq": seq, "action": action})
         return DispatchHandle(seq)
 
@@ -626,6 +651,8 @@ class AhpClient(CommandsMixin):
         if method == "action":
             event = ActionEvent(params)
             self._absorb_server_seq(params.get("serverSeq"))
+            if self._mirror is not None:
+                self._mirror.apply(params)
         elif method == "root/sessionAdded":
             event = SessionAdded(params)
         elif method == "root/sessionRemoved":

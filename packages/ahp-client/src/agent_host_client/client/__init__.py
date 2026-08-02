@@ -38,6 +38,14 @@ from agent_host_client.client.events import (
     SubscriptionEvent,
     UnknownResponse,
 )
+from agent_host_client.client.mirror import (
+    ApplyOutcome,
+    ChannelMirror,
+    GapPolicy,
+    PendingAction,
+    PendingPolicy,
+    StateMirror,
+)
 from agent_host_client.client.queue import BroadcastQueue, BroadcastReader
 
 __all__ = [
@@ -45,9 +53,11 @@ __all__ = [
     "ActionRejected",
     "AhpClient",
     "AhpClientError",
+    "ApplyOutcome",
     "AuthRequiredEvent",
     "BroadcastQueue",
     "BroadcastReader",
+    "ChannelMirror",
     "ClientClosed",
     "ClientConfig",
     "ClientEvent",
@@ -55,8 +65,11 @@ __all__ = [
     "Diagnostic",
     "DispatchHandle",
     "DroppedEvents",
+    "GapPolicy",
     "MalformedFrame",
     "OtlpEvent",
+    "PendingAction",
+    "PendingPolicy",
     "ProgressEvent",
     "ProtocolVersionError",
     "ProtocolViolation",
@@ -67,6 +80,7 @@ __all__ = [
     "SessionAdded",
     "SessionRemoved",
     "SessionSummaryChanged",
+    "StateMirror",
     "Subscription",
     "SubscriptionEvent",
     "TransportError",
