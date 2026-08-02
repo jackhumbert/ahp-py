@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import subprocess
 from pathlib import Path
+from typing import ClassVar
 from urllib.parse import unquote, urlparse
 
 import pytest
@@ -149,8 +150,11 @@ class TestWithoutGit:
 
 
 def test_the_changeset_reports_an_honest_kind(tmp_path: Path) -> None:
-    uncommitted, _staged = changeset_uris("echo:/s")
-    assert workspace_changeset(tmp_path, "Uncommitted", uncommitted).change_kind == "uncommitted"
+    uncommitted, _session = changeset_uris("echo:/s")
+    assert (
+        workspace_changeset(tmp_path, "Uncommitted", uncommitted, "uncommitted").change_kind
+        == "uncommitted"
+    )
 
 
 def test_changeset_uris_differ_per_session() -> None:
@@ -168,7 +172,8 @@ def test_changeset_uris_differ_per_session() -> None:
 
 
 @pytest.mark.parametrize(
-    "operation", workspace_changeset(Path("/x"), "l", changeset_uris("s")[0]).operations
+    "operation",
+    workspace_changeset(Path("/x"), "l", changeset_uris("s")[0], "uncommitted").operations,
 )
 def test_every_operation_is_well_formed(operation: object) -> None:
     """One malformed operation makes the client's derived throw, and a throwing
@@ -176,3 +181,56 @@ def test_every_operation_is_well_formed(operation: object) -> None:
     wire = operation.to_wire()  # type: ignore[attr-defined]
     assert wire["scopes"]
     assert wire["status"] == "idle"
+
+
+class TestTheTwoChangesetsAreDistinguishable:
+    """The client uses `changeKind` as the changeset's IDENTITY.
+
+    `Lbt`'s constructor is `this.id = i.changeKind`. Two changesets sharing a
+    kind are one changeset to the picker -- selecting the second silently
+    resolves to the first, which is what the user saw: "Staged changes" in the
+    dropdown, selecting it did nothing, still showing the empty one.
+
+    And `uXi` pushes nothing for an unrecognised kind, so an invented one like
+    `staged` would be dropped entirely -- despite the spec saying clients
+    SHOULD fall back to a reasonable default.
+    """
+
+    #: The only four `uXi` pushes for. Anything else is dropped silently.
+    RENDERED: ClassVar[set[str]] = {"branch", "uncommitted", "session", "turn"}
+
+    def test_the_two_kinds_differ(self, tmp_path: Path) -> None:
+        uncommitted, scoped = changeset_uris("echo:/s")
+        a = workspace_changeset(tmp_path, "Uncommitted changes", uncommitted, "uncommitted")
+        b = workspace_changeset(tmp_path, "Session changes", scoped, "session")
+        assert a.change_kind != b.change_kind
+        assert a.uri != b.uri
+
+    def test_both_kinds_are_ones_the_client_renders(self, tmp_path: Path) -> None:
+        for kind in ("uncommitted", "session"):
+            assert kind in self.RENDERED
+
+    def test_staging_does_not_empty_the_uncommitted_list(self, tmp_path: Path) -> None:
+        """It compares against HEAD, not the index: a staged change is still an
+        uncommitted one. Comparing against the index made files vanish on
+        stage, which reads as data loss rather than a state change."""
+        workspace = _sandbox(tmp_path)
+        changes = workspace.apply_demo_edits("howdy")
+        before_staging = {c.uri for c in workspace.uncommitted_changes()}
+        assert before_staging
+
+        workspace.stage([c.uri for c in changes])
+
+        assert {c.uri for c in workspace.uncommitted_changes()} == before_staging
+
+    def test_committing_empties_uncommitted_but_not_session(self, tmp_path: Path) -> None:
+        """The whole reason there are two."""
+        workspace = _sandbox(tmp_path)
+        changes = workspace.apply_demo_edits("howdy")
+        workspace.session_changes("echo:/s")  # records the base at HEAD
+
+        workspace.stage([c.uri for c in changes])
+        workspace.commit("committed by the test")
+
+        assert workspace.uncommitted_changes() == []
+        assert workspace.session_changes("echo:/s"), "the session's work vanished"

@@ -87,7 +87,7 @@ WORKSPACE_OPERATIONS = (
 
 
 def changeset_uris(session_uri: str) -> tuple[str, str]:
-    """The two changeset channels for one session: (uncommitted, staged).
+    """The two changeset channels for one session: (uncommitted, session).
 
     Stable WITHIN a session, so republishing replaces the changeset rather
     than appending a new one with a fresh random URI on every turn -- and
@@ -98,17 +98,23 @@ def changeset_uris(session_uri: str) -> tuple[str, str]:
     had been edited, so the tree changed and the Changes view stayed empty.
     """
     token = hashlib.sha256(session_uri.encode()).hexdigest()[:12]
-    return f"ahp-changeset:/{token}-uncommitted", f"ahp-changeset:/{token}-staged"
+    return f"ahp-changeset:/{token}-uncommitted", f"ahp-changeset:/{token}-session"
 
 
-def workspace_changeset(root: Path, label: str, uri: str) -> Changeset:
+def workspace_changeset(root: Path, label: str, uri: str, change_kind: str) -> Changeset:
     return Changeset(
         uri=uri,
         label=label,
         description=f"Real working-tree edits under {root}.",
         # These ARE uncommitted working-tree edits. Saying `session` would be
         # a less precise claim about the same bytes.
-        change_kind="uncommitted",
+        # MUST differ between the two changesets: the client uses this as the
+        # changeset's identity (`this.id = i.changeKind`), so two sharing a
+        # kind collapse into one in the picker. It must also be one the client
+        # renders -- `uXi` pushes nothing for an unrecognised kind, dropping
+        # the changeset entirely, despite the spec saying clients SHOULD fall
+        # back. `session`, `branch`, `uncommitted` and `turn` are the four.
+        change_kind=change_kind,
         reviewable=True,
         operations=WORKSPACE_OPERATIONS,
     )
@@ -120,6 +126,8 @@ class DemoWorkspace:
     def __init__(self, root: Path) -> None:
         self.root = Path(root).resolve()
         self._git = shutil.which("git")
+        #: session uri -> the commit that was HEAD when it first published.
+        self._bases: dict[str, str] = {}
 
     # ─── git, best effort ────────────────────────────────────────────────
 
@@ -259,35 +267,59 @@ class DemoWorkspace:
             rows.append((line[0], line[1], line[3:]))
         return rows
 
-    def staged_changes(self) -> list[FileChange]:
-        """The index against HEAD -- "the staged index", one of the guide's own
-        examples of a changeset."""
-        changes: list[FileChange] = []
-        for index_status, _worktree_status, relative in self.porcelain():
-            if index_status in (" ", "?"):
-                continue
-            uri = (self.root / relative).as_uri()
-            before = None if index_status == "A" else self._show("HEAD", relative)
-            after = None if index_status == "D" else self._show("", relative)
-            changes.append(FileChange(uri=uri, before=before, after=after))
-        return changes
-
     def uncommitted_changes(self) -> list[FileChange]:
-        """The working tree against the index: what is NOT yet staged.
+        """The working tree against HEAD: everything not committed.
 
-        Together with `staged_changes` this makes staging visible -- a file
-        moves from one changeset to the other, which is the only feedback the
-        client gives, because it discards the invoke result entirely.
+        Against HEAD, not against the index -- so STAGING does not empty this
+        list, because a staged change is still an uncommitted one. That is
+        correct and it is worth stating, since the previous version compared
+        against the index and made files vanish on stage, which read as data
+        loss rather than as a state change.
         """
+        return self._changes_against("HEAD")
+
+    def session_changes(self, session_uri: str) -> list[FileChange]:
+        """Everything changed since this session started, committed or not.
+
+        The complement of the above, and the reason there are two: after
+        Commit, `uncommitted` empties while this still shows the work. Both
+        kinds -- `uncommitted` and `session` -- are in the spec's own
+        vocabulary, and they have to DIFFER, because the client uses
+        `changeKind` as the changeset's identity (`this.id = i.changeKind`).
+        Two changesets sharing a kind are one changeset to the picker, which is
+        exactly the bug this replaces.
+        """
+        return self._changes_against(self._base_for(session_uri))
+
+    def _base_for(self, session_uri: str) -> str:
+        """HEAD as it was when this session first published. Recorded once."""
+        if session_uri not in self._bases:
+            head = self.git("rev-parse", "HEAD").stdout.strip() if self.is_git else ""
+            self._bases[session_uri] = head or "HEAD"
+        return self._bases[session_uri]
+
+    def _changes_against(self, ref: str) -> list[FileChange]:
+        """Every path that differs between *ref* and the working tree."""
+        if not self.is_git:
+            return []
+        paths: list[str] = []
+        # Tracked differences, plus untracked files, which `diff` never lists.
+        for row in self.git("diff", "--name-only", "-z", ref).stdout.split("\0"):
+            if row:
+                paths.append(row)
+        for row in self.git("ls-files", "--others", "--exclude-standard", "-z").stdout.split("\0"):
+            if row and row not in paths:
+                paths.append(row)
+
         changes: list[FileChange] = []
-        for index_status, worktree_status, relative in self.porcelain():
-            if worktree_status == " ":
+        for relative in paths:
+            before = self._show(ref, relative)
+            after = self._worktree(relative)
+            if before is None and after is None:
                 continue
-            uri = (self.root / relative).as_uri()
-            untracked = index_status == "?"
-            before = None if untracked else self._show("", relative)
-            after = None if worktree_status == "D" else self._worktree(relative)
-            changes.append(FileChange(uri=uri, before=before, after=after))
+            changes.append(
+                FileChange(uri=(self.root / relative).as_uri(), before=before, after=after)
+            )
         return changes
 
     # ─── the operations ──────────────────────────────────────────────────
@@ -384,12 +416,12 @@ async def publish_workspace_changesets(
     the demo remembers doing: commit empties them, revert empties them, and
     staging moves a file from one to the other.
     """
-    uncommitted, staged = changeset_uris(session_uri)
+    uncommitted_uri, session_scoped_uri = changeset_uris(session_uri)
     await publisher.changes_published(
-        workspace_changeset(workspace.root, "Uncommitted changes", uncommitted),
+        workspace_changeset(workspace.root, "Uncommitted changes", uncommitted_uri, "uncommitted"),
         workspace.uncommitted_changes(),
     )
     await publisher.changes_published(
-        workspace_changeset(workspace.root, "Staged changes", staged),
-        workspace.staged_changes(),
+        workspace_changeset(workspace.root, "Session changes", session_scoped_uri, "session"),
+        workspace.session_changes(session_uri),
     )
