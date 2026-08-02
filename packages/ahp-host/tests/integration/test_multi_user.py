@@ -282,6 +282,8 @@ class TestCounters:
         assert counters["sessions"] == 1
         assert counters["pendingRequests"] == 0
         assert counters["serverSeq"] > 0
+        # Pinned deliberately: `counters()` is a documented surface an
+        # embedder scrapes, so adding or renaming a key is a change they see.
         assert set(counters) == {
             "connections",
             "sessions",
@@ -290,6 +292,10 @@ class TestCounters:
             "watches",
             "channels",
             "serverSeq",
+            # Connections closed for not reading. Explains disconnects that
+            # otherwise look mysterious; a climbing value means a client or a
+            # proxy is not draining.
+            "outboxOverflows",
         }
 
 

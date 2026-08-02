@@ -43,7 +43,7 @@ from agent_host_server.core.changesets import (
 )
 from agent_host_server.core.channels import ROOT_URI
 from agent_host_server.core.config import RootConfig, type_matches
-from agent_host_server.core.connection import Connection
+from agent_host_server.core.connection import DEFAULT_OUTBOX_LIMIT, Connection
 from agent_host_server.core.outbound import OutboundRequests
 from agent_host_server.core.pending import PendingRequests, RequestOutcome
 from agent_host_server.core.policy import Policy, TracksChannels
@@ -652,6 +652,7 @@ class Host:
         terminals: TerminalBackend | None = None,
         default_directory: str | None = None,
         completion_trigger_characters: Sequence[str] | None = None,
+        outbox_limit: int = DEFAULT_OUTBOX_LIMIT,
     ) -> None:
         if policy is None:  # pragma: no cover - defensive; typing already forbids it
             raise ValueError("a Policy is required; there is no default")
@@ -727,6 +728,14 @@ class Host:
         #: who it is. Host-scoped rather than connection-scoped: reconnecting
         #: on a new socket is the whole point.
         self._known_clients: set[str] = set()
+        #: Connections dropped for not reading. Counted rather than logged only,
+        #: because the symptom an operator sees is a reconnect loop.
+        self._outbox_overflows = 0
+        #: Frames one connection may have outstanding before the host closes it.
+        #: The tradeoff is documented on `Connection.enqueue`; the limit is here
+        #: because only the embedder knows how far behind a peer may reasonably
+        #: fall on their network.
+        self.outbox_limit = outbox_limit
         # No path chosen on the embedder's behalf, same as `sequence_file`. The
         # default keeps nothing, which is what a host whose sessions do not
         # outlive it should do.
@@ -878,7 +887,12 @@ class Host:
         """
         await self._ensure_root()
         connection = Connection(
-            transport, peer=peer, headers=headers, token=token, wire_log=self.wire_log
+            transport,
+            peer=peer,
+            headers=headers,
+            token=token,
+            wire_log=self.wire_log,
+            outbox_limit=self.outbox_limit,
         )
         connection.start_writer()
         self._connections.add(connection)
@@ -931,6 +945,8 @@ class Host:
                 task.cancel()
             await self.sequencer.unsubscribe_all(connection)
             self._connections.discard(connection)
+            if connection.overflowed:
+                self._outbox_overflows += 1
             await self._retire_active_client(connection)
             await connection.close()
 
@@ -3629,6 +3645,10 @@ class Host:
             "watches": len(self._watches),
             "channels": self.sequencer.channel_count,
             "serverSeq": self.sequencer.server_seq,
+            # Connections closed because the peer stopped reading. A non-zero
+            # value here explains disconnects that otherwise look mysterious,
+            # and a climbing one means a client or a proxy is not draining.
+            "outboxOverflows": self._outbox_overflows,
         }
 
     # ─── shutdown ────────────────────────────────────────────────────────

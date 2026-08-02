@@ -122,6 +122,107 @@ connection token it prints is a convenience against other local processes, not
 an authentication scheme — it is a shared secret in a URL, visible in process
 listings.
 
+## Restoring, and knowing when you are ready
+
+`Host.restore()` is **explicit** — nothing in the library calls it. Sessions a
+previous run persisted come back only when you ask, before you serve:
+
+```python
+import asyncio
+
+from agent_host_server import Host, LoopbackSingleUserPolicy
+from agent_host_server.core.store import FileSessionStore
+from agent_host_server.provider import EchoProvider
+
+
+async def start(path: str) -> tuple[Host, int]:
+    host = Host(EchoProvider(), LoopbackSingleUserPolicy(), store=FileSessionStore(path))
+    restored = await host.restore()  # ← nothing calls this for you
+    return host, restored
+```
+
+A restored session has no live agent yet: the provider is asked to resume
+lazily, on the first turn, so a host with a hundred stored sessions does not
+spawn a hundred agent runtimes at startup.
+
+### Liveness and readiness
+
+`Host.counters()` is deliberately **not** a metrics endpoint — what scrapes it
+is yours. But every deployment then writes the same twenty lines, so here they
+are. Readiness in particular is not guessable from outside: "restore finished
+and the transport is bound" is a fact only the host has.
+
+```python
+import json
+
+
+class Readiness:
+    """Wrap a host with the two answers a supervisor needs."""
+
+    def __init__(self, host: Host) -> None:
+        self.host = host
+        self.restored = False
+        self.serving = False
+
+    def live(self) -> bool:
+        """The process is up. Weak on its own — the interesting failures all
+        keep the port open."""
+        return True
+
+    def ready(self) -> bool:
+        """Restore finished AND the transport is bound. Before both, a client
+        that connects sees an empty session list and concludes its work is
+        gone."""
+        return self.restored and self.serving
+
+    def report(self) -> str:
+        counters = self.host.counters()
+        return json.dumps({"ready": self.ready(), **counters})
+
+
+host = Host(EchoProvider(), LoopbackSingleUserPolicy())
+probe = Readiness(host)
+assert not probe.ready()
+probe.restored = probe.serving = True
+assert probe.ready()
+
+payload = json.loads(probe.report())
+assert payload["ready"] is True
+# The one to watch: it only grows when providers are waiting on clients that
+# are not answering.
+assert "pendingRequests" in payload
+assert "outboxOverflows" in payload
+```
+
+Serve that on loopback, or on a port your orchestrator can reach and nobody
+else — the counters disclose session and connection counts.
+
+## Backpressure: a slow peer is disconnected, not buffered
+
+A connection's outbox is bounded. A peer that stops reading — a suspended
+laptop, a wedged renderer, a client behind a stalled proxy — hits the limit and
+**the connection is closed**, rather than frames being dropped or the host
+blocking.
+
+```python
+from agent_host_server.core.connection import DEFAULT_OUTBOX_LIMIT
+
+assert DEFAULT_OUTBOX_LIMIT >= 1024
+host = Host(EchoProvider(), LoopbackSingleUserPolicy(), outbox_limit=4096)
+assert host.outbox_limit == 4096
+```
+
+Closing is the option with a **recovery path**: the protocol already handles
+"you missed things" — the peer reconnects, and `reconnect` either replays the
+gap or answers with fresh snapshots and a `missing` list. A silently dropped
+frame has no such path, and the ordering guarantee is exactly what makes a hole
+undetectable. Blocking is not available: `enqueue` runs inside the sequencer's
+critical section, so one slow peer would stall every other client.
+
+`counters()["outboxOverflows"]` counts them. A climbing value means a client or
+a proxy is not draining, and explains disconnects that otherwise look
+mysterious.
+
 ## What is logged
 
 The wire log (`--wire-log`) records every frame, and it redacts bearer tokens.

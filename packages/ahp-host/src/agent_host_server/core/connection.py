@@ -18,13 +18,22 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
 from collections.abc import Mapping
 from typing import Any
 
 from agent_host_server.core.policy import ConnectionInfo
 from agent_host_server.transport.base import Transport, TransportClosed
 
-__all__ = ["Connection"]
+#: Frames a connection may have outstanding before it is closed. Generous for
+#: a momentary stall -- a turn produces tens of frames, not thousands -- and
+#: small enough that a wedged peer cannot grow host memory without bound.
+DEFAULT_OUTBOX_LIMIT = 2048
+
+__all__ = ["DEFAULT_OUTBOX_LIMIT", "Connection"]
+
+
+_log = logging.getLogger(__name__)
 
 
 class Connection:
@@ -37,6 +46,7 @@ class Connection:
         headers: Mapping[str, str] | None = None,
         token: str | None = None,
         wire_log: Any = None,
+        outbox_limit: int = DEFAULT_OUTBOX_LIMIT,
     ) -> None:
         self.transport = transport
         self.client_id = client_id
@@ -55,7 +65,15 @@ class Connection:
         self.headers = headers
         self.token = token
         self.wire_log = wire_log
-        self._outbox: asyncio.Queue[Mapping[str, Any] | None] = asyncio.Queue()
+        # BOUNDED. An unbounded queue meant a peer that stopped reading -- a
+        # suspended laptop, a wedged renderer, a client behind a stalled proxy
+        # -- accumulated frames in host memory for the life of that connection,
+        # with no backpressure and no drop policy. Nothing on loopback; a slow
+        # leak with an ordinary trigger on a host serving several people.
+        self._outbox: asyncio.Queue[Mapping[str, Any] | None] = asyncio.Queue(
+            maxsize=max(1, outbox_limit)
+        )
+        self.overflowed = False
         self._writer: asyncio.Task[None] | None = None
         self._closed = False
 
@@ -71,9 +89,41 @@ class Connection:
     # ─── outbound ────────────────────────────────────────────────────────
 
     def enqueue(self, message: Mapping[str, Any]) -> None:
-        """Queue one outbound message. Never blocks, never reorders."""
-        if not self._closed:
+        """Queue one outbound message. Never blocks, never reorders.
+
+        On overflow the CONNECTION is closed rather than the frame dropped.
+
+        That is the choice with a recovery path. The protocol already handles
+        "you missed things": a client reconnects, and `reconnect` either replays
+        the gap or answers with fresh snapshots and a `missing` list. Dropping
+        a frame silently has no such path -- the client's state diverges from
+        the host's with no signal that it happened, and invariant 10's ordering
+        guarantee is exactly what makes a hole undetectable.
+
+        Blocking is not available either: `enqueue` is called from inside the
+        sequencer's critical section, so a slow peer would stall every other
+        client on the host.
+
+        So the peer is disconnected, sees it, and reconnects. The cost is a
+        visible interruption; the alternative is invisible corruption.
+        """
+        if self._closed:
+            return
+        try:
             self._outbox.put_nowait(message)
+        except asyncio.QueueFull:
+            # Recorded before closing, so `Host.counters()` can show an
+            # operator that this happened rather than leaving a mysterious
+            # disconnect.
+            self.overflowed = True
+            _log.warning(
+                "connection %s outbox full (%d frames); closing so the peer reconnects",
+                self.client_id or self.peer or "?",
+                self._outbox.maxsize,
+            )
+            self._closed = True
+            with contextlib.suppress(Exception):
+                self._outbox.put_nowait(None)
 
     def start_writer(self) -> None:
         if self._writer is None:
