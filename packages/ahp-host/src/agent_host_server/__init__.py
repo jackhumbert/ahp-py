@@ -36,7 +36,9 @@ from agent_host_server.provider.base import (
     UserMessage,
 )
 
-__version__ = "0.0.0"
+#: The single source of truth. `pyproject.toml` reads it from here through
+#: hatchling's dynamic version, so there is no second place to forget.
+__version__ = "0.1.0"
 
 __all__ = [
     "DEFAULT_SUPPORTED_VERSIONS",

@@ -38,6 +38,50 @@ jobs:
       - name: Test
         run: pytest
 
+  interop:
+    # The real Microsoft TypeScript client against our host, over a socket. The
+    # reference client validates almost nothing, so this is one of only two
+    # checks that are genuinely independent of our own reading of the spec.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - run: pip install -e '.[dev,ws]'
+      # 0.6.0 is the newest published client; we negotiate 0.7.0 when offered.
+      - run: npm i --no-save @microsoft/agent-host-protocol@0.6.0 ws
+      - name: Interop
+        # Without this the tests skip themselves when setup breaks, and a
+        # skipped interop suite looks exactly like a passing one.
+        env:
+          AHP_INTEROP_REQUIRED: "1"
+        run: pytest -m interop
+
+  wheel-is-installable:
+    # Three publication defects were invisible from a checkout and obvious from
+    # an install: missing exports, a demo tree resolving outside the package,
+    # and a missing py.typed. This is the check that would have caught all
+    # three -- from a directory that is not the repository, against a venv that
+    # has no source tree in it.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install build
+      - run: python -m build --wheel --outdir dist
+      - name: Install the wheel into a clean venv
+        run: |
+          python -m venv /tmp/fresh
+          /tmp/fresh/bin/pip install "$(echo dist/*.whl)[ws]"
+      - name: Smoke-test it from outside the checkout
+        run: cd /tmp && /tmp/fresh/bin/python "$GITHUB_WORKSPACE/scripts/smoke_wheel.py"
+
   codegen-is-reproducible:
     # The generated tables are derived from the vendored upstream TypeScript.
     # A stale checked-in copy would silently diverge from the pin.

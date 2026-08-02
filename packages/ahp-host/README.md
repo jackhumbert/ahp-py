@@ -284,18 +284,26 @@ This library's position:
   requires a policy object.
 - Default bind is loopback. Binding off-loopback without an explicit policy is a
   hard error, not a warning.
-- The filesystem family and terminals are not implemented at all, so the two
-  largest holes stay closed by construction. When they land they land behind
-  gates that must exist first — [`docs/roadmap.md`](docs/roadmap.md) §6 lists
-  them, and a real PTY backend is not going in this distribution.
+- The filesystem family and terminals **are** implemented, and every one of them
+  is **off by default**: no filesystem without a resource provider, no writes
+  without a second and separate `writable=True`, and no command execution
+  without a terminal backend you construct by name. The default backend declines
+  every terminal with a reason. Nothing arrives by upgrading.
+- The jail **walks** — `openat` with `O_NOFOLLOW`, one component at a time, each
+  resolved symlink re-checked against the root — rather than resolving a path
+  and then opening it, which has a window in which a component can be swapped.
 - `--wire-log` redacts credentials and writes owner-only. It still contains
   every message of every session, which is a transcript, not a trace.
 
-**v0.1 is single-trust-domain.** It is not multi-tenant, and it is not safe to
+**This is single-trust-domain.** It is not multi-tenant, and it is not safe to
 expose to an untrusted network. Both known existing hosts punt on this too — VS
 Code uses a single connection token; the one third-party host states outright
 that remote and multi-tenant security are unimplemented — but that is context,
 not reassurance.
+
+[`SECURITY.md`](SECURITY.md) has the scope and the disclosure path;
+[`docs/guide/deploying.md`](docs/guide/deploying.md) has the long version, with
+examples the test suite executes.
 
 ## Conformance
 

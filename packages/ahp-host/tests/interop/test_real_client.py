@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -30,16 +31,23 @@ ROOT = Path(__file__).resolve().parents[2]
 DRIVER = Path(__file__).parent / "driver.mjs"
 
 
+SETUP = "needs node + `npm i --no-save @microsoft/agent-host-protocol@0.6.0 ws`"
+
+
 def _client_available() -> bool:
     if shutil.which("node") is None:
         return False
     return (ROOT / "node_modules" / "@microsoft" / "agent-host-protocol").is_dir()
 
 
-requires_client = pytest.mark.skipif(
-    not _client_available(),
-    reason="needs node + `npm i --no-save @microsoft/agent-host-protocol@0.6.0 ws`",
-)
+if os.environ.get("AHP_INTEROP_REQUIRED") and not _client_available():
+    # CI installs the client, so a skip there means the *setup* broke -- and a
+    # skipped interop test is indistinguishable from a green one at a glance.
+    # This is the only independent check we have; it may not go quiet.
+    raise RuntimeError(f"AHP_INTEROP_REQUIRED is set but the client is missing: {SETUP}")
+
+
+requires_client = pytest.mark.skipif(not _client_available(), reason=SETUP)
 
 
 @pytest.fixture
