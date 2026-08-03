@@ -233,11 +233,17 @@ class AhpClient(CommandsMixin):
         request raises :class:`ClientClosed` rather than racing the read loop to
         a :class:`TransportError`. Callers key retry decisions on that
         difference.
+
+        A connection the *read loop* ended is already ``closed``, and only the
+        state transition is redundant then -- the tasks are not. Skipping the
+        whole body left ``_write_loop`` parked on ``await self._outbox.get()``
+        forever, holding this client and its transport, once per reconnect;
+        asyncio's destruction warning then fires at an unrelated moment with a
+        stack pointing nowhere useful.
         """
-        if self._state.status in {"closing", "closed"}:
-            return
-        self._set_state(ConnectionState("closing"))
-        self._tear_down(None)
+        if self._state.status not in {"closing", "closed"}:
+            self._set_state(ConnectionState("closing"))
+            self._tear_down(None)
         with contextlib.suppress(Exception, asyncio.CancelledError):
             await self._transport.close()
         self._outbox.put_nowait(None)
@@ -428,6 +434,26 @@ class AhpClient(CommandsMixin):
             self._mirror.record_pending(channel, action, seq)
         self.notify("dispatchAction", {"channel": channel, "clientSeq": seq, "action": action})
         return DispatchHandle(seq)
+
+    def redispatch(self, channel: str, action: Mapping[str, Any], client_seq: int) -> None:
+        """Put an already-pending dispatch back on the wire after a reconnect.
+
+        Deliberately **not** :meth:`dispatch`: the mirror already holds a
+        pending entry for this ``clientSeq`` from the original send, and
+        recording a second would replay the action twice into ``optimistic``.
+        The original number goes back out unchanged, so the host's echo retires
+        the entry that is actually there.
+
+        Advancing ``_next_client_seq`` past it is what stops a collision: the
+        fresh client of a reconnect starts counting at 1, so without this a
+        re-sent entry 3 and the caller's next new dispatch both claim 3 and the
+        first echo retires the wrong one.
+        """
+        self._assert_open()
+        self._next_client_seq = max(self._next_client_seq, client_seq + 1)
+        self.notify(
+            "dispatchAction", {"channel": channel, "clientSeq": client_seq, "action": action}
+        )
 
     async def ping(self) -> None:
         """Liveness. Answered whether or not we have completed ``initialize``."""

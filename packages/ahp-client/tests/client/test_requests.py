@@ -188,6 +188,7 @@ async def test_pending_inputs_and_responder_are_on_session() -> None:
                 "kind": "toolConfirmation",
                 "id": f"{CHAT}#tc1",
                 "chat": CHAT,
+                "turnId": "turn-1",
                 "toolCall": {"toolCallId": "tc1"},
             }
         ]
@@ -198,14 +199,16 @@ async def test_pending_inputs_and_responder_are_on_session() -> None:
         entries = session.pending_inputs()
         assert len(entries) == 1
 
-        session.responder.confirm_tool(
-            {"chat": entries[0]["chat"], "toolCallId": entries[0]["toolCall"]["toolCallId"]},
-            approved=True,
-        )
+        # The entry goes in whole. It is specified to carry "every identifier
+        # needed to construct the response", and the caller picking fields out
+        # of it by hand is how `turnId` went missing in the first place.
+        session.responder.confirm_tool(entries[0], approved=True)
         await asyncio.sleep(0.02)
         action = [m for m in host.received if m.get("method") == "dispatchAction"][-1]["params"]
         assert action["channel"] == CHAT
         assert action["action"]["type"] == "chat/toolCallConfirmed"
+        assert action["action"]["turnId"] == "turn-1"
+        assert action["action"]["toolCallId"] == "tc1"
         assert action["action"]["approved"] is True
     await host.stop()
 

@@ -7,7 +7,7 @@ one, because a denied call still ends the turn and the user never learns why.
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable, Collection
+from collections.abc import Awaitable, Callable, Collection, Mapping
 from typing import TYPE_CHECKING, Any, TypeAlias
 
 if TYPE_CHECKING:
@@ -42,6 +42,15 @@ def auto(
 ) -> ApprovalPolicy:
     """Approve by name, or by the tool's own read-only hint.
 
+    Both facts are read from :attr:`ToolCallReady.tool_name` and
+    :attr:`ToolCallReady.annotations`, which `event_for` resolves from state --
+    **neither is on the action**. `chat/toolCallReady` carries no `toolName`,
+    and `annotations` is a property of `ToolDefinition` alone. Reading them off
+    the action, as this once did, makes every name in *allow* and *deny* match
+    nothing and every hint absent, so every call falls through to *otherwise*:
+    `approvals="reads"` then denies read-only tools, the exact opposite of its
+    name, and the denial is indistinguishable from a deliberate one.
+
     `read_only=True` really does inspect `ToolAnnotations.readOnlyHint` and falls
     back to *otherwise* when the annotation is absent. `ahpx`'s equivalent
     silently degrades to prompting for everything, and its own documentation
@@ -55,8 +64,8 @@ def auto(
         if call.tool_name in allow:
             return True
         if read_only:
-            annotations = call.action.get("annotations")
-            if isinstance(annotations, dict) and "readOnlyHint" in annotations:
+            annotations = call.annotations
+            if isinstance(annotations, Mapping) and "readOnlyHint" in annotations:
                 return bool(annotations["readOnlyHint"])
         return otherwise
 

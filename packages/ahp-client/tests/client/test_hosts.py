@@ -144,6 +144,84 @@ async def test_a_failed_attempt_retries_rather_than_raising() -> None:
     await factory.stop()
 
 
+async def test_a_permanent_refusal_raises_from_start_rather_than_hanging() -> None:
+    """The classification half already worked -- `should_retry` declines -32005
+    and the supervisor reaches `failed`. This is the release half: `wait=True`
+    is the default and what `connect()` uses, so without it every caller hitting
+    a version disagreement blocks with no exception and nothing to observe."""
+    from agent_host_client.client.errors import UnsupportedProtocolVersion
+    from agent_host_client.testing import FakeRpcError
+
+    def refuse(_params: Any) -> Any:
+        raise FakeRpcError({"code": -32005, "message": "no mutually supported version"})
+
+    hosts: list[FakeHost] = []
+
+    async def factory() -> Transport:
+        host = echo_host()
+        host.on("initialize", refuse)
+        await host.start()
+        hosts.append(host)
+        return host.transport()
+
+    runtime = HostRuntime(HostConfig(factory, label="h"))
+    with pytest.raises(UnsupportedProtocolVersion):
+        await asyncio.wait_for(runtime.start(), 5)
+    assert runtime.state.status == "failed"
+    await runtime.shutdown()
+    for host in hosts:
+        await host.stop()
+
+
+async def test_an_exhausted_budget_raises_from_the_default_wait() -> None:
+    """The second way to reach terminal. Both must release `start(wait=True)`,
+    or one of them silently becomes a hang the next time somebody edits the
+    supervisor."""
+    factory = _Factory()
+    factory.fail_first = 99
+    runtime = HostRuntime(
+        HostConfig(
+            factory,
+            label="h",
+            reconnect_policy=ReconnectPolicy(
+                backoff=Backoff("immediate"), jitter=0.0, max_attempts=2
+            ),
+        )
+    )
+    with pytest.raises(OSError, match="connection refused"):
+        await asyncio.wait_for(runtime.start(), 5)
+    await runtime.shutdown()
+
+
+async def test_a_refusal_the_policy_retries_keeps_waiting() -> None:
+    """The other half of the same rule. A -32009 with an unlimited budget is
+    still trying, so `start(wait=True)` blocking is correct -- releasing on
+    every failed *attempt* would turn a reconnect into an error."""
+    from agent_host_client.testing import FakeRpcError
+
+    def refuse(_params: Any) -> Any:
+        raise FakeRpcError({"code": -32009, "message": "not permitted"})
+
+    hosts: list[FakeHost] = []
+
+    async def factory() -> Transport:
+        host = echo_host()
+        host.on("initialize", refuse)
+        await host.start()
+        hosts.append(host)
+        return host.transport()
+
+    runtime = HostRuntime(
+        HostConfig(factory, label="h", reconnect_policy=immediate_forever_policy())
+    )
+    with pytest.raises(TimeoutError):
+        await asyncio.wait_for(runtime.start(), 0.2)
+    assert runtime.state.status == "reconnecting"
+    await runtime.shutdown()
+    for host in hosts:
+        await host.stop()
+
+
 async def test_exhausting_the_policy_ends_in_failed_not_a_hang() -> None:
     factory = _Factory()
     factory.fail_first = 99
@@ -291,6 +369,48 @@ async def test_a_subscription_binds_its_reducer_and_applies_the_snapshot() -> No
     await factory.stop()
 
 
+async def test_a_disposed_session_stops_being_tracked_and_mirrored() -> None:
+    """`reconnect.missing` only covers the reconnect path. On a live connection
+    `root/sessionRemoved` is the whole mechanism -- there is no
+    `session/disposed` action -- so a runtime that only pops the summary keeps
+    mirroring a session the host has forgotten, still reporting
+    `lifecycle: "ready"`, and resubscribes to it on the next reconnect."""
+    session = "echo:/s1"
+    chat = "ahp-chat:/c1"
+    state = {"lifecycle": "ready", "chats": [{"resource": chat}], "defaultChat": chat}
+
+    factory = _Factory()
+    runtime = HostRuntime(HostConfig(factory, label="h"))
+    await runtime.start()
+    host = factory.hosts[0]
+    host.on(
+        "subscribe",
+        lambda p: {
+            "snapshot": {
+                "resource": p["channel"],
+                "state": state if p["channel"] == session else {},
+                "fromSeq": host._server_seq,
+            }
+        },
+    )
+    await runtime.subscribe(session, "session")
+    await runtime.subscribe(chat, "chat")
+    runtime.session_summaries[session] = {"resource": session}
+
+    await host.notify("root/sessionRemoved", {"channel": ROOT_URI, "session": session})
+    for _ in range(200):
+        await asyncio.sleep(0.01)
+        if session not in runtime._subscriptions:
+            break
+
+    assert sorted(runtime._subscriptions) == [ROOT_URI]
+    assert sorted(runtime.mirror.channels) == [ROOT_URI]
+    assert runtime.mirror.state(session) is None
+    assert runtime.session_summaries == {}
+    await runtime.shutdown()
+    await factory.stop()
+
+
 @pytest.mark.parametrize("policy", list(PendingPolicy))
 async def test_every_pending_policy_survives_a_reconnect(policy: PendingPolicy) -> None:
     factory = _Factory()
@@ -309,5 +429,312 @@ async def test_every_pending_policy_survives_a_reconnect(policy: PendingPolicy) 
         if runtime.generation == 2:
             break
     assert runtime.state.status == "connected"
+    await runtime.shutdown()
+    await factory.stop()
+
+
+class _ScriptedFactory:
+    """Hands out pre-built hosts in order.
+
+    `_Factory` builds its host inside `__call__`, so a test can only program the
+    reconnect target *after* the supervisor already has it -- and then races the
+    request it is trying to answer. These are built up front.
+    """
+
+    def __init__(self, *hosts: FakeHost) -> None:
+        self._queue = list(hosts)
+        self.handed: list[FakeHost] = []
+
+    async def __call__(self) -> Transport:
+        host = self._queue.pop(0)
+        await host.start()
+        self.handed.append(host)
+        return host.transport()
+
+    async def stop(self) -> None:
+        for host in self.handed:
+            await host.stop()
+
+
+async def _spin(predicate: Any, ticks: int = 300) -> None:
+    for _ in range(ticks):
+        await asyncio.sleep(0.01)
+        if predicate():
+            return
+
+
+def _bump(count: int) -> dict[str, Any]:
+    return {"type": "root/activeSessionsChanged", "activeSessions": count}
+
+
+async def _drain(reader: Any) -> list[Any]:
+    """Everything already published, without blocking on the next one."""
+    seen: list[Any] = []
+    while True:
+        try:
+            seen.append(await asyncio.wait_for(reader.__anext__(), 0.05))
+        except (TimeoutError, StopAsyncIteration):
+            return seen
+
+
+async def test_a_refused_subscribe_leaves_nothing_behind_in_either_half() -> None:
+    """`AhpClient.subscribe` rolls its own queue back on a refusal; the runtime
+    did not, so a -32009 left a bound, snapshot-less channel in the mirror and a
+    subscription re-requested on every reconnect, where it can only be declined
+    again."""
+    from agent_host_client.client.errors import RpcError
+    from agent_host_client.testing import FakeRpcError
+
+    chat = "ahp-chat://c/refused"
+    factory = _Factory()
+    runtime = HostRuntime(HostConfig(factory, label="h"))
+    await runtime.start()
+    factory.hosts[0].on(
+        "subscribe",
+        lambda p: (_ for _ in ()).throw(
+            FakeRpcError({"code": -32009, "message": f"Not permitted to observe {p['channel']}"})
+        ),
+    )
+
+    with pytest.raises(RpcError):
+        await runtime.subscribe(chat, "chat")
+
+    assert chat not in runtime._subscriptions
+    assert chat not in runtime.mirror.channels
+    await runtime.shutdown()
+    await factory.stop()
+
+
+async def test_subscribing_while_disconnected_still_records_the_intent() -> None:
+    """The other half of the rollback rule, and the reason it keys on
+    `RpcError`: no host answered, so the next successful connect must still
+    thread this into the handshake."""
+    chat = "ahp-chat://c/later"
+    factory = _Factory()
+    factory.fail_first = 99
+    runtime = HostRuntime(HostConfig(factory, label="h", reconnect_policy=disabled_policy()))
+    await runtime.start(wait=False)
+
+    with pytest.raises(HostNotConnected):
+        await runtime.subscribe(chat, "chat")
+
+    assert chat in runtime._subscriptions
+    await runtime.shutdown()
+
+
+async def test_replay_does_not_republish_what_the_mirror_discards_as_stale() -> None:
+    """`lastSeenServerSeq` is one scalar over a host-global counter, so it
+    cannot say "and this channel is already at 9"; the host replays from the
+    scalar and is right to. The per-channel `Snapshot.fromSeq` baseline is the
+    designed defence, and publishing what it discarded hands a consumer a
+    duplicate of an event it already has."""
+    chat = "ahp-chat://c/s"
+    first, second = echo_host(), echo_host()
+    first.on(
+        "subscribe",
+        lambda p: {
+            "snapshot": {
+                "resource": p["channel"],
+                "state": {"turns": [], "status": 1},
+                "fromSeq": 9,
+            }
+        },
+    )
+    second.on(
+        "reconnect",
+        lambda _p: {
+            "type": "replay",
+            "missing": [],
+            "actions": [
+                {
+                    "channel": chat,
+                    "action": {"type": "chat/titleChanged", "title": "already in the snapshot"},
+                    "serverSeq": 6,
+                },
+                {
+                    "channel": chat,
+                    "action": {"type": "chat/titleChanged", "title": "genuine catch-up"},
+                    "serverSeq": 11,
+                },
+            ],
+        },
+    )
+    factory = _ScriptedFactory(first, second)
+    runtime = HostRuntime(
+        HostConfig(factory, label="h", reconnect_policy=immediate_forever_policy())
+    )
+    await runtime.start()
+    await runtime.subscribe(chat, "chat")
+    runtime._server_seq = 4  # a cursor below the channel's baseline, as the host sees it
+    events = runtime.events()
+
+    await first.stop()
+    await _spin(lambda: runtime.generation == 2)
+    assert runtime.generation == 2
+
+    titles = [
+        e.event.action.get("title")
+        for e in await _drain(events)
+        if e.event.__class__.__name__ == "ActionEvent"
+    ]
+    assert "already in the snapshot" not in titles
+    assert "genuine catch-up" in titles
+    await runtime.shutdown()
+    await factory.stop()
+
+
+async def test_a_pending_action_the_policy_keeps_is_put_back_on_the_wire() -> None:
+    """ADR 0006b's replay arm is "drop what the replay acknowledged and re-send
+    the survivors". Only the first half existed, so a `dispatchAction` whose
+    frame died in the write loop stayed in `pending` forever -- `optimistic`
+    rendering a turn the host has never heard of, with no echo that could ever
+    retire it."""
+    action = {"type": "root/activeSessionsChanged", "activeSessions": 7}
+    first, second = echo_host(), echo_host()
+    second.on("reconnect", lambda _p: {"type": "replay", "missing": [], "actions": []})
+    factory = _ScriptedFactory(first, second)
+    runtime = HostRuntime(
+        HostConfig(factory, label="h", reconnect_policy=immediate_forever_policy())
+    )
+    await runtime.start()
+    runtime.client().dispatch(ROOT_URI, action)
+    runtime._server_seq = 4  # so the supervisor resumes rather than re-initialising
+    assert [p.client_seq for p in runtime.mirror.pending(ROOT_URI)] == [1]
+
+    await first.stop()
+    await _spin(lambda: runtime.generation == 2)
+    assert runtime.generation == 2
+
+    resent = [m for m in second.received if m.get("method") == "dispatchAction"]
+    assert [m["params"]["clientSeq"] for m in resent] == [1]
+    assert resent[0]["params"]["action"] == action
+    # Still pending: the re-sent frame has not been echoed, so the optimistic
+    # effect must survive until it is.
+    assert [p.client_seq for p in runtime.mirror.pending(ROOT_URI)] == [1]
+    await runtime.shutdown()
+    await factory.stop()
+
+
+async def test_a_resent_client_seq_cannot_collide_with_the_next_new_dispatch() -> None:
+    """The reconnect builds a *fresh* client, which starts counting at 1. Re-send
+    3 and then let the caller dispatch, and both claim 3 -- the first echo then
+    retires the wrong pending entry."""
+    first, second = echo_host(), echo_host()
+    second.on("reconnect", lambda _p: {"type": "replay", "missing": [], "actions": []})
+    factory = _ScriptedFactory(first, second)
+    runtime = HostRuntime(
+        HostConfig(factory, label="h", reconnect_policy=immediate_forever_policy())
+    )
+    await runtime.start()
+
+    def _sent() -> list[int]:
+        return [
+            m["params"]["clientSeq"] for m in second.received if m.get("method") == "dispatchAction"
+        ]
+
+    for count in (1, 2, 3):
+        runtime.client().dispatch(ROOT_URI, _bump(count))
+    runtime._server_seq = 4
+
+    await first.stop()
+    await _spin(lambda: runtime.generation == 2)
+    runtime.client().dispatch(ROOT_URI, _bump(9))
+    await _spin(lambda: len(_sent()) == 4)
+
+    assert _sent() == [1, 2, 3, 4]
+    await runtime.shutdown()
+    await factory.stop()
+
+
+# ── the cached session catalog ───────────────────────────────────────────────
+
+
+def _summary() -> dict[str, Any]:
+    return {
+        "resource": "echo:/s1",
+        "provider": "echo",
+        "title": "New Session",
+        "status": 1,
+        "createdAt": "2026-08-02T18:00:00.000Z",
+        "modifiedAt": "2026-08-02T18:00:00.000Z",
+    }
+
+
+async def test_the_cached_session_list_follows_root_session_summary_changed() -> None:
+    """`session_summaries` is seeded from `listSessions` and is exactly the cache
+    this notification exists to keep current -- it is what lets a client stay in
+    sync "without having to subscribe to every session URI individually". The one
+    consumer of the feature was the one place it was dropped."""
+    session = "echo:/s1"
+    host = echo_host()
+    host.on("listSessions", lambda _p: {"items": [_summary()]})
+    factory = _ScriptedFactory(host)
+    runtime = HostRuntime(HostConfig(factory, label="h"))
+    await runtime.start()
+    assert runtime.session_summaries[session]["title"] == "New Session"
+
+    await host.notify(
+        "root/sessionSummaryChanged",
+        {
+            "channel": ROOT_URI,
+            "session": session,
+            "changes": {
+                "title": "please run the tool",
+                "modifiedAt": "2026-08-02T18:50:12.258Z",
+                # Identity fields "MUST be omitted by senders; receivers SHOULD
+                # ignore them if present" -- a sender that sends them anyway is
+                # the sender whose values are wrong.
+                "provider": "not-echo",
+            },
+        },
+    )
+    await _spin(lambda: runtime.session_summaries[session]["title"] == "please run the tool")
+
+    cached = runtime.session_summaries[session]
+    assert cached["title"] == "please run the tool"
+    assert cached["modifiedAt"] == "2026-08-02T18:50:12.258Z"
+    assert cached["provider"] == "echo"
+    assert cached["status"] == 1  # merged, not replaced
+    await runtime.shutdown()
+    await factory.stop()
+
+
+async def test_a_bare_partial_change_does_not_clobber_the_rest_of_the_summary() -> None:
+    """The host sends genuine partials -- a lone `{"status": 8}` while a turn
+    runs -- so this is a merge, not a replace."""
+    session = "echo:/s1"
+    host = echo_host()
+    host.on("listSessions", lambda _p: {"items": [_summary()]})
+    factory = _ScriptedFactory(host)
+    runtime = HostRuntime(HostConfig(factory, label="h"))
+    await runtime.start()
+
+    await host.notify(
+        "root/sessionSummaryChanged",
+        {"channel": ROOT_URI, "session": session, "changes": {"status": 8}},
+    )
+    await _spin(lambda: runtime.session_summaries[session]["status"] == 8)
+
+    assert runtime.session_summaries[session] == _summary() | {"status": 8}
+    await runtime.shutdown()
+    await factory.stop()
+
+
+async def test_a_summary_change_for_an_unknown_session_is_ignored() -> None:
+    """ "Clients that have no cached entry for `session` MAY ignore the
+    notification; it is not a substitute for `root/sessionAdded`." Inventing an
+    entry from a partial publishes a summary with no `resource` or `provider`."""
+    host = echo_host()
+    factory = _ScriptedFactory(host)
+    runtime = HostRuntime(HostConfig(factory, label="h"))
+    await runtime.start()
+
+    await host.notify(
+        "root/sessionSummaryChanged",
+        {"channel": ROOT_URI, "session": "echo:/never-listed", "changes": {"title": "ghost"}},
+    )
+    await _spin(lambda: bool(runtime.session_summaries), ticks=20)
+
+    assert runtime.session_summaries == {}
     await runtime.shutdown()
     await factory.stop()

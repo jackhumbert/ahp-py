@@ -29,7 +29,7 @@ Handler = Callable[[JsonObject], Any]
 class FakeToolCall:
     """A tool call to weave into a scripted turn."""
 
-    __slots__ = ("confirmed", "contributor", "name", "tool_call_id")
+    __slots__ = ("confirmed", "contributor", "name", "tool_call_id", "tool_input")
 
     def __init__(
         self,
@@ -38,6 +38,7 @@ class FakeToolCall:
         *,
         confirmed: bool = False,
         contributor: JsonObject | None = None,
+        tool_input: Any = None,
     ) -> None:
         self.tool_call_id = tool_call_id
         self.name = name
@@ -46,6 +47,9 @@ class FakeToolCall:
         #: ``{"kind": "client", "clientId": ...}`` makes the call the client's
         #: to execute.
         self.contributor = contributor
+        #: The final arguments. They ride the *ready*, not the start, which is
+        #: why an executor cannot be driven off `chat/toolCallStart` alone.
+        self.tool_input = tool_input
 
 
 class FakeHost:
@@ -204,6 +208,27 @@ class FakeHost:
         if tool.contributor is not None:
             start["contributor"] = dict(tool.contributor)
         await self.push(chat, start)
+        if tool.contributor is not None:
+            # Handing a call to a client is a ready carrying
+            # `confirmed: "not-needed"` -- "the tool transitions directly to
+            # `running`, where the owning client can begin execution" -- plus the
+            # final `toolInput`. There is nothing to approve, and a fake that
+            # emits no ready at all leaves the client with a call still in
+            # `streaming`, which no executor may run.
+            ready: JsonObject = {
+                "type": "chat/toolCallReady",
+                "turnId": turn_id,
+                "toolCallId": tool.tool_call_id,
+                "invocationMessage": f"Running {tool.name}",
+                "confirmed": "not-needed",
+                # "MUST NOT change execution ownership established at
+                # `chat/toolCallStart`" -- same contributor, deliberately repeated.
+                "contributor": dict(tool.contributor),
+            }
+            if tool.tool_input is not None:
+                ready["toolInput"] = tool.tool_input
+            await self.push(chat, ready)
+            return
         if tool.confirmed:
             await self.push(
                 chat,

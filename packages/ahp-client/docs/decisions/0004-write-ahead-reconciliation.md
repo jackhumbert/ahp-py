@@ -21,8 +21,16 @@ similar scope. The only working implementation is VS Code's internal
 
 Per inbound envelope:
 
-- **Own echo** (`origin.clientId == ours`) **with `rejectionReason`** → drop the
-  pending entry **without applying**, emit `ActionRejected` on `diagnostics()`.
+- **Any envelope carrying `rejectionReason`** → **never applied, whoever sent
+  it.** `rejectionReason` is a property of the *envelope*: the host leaves its
+  own state untouched and fans the refusal out to every subscriber of the
+  channel, so scoping the check to `origin.clientId == ours` makes every
+  *observer* apply an action the host did not. That is permanent — nothing later
+  corrects it — and it is how a second client watching a refused
+  `terminal/claimed` or `chat/truncated` diverges forever.
+- **Own echo with `rejectionReason`** → additionally drop the pending entry and
+  emit `ActionRejected` on `diagnostics()`. Only the originator had an
+  optimistic effect to revert, so only the originator gets the diagnostic.
 - **Own echo without** → drop the pending entry, apply to confirmed.
 - **Own echo with no matching pending entry and no rejection** → **still apply
   to confirmed.** This is `agentSubscription.ts:327-328` and it is the arm every
@@ -33,6 +41,11 @@ Per inbound envelope:
 
 Matching is on **exact `clientSeq`** (`agentSubscription.ts:321`), not Swift's
 cumulative ack.
+
+A rejection still **advances the channel's high-water mark.** The host numbers a
+refused action exactly as it numbers an applied one and appends it to the replay
+log, so the number is accounted for; leaving the mark behind makes the next
+envelope look like a hole and turns every rejection into a false `SequenceGap`.
 
 ## Why exact match rather than cumulative
 

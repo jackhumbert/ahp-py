@@ -220,6 +220,16 @@ changes": the default predicate **does** change behaviour for those three cases.
 A hook that ships inert is a hook nobody enables, and the three refusals it
 declines are the ones the request calls unambiguous.
 
+That first landing was half a fix. `HostState("failed", …)` was reachable and
+broadcast, but `_supervise` reached it and returned without setting either event
+`_await_connected` was racing — so `start(wait=True)`, the default and what
+`connect()` uses, became *unsatisfiable* on precisely the refusals the new
+predicate had started declining. An embedder mapping "failed with a rejected
+credential" onto a re-login prompt could see it on `state_changes()`, but the
+call it had made never returned and never raised. Both routes to terminal — a
+declined refusal and an exhausted budget — now release `start(wait=True)` and
+raise the classified error.
+
 ---
 
 ## 4. `connect()` cannot be given a TLS configuration

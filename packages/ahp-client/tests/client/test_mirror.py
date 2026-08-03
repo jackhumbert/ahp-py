@@ -164,6 +164,53 @@ def test_a_rejected_echo_reverts_without_applying() -> None:
     assert any(isinstance(d, ActionRejected) and d.reason == "not allowed" for d in seen)
 
 
+def test_another_clients_rejected_action_is_not_applied_either() -> None:
+    """The headline divergence. `rejectionReason` is on the ENVELOPE, and the
+    host fans a refused action out to every subscriber of the channel while
+    leaving its own state untouched. A second client that reduces it because the
+    origin is not its own is wrong forever -- nothing later corrects it."""
+    mirror, seen = _mirror()
+    mirror.apply_snapshot(_snapshot(ROOT, {"agents": [], "activeSessions": 1}, from_seq=1))
+
+    outcome = mirror.apply(
+        _envelope(
+            ROOT,
+            {"type": "root/activeSessionsChanged", "activeSessions": 99},
+            server_seq=2,
+            origin={"clientId": "someone-else", "clientSeq": 4},
+            rejection="not permitted",
+        )
+    )
+    assert outcome is ApplyOutcome.REJECTED
+    assert mirror.confirmed(ROOT)["activeSessions"] == 1
+    # Somebody else's refusal is not our diagnostic: we had no optimistic
+    # effect to revert.
+    assert not [d for d in seen if isinstance(d, ActionRejected)]
+
+
+def test_a_rejection_advances_the_high_water_mark_it_consumed() -> None:
+    """The host numbers a rejection exactly as it numbers an applied action and
+    logs it for replay, so the number is not a hole. Leaving it behind made
+    every rejection manufacture a `SequenceGap` on the stream that exists to be
+    trusted."""
+    mirror, seen = _mirror()
+    mirror.apply_snapshot(_snapshot(ROOT, {"agents": []}, from_seq=1))
+    action = {"type": "root/agentsChanged", "agents": []}
+    for seq in (2, 3, 4):
+        mirror.record_pending(ROOT, action, seq)
+        mirror.apply(
+            _envelope(
+                ROOT,
+                action,
+                server_seq=seq,
+                origin={"clientId": "me", "clientSeq": seq},
+                rejection="no",
+            )
+        )
+    assert mirror.channels[ROOT].last_seq == 4
+    assert not [d for d in seen if isinstance(d, SequenceGap)]
+
+
 def test_an_own_echo_with_no_matching_pending_entry_still_applies() -> None:
     """`agentSubscription.ts:327-328`, and the arm every reimplementation of
     this algorithm leaves out. Dropping it loses state on any echo whose
@@ -254,12 +301,47 @@ def test_ignore_says_nothing() -> None:
     assert not [d for d in seen if isinstance(d, SequenceGap)]
 
 
-def test_reseed_marks_the_channel_so_a_caller_can_resubscribe() -> None:
-    mirror, _ = _mirror(gap_policy=GapPolicy.RESEED)
+def test_ordinary_interleaving_of_two_channels_is_not_a_gap() -> None:
+    """`serverSeq` is one host-global counter every channel draws from, so
+    per-channel contiguity is not a property the protocol provides. Two
+    subscribed channels were enough to make every reported gap a false
+    positive."""
+    mirror, seen = _mirror()
+    mirror.apply_snapshot(_snapshot(ROOT, {"agents": [], "activeSessions": 0}, from_seq=1))
+    mirror.apply_snapshot(_snapshot(CHAT, {"turns": [], "status": 1}, from_seq=1))
+    for seq, uri in ((2, ROOT), (3, CHAT), (4, ROOT), (5, CHAT), (6, ROOT)):
+        action: dict[str, Any] = (
+            {"type": "root/activeSessionsChanged", "activeSessions": seq}
+            if uri == ROOT
+            else {"type": "chat/titleChanged", "title": str(seq)}
+        )
+        mirror.apply(_envelope(uri, action, server_seq=seq))
+    assert not [d for d in seen if isinstance(d, SequenceGap)]
+
+
+def test_a_late_subscriptions_baseline_carries_the_global_mark_with_it() -> None:
+    """`Snapshot.fromSeq` is a reading of the same global counter, so it also
+    says how far that counter has run. A channel that was quiet while another
+    was subscribed to at 50 must not report its own next action as a
+    48-envelope hole."""
+    mirror, seen = _mirror()
     mirror.apply_snapshot(_snapshot(ROOT, {"agents": []}, from_seq=1))
     mirror.apply(_envelope(ROOT, {"type": "root/agentsChanged", "agents": []}, server_seq=2))
+    mirror.apply_snapshot(_snapshot(CHAT, {"turns": [], "status": 1}, from_seq=50))
+    mirror.apply(_envelope(ROOT, {"type": "root/agentsChanged", "agents": []}, server_seq=51))
+    assert not [d for d in seen if isinstance(d, SequenceGap)]
+
+
+def test_reseed_cannot_attribute_a_global_hole_so_it_marks_every_channel() -> None:
+    """The lost envelope belonged to whichever channel the host numbered it on,
+    which is exactly the information the hole destroyed. Reseeding only the
+    channel that revealed it leaves the actual victim silently wrong."""
+    mirror, _ = _mirror(gap_policy=GapPolicy.RESEED)
+    mirror.apply_snapshot(_snapshot(ROOT, {"agents": []}, from_seq=1))
+    mirror.apply_snapshot(_snapshot(CHAT, {"turns": [], "status": 1}, from_seq=1))
+    mirror.apply(_envelope(ROOT, {"type": "root/agentsChanged", "agents": []}, server_seq=2))
     mirror.apply(_envelope(ROOT, {"type": "root/agentsChanged", "agents": []}, server_seq=9))
-    assert mirror.stale == frozenset({ROOT})
+    assert mirror.stale == frozenset({ROOT, CHAT})
 
 
 def test_a_gap_is_never_fatal_in_any_policy() -> None:
@@ -300,6 +382,45 @@ def test_pending_policy_across_a_reconnect(
     mirror.record_pending(ROOT, {"type": "root/agentsChanged", "agents": []}, 2)
     mirror.on_reconnect(policy=policy, arm=arm, acknowledged=[1])
     assert [p.client_seq for p in mirror.pending(ROOT)] == expected
+
+
+@pytest.mark.parametrize(
+    ("policy", "arm", "expected"),
+    [
+        (PendingPolicy.VSCODE, "replay", [2]),
+        (PendingPolicy.VSCODE, "snapshot", []),
+        (PendingPolicy.SPEC, "replay", []),
+        (PendingPolicy.SPEC, "snapshot", []),
+        (PendingPolicy.RESEND_ALL, "replay", [1, 2]),
+        (PendingPolicy.RESEND_ALL, "snapshot", [1, 2]),
+    ],
+)
+def test_every_surviving_pending_entry_is_handed_back_to_be_resent(
+    policy: PendingPolicy, arm: str, expected: list[int]
+) -> None:
+    """Keeping an entry without putting it back on the wire is the one outcome
+    none of the three references describes: `optimistic` then shows a turn the
+    host has never heard of, with no echo that can ever retire it."""
+    mirror, _ = _mirror()
+    mirror.apply_snapshot(_snapshot(ROOT, {"agents": []}, from_seq=1))
+    mirror.record_pending(ROOT, {"type": "root/agentsChanged", "agents": []}, 1)
+    mirror.record_pending(ROOT, {"type": "root/agentsChanged", "agents": []}, 2)
+    resend = mirror.on_reconnect(policy=policy, arm=arm, acknowledged=[1])
+    assert [entry.client_seq for _uri, entry in resend] == expected
+    assert {uri for uri, _entry in resend} <= {ROOT}
+
+
+def test_what_is_resent_is_ordered_by_the_clientseq_it_was_dispatched_with() -> None:
+    """Two channels' queues interleave; the host must see them in the order the
+    caller sent them, not grouped by whichever channel iterates first."""
+    mirror, _ = _mirror()
+    mirror.apply_snapshot(_snapshot(ROOT, {"agents": []}, from_seq=1))
+    mirror.apply_snapshot(_snapshot(CHAT, {"turns": [], "status": 1}, from_seq=1))
+    mirror.record_pending(CHAT, {"type": "chat/titleChanged", "title": "a"}, 2)
+    mirror.record_pending(ROOT, {"type": "root/agentsChanged", "agents": []}, 1)
+    mirror.record_pending(CHAT, {"type": "chat/titleChanged", "title": "b"}, 3)
+    resend = mirror.on_reconnect(policy=PendingPolicy.VSCODE, arm="replay")
+    assert [entry.client_seq for _uri, entry in resend] == [1, 2, 3]
 
 
 def test_missing_channels_are_forgotten() -> None:

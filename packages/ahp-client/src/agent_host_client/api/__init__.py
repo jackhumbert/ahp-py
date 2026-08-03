@@ -26,9 +26,13 @@ from agent_host_client.api.events import (
     ResponsePartAdded,
     TitleChanged,
     ToolCallCompleted,
+    ToolCallContentChanged,
+    ToolCallDelta,
     ToolCallReady,
     ToolCallResultReview,
+    ToolCallRunning,
     ToolCallStarted,
+    ToolInfo,
     TurnCancelled,
     TurnCompleted,
     TurnEvent,
@@ -38,6 +42,7 @@ from agent_host_client.api.events import (
     UnknownEvent,
     Usage,
     event_for,
+    is_modelled,
 )
 
 __all__ = [
@@ -54,9 +59,13 @@ __all__ = [
     "Session",
     "TitleChanged",
     "ToolCallCompleted",
+    "ToolCallContentChanged",
+    "ToolCallDelta",
     "ToolCallReady",
     "ToolCallResultReview",
+    "ToolCallRunning",
     "ToolCallStarted",
+    "ToolInfo",
     "TurnCancelled",
     "TurnCompleted",
     "TurnEvent",
@@ -71,5 +80,6 @@ __all__ = [
     "connect",
     "deny_all",
     "event_for",
+    "is_modelled",
     "resolve_policy",
 ]

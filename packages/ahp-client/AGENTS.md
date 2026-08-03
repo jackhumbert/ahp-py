@@ -59,6 +59,14 @@ write-ahead reconciliation, all 10 server→client requests, `clientInfo` and
 `capabilities` on the handshake, verified version negotiation, all 9 server
 notifications, and sequence-gap detection.
 
+That table is about the *protocol* layer and every row of it holds. **§1.3 is the
+other axis and is less flattering:** three of the seven channels — terminals,
+changesets and resource watches — still have no typed API, and the interop run
+found that essentially every client defect lived on a surface that *does* have
+one. Read it before adding a wrapper: an unwrapped surface is a gap in
+ergonomics, a wrapper is a place to be wrong, and §1.3 argues one of the three
+should stay absent.
+
 **Every divergence from a reference client is an ADR.** Divergence is a
 decision, not an accident. `docs/plan.md` §13 lists the ADRs to write before the
 code they justify.
@@ -121,7 +129,20 @@ rather than a test failure.
 5. **Reconciliation matches on exact `clientSeq`**, following VS Code
    (`agentSubscription.ts:321`), not Swift's cumulative ack — and reproduces VS
    Code's second arm: an own echo with no matching pending entry and no
-   `rejectionReason` is still applied to confirmed.
+   `rejectionReason` is still applied to confirmed. Three corollaries, each of
+   which was wrong once:
+   - **`rejectionReason` is on the envelope, not on the originator's copy.** The
+     host fans a refused action out to *every* subscriber with its own state
+     untouched, so no peer may apply it — scoping the check to our own `origin`
+     makes every observer diverge permanently, with nothing that corrects it.
+     Advance the channel's `last_seq` anyway: the host consumed that `serverSeq`.
+   - **Sequence gaps are measured against the global mark, never a channel's.**
+     `serverSeq` is one host-global counter, so per-channel contiguity is not a
+     property the protocol provides, and two subscribed channels turn ordinary
+     interleaving into a gap per envelope.
+   - **A pending action a reconnect keeps must be re-sent** (`redispatch`, same
+     `clientSeq`). Keeping it without re-sending renders an optimistic turn the
+     host has never heard of, forever.
 6. **`notify()`, `dispatch()` and `unsubscribe()` are synchronous.** If
    `dispatch` were `async def`, two coroutines could interleave between
    `clientSeq` allocation and enqueue, putting `clientSeq` 5 on the wire before

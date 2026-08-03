@@ -237,6 +237,26 @@ async def test_transport_close_tears_down_with_a_transport_error() -> None:
     assert isinstance(client.connection_state.error, TransportError)
 
 
+async def test_shutdown_reaps_the_writer_after_the_read_loop_tore_down() -> None:
+    """`shutdown()` is the only tear-down the supervisor calls, and it must
+    reap the tasks however the connection ended. Early-returning on the state
+    the read loop already set left `_write_loop` parked on the outbox forever,
+    holding this client and its transport -- once per reconnect."""
+
+    def running() -> list[str]:
+        return sorted(t.get_name() for t in asyncio.all_tasks() if "ahp-client" in t.get_name())
+
+    client, host = await _connected()
+    assert running() == ["ahp-client-read", "ahp-client-write"]
+    await host.stop()
+    await asyncio.sleep(0.02)
+    assert client.connection_state.status == "closed"
+    await client.shutdown()
+    await asyncio.sleep(0.02)
+    assert running() == []
+    await client.shutdown()  # still idempotent
+
+
 # ── subscriptions ────────────────────────────────────────────────────────────
 
 

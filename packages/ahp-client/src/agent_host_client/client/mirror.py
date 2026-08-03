@@ -47,7 +47,8 @@ class ApplyOutcome(Enum):
     can assert on the path taken rather than only on the resulting state."""
 
     APPLIED = "applied"
-    #: Our own action, echoed back refused. The optimistic effect is reverted.
+    #: An action the host refused and did not apply. Ours, whose optimistic
+    #: effect is reverted, or another client's, which we must not apply either.
     REJECTED = "rejected"
     #: For a channel with no snapshot yet. Held, not dropped.
     BUFFERED = "buffered"
@@ -60,6 +61,11 @@ class ApplyOutcome(Enum):
 class GapPolicy(Enum):
     """What to do about a hole in ``serverSeq``.
 
+    Measured against the **global** high-water mark, never against one
+    channel's. ``serverSeq`` is a single host-global counter shared by every
+    channel, so a channel's own numbers are never contiguous and a per-channel
+    test calls ordinary interleaving a hole.
+
     Never fatal in any mode. A client sees only the channels it subscribed to,
     so its view of a host-global counter legitimately has holes -- raising would
     make the common case an error. See ADR 0005.
@@ -69,7 +75,7 @@ class GapPolicy(Enum):
     IGNORE = "ignore"
     #: Report on ``diagnostics()``, then apply. The default.
     WARN = "warn"
-    #: Additionally mark the channel stale so a caller can re-subscribe.
+    #: Additionally mark every tracked channel stale so a caller can re-subscribe.
     RESEED = "reseed"
 
 
@@ -80,6 +86,12 @@ class PendingPolicy(Enum):
     silent choice (ADR 0006b). ``docs/guide/reconciliation.md:81`` says clear in
     both arms; VS Code re-sends survivors on the replay arm; Swift re-sends
     always.
+
+    Whatever a policy *keeps*, :meth:`StateMirror.on_reconnect` hands back to be
+    re-sent. Keeping an entry without putting it back on the wire is the one
+    outcome none of the three references describes and the only indefensible
+    one: ``optimistic`` -- the state this library tells you to render -- would
+    then show, forever, a turn the host has never heard of.
     """
 
     #: Default. Replay arm keeps un-acknowledged entries; snapshot arm clears.
@@ -250,6 +262,11 @@ class StateMirror:
         channel.from_seq = from_seq
         channel.last_seq = max(channel.last_seq, from_seq)
         channel.has_snapshot = True
+        # `fromSeq` is a reading of the host-GLOBAL counter, so it also tells us
+        # how far that counter has run. Without this a channel subscribed to
+        # late -- baseline 50 while we have only seen 10 -- makes its own first
+        # action look like a 40-envelope hole.
+        self._last_server_seq = max(self._last_server_seq, from_seq)
         self._stale.discard(uri)
 
         # Anything buffered at or below `fromSeq` is already inside this
@@ -295,6 +312,10 @@ class StateMirror:
         uri = str(envelope.get("channel", ""))
         channel = self._channels.get(uri)
         server_seq = _server_seq(envelope)
+        # Snapshot the global mark before advancing it: it is what the gap check
+        # measures against, and every envelope we see advances it -- including
+        # ones for channels we buffer, discard as stale or do not track at all.
+        previous_global = self._last_server_seq
         if server_seq > self._last_server_seq:
             self._last_server_seq = server_seq
 
@@ -311,7 +332,7 @@ class StateMirror:
         if server_seq and server_seq <= channel.from_seq:
             return ApplyOutcome.STALE
 
-        self._check_gap(channel, server_seq)
+        self._check_gap(channel, server_seq, previous_global)
 
         action = envelope.get("action")
         action = dict(action) if isinstance(action, Mapping) else {}
@@ -322,9 +343,26 @@ class StateMirror:
         own = origin is not None and origin.get("clientId") == self._client_id
         client_seq = origin.get("clientSeq") if origin is not None else None
 
-        if own and isinstance(rejection, str):
-            self._retire(channel, client_seq)
-            self._diagnose(ActionRejected(uri, client_seq or 0, rejection, action))
+        if isinstance(rejection, str):
+            # `rejectionReason` is a property of the ENVELOPE, not of the
+            # originator's copy of it: the host fans a refused action out to
+            # every subscriber of the channel while leaving its own state
+            # untouched. Reducing it because it came from someone else diverges
+            # from the host permanently -- there is no later action that
+            # corrects it, so a second client watching a refused
+            # `terminal/claimed` or `chat/truncated` never recovers.
+            if own:
+                # Only the originator has an optimistic effect to revert, and
+                # `ActionRejected` is documented as being about ours.
+                self._retire(channel, client_seq)
+                self._diagnose(ActionRejected(uri, client_seq or 0, rejection, action))
+            # The host consumed this serverSeq for the rejection exactly as it
+            # does for an applied action and logged it for replay, so the number
+            # is accounted for. Leaving `last_seq` behind would make the next
+            # envelope look like a hole and turn every rejection into a false
+            # `SequenceGap` on a stream that exists to be trusted.
+            if server_seq:
+                channel.last_seq = server_seq
             return ApplyOutcome.REJECTED
 
         if own:
@@ -344,15 +382,27 @@ class StateMirror:
         policy: PendingPolicy,
         arm: str,
         acknowledged: Iterable[int] = (),
-    ) -> None:
-        """Settle the pending queues after a reconnect.
+    ) -> list[tuple[str, PendingAction]]:
+        """Settle the pending queues after a reconnect; return what to re-send.
 
         *arm* is ``"replay"`` or ``"snapshot"``. The three reference
         implementations disagree about this; see :class:`PendingPolicy`.
+
+        **Every surviving entry is returned, and the caller MUST put it back on
+        the wire** with its original ``clientSeq`` so the host's echo still
+        reconciles against it. A survivor that is neither re-sent nor cleared
+        leaves ``optimistic`` showing an action the host never received, with
+        nothing that can ever retire it -- the failure mode ADR 0006b's trade
+        was chosen to avoid, not the one it accepted.
+
+        Ordered by ``clientSeq`` across channels, so the host sees them in the
+        order they were originally dispatched.
         """
         acked = set(acknowledged)
+        resend: list[tuple[str, PendingAction]] = []
         for channel in self._channels.values():
             if policy is PendingPolicy.RESEND_ALL:
+                resend.extend((channel.uri, entry) for entry in channel.pending)
                 continue
             if policy is PendingPolicy.SPEC or arm == "snapshot":
                 # Predicated on pre-disconnect state. Re-sending after a fresh
@@ -360,6 +410,9 @@ class StateMirror:
                 channel.pending.clear()
                 continue
             channel.pending = [p for p in channel.pending if p.client_seq not in acked]
+            resend.extend((channel.uri, entry) for entry in channel.pending)
+        resend.sort(key=lambda item: item[1].client_seq)
+        return resend
 
     # ── internals ────────────────────────────────────────────────────────────
 
@@ -379,15 +432,38 @@ class StateMirror:
                 del channel.pending[index]
                 return
 
-    def _check_gap(self, channel: ChannelMirror, server_seq: int) -> None:
-        if self._gap_policy is GapPolicy.IGNORE or not server_seq or not channel.last_seq:
+    def _check_gap(self, channel: ChannelMirror, server_seq: int, previous: int) -> None:
+        """Measure the hole against the **global** mark, not the channel's.
+
+        ``serverSeq`` is one host-global counter that every channel draws from,
+        so per-channel contiguity is not a property the protocol provides:
+        ``root@5, chat@6, root@7`` is ordinary traffic with nothing lost, and a
+        channel-local test reports both steps as holes. Two subscribed channels
+        are enough to make every reported gap a false positive, which costs the
+        whole diagnostics stream its meaning -- it exists so a consumer can tell
+        a quiet host from a broken one.
+
+        Globally, what is left is exactly the two cases worth reporting: an
+        envelope we never received, and traffic on a channel we did not
+        subscribe to. ADR 0005 says the second is legal, which is why this warns
+        rather than raises.
+
+        *channel* is the one whose envelope revealed the hole, reported so a
+        consumer has somewhere to look -- not a claim about which channel lost
+        anything.
+        """
+        if self._gap_policy is GapPolicy.IGNORE or not server_seq or not previous:
             return
-        expected = channel.last_seq + 1
+        expected = previous + 1
         if server_seq <= expected:
             return
         self._diagnose(SequenceGap(channel.uri, expected, server_seq))
         if self._gap_policy is GapPolicy.RESEED:
-            self._stale.add(channel.uri)
+            # A global hole cannot be attributed: the lost envelope belonged to
+            # whichever channel the host numbered it on, and that is precisely
+            # the information the hole destroyed. Reseeding only the channel
+            # that revealed it would leave the actual victim silently wrong.
+            self._stale.update(self._channels)
 
     def _diagnose(self, diagnostic: Diagnostic) -> None:
         if self._on_diagnostic is not None:

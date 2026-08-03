@@ -33,6 +33,7 @@ __all__ = [
     "ClientClosed",
     "Conflict",
     "ContentNotFound",
+    "InvalidParams",
     "MethodNotFound",
     "NotFound",
     "PermissionDenied",
@@ -224,6 +225,16 @@ class Conflict(RpcError):
     """-32011. Absent from upstream's published ``errors.schema.json``."""
 
 
+class InvalidParams(RpcError):
+    """-32602 -- the request was malformed.
+
+    Distinct from :class:`NotFound`, and the distinction is actionable: -32008
+    says the URI was well-formed and the resource was absent, so the caller
+    should stop asking for it; -32602 says the caller left out a required
+    param and should send a different frame.
+    """
+
+
 class MethodNotFound(RpcError):
     """-32601 -- "the peer does not implement this".
 
@@ -245,6 +256,7 @@ _BY_CODE: Final[dict[int, type[RpcError]]] = {
     AHP_ERROR_CODES["AlreadyExists"]: AlreadyExists,
     AHP_ERROR_CODES["Conflict"]: Conflict,
     JSON_RPC_ERROR_CODES["MethodNotFound"]: MethodNotFound,
+    JSON_RPC_ERROR_CODES["InvalidParams"]: InvalidParams,
 }
 
 

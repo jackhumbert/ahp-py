@@ -37,19 +37,22 @@ from agent_host_client.api.approvals import ApprovalPolicy, resolve_policy
 from agent_host_client.api.events import (
     ToolCallReady,
     ToolCallResultReview,
+    ToolInfo,
     TurnCancelled,
     TurnCompleted,
     TurnEvent,
     TurnFailed,
     TurnInProgress,
     event_for,
+    is_modelled,
 )
+from agent_host_client.client import actions
 from agent_host_client.client.client import AhpClient
 from agent_host_client.client.errors import AhpClientError
-from agent_host_client.client.events import ActionEvent, ClientEvent
+from agent_host_client.client.events import ActionEvent, ClientEvent, SessionRemoved
 from agent_host_client.client.mirror import StateMirror
 from agent_host_client.hosts.runtime import HostConfig, HostRuntime, TransportFactory
-from agent_host_client.serve.inputs import InputResponder, pending_inputs
+from agent_host_client.serve.inputs import ClientToolHost, InputResponder, pending_inputs
 from agent_host_client.serve.router import ResourceServer
 
 __all__ = ["Chat", "ChatWatch", "Client", "ClientContext", "Session", "TurnStream", "connect"]
@@ -68,7 +71,14 @@ class ClientContext:
 
     async def _open(self) -> Client:
         if self._client is None:
-            await self._runtime.start()
+            try:
+                await self._runtime.start()
+            except BaseException:
+                # `start` raises on a permanent refusal, and `__aexit__` does not
+                # run when `__aenter__` raises -- so the only chance to close the
+                # runtime's queues is here, while we still hold it.
+                await self._runtime.shutdown()
+                raise
             self._client = Client(self._runtime)
         return self._client
 
@@ -194,6 +204,35 @@ class Client:
     def protocol_version(self) -> str | None:
         return self._runtime.protocol_version
 
+    # ── what the handshake advertised ────────────────────────────────────────
+    #
+    # Affordances only a client can implement, from an `InitializeResult` no
+    # `connect()` caller can otherwise reach: the runtime absorbed two of these
+    # and dropped the third on the floor, and re-exported none. An advertisement
+    # the front door cannot read is one the host made to nobody.
+
+    @property
+    def terminal_command_prefix(self) -> str | None:
+        """The `!` shorthand, or ``None`` when the host supports none.
+
+        A ``Message.text`` starting with this is executed as a terminal command
+        rather than sent to the agent. ``"!"`` is the standardised convention,
+        but the *host* decides -- so a client that hardcodes it offers the
+        affordance to hosts that never claimed it, and withholds it from hosts
+        that spell it differently.
+        """
+        return self._runtime.terminal_command_prefix
+
+    @property
+    def completion_trigger_characters(self) -> Sequence[str]:
+        """Characters that SHOULD make an input issue a `completions` request."""
+        return self._runtime.completion_trigger_characters
+
+    @property
+    def default_directory(self) -> str | None:
+        """Where the host suggests a remote filesystem browser should open."""
+        return self._runtime.default_directory
+
     @property
     def root(self) -> JsonObject:
         state = self._runtime.mirror.state(ROOT_URI)
@@ -224,7 +263,7 @@ class Client:
         working_directories: Sequence[str] | None = None,
         config: Mapping[str, Any] | None = None,
         uri: str | None = None,
-        tools: Sequence[Mapping[str, Any]] | None = None,
+        tools: ClientToolHost | Sequence[Mapping[str, Any]] | None = None,
         progress: bool = False,
         ready_timeout: float = 30.0,
     ) -> Session:
@@ -234,6 +273,16 @@ class Client:
         ``ahp-session:``. Nothing anywhere routes on the scheme, so the form is
         a convention rather than a contract, but matching the one real client is
         free.
+
+        *tools* publishes this client's own tools on ``activeClient``, and a
+        :class:`~agent_host_client.serve.ClientToolHost` also **runs** them: the
+        session starts a pump that executes every call the host hands us and
+        reports the result. Passing bare ``ToolDefinition`` mappings advertises
+        tools with no executor behind them, so each call is *denied* as soon as
+        it arrives -- which is the honest answer, and is the reason this argument
+        may not simply be a list. Advertising without either is worse than not
+        advertising at all: the agent asks for a tool, nothing ever answers, and
+        the host parks the turn on a future that cannot be resolved.
         """
         from agent_host_client.serve.resources import file_uri
 
@@ -246,9 +295,10 @@ class Client:
         # `progressToken` is what makes root/progress fire at all. A client that
         # never sends one has a progress surface that can never receive anything.
         token = str(uuid.uuid4()) if progress else None
+        tool_host = self._tool_host(tools)
         active_client: JsonObject | None = None
-        if tools is not None:
-            active_client = {"clientId": self.client_id, "tools": list(tools)}
+        if tool_host is not None:
+            active_client = {"clientId": self.client_id, "tools": tool_host.definitions()}
 
         await self.protocol.create_session(
             session_uri,
@@ -260,8 +310,29 @@ class Client:
         )
         await self._runtime.subscribe(session_uri, "session")
         session = Session(self, session_uri, provider, owned=True)
+        # Started before readiness is awaited: a host that queues an
+        # `initialMessage` can have a turn -- and a tool call -- in flight
+        # already, and a pump attached afterwards would never see it.
+        session._serve_tools(tool_host)
         await session._await_ready(ready_timeout)
         return session
+
+    def _tool_host(
+        self, tools: ClientToolHost | Sequence[Mapping[str, Any]] | None
+    ) -> ClientToolHost | None:
+        """Normalise *tools* to the thing that can actually answer a call.
+
+        A bare definition list becomes a host with no executors registered,
+        which denies every call by name. That is deliberate: the alternative --
+        what this did before there was a pump at all -- is publishing tools
+        nothing in the library can run, and `chat/toolCallStart` for a client
+        contributor has no other answerer.
+        """
+        if tools is None or isinstance(tools, ClientToolHost):
+            return tools
+        host = ClientToolHost(self.protocol, client_id=self.client_id)
+        host.advertise(tools)
+        return host
 
     async def open_session(self, uri: str) -> Session:
         """Attach to a session someone else created.
@@ -284,11 +355,30 @@ class Session:
         self._owned = owned
         self._chat: Chat | None = None
         self._responder: InputResponder | None = None
+        self._tools: ClientToolHost | None = None
+        self._tool_pump: asyncio.Task[None] | None = None
 
     @property
     def state(self) -> JsonObject:
         state = self._client.mirror.state(self.uri)
         return state if isinstance(state, dict) else {}
+
+    @property
+    def capabilities(self) -> JsonObject:
+        """``AgentCapabilities`` for the agent behind this session.
+
+        Read from ``RootState.agents`` -- the only place they are published --
+        matched on ``AgentInfo.provider``. **Every field is a presence flag and
+        ``{}`` is falsy in Python**, so a caller testing one must write
+        ``is not None``: ``multipleChats: {}`` advertises multi-chat, and
+        ``if caps.get("multipleChats"):`` reads it as unsupported.
+        """
+        provider = self.provider or str(self.state.get("provider", ""))
+        for agent in self._client.agents():
+            if agent.get("provider") == provider:
+                raw = agent.get("capabilities")
+                return raw if isinstance(raw, dict) else {}
+        return {}
 
     @property
     def interactivity(self) -> str:
@@ -309,6 +399,90 @@ class Session:
             await self._client._runtime.subscribe(uri, "chat")
             self._chat = Chat(self._client, self, uri)
         return self._chat
+
+    # ── more than one chat ───────────────────────────────────────────────────
+
+    def chats(self) -> Sequence[JsonObject]:
+        """``SessionState.chats`` -- one ``ChatSummary`` per chat.
+
+        The catalogue, not the conversations: `resource`, `title`, `status`,
+        `origin` and `interactivity` without the transcript. A tab strip is
+        exactly this list, and rendering it does not require subscribing to
+        every chat.
+        """
+        raw = self.state.get("chats")
+        return [c for c in raw if isinstance(c, dict)] if isinstance(raw, list) else []
+
+    async def create_chat(
+        self,
+        *,
+        uri: str | None = None,
+        initial_message: Mapping[str, Any] | str | None = None,
+        source: Mapping[str, Any] | None = None,
+        working_directories: Sequence[str] | None = None,
+    ) -> Chat:
+        """Open a second chat in this session, and subscribe to it.
+
+        Gated on the agent's own advertisement, which the spec states as a MUST
+        NOT rather than a SHOULD: without ``capabilities.multipleChats`` a
+        client must not call `createChat` for anything beyond the chat the
+        session starts with, and `fork` / `sideChat` are separate opt-ins on top
+        of it. Refusing here costs a round trip; sending it anyway asks a host
+        to enforce a rule we were told about in advance.
+
+        The chat URI is **ours to mint** (`CreateChatParams.chat` is documented
+        client-chosen and VS Code sends one), which is what makes the subscribe
+        below possible without waiting for `session/chatAdded` to name it.
+        """
+        capabilities = self.capabilities
+        # `is not None`, never truthiness: `multipleChats: {}` is the ordinary
+        # advertisement and `{}` is falsy in Python, so a truthiness test reads
+        # every plain multi-chat agent as not supporting multi-chat.
+        multiple = capabilities.get("multipleChats")
+        if multiple is None:
+            raise AhpClientError(
+                f"agent {self.provider or self.state.get('provider', '')!r} does not advertise "
+                "capabilities.multipleChats; the spec says clients MUST NOT call createChat"
+            )
+        if source is not None:
+            self._check_source(source, multiple if isinstance(multiple, Mapping) else {})
+        chat_uri = uri or f"ahp-chat:/{uuid.uuid4()}"
+        message = {"text": initial_message} if isinstance(initial_message, str) else initial_message
+        await self._client.protocol.create_chat(
+            self.uri,
+            chat_uri,
+            initialMessage=dict(message) if message is not None else None,
+            source=dict(source) if source is not None else None,
+            workingDirectories=list(working_directories)
+            if working_directories is not None
+            else None,
+        )
+        return await self.open_chat(chat_uri)
+
+    @staticmethod
+    def _check_source(source: Mapping[str, Any], multiple: Mapping[str, Any]) -> None:
+        """`fork` and `sideChat` are each their own opt-in.
+
+        Both are plain booleans here rather than presence objects -- the one
+        place in `AgentCapabilities` where truthiness is the correct test, and
+        the reason this is not folded into the check above.
+        """
+        kind = str(source.get("kind", ""))
+        if kind in {"fork", "sideChat"} and not multiple.get(kind):
+            raise AhpClientError(
+                f"agent does not advertise capabilities.multipleChats.{kind}; "
+                f"clients MUST NOT pass a ChatSource with kind={kind!r}"
+            )
+
+    async def open_chat(self, uri: str) -> Chat:
+        """Subscribe to a chat of this session that already exists.
+
+        The way to reach a chat somebody else created -- a fork, a side chat, or
+        the second tab another client opened -- which `chats()` lists and
+        :meth:`chat` cannot return because it only ever resolves `defaultChat`.
+        """
+        await self._client._runtime.subscribe(uri, "chat")
+        return Chat(self._client, self, uri)
 
     def prompt(self, text: str, **kwargs: Any) -> TurnStream:
         return _LazyTurnStream(self, text, kwargs)  # type: ignore[return-value]
@@ -407,7 +581,76 @@ class Session:
             if tagged.channel == self.uri:
                 return True
 
+    # ── running the tools we published ───────────────────────────────────────
+
+    def _serve_tools(self, tools: ClientToolHost | None) -> None:
+        """Start answering the client-contributed calls this session will get.
+
+        Driven off ``client.events()`` rather than off a `TurnStream`, because
+        the turn carrying the call need not be one we started -- and because
+        `TurnStream._drain` cannot answer one anyway: a client-provided call
+        arrives already `running`, so there is no approval to give, only a
+        result to produce.
+        """
+        if tools is None:
+            return
+        self._tools = tools
+        self._tool_pump = asyncio.get_running_loop().create_task(
+            self._run_client_tools(tools), name=f"ahp-client-tools-{self.uri}"
+        )
+
+    async def _run_client_tools(self, tools: ClientToolHost) -> None:
+        reader = self._client._runtime.events()
+        #: `(channel, toolCallId)` already dispatched to an executor. A second
+        #: `chat/toolCallReady` is the one action that reaches an already-running
+        #: call -- hosts republish it to revise the invocation message -- and
+        #: without this the tool runs again and the second result overwrites the
+        #: first.
+        started: set[tuple[str, str]] = set()
+        try:
+            async for tagged in reader:
+                event = tagged.event
+                if not isinstance(event, ActionEvent) or event.rejection_reason is not None:
+                    continue
+                action = event.action
+                if action.get("type") != "chat/toolCallReady":
+                    continue
+                call = _tool_call_in(
+                    self._client.mirror.state(tagged.channel), str(action.get("toolCallId", ""))
+                )
+                # Ownership is read from the call's *state*: `contributor` is
+                # required on `chat/toolCallStart` and only repeated on the ready
+                # by hosts that choose to, so deciding from the action alone
+                # silently declines to run anything against a host that does not.
+                if not tools.owns(call or action):
+                    continue
+                key = (tagged.channel, str(action.get("toolCallId", "")))
+                if key in started:
+                    continue
+                started.add(key)
+                await tools.execute(
+                    tagged.channel, action, tool_name=str((call or {}).get("toolName", ""))
+                )
+        except Exception:
+            # Ends the pump, quietly. Reporting the result means dispatching, so
+            # anything reaching here is the connection going away underneath us
+            # -- and an exception left on a task nobody awaits is reported by
+            # asyncio at an unrelated moment with a stack that points nowhere
+            # useful, which is exactly the shape this file avoids elsewhere.
+            return
+        finally:
+            await reader.aclose()
+
+    async def _stop_tools(self) -> None:
+        if self._tool_pump is None:
+            return
+        pump, self._tool_pump = self._tool_pump, None
+        pump.cancel()
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await pump
+
     async def dispose(self) -> None:
+        await self._stop_tools()
         await self._client.protocol.dispose_session(self.uri)
 
     async def _await_ready(self, timeout: float) -> None:
@@ -437,6 +680,10 @@ class Session:
         exc: BaseException | None,
         tb: TracebackType | None,
     ) -> None:
+        # Stopped whether or not we own the session: the pump is ours, and
+        # leaving it attached to a `Session` the caller has finished with keeps a
+        # reader on the event queue and a task holding this object alive.
+        await self._stop_tools()
         if self._owned:
             with contextlib.suppress(Exception):
                 await self.dispose()
@@ -447,6 +694,11 @@ class Chat:
         self._client = client
         self._session = session
         self.uri = uri
+        #: ``(turn id, loop time at dispatch)`` for a turn this client started.
+        #: The only own-clock measurement available for
+        #: ``chat/turnCancelled.duration``, which a client "MUST NOT derive by
+        #: subtracting timestamps".
+        self._own_turn: tuple[str, float] | None = None
 
     @property
     def state(self) -> JsonObject:
@@ -469,8 +721,56 @@ class Chat:
         """
         return ChatWatch(self._client, self, from_start=from_start)
 
-    async def cancel(self) -> None:
-        self._client.protocol.dispatch(self.uri, {"type": "chat/turnCancelled"})
+    async def cancel(self, *, duration_ms: float | None = None) -> None:
+        """Stop whatever turn is running on this chat.
+
+        The turn id comes from the mirror because the action requires it and
+        `_end_turn` matches on it: a cancel that omits it is a no-op on *every*
+        peer while the host still tears the provider down, so the transcript
+        keeps a live `activeTurn` nobody can finish and the chat refuses every
+        later `chat/turnStarted` as "a turn is already active".
+
+        With no active turn there is nothing to name, and a bare cancel is
+        precisely the defect above -- so this sends nothing.
+        """
+        active = self.state.get("activeTurn")
+        turn_id = str(active.get("id", "")) if isinstance(active, Mapping) else ""
+        if not turn_id:
+            return
+        self._client.protocol.dispatch(
+            self.uri,
+            actions.turn_cancelled(turn_id, duration_ms=self._elapsed_ms(turn_id, duration_ms)),
+        )
+
+    async def dispose(self) -> None:
+        """Close this chat.
+
+        `chat-channel.md` claims the protocol exposes no such command; it is in
+        `CommandMap` with a `DisposeChatParams` and the reference host implements
+        it. The types win. Disposing the session's *default* chat is not
+        something the protocol forbids and not something a host has to survive,
+        so this is for the extra chats :meth:`Session.create_chat` opened.
+        """
+        await self._client.protocol.dispose_chat(self.uri)
+
+    def _note_turn_started(self, turn_id: str, at: float) -> None:
+        """Remember when *we* started a turn, on our own clock."""
+        self._own_turn = (turn_id, at)
+
+    def _elapsed_ms(self, turn_id: str, override: float | None) -> float:
+        """How long the turn ran, by the only clock we are allowed to use.
+
+        Zero for a turn somebody else started: we have no own-clock measurement
+        of it, and `ActiveTurn.startedAt` is the peer timestamp the spec forbids
+        subtracting. The consumer "MUST treat it as opaque, producer-supplied
+        data", so an honest zero beats a cross-clock difference; a caller that
+        did time the turn passes *duration_ms*.
+        """
+        if override is not None:
+            return override
+        if self._own_turn is not None and self._own_turn[0] == turn_id:
+            return max(0.0, (asyncio.get_running_loop().time() - self._own_turn[1]) * 1000)
+        return 0.0
 
 
 class ChatWatch:
@@ -541,12 +841,21 @@ class ChatWatch:
             envelope = tagged.event.envelope
             if envelope.get("channel") != self._chat.uri:
                 continue
-            return event_for(envelope, self._dispatch)
+            if not is_modelled(envelope):
+                # Deliberately not surfaced -- mostly this caller's own writes
+                # coming back. Skipped rather than delivered as `UnknownEvent`,
+                # which is reserved for an action a newer host sent that this
+                # build has never heard of.
+                continue
+            return event_for(envelope, self._dispatch, self._tools)
 
     def _dispatch(self, channel: str, action: Mapping[str, Any]) -> None:
         """Adapt `dispatch` -- which returns a handle -- to the fire-and-forget
         shape an event's `.approve()` needs."""
         self._client.protocol.dispatch(channel, action)
+
+    def _tools(self, channel: str, tool_call_id: str) -> ToolInfo:
+        return _tool_info(self._client.mirror, channel, self._chat._session.uri, tool_call_id)
 
     async def aclose(self) -> None:
         if self._reader is not None:
@@ -567,6 +876,85 @@ async def _next_or_none(reader: Any) -> Any:
         return await reader.__anext__()
     except StopAsyncIteration:
         return None
+
+
+def _tool_info(mirror: StateMirror, chat_uri: str, session_uri: str, tool_call_id: str) -> ToolInfo:
+    """What the tool call *is*, read from state because no action says.
+
+    `toolName` is published once, on `chat/toolCallStart`, and is required on
+    the resulting `ToolCallState`; `annotations` is a property of
+    `ToolDefinition` alone -- `SessionState.serverTools` for the host's tools,
+    `activeClients[].tools` for a client's. An `ApprovalPolicy` switching on
+    either has nowhere else to look.
+
+    Reading it at event time is safe because the client applies an envelope to
+    the mirror *before* publishing it (`AhpClient._on_notification`), so the
+    call is already in state when its `chat/toolCallReady` reaches the caller.
+
+    From **confirmed** state, for the same reason `TurnStream.text()` is: our
+    own `chat/turnStarted` sits in the pending queue until the host echoes it,
+    and replaying it over confirmed puts a second, empty `activeTurn` in the
+    optimistic view -- one with no response parts, and so no tool call to name.
+    """
+    name = _tool_name_in(mirror.confirmed(chat_uri), tool_call_id)
+    if not name:
+        return ToolInfo()
+    return ToolInfo(name, _annotations_in(mirror.confirmed(session_uri), name))
+
+
+def _tool_name_in(state: Any, tool_call_id: str) -> str:
+    call = _tool_call_in(state, tool_call_id)
+    return str(call.get("toolName", "")) if call is not None else ""
+
+
+def _tool_call_in(state: Any, tool_call_id: str) -> Mapping[str, Any] | None:
+    """The `ToolCallState`, from the live turn *or* an archived one.
+
+    The mirror is applied in the read loop, ahead of whatever the caller is
+    still working through -- a host that finishes a turn in one burst has
+    already moved `activeTurn` into `turns` by the time the tool call's
+    `chat/toolCallReady` is handed over. Looking only at `activeTurn` finds the
+    call for a slow host and not for a fast one, which is the worst shape a bug
+    can have.
+
+    State rather than the action because the two fields a caller needs here --
+    `toolName` and `contributor` -- are published once, on
+    `chat/toolCallStart`, and the reducer is what carries them forward.
+    """
+    if not isinstance(state, Mapping):
+        return None
+    turns = state.get("turns")
+    candidates: list[Any] = [state.get("activeTurn")]
+    candidates.extend(reversed(turns) if isinstance(turns, list) else ())
+    for turn in candidates:
+        parts = turn.get("responseParts") if isinstance(turn, Mapping) else None
+        for part in parts if isinstance(parts, list) else ():
+            call = part.get("toolCall") if isinstance(part, Mapping) else None
+            if isinstance(call, Mapping) and call.get("toolCallId") == tool_call_id:
+                return call
+    return None
+
+
+def _annotations_in(state: Any, name: str) -> JsonObject | None:
+    """`ToolDefinition.annotations` for *name*, from either publisher.
+
+    Both catalogues are searched because a client-contributed tool is announced
+    on `activeClients[].tools` and never appears in `serverTools`, and a policy
+    should not behave differently depending on who contributed the tool.
+    """
+    if not isinstance(state, Mapping):
+        return None
+    catalogues: list[Any] = [state.get("serverTools")]
+    clients = state.get("activeClients")
+    for client in clients if isinstance(clients, list) else ():
+        if isinstance(client, Mapping):
+            catalogues.append(client.get("tools"))
+    for catalogue in catalogues:
+        for tool in catalogue if isinstance(catalogue, list) else ():
+            if isinstance(tool, Mapping) and tool.get("name") == name:
+                annotations = tool.get("annotations")
+                return annotations if isinstance(annotations, dict) else None
+    return None
 
 
 def _markdown_text(turn: Mapping[str, Any]) -> str:
@@ -645,14 +1033,14 @@ class TurnStream:
                 "the host will not accept a message"
             )
         self._reader = self._client._runtime.events()
-        action: JsonObject = {
-            "type": "chat/turnStarted",
-            "turnId": self._turn_id,
-            "message": {"text": self._text},
-        }
-        if self._model is not None:
-            action["message"]["model"] = self._model
-        self._client.protocol.dispatch(self._chat.uri, action)
+        started = asyncio.get_running_loop().time()
+        self._client.protocol.dispatch(
+            self._chat.uri,
+            actions.turn_started(self._turn_id, text=self._text, model=self._model),
+        )
+        # Recorded on our own clock so a later `Chat.cancel()` has a duration it
+        # is allowed to report for this turn.
+        self._chat._note_turn_started(self._turn_id, started)
         self._started = True
 
     @property
@@ -686,6 +1074,10 @@ class TurnStream:
                 # termination, so say so rather than ending silently.
                 self._finished = True
                 raise StopAsyncIteration
+            disposed = self._disposal(tagged)
+            if disposed is not None:
+                self._finished = True
+                return disposed
             if not isinstance(tagged.event, ActionEvent):
                 continue
             envelope = tagged.event.envelope
@@ -697,8 +1089,18 @@ class TurnStream:
             turn_id = action.get("turnId")
             if turn_id is not None and turn_id != self._turn_id:
                 continue
+            refused = self._refusal(tagged.event, action)
+            if refused is not None:
+                self._finished = True
+                return refused
 
-            event = event_for(envelope, self._dispatch)
+            if not is_modelled(envelope):
+                # AFTER the refusal check: a rejected echo of our own write is
+                # exactly what the caller needs to hear about, even though the
+                # accepted one is noise.
+                continue
+
+            event = event_for(envelope, self._dispatch, self._tools)
             if isinstance(event, TurnCompleted):
                 self._finished = True
                 return self._finalise(event)
@@ -710,10 +1112,66 @@ class TurnStream:
     async def _next_tagged(self) -> Any:
         return await _next_or_none(self._reader)
 
+    def _refusal(self, event: ActionEvent, action: Mapping[str, Any]) -> TurnFailed | None:
+        """The host refused the `chat/turnStarted` that opened this stream.
+
+        A rejected envelope describes an action that was NOT applied, so the
+        turn will never run and nothing further will arrive for it. Delivered as
+        an ordinary event it decodes to a plain `TurnStarted` -- the caller is
+        told the turn began, and then waits out `idle_timeout` for it.
+
+        Scoped to `chat/turnStarted` deliberately. A rejected
+        `chat/toolCallConfirmed` is another client having answered the approval
+        first, which `ToolCallReady` documents as "not an error": the mirror
+        reverts our optimistic effect and the turn carries on.
+        """
+        reason = event.rejection_reason
+        if reason is None or action.get("type") != "chat/turnStarted":
+            return None
+        return TurnFailed(dict(event.envelope), reason)
+
+    def _disposal(self, tagged: ClientEvent) -> TurnFailed | None:
+        """The turn's chat was torn down underneath it, if this says so.
+
+        A disposed chat's channel is dropped, so the `chat/turnComplete` this
+        stream is waiting for can never arrive on it -- not even from a host
+        that publishes a closing action, because there is nowhere left to
+        publish it. `root/sessionRemoved` and `session/chatRemoved` are the only
+        notice the protocol gives, and both arrive somewhere this stream would
+        otherwise filter out: one is a notification rather than an envelope, the
+        other is an action on the *session* channel.
+
+        Without this the caller blocks for the whole `idle_timeout`, or forever
+        where it is disabled, for a turn that ended before it started.
+        """
+        event = tagged.event
+        gone = ""
+        if isinstance(event, SessionRemoved):
+            if str(event.params.get("session", "")) == self._session.uri:
+                gone = f"session {self._session.uri}"
+        elif isinstance(event, ActionEvent):
+            action = event.action
+            if action.get("type") == "session/chatRemoved" and (
+                str(action.get("chat", "")) == self._chat.uri
+            ):
+                gone = f"chat {self._chat.uri}"
+        if not gone:
+            return None
+        # Failed rather than cancelled: the spec says an in-progress turn SHOULD
+        # be considered failed after an unexpected termination, and the disposal
+        # need not have been this caller's doing.
+        return TurnFailed(
+            {"channel": self._chat.uri, "action": {"turnId": self._turn_id}},
+            f"{gone} was disposed while turn {self._turn_id} was running",
+        )
+
     def _dispatch(self, channel: str, action: Mapping[str, Any]) -> None:
         """Adapt `AhpClient.dispatch` -- which returns a handle -- to the
         fire-and-forget shape an event's `.approve()` needs."""
         self._client.protocol.dispatch(channel, action)
+
+    def _tools(self, channel: str, tool_call_id: str) -> ToolInfo:
+        return _tool_info(self._client.mirror, channel, self._session.uri, tool_call_id)
 
     def _finalise(self, event: TurnCompleted) -> TurnCompleted:
         """Re-read the authoritative text from the mirror.

@@ -176,14 +176,23 @@ class CommandsMixin:
 
     # ── chats ────────────────────────────────────────────────────────────────
 
-    async def create_chat(self, chat: str, **extra: Any) -> JsonObject:
-        """Create a chat.
+    async def create_chat(self, session: str, chat: str, **extra: Any) -> JsonObject:
+        """Create a chat inside *session*.
+
+        **Two URIs, and they are different things.** `CreateChatParams` requires
+        both: `channel` is the *session* that will contain the chat, `chat` is
+        the new chat's own URI. This took one argument until the interop run,
+        and `_scoped` wrote it into `channel` -- so no `chat` key was ever
+        emitted, every host answered `-32602`, and there was no call shape that
+        worked: `channel=` in the kwargs was overwritten, `chat=` collided with
+        the positional. The only caller-scoped command whose caller-chosen URI
+        is *not* the thing being created.
 
         The spec contradicts itself on who allocates the URI -- `chat-channel.md`
         says the server does, while `CreateChatParams.chat` is documented
         client-chosen and VS Code sends one. We send one.
         """
-        return await self._scoped("createChat", chat, extra)
+        return await self._scoped("createChat", session, {"chat": chat, **extra})
 
     async def dispose_chat(self, chat: str) -> JsonObject:
         """Dispose a chat.

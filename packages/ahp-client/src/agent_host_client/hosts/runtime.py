@@ -18,7 +18,7 @@ import contextlib
 import uuid
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Any, Literal
+from typing import Any, Final, Literal
 
 from agent_host_protocol.channels import ROOT_URI
 from agent_host_protocol.transport import Transport
@@ -27,7 +27,7 @@ from agent_host_protocol.types import JsonObject
 from agent_host_client.client.client import AhpClient, ClientConfig, ServerRequestHandler
 from agent_host_client.client.errors import AhpClientError, RpcError
 from agent_host_client.client.events import ClientEvent, Diagnostic
-from agent_host_client.client.mirror import GapPolicy, PendingPolicy, StateMirror
+from agent_host_client.client.mirror import ApplyOutcome, GapPolicy, PendingPolicy, StateMirror
 from agent_host_client.client.queue import BroadcastQueue, BroadcastReader
 from agent_host_client.hosts.client_id_store import ClientIdStore, InMemoryClientIdStore
 from agent_host_client.hosts.policy import ReconnectPolicy, exponential_policy
@@ -172,9 +172,19 @@ class HostRuntime:
         self._manual = ShutdownSignal("manual-reconnect")
         self._supervisor: asyncio.Task[None] | None = None
         self._connected = asyncio.Event()
+        #: The other way `_await_connected` can end. `_supervise` reaches a
+        #: terminal `failed` and returns without touching `_connected` or
+        #: `_shutdown`, so waiting on those two alone makes every permanent
+        #: refusal an unobservable hang.
+        self._terminal = ShutdownSignal("terminal")
+        self._failure: BaseException | None = None
         self.protocol_version: str | None = None
         self.default_directory: str | None = None
         self.completion_trigger_characters: tuple[str, ...] = ()
+        #: ``InitializeResult.terminalCommandPrefix`` -- ``"!"`` by convention,
+        #: ``None`` when the host supports no prefix. Absence and ``""`` are the
+        #: same answer and both mean "do not offer the shorthand".
+        self.terminal_command_prefix: str | None = None
         self.session_summaries: dict[str, JsonObject] = {}
 
     # ── observation ──────────────────────────────────────────────────────────
@@ -232,8 +242,30 @@ class HostRuntime:
             await self._await_connected()
 
     async def _await_connected(self) -> None:
-        async with link(self._shutdown) as waiters:
-            await race(self._connected.wait(), waiters)
+        """Wait for the connection, or for the news that there will not be one.
+
+        The classification half of a permanent refusal already worked --
+        `should_retry` declines a version disagreement and the supervisor
+        broadcasts `failed` on `state_changes()`. The release half is this:
+        without it `start(wait=True)`, the default and what `connect()` uses,
+        is unsatisfiable against `-32005`, a policy close, or an exhausted
+        attempt budget, and the caller hangs with no exception to catch.
+        """
+        async with link(self._shutdown, self._terminal) as waiters:
+            try:
+                await race(self._connected.wait(), waiters)
+            except asyncio.CancelledError:
+                # Only the terminal arm is ours to translate; a shutdown -- or a
+                # genuine cancellation of the caller -- still unwinds as one.
+                if not self._terminal.triggered:
+                    raise
+        if self._connected.is_set() or not self._terminal.triggered:
+            return
+        # Raised rather than returned: `start()` promises a connection, and a
+        # caller that gets one silently has no reason to consult `state`.
+        raise self._failure or HostNotConnected(
+            f"{self._config.label} gave up connecting and will not retry"
+        )
 
     async def shutdown(self) -> None:
         self._shutdown.trigger()
@@ -260,11 +292,29 @@ class HostRuntime:
         Tracked **before** the request goes out: subscribing while disconnected
         records the intent locally and raises, and the next successful connect
         threads it into the handshake.
+
+        A refusal is the other case, and it is rolled back -- symmetry with
+        ``AhpClient.subscribe``, which rolls its own queue back for exactly this
+        reason. The two halves disagreeing is worse than either: a ``-32009``
+        would otherwise leave a bound, snapshot-less channel in the mirror and a
+        subscription the runtime re-requests on every reconnect, where the host
+        can only decline it again. Only an ``RpcError`` rolls back -- the host
+        answered, and the answer was no. A transport failure is not an answer,
+        and the reconnect must still bring the subscription back.
         """
+        existed = uri in self._subscriptions
         self._subscriptions[uri] = reducer_name
         self._mirror.bind(uri, reducer_name)
         client = self.client()
-        result, _subscription = await client.subscribe(uri)
+        try:
+            result, _subscription = await client.subscribe(uri)
+        except RpcError:
+            # Only what this call added: tearing down a channel another caller
+            # was already subscribed to would blind them over our refusal.
+            if not existed:
+                self._subscriptions.pop(uri, None)
+                self._mirror.drop(uri)
+            raise
         snapshot = result.get("snapshot")
         if isinstance(snapshot, Mapping):
             self._mirror.apply_snapshot(snapshot, reducer_name=reducer_name)
@@ -354,9 +404,18 @@ class HostRuntime:
             else:
                 await self._absorb_initialize(client, prior)
 
-            self._mirror.on_reconnect(
+            resend = self._mirror.on_reconnect(
                 policy=self._config.pending_policy, arm=arm, acknowledged=acknowledged
             )
+            # The half ADR 0006b describes and nothing implemented. A pending
+            # entry the policy KEEPS is one whose `dispatchAction` frame may
+            # never have left -- the socket can die inside the write loop -- so
+            # keeping it without re-sending renders an optimistic turn the host
+            # has never heard of, with no echo that can ever retire it. Sent
+            # before `connected`, so a caller that dispatches the moment it sees
+            # the state cannot get ahead of the catch-up.
+            for uri, entry in resend:
+                client.redispatch(uri, entry.action, entry.client_seq)
 
             # Best-effort: a host that cannot list sessions is still usable.
             with contextlib.suppress(Exception):
@@ -394,6 +453,13 @@ class HostRuntime:
         self.completion_trigger_characters = (
             tuple(str(t) for t in triggers) if isinstance(triggers, list) else ()
         )
+        # Kept for the same reason `completionTriggerCharacters` is: it is an
+        # affordance the host advertises and only the client can implement. A
+        # client that drops it cannot offer the `!command` shorthand at all, and
+        # the two fields are otherwise identical in kind -- one was absorbed and
+        # the other fell on the floor.
+        prefix = result.get("terminalCommandPrefix")
+        self.terminal_command_prefix = prefix if isinstance(prefix, str) and prefix else None
         seq = result.get("serverSeq")
         if isinstance(seq, int) and not isinstance(seq, bool):
             self._server_seq = max(self._server_seq, seq)
@@ -422,10 +488,18 @@ class HostRuntime:
                         acknowledged.append(seq)
                 # Applied BEFORE the state flips to connected, so a consumer
                 # observing `connected` already sees the catch-up.
-                self._mirror.apply(envelope)
-                self._events.publish(
-                    ClientEvent(str(envelope.get("channel", "")), _action_event(envelope))
-                )
+                outcome = self._mirror.apply(envelope)
+                # `lastSeenServerSeq` is one scalar over a host-global counter,
+                # so it cannot express "and I already have this channel up to
+                # 40" -- the host replays from the scalar and is right to. The
+                # per-channel `Snapshot.fromSeq` baseline is the designed
+                # defence and the mirror applies it; publishing what the mirror
+                # discarded would hand a consumer a duplicate of an event it has
+                # already seen, which is worse than the gap it is trying to fill.
+                if outcome is not ApplyOutcome.STALE:
+                    self._events.publish(
+                        ClientEvent(str(envelope.get("channel", "")), _action_event(envelope))
+                    )
                 seq_value = envelope.get("serverSeq")
                 if isinstance(seq_value, int) and not isinstance(seq_value, bool):
                     self._server_seq = max(self._server_seq, seq_value)
@@ -479,6 +553,7 @@ class HostRuntime:
             ActionEvent,
             SessionAdded,
             SessionRemoved,
+            SessionSummaryChanged,
         )
 
         payload = event.event
@@ -489,8 +564,68 @@ class HostRuntime:
             summary = payload.params.get("summary")
             if isinstance(summary, Mapping):
                 self.session_summaries[str(summary.get("resource", ""))] = dict(summary)
+        elif isinstance(payload, SessionSummaryChanged):
+            self._merge_summary(payload.params)
         elif isinstance(payload, SessionRemoved):
-            self.session_summaries.pop(str(payload.params.get("session", "")), None)
+            uri = str(payload.params.get("session", ""))
+            self.session_summaries.pop(uri, None)
+            self._forget_session(uri)
+
+    #: `SessionSummaryChangedParams.changes`: "Identity fields (`resource`,
+    #: `provider`, `createdAt`) never change and MUST be omitted by senders;
+    #: receivers SHOULD ignore them if present." Dropped rather than trusted,
+    #: because a sender that sends them anyway is exactly the sender whose
+    #: values are wrong.
+    _IDENTITY_FIELDS: Final = ("resource", "provider", "createdAt")
+
+    def _merge_summary(self, params: Mapping[str, Any]) -> None:
+        """Apply ``root/sessionSummaryChanged`` to the cached catalog.
+
+        `session_summaries` is seeded from `listSessions` and is precisely the
+        cache this notification exists to keep current -- it lets a client
+        "stay in sync with in-flight sessions without having to subscribe to
+        every session URI individually". Dropping it left titles, statuses and
+        timestamps frozen at connect time for the one consumer of the feature.
+
+        A **merge**, not a replace: `changes` is a genuine partial and the host
+        sends bare ones (a lone `{"status": 1}` while a turn runs). And an
+        unknown session is ignored, per the same schema: the notification "is
+        not a substitute for `root/sessionAdded`", so inventing a catalog entry
+        from a partial would publish a summary with no `resource` or `provider`.
+        """
+        uri = str(params.get("session", ""))
+        cached = self.session_summaries.get(uri)
+        changes = params.get("changes")
+        if cached is None or not isinstance(changes, Mapping):
+            return
+        cached.update(
+            {k: v for k, v in changes.items() if k not in self._IDENTITY_FIELDS},
+        )
+
+    def _forget_session(self, uri: str) -> None:
+        """Drop a disposed session's channel and every chat channel it owned.
+
+        `reconnect.missing` only exists on the reconnect path; on a live
+        connection `root/sessionRemoved` is the whole mechanism, because there
+        is no `session/disposed` action for the host to publish. Left tracked,
+        the runtime keeps mirroring a session the host has forgotten -- still
+        reporting `lifecycle: "ready"` -- and asks to resubscribe to it on every
+        subsequent reconnect, where it can only come back as `missing`.
+
+        The chat list is read out of the mirror *before* the session state goes,
+        because afterwards nothing anywhere records which chats were its.
+        """
+        if not uri:
+            return
+        state = self._mirror.state(uri)
+        chats = state.get("chats") if isinstance(state, Mapping) else None
+        doomed = [uri]
+        if isinstance(chats, list):
+            doomed += [str(c.get("resource", "")) for c in chats if isinstance(c, Mapping)]
+        for channel in doomed:
+            if channel:
+                self._subscriptions.pop(channel, None)
+                self._mirror.drop(channel)
 
     async def _tear_down_client(self) -> None:
         client, self._client = self._client, None
@@ -500,6 +635,12 @@ class HostRuntime:
 
     def _transition(self, state: HostState) -> None:
         self._state = state
+        if state.status == "failed":
+            # Released here rather than at each `return` in `_supervise`, so the
+            # two ways to reach terminal -- a refusal the policy declines and an
+            # exhausted budget -- cannot drift apart.
+            self._failure = state.error
+            self._terminal.trigger()
         self._states.publish(state)
 
     async def _resolve_client_id(self) -> str:

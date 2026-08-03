@@ -58,6 +58,73 @@ Counted directly from the pinned `types/common/messages.ts`, not from prose:
 proposal in the design pass wrote 28 or ~30; only a *generated* parity matrix
 would have caught that, which is why §9 makes the matrix generated.
 
+### 1.3 Where the typed API stops, and what that cost us
+
+§1.1 is a table about the *protocol* layer, and every row of it holds. The
+interop run measured a different axis and got a less flattering answer: of the
+seven channels, **four had no typed API at all** and had to be driven through
+`client.protocol.request` — multi-chat, changesets, terminals and resource
+watches. The finding that matters is what came back with them. Essentially
+**every client defect the run found was on a surface that *does* have an API**:
+elicitation answers, tool-call confirmations, `Chat.cancel()`, the reverse
+`resource*` results, the handshake. The four unwrapped surfaces produced almost
+nothing, because a caller assembling params by hand reads the schema, and a
+wrapper is where a wrong field name gets frozen in and repeated.
+
+That is the honest reading of "fully featured": **an unwrapped surface is a gap
+in ergonomics, not in correctness — and a wrapper is a place to be wrong.**
+`createChat` proves it in both directions. It was the one command of the four
+that *did* have a wrapper, and it was the only one of the four with a blocker:
+the wrapper wrote the chat URI into `channel` and never emitted `chat`, so no
+call shape worked at all, while the three commands with no wrapper were driven
+correctly by hand on the first attempt.
+
+So the order below is not by size. It is by *how much a caller has to know that
+the schema will not tell them*, which is the only thing a wrapper adds.
+
+| Surface | Actions (client-dispatchable) | What a wrapper actually buys | Cost |
+|---|---|---|---|
+| **Multi-chat** | 29 chat (15), plus `SessionState.chats` | Three MUST-NOT capability gates, a client-minted URI, `{}`-is-falsy | ~1 day — **built** |
+| **Terminals** | 11 (5) | Claim arbitration, three URI forms, the `!` prefix, UTF-16 in `terminal/input` | ~2–3 days |
+| **Changesets** | 8 (1) | Expanded-URI subscription, `operationId`/`scopes` validation, review state | ~2 days |
+| **Resource watches** | 1 (0) | Nothing the command does not already say | ~half a day, and not worth it |
+
+**Multi-chat was built, and it is the right one.** Its command was already
+broken, so that surface had a blocker rather than a gap; the chat reducer and the
+`Chat` class already existed, so the API is a URI to mint and three capability
+checks; and `capabilities.multipleChats` is stated as a **MUST NOT** for the
+client, so the schema alone does not save a hand-rolled caller — it will send a
+`createChat` the host has to reject. That is exactly the "a caller cannot know
+this from the params" test, and no other surface of the four meets it as
+squarely.
+
+**Terminals are next, and they are the expensive one.** Not for the action count
+but because the state is *contended*: `terminal/claimed` is an arbitration, and
+the interop run found a rejected claim being applied by every non-originating
+subscriber. A `Terminal` object has to make the claim's lifetime explicit, and
+the sibling host mints three different `agenthost-terminal:` URI forms, so
+nothing may route on the scheme (invariant 1). Now that `terminalCommandPrefix`
+survives the handshake, the `!` shorthand is implementable for the first time —
+which is the affordance the surface is actually for.
+
+**Changesets come second because they are read-mostly.** One client-dispatchable
+action out of eight; the rest is server push into a reducer that already runs.
+The wrapper is a view over `SessionState.changesets` plus
+`invoke_changeset_operation` with `operationId` and `target.kind` validated
+against the changeset's own advertised `operations` and `scopes` — worth having
+so a caller does not learn its scope was wrong from a JSON-RPC error, but nothing
+on this surface can hang a turn.
+
+**Resource watches should not get one.** One action, none client-dispatchable,
+and `createResourceWatch` already returns the channel to subscribe to. A
+`watch()` helper is `create_resource_watch` + `subscribe` + an async iterator
+over a single action type: four lines a caller can write, and one more place for
+the opaque receiver-assigned channel to be second-guessed. The spec's own advice
+is "do not derive it, subscribe to what comes back", and a wrapper that hides the
+channel makes that advice unfollowable. **Absent is the right answer here**, and
+saying so is the point of this section: the alternative is a wrapper that exists
+to make a table look complete.
+
 ---
 
 ## 2. The extraction: one protocol layer, two peers
@@ -236,6 +303,7 @@ repo would be.
 ```
 src/agent_host_client/
   client/     errors.py events.py queue.py client.py commands.py mirror.py outbox.py
+              actions.py                             # the outbound action constructors
   serve/      router.py resources.py watch.py tools.py plugins.py inputs.py
   hosts/      types.py policy.py cancel.py client_id_store.py factory.py
               runtime.py handle.py multi.py mirror.py
@@ -453,19 +521,28 @@ Rules:
    `lastSeenServerSeq`.** A late `subscribe` snapshot otherwise re-applies
    already-counted actions. This is the one place a client can silently
    double-apply.
-5. **Reconciliation.** Own echo with `rejectionReason` → drop the pending entry
-   **without applying**, emit `ActionRejected` on `diagnostics()`. Own echo
-   without → drop pending, apply to confirmed. Foreign or server-originated
-   (`origin` absent *or* explicitly `null` — treat identically) → apply to
-   confirmed; pending rebases because `optimistic` is recomputed. Match on
-   **exact `clientSeq`**, following VS Code (`agentSubscription.ts:321`), not
-   Swift's cumulative ack. Reproduce VS Code's second branch too: an own echo
-   with **no** matching pending entry and no `rejectionReason` is still applied
-   to confirmed — an arm every proposal missed.
-6. **Gaps are detected and reported, never raised.** `GapPolicy` ∈
-   `IGNORE | WARN | RESEED`, default `WARN`. A client that raises would be
-   unusable against real hosts; a client that cannot see a gap is the current
-   state of the art.
+5. **Reconciliation.** **Any** envelope carrying `rejectionReason` is not
+   applied, whoever originated it — the host fans a refusal out to every
+   subscriber while leaving its own state untouched, so an observer that reduces
+   it diverges permanently. Own echo with `rejectionReason` additionally drops
+   the pending entry and emits `ActionRejected` on `diagnostics()`; only the
+   originator had an optimistic effect to revert. Own echo without → drop
+   pending, apply to confirmed. Foreign or server-originated (`origin` absent
+   *or* explicitly `null` — treat identically) → apply to confirmed; pending
+   rebases because `optimistic` is recomputed. Match on **exact `clientSeq`**,
+   following VS Code (`agentSubscription.ts:321`), not Swift's cumulative ack.
+   Reproduce VS Code's second branch too: an own echo with **no** matching
+   pending entry and no `rejectionReason` is still applied to confirmed — an arm
+   every proposal missed. A rejection still advances the channel's high-water
+   mark: the host consumed that `serverSeq`, so it is not a hole.
+6. **Gaps are detected and reported, never raised**, and measured against the
+   **global** mark rather than a channel's own — `serverSeq` is one host-global
+   counter, so per-channel contiguity is not a property the protocol provides
+   and two subscribed channels make every reported gap a false positive.
+   `GapPolicy` ∈ `IGNORE | WARN | RESEED`, default `WARN`. A client that raises
+   would be unusable against real hosts; a client that cannot see a gap is the
+   current state of the art; a client that reports one per envelope is worse
+   than either.
 
 **A consequence nobody costed:** the chat reducer resets `modifiedAt` from the
 clock at turn end (`channels-chat/reducer.ts:133-190`) and recomputes
@@ -590,6 +667,41 @@ Actionable events carry their actions: `ToolCallReady.approve()/.deny()`,
 `ToolCallResultReview.confirm()/.reject()` — the last of which `ahpx` omits, and
 whose absence **hangs any turn using `requiresResultConfirmation` forever**.
 
+**Two action types decode to more than one event**, because the schema overloads
+them and the difference is precisely what the caller must do:
+
+- `chat/toolCallReady` **carrying `confirmed`** has already transitioned to
+  `running`, so it is a `ToolCallRunning` and there is nothing to answer. A host
+  emits one for every call it does not gate — and for every client-provided
+  tool, where `confirmed: "not-needed"` is what hands over execution — so
+  surfacing them as `ToolCallReady` asks a human about the common path and
+  dispatches a confirmation the host refuses with "no tool call awaiting that
+  id".
+- `chat/toolCallComplete` **carrying `requiresResultConfirmation`** is the
+  review: there is no `chat/toolCallResultReview` action in any version of the
+  schema, and keying on that invented name left `ToolCallResultReview`
+  unreachable — the exact hang its docstring warns about.
+
+**Events know what the actions do not carry.** A `chat/toolCallReady` has no
+`toolName` (published once, on `chat/toolCallStart`) and no `annotations` (a
+property of `ToolDefinition`, in `SessionState.serverTools` and
+`activeClients[].tools`). `event_for` resolves both from the mirror into
+`ToolCallReady.tool_name` / `.annotations`, because a policy that switches on
+either and reads them off the action matches nothing and denies **everything**,
+silently and indistinguishably from a decision.
+
+**Nothing builds an outbound action as a dict literal.** `client/actions.py`
+constructs every turn-scoped one, taking `turnId` as a required parameter, and
+`api/` and `serve/` call it. This is a rule with a bill attached: five separate
+sites — `Chat.cancel()`, `TurnStream._start`, `ToolCallReady.approve()/.deny()`,
+`ToolCallResultReview`, `ClientToolHost.execute()` — each hand-assembled one of
+these and each omitted `turnId`, which every chat reducer matches on before it
+will touch a turn or a tool call. The action was still valid enough for the host
+to accept, number and broadcast, so a tool ran and its result reached the agent
+while every mirror recorded the call cancelled as `skipped`. A missing required
+field on this wire fails *silently and symmetrically*, so the only defence is
+that it cannot be omitted.
+
 `ApprovalPolicy` with `approve_all` / `deny_all` / `ask` / `auto` and string
 shorthands. `auto(read_only=True)` really does inspect
 `ToolAnnotations.readOnlyHint` with an explicit fallback — `ahpx`'s
@@ -630,6 +742,56 @@ Every non-obvious step carries its evidence:
    *also* checking the already-applied snapshot. Waiting unconditionally
    deadlocks for 30 s against a provisional host.
 7. Resolve `state.defaultChat`; subscribe lazily on first `.chat` access.
+8. If `tools=` was given, start the **client-tool pump** before awaiting
+   readiness — a host that queues an `initialMessage` can already have a turn,
+   and a call, in flight.
+
+### 7.2 The tools we publish, and who runs them
+
+`create_session(tools=…)` takes a `ClientToolHost`, not a definition list. The
+list form is still accepted and still advertised, but it registers *no executor*
+and therefore denies every call by name — because the third option, which is
+what this did before, is to advertise a tool nothing in the library can run. A
+client-provided call has no other answerer: the host publishes
+`chat/toolCallStart` with `contributor: {"kind": "client", …}`, then a
+`chat/toolCallReady` carrying `confirmed: "not-needed"` and the final
+`toolInput`, and then parks the turn on a future only our
+`chat/toolCallComplete` resolves. **Advertised-and-absent is worse than absent.**
+
+Three things the pump has to get right, none of which the action says:
+
+- **It is not driven from a `TurnStream`.** The turn carrying the call need not
+  be one we started, and `_drain` has nothing to answer with anyway — the call
+  arrives already `running`, so there is no approval to give. It reads
+  `client.events()` for the session's lifetime.
+- **`toolName` and `contributor` come from the mirror, not the ready action.**
+  `toolName` is published once, on `chat/toolCallStart`, and `contributor` is
+  only *repeated* on the ready by hosts that choose to. Resolving either off the
+  ready alone denies every call as unregistered, or declines to run anything at
+  all.
+- **A second `chat/toolCallReady` is not a second call.** It is the one action
+  that reaches an already-running call, and hosts send it to revise the
+  invocation message. Dedupe on `(channel, toolCallId)` or the tool runs twice
+  and the second result overwrites the first.
+
+### 7.3 More than one chat
+
+`Session.create_chat()`, `.open_chat()`, `.chats()`, `Chat.dispose()` and
+`Session.capabilities`. See §1.3 for why this surface and not the other three.
+
+The URI is **ours to mint** (`CreateChatParams.chat` is documented
+client-chosen and VS Code sends one), which is what lets the subscribe follow
+immediately instead of waiting for `session/chatAdded` to name it. `createChat`
+is the only caller-scoped command whose caller-chosen URI is *not* the thing
+being created: `channel` is the containing **session**, `chat` is the new chat.
+
+Creation is refused locally on three MUST NOTs the agent states in advance —
+absent `capabilities.multipleChats`, and `fork`/`sideChat` for a `ChatSource` —
+because making the host enforce a rule we were told about is a round trip spent
+proving we did not read the advertisement. `multipleChats` is a **presence
+flag**: `{}` advertises multi-chat and `{}` is falsy in Python, so the test is
+`is not None`. `fork` and `sideChat` inside it are plain booleans, and are the
+one place truthiness is correct.
 
 ---
 
@@ -639,8 +801,12 @@ The protocol is symmetric and no reference client finishes this half. It is what
 separates "a nice turn API" from a client a host can actually work with.
 
 - **`ResourceRouter`** — longest-prefix mount on `params["uri"]`, `-32601` for
-  anything outside `ServerCommandMap`, `-32008` for an unmounted prefix. Empty
-  results serialize as `{}`, never `null`.
+  anything outside `ServerCommandMap`, `-32602` for a frame with no `uri`, and
+  `-32008` only for an unmounted prefix — `-32008` on a malformed frame tells
+  the caller its URI was fine and the resource was gone, so it stops asking.
+  Empty results serialize as `{}`, never `null`. It answers **both**
+  `handle(method, params)` and `__call__`, because `connect(resources=…)` takes
+  a `ResourceServer` and `set_server_request_handler` takes a callable.
 - **`FileResourceServer(roots, writable=False)`** — `realpath` **then** re-check
   containment under a root, so a symlink swapped between check and open cannot
   escape. `ifMatch` etags → `-32011 Conflict`; `createOnly` → `-32010`;
@@ -650,7 +816,18 @@ separates "a nice turn API" from a client a host can actually work with.
 - **`VirtualResourceServer`** — in-memory, for client-published plugins. This is
   not optional polish: publishing a `virtual://` plugin causes the host to call
   `resourceList`/`resourceRead` straight back at you, and a forward-only client
-  silently publishes empty plugins.
+  silently publishes empty plugins. `put` registers **every** ancestor, not just
+  the blob's immediate parent, because the host walks *down* from the plugin
+  root and stops at the first empty listing.
+- **Result shapes come from `commands.schema.json`, method by method.** Every
+  one of these is a field name nothing else can catch, because upstream's
+  TypeScript client ships this half with zero implementations: `resourceRead`
+  returns `{data, encoding}` (there is no `content`), `resourceWrite` *reads*
+  `data` — a missing one is `-32602`, never an empty write — `DirectoryEntry` is
+  `{name, type}`, `resourceResolve` returns `type` plus an **ISO 8601** `mtime`,
+  `resourceRequest` answers `{}` or `-32009` (a successful `{"granted": false}`
+  is the deny/retry/deny loop it exists to end), `resourceMkdir` creates `uri`
+  rather than its parent, and `failIfExists` is honoured on copy/move.
 - **`ResourceWatchServer`** — the client as a watch *server*. Allocates
   `ahp-resource-watch:/<uuid>`, serves `subscribe` with the frozen state, pushes
   `resourceWatch/changed`. There is no dispose command: release when the last
@@ -661,9 +838,13 @@ separates "a nice turn API" from a client a host can actually work with.
   action); `detach()` dispatches `session/activeClientRemoved`, **which is
   client-dispatchable** (`action-origin.generated.ts:373` → `true`,
   contradicting the "a client never unsets itself" prose that two of the three
-  proposals inherited). Watches for `chat/toolCallStart` with
-  `contributor == {"kind": "client", "clientId": ours}`; unknown tool name
-  auto-denies. `chat/toolCallContentChanged` **replaces** content, so a
+  proposals inherited). Executes on `chat/toolCallReady` — **not**
+  `chat/toolCallStart`, which is where ownership is *established* but carries no
+  `toolInput`, so a call still in `streaming` has nothing to run — for a
+  `contributor == {"kind": "client", "clientId": ours}` read out of the call's
+  state; unknown tool name auto-denies, and so does an advertised name with no
+  executor. §7.2 is the front-door wiring.
+  `chat/toolCallContentChanged` **replaces** content, so a
   streaming helper must resend accumulated blocks. A referenced `toolInput`
   (`ContentRef`) is resolved via `resourceRead` and **never cached across
   confirmation**.
@@ -671,9 +852,25 @@ separates "a nice turn API" from a client a host can actually work with.
   the ordinary `chat/*` action to `entry["chat"]` **without subscribing to that
   chat**, which is the whole point of the `SessionState.inputNeeded` aggregate.
   The one exception is `kind == "toolAuthentication"`, resolved by calling
-  `authenticate` with `toolCall.auth.resource`. `chat/inputAnswerChanged`
-  **merges** per-question answers, so read the current map from the mirror and
-  overlay rather than clobbering another client's partial answer.
+  `authenticate` with `toolCall.auth.resource`.
+
+  An elicitation is resolved by **`chat/inputCompleted`** — `{requestId,
+  response: accept|decline|cancel, answers?}` — keyed by `request.id`, never by
+  the aggregate entry's own `id`, which the schema says to treat as opaque.
+  `chat/inputAnswerChanged` is a *different* action and does not resolve
+  anything: it syncs **one** question's draft (`questionId` plus a singular
+  `answer`), which is how "a user can answer one question on client A and
+  another on client B" works, and it is `sync_draft()`. The merge of drafts and
+  final answers is the **reducer's**, and the host reads the merged map back out
+  of reduced state — so the responder overlays nothing itself. The drafts live
+  on `activeTurn.responseParts[kind=inputRequest].request.answers`; there is no
+  `ChatState.inputRequests`.
+
+  Answer *values* are encoded from each question's kind (`client/elicitation.py`),
+  because `ChatInputQuestion` and `ChatInputAnswerValue` are closed vocabularies
+  that do not line up by name: a `single-select` answers `selected` though the
+  caller holds a string, `integer` answers `number`, `multi-select` answers
+  `selected-many`.
 
 ### 8.1 Auth as a subsystem, not a command
 
@@ -922,11 +1119,17 @@ than the nine originally scoped:
    protects the handshake, not the action shapes. A version-keyed normalisation
    seam belongs in the mirror's bind step — even as a no-op today — or it gets
    retrofitted through every reducer call site.
-6. **The reverse-direction surface is designed entirely from types.**
-   `resourceWrite`'s mode/position byte semantics, `resourceRequest`'s
-   permission negotiation and the watch release rule are prose with no
-   implementation to check against. Expect these to be wrong in ways only a real
-   host reveals.
+6. **The reverse-direction surface is designed entirely from types, and this
+   risk has already paid out once.** Driving the sibling host against `serve/`
+   found nine wrong field names and semantics in one pass — `content` for
+   `data` on both read and write (a spec-shaped write *emptied the file* and
+   reported success), `kind` for `type` on list and resolve, epoch millis for an
+   ISO `mtime`, `mkdir` creating the parent, `failIfExists` ignored, a
+   successful `{"granted": false}` where `-32009` is mandated, and a router
+   that could not be installed through the front door at all. Each is now
+   pinned by a test, and the general lesson stands: the remaining prose —
+   `resourceWrite`'s position semantics beyond what is tested, and the watch
+   release rule — is still unverified against anything independent.
 7. **Three coupled distributions under a spec that breaks in MINOR bumps.** The
    `~=0.1.0` pin and the non-blocking `protocol-main` job are the mitigation;
    the fallback if coordination proves painful is a monorepo, and switching

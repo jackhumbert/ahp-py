@@ -16,7 +16,7 @@ from typing import Any, Final, Protocol, runtime_checkable
 
 from agent_host_protocol.types import JsonObject
 
-from agent_host_client.client.errors import MethodNotFound, NotFound
+from agent_host_client.client.errors import InvalidParams, MethodNotFound, NotFound
 
 __all__ = ["REVERSE_METHODS", "ResourceRouter", "ResourceServer"]
 
@@ -77,14 +77,31 @@ class ResourceRouter:
                 best = (len(prefix), server)
         return None if best is None else best[1]
 
-    async def __call__(self, method: str, params: Mapping[str, Any]) -> JsonObject:
+    async def handle(self, method: str, params: Mapping[str, Any]) -> JsonObject:
         if method not in REVERSE_METHODS:
             raise MethodNotFound(-32601, f'no handler for server method "{method}"')
         # `resourceCopy`/`resourceMove` key on the source; a mount that can read
         # the source is the one that has to be asked, even if the destination
         # lives elsewhere -- and it will refuse a cross-mount destination itself.
-        uri = str(params.get("uri") or params.get("source") or "")
+        keyed_on = "source" if method in {"resourceCopy", "resourceMove"} else "uri"
+        uri = params.get(keyed_on)
+        if not isinstance(uri, str) or not uri:
+            # Coercing the absent case to `""` and reporting the mount miss tells
+            # the caller its URI was fine and the resource was gone, so it stops
+            # asking -- when what it must do is send the required param.
+            raise InvalidParams(-32602, f"{method} requires {keyed_on!r}")
         server = self._resolve(uri)
         if server is None:
             raise NotFound(-32008, f"nothing mounted for {uri!r}")
         return await server.handle(method, params)
+
+    async def __call__(self, method: str, params: Mapping[str, Any]) -> JsonObject:
+        """The `ServerRequestHandler` spelling of :meth:`handle`.
+
+        The router has to satisfy both protocols: `set_server_request_handler`
+        wants a callable, and `connect(resources=...)` calls `.handle`. Offering
+        only one of them made the documented multi-mount composition answer
+        -32603 `'ResourceRouter' object has no attribute 'handle'` on every
+        reverse call.
+        """
+        return await self.handle(method, params)
