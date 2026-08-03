@@ -64,16 +64,59 @@ async def _client(host: Host) -> FakeClient:
     return client
 
 
+def _chat_of(host: Host, uri: str) -> dict[str, Any]:
+    """The state of the session's default chat, or ``{}`` while it has none.
+
+    Total rather than asserting, because it is read from inside a wait
+    predicate: "the session has no chats yet" is the condition being waited on,
+    not a failure.
+    """
+    chats = (host.sequencer.state_of(uri) or {}).get("chats") or []
+    if not chats:
+        return {}
+    state = host.sequencer.state_of(chats[0]["resource"]) or {}
+    return dict(state)
+
+
+async def _created(host: Host, client: FakeClient, uri: str, *, timeout: float = 10.0) -> None:
+    """Wait for the session at *uri* to carry its default chat.
+
+    Every caller goes on to read ``state["chats"][0]``, so that -- not the
+    command response -- is the state they are waiting for.
+    """
+    await client.collect_until(
+        lambda: bool((host.sequencer.state_of(uri) or {}).get("chats")), timeout=timeout
+    )
+
+
+async def _ran(
+    host: Host, client: FakeClient, chat: str, turn: str, *, timeout: float = 10.0
+) -> None:
+    """Wait for *turn* to reach *chat*'s completed list.
+
+    The completed list, not ``activeTurn``: a turn is moved into ``turns`` when
+    it settles, so this is the turn having FINISHED rather than having been
+    accepted. Callers fork through the turn or name it as a `createChat`
+    source, both of which the host validates against exactly this list.
+    """
+    await client.collect_until(
+        lambda: any(
+            t.get("id") == turn for t in (host.sequencer.state_of(chat) or {}).get("turns", [])
+        ),
+        timeout=timeout,
+    )
+
+
 async def _session(host: Host, client: FakeClient, uri: str, **extra: Any) -> str:
     await client.request("createSession", {"channel": uri, "provider": "echo", **extra})
-    await client.collect(seconds=0.3)
+    await _created(host, client, uri)
     state = (await client.request("subscribe", {"channel": uri}))["result"]["snapshot"]["state"]
     default: str = state["chats"][0]["resource"]
     return default
 
 
 async def _one_turn(
-    client: FakeClient, chat: str, *, turn_id: str = "t1", text: str = "hello"
+    host: Host, client: FakeClient, chat: str, *, turn_id: str = "t1", text: str = "hello"
 ) -> str:
     """Drive one complete turn and return its id."""
     await client.request("subscribe", {"channel": chat})
@@ -90,7 +133,7 @@ async def _one_turn(
             },
         },
     )
-    await client.collect(seconds=0.6)
+    await _ran(host, client, chat, turn_id)
     state = (await client.request("subscribe", {"channel": chat}))["result"]["snapshot"]["state"]
     started: str = state["turns"][-1]["id"]
     return started
@@ -170,7 +213,7 @@ class TestCreateChat:
         # A real turn: the origin's `turnId` is validated against the source
         # chat now, because publishing a provenance pointing at a turn that
         # does not exist is a claim nothing downstream ever rechecks.
-        turn_id = await _one_turn(client, default)
+        turn_id = await _one_turn(multi, client, default)
         selection = {"text": "the selected bit", "responsePartId": "p1"}
 
         await client.request(
@@ -303,7 +346,18 @@ class TestAggregation:
                     },
                 },
             )
-            await client.collect(seconds=0.5)
+            # The promotion is derived at `listSessions` time from the chats'
+            # own status bits, so the state to wait for is the worker chat
+            # actually reaching `InputNeeded` -- the aggregation is then the
+            # only thing the assertion can still be measuring.
+            await client.collect_until(
+                lambda: (
+                    (host.sequencer.state_of("ahp-chat:/worker") or {}).get("status", 0)
+                    & SessionStatus.INPUT_NEEDED
+                    == SessionStatus.INPUT_NEEDED
+                ),
+                timeout=10.0,
+            )
 
             item = (await client.request("listSessions", {"channel": ROOT_URI}))["result"]["items"][
                 0
@@ -335,7 +389,7 @@ class TestAggregation:
                 },
             },
         )
-        await client.collect(seconds=0.5)
+        await _ran(multi, client, "ahp-chat:/later", "t1")
 
         after = (await client.request("listSessions", {"channel": ROOT_URI}))["result"]["items"][0][
             "modifiedAt"
@@ -358,7 +412,14 @@ class TestAggregation:
                 "action": {"type": "session/isReadChanged", "isRead": True},
             },
         )
-        await client.collect(seconds=0.3)
+        # The bit on the session channel is what aggregation must carry
+        # through, so wait for it there rather than for the notification.
+        await client.collect_until(
+            lambda: bool(
+                (multi.sequencer.state_of(uri) or {}).get("status", 0) & int(SessionStatus.IS_READ)
+            ),
+            timeout=10.0,
+        )
 
         item = (await client.request("listSessions", {"channel": ROOT_URI}))["result"]["items"][0]
         assert item["status"] & SessionStatus.IS_READ
@@ -376,8 +437,8 @@ class TestFork:
     async def test_a_fork_copies_turns_through_the_named_one(self, multi: Host) -> None:
         client = await _client(multi)
         source = await _session(multi, client, "echo:/fork-src")
-        first = await _one_turn(client, source, turn_id="t1", text="alpha")
-        await _one_turn(client, source, turn_id="t2", text="beta")
+        first = await _one_turn(multi, client, source, turn_id="t1", text="alpha")
+        await _one_turn(multi, client, source, turn_id="t2", text="beta")
 
         await client.request(
             "createSession",
@@ -387,7 +448,12 @@ class TestFork:
                 "fork": {"session": "echo:/fork-src", "turnId": first},
             },
         )
-        await client.collect(seconds=0.3)
+        # The copied turns, not merely the new session: an empty copy is the
+        # bug this class exists for, and waiting only for the channel would
+        # wait for exactly the thing the bug still produced.
+        await client.collect_until(
+            lambda: bool(_chat_of(multi, "echo:/fork-dst").get("turns")), timeout=10.0
+        )
 
         state = (await client.request("subscribe", {"channel": "echo:/fork-dst"}))["result"][
             "snapshot"
@@ -402,7 +468,7 @@ class TestFork:
         """ "An independent copy" -- a later turn on the source must not appear."""
         client = await _client(multi)
         source = await _session(multi, client, "echo:/fork-ind")
-        await _one_turn(client, source, turn_id="t1", text="alpha")
+        await _one_turn(multi, client, source, turn_id="t1", text="alpha")
 
         await client.request(
             "createSession",
@@ -412,8 +478,15 @@ class TestFork:
                 "fork": {"session": "echo:/fork-ind", "turnId": "t1"},
             },
         )
+        await client.collect_until(
+            lambda: bool(_chat_of(multi, "echo:/fork-ind2").get("turns")), timeout=10.0
+        )
+        await _one_turn(multi, client, source, turn_id="t2", text="added after the fork")
+        # Deliberately fixed: the assertion below is NEGATIVE -- t2 must not
+        # have crossed into the copy -- and a condition wait would return the
+        # instant t2 landed on the SOURCE, proving nothing about the interval
+        # in which a leak would show up.
         await client.collect(seconds=0.3)
-        await _one_turn(client, source, turn_id="t2", text="added after the fork")
 
         state = (await client.request("subscribe", {"channel": "echo:/fork-ind2"}))["result"][
             "snapshot"
@@ -462,7 +535,7 @@ class TestFork:
         source = await _session(
             multi, client, "echo:/fork-wd", workingDirectories=["file:///from-source"]
         )
-        await _one_turn(client, source, turn_id="t1", text="alpha")
+        await _one_turn(multi, client, source, turn_id="t1", text="alpha")
 
         await client.request(
             "createSession",
@@ -473,7 +546,15 @@ class TestFork:
                 "fork": {"session": "echo:/fork-wd", "turnId": "t1"},
             },
         )
-        await client.collect(seconds=0.3)
+        # The seeded field itself, not just the channel: which of the two
+        # candidate values landed in it is what the assertion is for, so a
+        # populated `workingDirectories` is the state to wait for.
+        await client.collect_until(
+            lambda: bool(
+                (multi.sequencer.state_of("echo:/fork-wd2") or {}).get("workingDirectories")
+            ),
+            timeout=10.0,
+        )
 
         state = (await client.request("subscribe", {"channel": "echo:/fork-wd2"}))["result"][
             "snapshot"
@@ -484,7 +565,7 @@ class TestFork:
         """Otherwise every fork reads "New Session"."""
         client = await _client(multi)
         source = await _session(multi, client, "echo:/fork-ti")
-        await _one_turn(client, source, turn_id="t1", text="alpha")
+        await _one_turn(multi, client, source, turn_id="t1", text="alpha")
         await multi.sequencer.publish(
             "echo:/fork-ti", {"type": "session/titleChanged", "title": "Something Specific"}
         )
@@ -497,7 +578,15 @@ class TestFork:
                 "fork": {"session": "echo:/fork-ti", "turnId": "t1"},
             },
         )
-        await client.collect(seconds=0.3)
+        # The inherited title itself: waiting for the session to merely exist
+        # would race the copy, and "New Session" is what the bug looked like.
+        await client.collect_until(
+            lambda: (
+                (multi.sequencer.state_of("echo:/fork-ti2") or {}).get("title")
+                == "Something Specific"
+            ),
+            timeout=10.0,
+        )
 
         state = (await client.request("subscribe", {"channel": "echo:/fork-ti2"}))["result"][
             "snapshot"

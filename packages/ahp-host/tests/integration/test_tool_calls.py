@@ -53,8 +53,28 @@ async def _attach(host: Host, client_id: str) -> FakeClient:
     return client
 
 
+def _state(host: Host, uri: str) -> dict[str, Any]:
+    state = host.sequencer.state_of(uri)
+    return state if isinstance(state, dict) else {}
+
+
+def _seeded(host: Host, uri: str, client_id: str | None) -> bool:
+    """The session exists with its default chat, and its active client is on it.
+
+    The active client is part of the wait rather than assumed: a later
+    assertion that the list is EMPTY -- after the owner disconnects -- would
+    pass vacuously against a session whose seeding had not landed yet.
+    """
+    state = _state(host, uri)
+    if not state.get("chats"):
+        return False
+    if client_id is None:
+        return True
+    return any(entry.get("clientId") == client_id for entry in state.get("activeClients") or [])
+
+
 async def _session(
-    client: FakeClient, uri: str, *, client_id: str | None = None
+    host: Host, client: FakeClient, uri: str, *, client_id: str | None = None
 ) -> tuple[str, str]:
     params: dict[str, Any] = {"channel": uri, "provider": "echo"}
     if client_id is not None:
@@ -64,7 +84,7 @@ async def _session(
             "tools": _TOOLS,
         }
     await client.request("createSession", params)
-    await client.collect(seconds=0.3)
+    await client.collect_until(lambda: _seeded(host, uri, client_id), timeout=10.0)
     state = (await client.request("subscribe", {"channel": uri}))["result"]["snapshot"]["state"]
     chat_uri: str = state["chats"][0]["resource"]
     await client.request("subscribe", {"channel": chat_uri})
@@ -103,6 +123,102 @@ def _deltas(client: FakeClient, chat_uri: str) -> str:
     )
 
 
+def _input_needed(host: Host, session_uri: str) -> list[dict[str, Any]]:
+    entries = _state(host, session_uri).get("inputNeeded")
+    return entries if isinstance(entries, list) else []
+
+
+def _own_echoes(client: FakeClient, chat_uri: str, action: dict[str, Any]) -> list[dict[str, Any]]:
+    """The host's echoes of *action* back to the client that dispatched it."""
+    return [
+        envelope
+        for envelope in client.actions(chat_uri)
+        if envelope["action"]["type"] == action["type"]
+        and envelope["action"] is not action
+        and envelope.get("origin", {}).get("clientId") == "solo"
+    ]
+
+
+async def _await_action(
+    client: FakeClient, chat_uri: str, kind: str, *, timeout: float = 10.0
+) -> dict[str, Any] | None:
+    """Wait until an action of *kind* has reached the CLIENT for *chat_uri*.
+
+    Client-side rather than host-side deliberately: the callers assert on what
+    the client was told, and the host's own state settles before the
+    notification carrying it has crossed the transport.
+    """
+    await client.collect_until(lambda: _action(client, chat_uri, kind) is not None, timeout=timeout)
+    return _action(client, chat_uri, kind)
+
+
+async def _turn_over(client: FakeClient, chat_uri: str, *, timeout: float = 10.0) -> None:
+    """Wait until the client has seen the turn's TERMINAL frame.
+
+    Not the delta a test happens to look for: several of these pair a positive
+    ("the edited input ran") with a negative ("and the proposed one did not"),
+    and a negative is only sound once nothing further is coming. A turn stream
+    ends on `chat/turnComplete` or `chat/turnCancelled`, so that is the wait.
+    """
+    await client.collect_until(
+        lambda: any(
+            envelope["action"]["type"] in {"chat/turnComplete", "chat/turnCancelled"}
+            for envelope in client.actions(chat_uri)
+        ),
+        timeout=timeout,
+    )
+
+
+async def _settled(host: Host, client: FakeClient, chat_uri: str, *, timeout: float = 10.0) -> None:
+    """Wait for the chat's tool call to reach a TERMINAL status.
+
+    The call's own end state, never merely its existence: a call joins the
+    reduced turn the moment it starts, and every field asserted on below is
+    written by frames that arrive after. Waiting for it to appear would
+    reintroduce the race in a slower form.
+    """
+    await client.collect_until(
+        lambda: _tool_call(host, chat_uri).get("status") in {"completed", "cancelled"},
+        timeout=timeout,
+    )
+
+
+async def _parked_for_confirmation(
+    host: Host, client: FakeClient, chat_uri: str, *, timeout: float = 10.0
+) -> dict[str, Any] | None:
+    """Wait until the confirmation request is BOTH published and suspended on.
+
+    Both halves, because tests here assert on both: the ready frame is what a
+    client renders, and `host.pending` is what proves the agent stopped instead
+    of running ahead. Waiting on the frame alone lets a test read the
+    suspension before it exists.
+    """
+    await client.collect_until(
+        lambda: _action(client, chat_uri, "chat/toolCallReady") is not None and bool(host.pending),
+        timeout=timeout,
+    )
+    return _action(client, chat_uri, "chat/toolCallReady")
+
+
+async def _asked_the_client(
+    host: Host, client: FakeClient, session_uri: str, chat_uri: str, *, timeout: float = 10.0
+) -> dict[str, Any] | None:
+    """Wait until the client has the tool-call start AND the session advertises it.
+
+    The session entry is half of the wait on purpose: an assertion that the
+    list is later EMPTY proves nothing unless it was non-empty first, and that
+    entry lands on a different channel from the frame the client renders.
+    """
+    await client.collect_until(
+        lambda: (
+            _action(client, chat_uri, "chat/toolCallStart") is not None
+            and bool(_input_needed(host, session_uri))
+        ),
+        timeout=timeout,
+    )
+    return _action(client, chat_uri, "chat/toolCallStart")
+
+
 class TestActiveClients:
     async def test_create_session_seeds_the_clients_published_tools(self) -> None:
         """VS Code ships its entire tool set here, with input schemas. Dropping
@@ -110,7 +226,7 @@ class TestActiveClients:
         host = Host(EchoProvider(), LoopbackSingleUserPolicy())
         try:
             client = await _attach(host, "vscode")
-            uri, _ = await _session(client, "echo:/tools-1", client_id="vscode")
+            uri, _ = await _session(host, client, "echo:/tools-1", client_id="vscode")
             state = (await client.request("subscribe", {"channel": uri}))["result"]["snapshot"][
                 "state"
             ]
@@ -127,11 +243,13 @@ class TestActiveClients:
         try:
             owner = await _attach(host, "owner")
             watcher = await _attach(host, "watcher")
-            uri, _ = await _session(owner, "echo:/tools-2", client_id="owner")
+            uri, _ = await _session(host, owner, "echo:/tools-2", client_id="owner")
             await watcher.request("subscribe", {"channel": uri})
 
             await owner.transport.close()
-            await watcher.collect(seconds=0.4)
+            await watcher.collect_until(
+                lambda: _state(host, uri).get("activeClients") == [], timeout=10.0
+            )
 
             state = (await watcher.request("subscribe", {"channel": uri}))["result"]["snapshot"][
                 "state"
@@ -195,21 +313,19 @@ class TestToolConfirmation:
 
     async def test_the_agent_waits_for_approval(self, host: Host) -> None:
         client = await _attach(host, "solo")
-        _, chat_uri = await _session(client, "echo:/confirm-1")
+        _, chat_uri = await _session(host, client, "echo:/confirm-1")
         await _send(client, chat_uri)
-        await client.collect(seconds=0.4)
 
-        ready = _action(client, chat_uri, "chat/toolCallReady")
+        ready = await _parked_for_confirmation(host, client, chat_uri)
         assert ready is not None, "the agent never asked"
         assert ready["confirmationTitle"] == "Run echo tool"
         assert len(host.pending) == 1, "the agent did not suspend"
 
     async def test_approving_runs_the_tool(self, host: Host) -> None:
         client = await _attach(host, "solo")
-        _, chat_uri = await _session(client, "echo:/confirm-2")
+        _, chat_uri = await _session(host, client, "echo:/confirm-2")
         await _send(client, chat_uri)
-        await client.collect(seconds=0.4)
-        ready = _action(client, chat_uri, "chat/toolCallReady")
+        ready = await _parked_for_confirmation(host, client, chat_uri)
         assert ready is not None
 
         await client.notify(
@@ -226,17 +342,16 @@ class TestToolConfirmation:
                 },
             },
         )
-        await client.collect(seconds=0.5)
+        await _turn_over(client, chat_uri)
         assert "You said: hello" in _deltas(client, chat_uri)
 
     async def test_an_edited_input_is_what_actually_runs(self, host: Host) -> None:
         """`editable` lets a client rewrite the parameters. Running the proposed
         input instead would execute something nobody agreed to."""
         client = await _attach(host, "solo")
-        _, chat_uri = await _session(client, "echo:/confirm-3")
+        _, chat_uri = await _session(host, client, "echo:/confirm-3")
         await _send(client, chat_uri)
-        await client.collect(seconds=0.4)
-        ready = _action(client, chat_uri, "chat/toolCallReady")
+        ready = await _parked_for_confirmation(host, client, chat_uri)
         assert ready is not None
 
         await client.notify(
@@ -254,17 +369,18 @@ class TestToolConfirmation:
                 },
             },
         )
-        await client.collect(seconds=0.5)
+        # The turn's END, not the delta being looked for: the negative below is
+        # only sound once nothing further can arrive.
+        await _turn_over(client, chat_uri)
         deltas = _deltas(client, chat_uri)
         assert "edited by the client" in deltas
         assert "hello" not in deltas, "the proposed input ran instead of the approved one"
 
     async def test_denying_does_not_run_the_tool(self, host: Host) -> None:
         client = await _attach(host, "solo")
-        _, chat_uri = await _session(client, "echo:/confirm-4")
+        _, chat_uri = await _session(host, client, "echo:/confirm-4")
         await _send(client, chat_uri)
-        await client.collect(seconds=0.4)
-        ready = _action(client, chat_uri, "chat/toolCallReady")
+        ready = await _parked_for_confirmation(host, client, chat_uri)
         assert ready is not None
 
         await client.notify(
@@ -281,14 +397,14 @@ class TestToolConfirmation:
                 },
             },
         )
-        await client.collect(seconds=0.5)
+        await _turn_over(client, chat_uri)
         assert "(denied)" in _deltas(client, chat_uri)
 
     async def test_a_forged_tool_call_id_is_rejected(self, host: Host) -> None:
         client = await _attach(host, "solo")
-        _, chat_uri = await _session(client, "echo:/confirm-5")
+        _, chat_uri = await _session(host, client, "echo:/confirm-5")
         await _send(client, chat_uri)
-        await client.collect(seconds=0.4)
+        await _parked_for_confirmation(host, client, chat_uri)
 
         await client.notify(
             "dispatchAction",
@@ -304,7 +420,10 @@ class TestToolConfirmation:
                 },
             },
         )
-        await client.collect(seconds=0.3)
+        # The echo IS the sequencing point: once it is here the host has made
+        # its decision about the forged id, so `pending` below is read at a
+        # defined moment rather than after an arbitrary sleep.
+        await _await_action(client, chat_uri, "chat/toolCallConfirmed")
         echoes = [
             envelope
             for envelope in client.actions(chat_uri)
@@ -326,21 +445,19 @@ class TestClientTools:
 
     async def test_the_host_asks_the_client_to_execute(self, host: Host) -> None:
         client = await _attach(host, "vscode")
-        _, chat_uri = await _session(client, "echo:/client-1", client_id="vscode")
+        _, chat_uri = await _session(host, client, "echo:/client-1", client_id="vscode")
         await _send(client, chat_uri)
-        await client.collect(seconds=0.4)
 
-        start = _action(client, chat_uri, "chat/toolCallStart")
+        start = await _await_action(client, chat_uri, "chat/toolCallStart")
         assert start is not None
         # This is what makes the client responsible for running it.
         assert start["contributor"] == {"kind": "client", "clientId": "vscode"}
 
     async def test_the_clients_result_reaches_the_agent(self, host: Host) -> None:
         client = await _attach(host, "vscode")
-        _, chat_uri = await _session(client, "echo:/client-2", client_id="vscode")
+        _, chat_uri = await _session(host, client, "echo:/client-2", client_id="vscode")
         await _send(client, chat_uri)
-        await client.collect(seconds=0.4)
-        start = _action(client, chat_uri, "chat/toolCallStart")
+        start = await _await_action(client, chat_uri, "chat/toolCallStart")
         assert start is not None
 
         await client.notify(
@@ -356,7 +473,7 @@ class TestClientTools:
                 },
             },
         )
-        await client.collect(seconds=0.5)
+        await _turn_over(client, chat_uri)
         assert "ran it locally" in _deltas(client, chat_uri)
 
     async def test_it_is_surfaced_on_the_session_so_a_client_need_not_subscribe(
@@ -365,9 +482,9 @@ class TestClientTools:
         """ "Surfaced so a client that provides the tool can pick up the work
         without subscribing to the owning chat." """
         client = await _attach(host, "vscode")
-        session_uri, chat_uri = await _session(client, "echo:/client-3", client_id="vscode")
+        session_uri, chat_uri = await _session(host, client, "echo:/client-3", client_id="vscode")
         await _send(client, chat_uri)
-        await client.collect(seconds=0.4)
+        await _asked_the_client(host, client, session_uri, chat_uri)
 
         state = (await client.request("subscribe", {"channel": session_uri}))["result"]["snapshot"][
             "state"
@@ -383,10 +500,9 @@ class TestClientTools:
 
     async def test_the_session_entry_is_retracted_once_answered(self, host: Host) -> None:
         client = await _attach(host, "vscode")
-        session_uri, chat_uri = await _session(client, "echo:/client-4", client_id="vscode")
+        session_uri, chat_uri = await _session(host, client, "echo:/client-4", client_id="vscode")
         await _send(client, chat_uri)
-        await client.collect(seconds=0.4)
-        start = _action(client, chat_uri, "chat/toolCallStart")
+        start = await _asked_the_client(host, client, session_uri, chat_uri)
         assert start is not None
 
         await client.notify(
@@ -402,7 +518,7 @@ class TestClientTools:
                 },
             },
         )
-        await client.collect(seconds=0.5)
+        await client.collect_until(lambda: not _input_needed(host, session_uri), timeout=10.0)
         state = (await client.request("subscribe", {"channel": session_uri}))["result"]["snapshot"][
             "state"
         ]
@@ -412,9 +528,9 @@ class TestClientTools:
         """A session left advertising work nobody can do stays InputNeeded until
         it is disposed."""
         client = await _attach(host, "vscode")
-        session_uri, chat_uri = await _session(client, "echo:/client-5", client_id="vscode")
+        session_uri, chat_uri = await _session(host, client, "echo:/client-5", client_id="vscode")
         await _send(client, chat_uri)
-        await client.collect(seconds=0.4)
+        await _asked_the_client(host, client, session_uri, chat_uri)
 
         await client.notify(
             "dispatchAction",
@@ -424,7 +540,9 @@ class TestClientTools:
                 "action": {"type": "chat/turnCancelled", "turnId": "t1"},
             },
         )
-        await client.collect(seconds=0.5)
+        await client.collect_until(
+            lambda: not _input_needed(host, session_uri) and not host.pending, timeout=10.0
+        )
         state = (await client.request("subscribe", {"channel": session_uri}))["result"]["snapshot"][
             "state"
         ]
@@ -436,9 +554,9 @@ class TestClientTools:
         and an error the adapter can handle beats a hang it cannot see."""
         client = await _attach(host, "vscode")
         # No `activeClient` on createSession, so the provider has nobody to ask.
-        _, chat_uri = await _session(client, "echo:/client-6")
+        _, chat_uri = await _session(host, client, "echo:/client-6")
         await _send(client, chat_uri)
-        await client.collect(seconds=0.5)
+        await _turn_over(client, chat_uri)
         assert "(no active client to run a tool)" in _deltas(client, chat_uri)
         assert len(host.pending) == 0
 
@@ -503,11 +621,11 @@ class TestPlainToolCalls:
         host = Host(_Plain(), LoopbackSingleUserPolicy())
         try:
             client = await _attach(host, "solo")
-            _, chat_uri = await _session(client, "echo:/plain-1")
+            _, chat_uri = await _session(host, client, "echo:/plain-1")
             await _send(client, chat_uri)
-            await client.collect(seconds=0.5)
+            await _settled(host, client, chat_uri)
 
-            ready = _action(client, chat_uri, "chat/toolCallReady")
+            ready = await _await_action(client, chat_uri, "chat/toolCallReady")
             assert ready is not None
             assert ready["invocationMessage"], "REQUIRED by ChatToolCallReadyAction"
             assert ready["toolInput"] == '{"path": "/tmp/x"}'
@@ -526,11 +644,11 @@ class TestPlainToolCalls:
         host = Host(_Plain(), LoopbackSingleUserPolicy())
         try:
             client = await _attach(host, "solo")
-            _, chat_uri = await _session(client, "echo:/plain-2")
+            _, chat_uri = await _session(host, client, "echo:/plain-2")
             await _send(client, chat_uri)
-            await client.collect(seconds=0.5)
+            await _settled(host, client, chat_uri)
 
-            start = _action(client, chat_uri, "chat/toolCallStart")
+            start = await _await_action(client, chat_uri, "chat/toolCallStart")
             assert start is not None
             assert "toolInput" not in start
             # Moved, not lost: the input still reaches the client's state.
@@ -547,9 +665,13 @@ class TestPlainToolCalls:
         host = Host(_Plain(gate=gate), LoopbackSingleUserPolicy())
         try:
             client = await _attach(host, "solo")
-            _, chat_uri = await _session(client, "echo:/plain-3")
+            _, chat_uri = await _session(host, client, "echo:/plain-3")
             await _send(client, chat_uri)
-            await client.collect(seconds=0.4)
+            # The partial itself. The gate holds the call open, so this is the
+            # last thing that happens until the test lets go of it.
+            await client.collect_until(
+                lambda: bool(_tool_call(host, chat_uri).get("content")), timeout=10.0
+            )
 
             call = _tool_call(host, chat_uri)
             assert call["status"] == "running"
@@ -593,11 +715,11 @@ class TestProgressAfterConfirmation:
 
     async def test_progress_reaches_the_mirror(self, host: Host) -> None:
         client = await _attach(host, "solo")
-        _, chat_uri = await _session(client, "echo:/progress-1")
+        _, chat_uri = await _session(host, client, "echo:/progress-1")
         await _send(client, chat_uri)
-        await client.collect(seconds=0.4)
+        await _parked_for_confirmation(host, client, chat_uri)
         await self._approve(client, chat_uri)
-        await client.collect(seconds=0.6)
+        await _settled(host, client, chat_uri)
 
         call = _tool_call(host, chat_uri)
         assert call["invocationMessage"] == "Echoing word 1"
@@ -609,11 +731,11 @@ class TestProgressAfterConfirmation:
         """A second `chat/toolCallReady` rebuilds the call from its base fields,
         and `content` is not one of them."""
         client = await _attach(host, "solo")
-        _, chat_uri = await _session(client, "echo:/progress-2")
+        _, chat_uri = await _session(host, client, "echo:/progress-2")
         await _send(client, chat_uri)
-        await client.collect(seconds=0.4)
+        await _parked_for_confirmation(host, client, chat_uri)
         await self._approve(client, chat_uri)
-        await client.collect(seconds=0.6)
+        await _settled(host, client, chat_uri)
 
         assert _tool_call(host, chat_uri)["content"] == [{"type": "text", "text": "hello"}]
 
@@ -639,14 +761,10 @@ class TestMalformedToolCallActions:
         await client.notify(
             "dispatchAction", {"channel": chat_uri, "clientSeq": 2, "action": action}
         )
-        await client.collect(seconds=0.4)
-        echoes = [
-            envelope
-            for envelope in client.actions(chat_uri)
-            if envelope["action"]["type"] == action["type"]
-            and envelope["action"] is not action
-            and envelope.get("origin", {}).get("clientId") == "solo"
-        ]
+        await client.collect_until(
+            lambda: bool(_own_echoes(client, chat_uri, action)), timeout=10.0
+        )
+        echoes = _own_echoes(client, chat_uri, action)
         assert echoes, "a rejected action MUST still be echoed"
         reason: str | None = echoes[-1].get("rejectionReason")
         return reason
@@ -668,10 +786,9 @@ class TestMalformedToolCallActions:
         self, host: Host, missing: str, action: dict[str, Any]
     ) -> None:
         client = await _attach(host, "solo")
-        _, chat_uri = await _session(client, f"echo:/malformed-{missing}")
+        _, chat_uri = await _session(host, client, f"echo:/malformed-{missing}")
         await _send(client, chat_uri)
-        await client.collect(seconds=0.4)
-        ready = _action(client, chat_uri, "chat/toolCallReady")
+        ready = await _parked_for_confirmation(host, client, chat_uri)
         assert ready is not None
 
         reason = await self._dispatch(

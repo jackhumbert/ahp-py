@@ -67,7 +67,11 @@ async def _client(host: Host) -> FakeClient:
 
 async def _session(host: Host, client: FakeClient, uri: str) -> str:
     await client.request("createSession", {"channel": uri, "provider": "echo"})
-    await client.collect(seconds=0.3)
+    # The default chat is what the next two lines read; waiting for it by name
+    # turns "the session had not published yet" from an IndexError into a wait.
+    await client.collect_until(
+        lambda: bool((host.sequencer.state_of(uri) or {}).get("chats")), timeout=10.0
+    )
     state = (await client.request("subscribe", {"channel": uri}))["result"]["snapshot"]["state"]
     chat: str = state["chats"][0]["resource"]
     await client.request("subscribe", {"channel": chat})
@@ -104,6 +108,34 @@ def _state(host: Host, uri: str) -> dict[str, Any]:
     return state
 
 
+async def _completed(client: FakeClient, chat: str, *, timeout: float = 10.0) -> None:
+    """Wait for the turn on *chat* to publish `chat/turnComplete`.
+
+    The terminal FRAME rather than any one part or count an assertion happens to
+    name: the tests below assert on exact lists ("one usage action", "tool then
+    markdown"), and stopping at the first part that matched would let a stray
+    later one through. `chat/turnComplete` is the last frame a turn publishes,
+    so waiting for it bounds the same window a fixed wait did -- everything the
+    turn said, and nothing after.
+    """
+    await client.collect_until(
+        lambda: any(a["type"] == "chat/turnComplete" for a in _actions(client, chat)),
+        timeout=timeout,
+    )
+
+
+async def _parked(client: FakeClient, chat: str, *, timeout: float = 10.0) -> None:
+    """Wait for a tool call to reach `chat/toolCallReady`.
+
+    Where a confirming host stops until someone answers, and where every caller
+    below reads the `toolCallId` off it.
+    """
+    await client.collect_until(
+        lambda: any(a["type"] == "chat/toolCallReady" for a in _actions(client, chat)),
+        timeout=timeout,
+    )
+
+
 class TestResponsePartOrdering:
     """The client renders parts in creation order and appends a delta to
     whichever part its id names, so one markdown part per turn puts prose
@@ -114,7 +146,7 @@ class TestResponsePartOrdering:
         chat = await _session(tooled, client, "echo:/f-1")
 
         await _turn(client, chat, text="hello")
-        await client.collect(seconds=0.4)
+        await _parked(client, chat)
         ready = next(a for a in _actions(client, chat) if a["type"] == "chat/toolCallReady")
         await client.notify(
             "dispatchAction",
@@ -130,7 +162,7 @@ class TestResponsePartOrdering:
                 },
             },
         )
-        await client.collect(seconds=0.6)
+        await _completed(client, chat)
 
         kinds = [
             "tool" if a["type"] == "chat/toolCallStart" else a["part"]["kind"]
@@ -146,7 +178,7 @@ class TestResponsePartOrdering:
         chat = await _session(host, client, "echo:/f-2")
 
         await _turn(client, chat, text="hello")
-        await client.collect(seconds=0.5)
+        await _completed(client, chat)
 
         parts = [a for a in _actions(client, chat) if a["type"] == "chat/responsePart"]
         deltas = [a for a in _actions(client, chat) if a["type"] == "chat/delta"]
@@ -204,7 +236,7 @@ class TestQueuedMessages:
         chat = await _session(host, client, "echo:/q-1")
 
         await self._queue(client, chat, "q1", "hello", 1)
-        await client.collect(seconds=0.6)
+        await _completed(client, chat)
 
         state = _state(host, chat)
         assert state.get("queuedMessages") in (None, []), "the queue was never drained"
@@ -217,8 +249,11 @@ class TestQueuedMessages:
         chat = await _session(tooled, client, "echo:/q-2")
 
         await _turn(client, chat, text="first")
-        await client.collect(seconds=0.4)
+        await _parked(client, chat)
         await self._queue(client, chat, "q1", "second", 2)
+        # Fixed on purpose: the claim is that the queue was NOT drained while
+        # the turn ran, and a wait that returns the moment the message lands
+        # gives the host no chance to wrongly drain it a beat later.
         await client.collect(seconds=0.3)
         assert _state(tooled, chat)["queuedMessages"], "drained while a turn was running"
 
@@ -237,7 +272,10 @@ class TestQueuedMessages:
                 },
             },
         )
-        await client.collect(seconds=1.0)
+        await client.collect_until(
+            lambda: "second" in str((tooled.sequencer.state_of(chat) or {}).get("activeTurn")),
+            timeout=10.0,
+        )
 
         state = _state(tooled, chat)
         assert state.get("queuedMessages") in (None, [])
@@ -254,7 +292,7 @@ class TestQueuedMessages:
         chat = await _session(host, client, "echo:/q-3")
 
         await self._queue(client, chat, "q1", "hello", 1)
-        await client.collect(seconds=0.6)
+        await _completed(client, chat)
 
         removals = [a for a in _actions(client, chat) if a["type"] == "chat/pendingMessageRemoved"]
         assert [a["id"] for a in removals] == ["q1"]
@@ -265,7 +303,15 @@ class TestQueuedMessages:
 
         await self._queue(client, chat, "q1", "alpha", 1)
         await self._queue(client, chat, "q2", "bravo", 2)
-        await client.collect(seconds=1.2)
+        # Both turns, and the chat back at rest: an exact count of two only
+        # means anything once nothing is still running.
+        await client.collect_until(
+            lambda: (
+                (host.sequencer.state_of(chat) or {}).get("activeTurn") is None
+                and len((host.sequencer.state_of(chat) or {}).get("turns", [])) >= 2
+            ),
+            timeout=10.0,
+        )
 
         state = _state(host, chat)
         assert state.get("queuedMessages") in (None, [])
@@ -294,6 +340,9 @@ class TestQueuedMessages:
                 },
             },
         )
+        # Fixed on purpose: "left alone" is a negative claim. Returning as soon
+        # as the steering message appears would pass even against the bug this
+        # guards -- consuming it a moment later and running it as its own turn.
         await client.collect(seconds=0.5)
 
         assert _state(host, chat)["steeringMessage"]["id"] == "s1"
@@ -308,7 +357,7 @@ class TestUsage:
         chat = await _session(host, client, "echo:/u-1")
 
         await _turn(client, chat, text="hello there")
-        await client.collect(seconds=0.5)
+        await _completed(client, chat)
 
         usage = [a for a in _actions(client, chat) if a["type"] == "chat/usage"]
         assert len(usage) == 1
@@ -322,7 +371,7 @@ class TestUsage:
         chat = await _session(host, client, "echo:/u-2")
 
         await _turn(client, chat, text="hello")
-        await client.collect(seconds=0.5)
+        await _completed(client, chat)
 
         types = [a["type"] for a in _actions(client, chat)]
         assert types.index("chat/usage") < types.index("chat/turnComplete")
@@ -334,7 +383,7 @@ class TestProgressiveToolOutput:
         chat = await _session(tooled, client, "echo:/p-1")
 
         await _turn(client, chat, text="one two three")
-        await client.collect(seconds=0.4)
+        await _parked(client, chat)
         ready = next(a for a in _actions(client, chat) if a["type"] == "chat/toolCallReady")
         await client.notify(
             "dispatchAction",
@@ -350,7 +399,7 @@ class TestProgressiveToolOutput:
                 },
             },
         )
-        await client.collect(seconds=0.8)
+        await _completed(client, chat)
 
         actions = _actions(client, chat)
         content = [
@@ -402,7 +451,10 @@ class TestProgressiveToolOutput:
             display_name="ls",
             meta={"ptyTerminal": {"input": "ls\r", "output": "a\r\nb\r\n"}},
         )
-        await client.collect(seconds=0.3)
+        await client.collect_until(
+            lambda: any(a["type"] == "chat/toolCallStart" for a in _actions(client, chat)),
+            timeout=10.0,
+        )
 
         start = next(a for a in _actions(client, chat) if a["type"] == "chat/toolCallStart")
         assert start["_meta"]["ptyTerminal"]["input"] == "ls\r"
@@ -419,6 +471,11 @@ class TestToolInputEncoding:
         chat = await _session(tooled, client, "echo:/e-1")
 
         await _turn(client, chat, text="hello")
+        # Fixed on purpose, and the set-equality below is why: the claim is that
+        # `chat/toolCallReady` is the ONLY frame carrying a `toolInput`. This
+        # host parks the turn on a confirmation nobody answers, so there is no
+        # terminal frame to wait for, and stopping at the first `toolInput`
+        # would stop checking exactly where the check starts being interesting.
         await client.collect(seconds=0.5)
 
         carrying = [a for a in _actions(client, chat) if "toolInput" in a]

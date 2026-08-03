@@ -139,6 +139,70 @@ def _content(client: FakeClient, channel: str) -> str:
     return text
 
 
+def _catalogue(host: Host) -> list[Any]:
+    state = host.sequencer.state_of(ROOT_URI) or {}
+    terminals = state.get("terminals")
+    return list(terminals) if isinstance(terminals, list) else []
+
+
+async def _session_ready(
+    host: Host, client: FakeClient, uri: str, *, timeout: float = 10.0
+) -> None:
+    """Wait for *uri*'s bring-up to finish.
+
+    `createSession` answers BEFORE `_bring_up` runs, and the default chat is
+    published from inside it (`session/chatAdded`) -- so a caller that reads
+    `chats[0]` after a fixed sleep is racing a background task rather than
+    merely being slow. `lifecycle` is the end of that task: `session/ready` is
+    its last publish.
+    """
+
+    def ready() -> bool:
+        state = host.sequencer.state_of(uri) or {}
+        return state.get("lifecycle") == "ready" and bool(state.get("chats"))
+
+    await client.collect_until(ready, timeout=timeout)
+
+
+async def _data(client: FakeClient, channel: str, text: str, *, timeout: float = 10.0) -> None:
+    """Wait for *text* to arrive in *channel*'s `terminal/data`.
+
+    One read is mapped to actions in stream order inside a single coroutine, so
+    waiting for the LAST expected fragment means every earlier one -- and any
+    escape wrongly emitted as text among them -- has already been published.
+    """
+    await client.collect_until(lambda: text in _content(client, channel), timeout=timeout)
+
+
+async def _acted(
+    client: FakeClient, channel: str, action_type: str, *, timeout: float = 10.0
+) -> None:
+    """Wait for *action_type* to be published on *channel*."""
+    await client.collect_until(
+        lambda: any(e["action"]["type"] == action_type for e in client.actions(channel)),
+        timeout=timeout,
+    )
+
+
+async def _rejected(
+    client: FakeClient, channel: str, action_type: str, *, timeout: float = 10.0
+) -> None:
+    """Wait for the echo of *action_type* to come back carrying a rejection.
+
+    The rejection IS the terminal outcome of that dispatch: the gate and the
+    hand-off to the backend live in the same handler. So "the backend was never
+    touched", asserted after this, is checked against a handler that has
+    demonstrably run rather than against a clock that has merely ticked.
+    """
+    await client.collect_until(
+        lambda: any(
+            e["action"]["type"] == action_type and "rejectionReason" in e
+            for e in client.actions(channel)
+        ),
+        timeout=timeout,
+    )
+
+
 class TestLifecycle:
     async def test_a_terminal_registers_and_lands_in_the_catalogue(
         self, wired: tuple[Host, FakeBackend]
@@ -190,7 +254,7 @@ class TestOutput:
         client = await _client(host)
         channel = await _open(client)
         await backend.emit(b"hello world\r\n")
-        await client.collect(seconds=0.3)
+        await _data(client, channel, "hello world")
         assert "hello world" in _content(client, channel)
 
     async def test_shell_integration_sequences_are_stripped(
@@ -201,7 +265,7 @@ class TestOutput:
         client = await _client(host)
         channel = await _open(client)
         await backend.emit(b"\x1b]633;A\x07before\x1b]633;B\x07after")
-        await client.collect(seconds=0.3)
+        await _data(client, channel, "after")
         text = _content(client, channel)
         assert "before" in text
         assert "after" in text
@@ -218,7 +282,7 @@ class TestOutput:
         channel = await _open(client)
         await backend.emit(b"start\x1b]6")
         await backend.emit(b"33;A\x07end")
-        await client.collect(seconds=0.4)
+        await _data(client, channel, "end")
         text = _content(client, channel)
         assert "start" in text
         assert "end" in text
@@ -229,7 +293,8 @@ class TestOutput:
         client = await _client(host)
         channel = await _open(client)
         await backend.emit(b"\x1b]633;E;ls -la\x07\x1b]633;C\x07total 0\r\n\x1b]633;D;0\x07")
-        await client.collect(seconds=0.4)
+        # The last of the three, so the two before it have already landed.
+        await _acted(client, channel, "terminal/commandFinished")
 
         kinds = [e["action"]["type"] for e in client.actions(channel)]
         assert "terminal/commandDetectionAvailable" in kinds
@@ -260,7 +325,9 @@ class TestOutput:
         client = await _client(host)
         channel = await _open(client)
         await backend.emit(b"first\x1b]633;D;0\x07\x1b]633;C\x07second")
-        await client.collect(seconds=0.4)
+        # `second` is the tail of the chunk: once it is here the whole read has
+        # been mapped, which is what the ordering below is asserted over.
+        await _data(client, channel, "second")
 
         ordered = [
             e["action"]["type"] if e["action"]["type"] != "terminal/data" else e["action"]["data"]
@@ -289,6 +356,12 @@ class TestClientActions:
                 "action": {"type": "terminal/input", "data": "ls\r"},
             },
         )
+        await client.collect_until(lambda: backend.process.written == [b"ls\r"], timeout=10.0)
+        # And then a real elapsed wait, kept deliberately: the second assertion
+        # is NEGATIVE -- no `terminal/data` was manufactured from the keystroke
+        # -- and a condition wait would return before any such frame could
+        # arrive and prove nothing. Now it is a quiet window that begins after
+        # the write has landed, rather than one the dispatch had to fit inside.
         await client.collect(seconds=0.3)
         assert backend.process.written == [b"ls\r"]
         assert _content(client, channel) == ""
@@ -305,7 +378,7 @@ class TestClientActions:
                 "action": {"type": "terminal/resized", "cols": 120, "rows": 40},
             },
         )
-        await client.collect(seconds=0.3)
+        await client.collect_until(lambda: backend.process.size == (120, 40), timeout=10.0)
         assert backend.process.size == (120, 40)
 
     async def test_a_peer_that_does_not_hold_the_claim_cannot_type(
@@ -339,7 +412,7 @@ class TestClientActions:
                 "action": {"type": "terminal/input", "data": "rm -rf /\r"},
             },
         )
-        await intruder.collect(seconds=0.3)
+        await _rejected(intruder, channel, "terminal/input")
 
         assert backend.process.written == []
         echoes = [e for e in intruder.actions(channel) if e["action"]["type"] == "terminal/input"]
@@ -405,7 +478,7 @@ class TestTheExitIsAnnounced:
     async def test_exiting_publishes_terminal_exited_with_the_code(self, pty_host: Host) -> None:
         client = await _client(pty_host)
         await client.request("createSession", {"channel": "echo:/t-exit"})
-        await client.collect(seconds=0.3)
+        await _session_ready(pty_host, client, "echo:/t-exit")
         channel = "ahp-terminal:/exit-1"
         result = await client.request(
             "createTerminal",
@@ -432,7 +505,19 @@ class TestTheExitIsAnnounced:
                 "action": {"type": "terminal/input", "data": "exit 7\n"},
             },
         )
-        await client.collect(seconds=2.5)
+        await _acted(client, channel, "terminal/exited")
+        # A real elapsed wait AFTER the exit, kept on purpose: the second half
+        # of this test is the NEGATIVE claim that nothing follows the exit
+        # frame, and stopping the moment it arrives would make that claim true
+        # by construction.
+        #
+        # One second, not the 0.4 this was first converted to. The failure it
+        # exists to catch is buffered pty output arriving LATE on a loaded
+        # runner -- which is the same load case this whole conversion is about,
+        # so the one window that must stay generous is this one. The window it
+        # replaced was ~2.2s of real post-exit time; 0.4s was a narrowing, and
+        # the module's next-slowest test is 0.68s, so the second is free.
+        await client.collect(seconds=1.0)
 
         exits = [
             a["action"] for a in client.actions(channel) if a["action"]["type"] == "terminal/exited"
@@ -450,7 +535,7 @@ class TestTheExitIsAnnounced:
         `{resource, isPty}` -- and `isPty` is not even a TerminalInfo field."""
         client = await _client(pty_host)
         await client.request("createSession", {"channel": "echo:/t-cat"})
-        await client.collect(seconds=0.3)
+        await _session_ready(pty_host, client, "echo:/t-cat")
         await client.request(
             "createTerminal",
             {
@@ -460,7 +545,12 @@ class TestTheExitIsAnnounced:
                 "name": "named",
             },
         )
-        await client.collect(seconds=0.4)
+        # The catalogue entry is published as one dict, so its arrival is the
+        # end state for all three fields asserted below.
+        await client.collect_until(
+            lambda: any(t.get("resource") == "ahp-terminal:/cat-1" for t in _catalogue(pty_host)),
+            timeout=10.0,
+        )
 
         root = (await client.request("subscribe", {"channel": ROOT_URI}))["result"]["snapshot"][
             "state"
@@ -493,7 +583,9 @@ class TestTheCatalogueKeepsUp:
                 "action": {"type": "terminal/titleChanged", "title": "renamed"},
             },
         )
-        await client.collect(seconds=0.3)
+        await client.collect_until(
+            lambda: [t.get("title") for t in _catalogue(host)] == ["renamed"], timeout=10.0
+        )
 
         root = (await client.request("subscribe", {"channel": ROOT_URI}))["result"]["snapshot"][
             "state"
@@ -513,7 +605,9 @@ class TestTheCatalogueKeepsUp:
                 "action": {"type": "terminal/claimed", "claim": handed},
             },
         )
-        await client.collect(seconds=0.3)
+        await client.collect_until(
+            lambda: [t.get("claim") for t in _catalogue(host)] == [handed], timeout=10.0
+        )
 
         root = (await client.request("subscribe", {"channel": ROOT_URI}))["result"]["snapshot"][
             "state"
@@ -532,7 +626,9 @@ class TestTheCatalogueKeepsUp:
         client = await _client(host)
         channel = await _open(client)
         await client.request("createSession", {"channel": "echo:/cat-noise"})
-        await client.collect(seconds=0.3)
+        # Bring-up must be COMPLETE before `before` is read below, or one of its
+        # own publishes lands inside the window this test counts envelopes over.
+        await _session_ready(host, client, "echo:/cat-noise")
         chat = (await client.request("subscribe", {"channel": "echo:/cat-noise"}))["result"][
             "snapshot"
         ]["state"]["chats"][0]["resource"]
@@ -546,6 +642,9 @@ class TestTheCatalogueKeepsUp:
                 "action": {"type": "terminal/titleChanged", "title": "nowhere"},
             },
         )
+        # A real elapsed wait, kept: the assertion is that a SECOND envelope
+        # never arrives, and a condition wait on the first would return before
+        # the second had a chance to and prove nothing.
         await client.collect(seconds=0.3)
         # One envelope, the echo of the action itself -- not two.
         assert host.sequencer.server_seq == before + 1
@@ -704,7 +803,7 @@ class TestTheBangCommandShellDiesWithItsTurn:
         host, started = spied
         client = await _client(host)
         await client.request("createSession", {"channel": "echo:/bang"})
-        await client.collect(seconds=0.3)
+        await _session_ready(host, client, "echo:/bang")
         chat = (await client.request("subscribe", {"channel": "echo:/bang"}))["result"]["snapshot"][
             "state"
         ]["chats"][0]["resource"]
@@ -724,7 +823,14 @@ class TestTheBangCommandShellDiesWithItsTurn:
                 },
             },
         )
-        await client.collect(seconds=1.0)
+        # POLLED, not `collect_until`: the one-shot has no channel of its own,
+        # so nothing on the wire marks the moment the backend was asked for a
+        # shell -- and a predicate that is only re-checked when a notification
+        # arrives would sit out its whole timeout waiting for a frame that is
+        # never sent. Same shape as the liveness loop below.
+        deadline = asyncio.get_running_loop().time() + 15
+        while not started and asyncio.get_running_loop().time() < deadline:
+            await asyncio.sleep(0.05)
         assert started, "the `!` prefix never reached the backend"
         pid = started[0]._process.pid
         assert self._alive(pid), "the shell never started"
@@ -758,7 +864,7 @@ class TestCommandFinishedWithoutAnExitCode:
         client = await _client(host)
         channel = await _open(client)
         await backend.emit(b"\x1b]633;E;make\x07\x1b]633;C\x07building\r\n\x1b]633;D\x07")
-        await client.collect(seconds=0.4)
+        await _acted(client, channel, "terminal/commandFinished")
 
         finished = next(
             e["action"]
@@ -850,7 +956,7 @@ class TestStrictClaimGating:
                     "action": {"type": "terminal/resized", "cols": 10, "rows": 5},
                 },
             )
-            await viewer.collect(seconds=0.3)
+            await _rejected(viewer, channel, "terminal/resized")
 
             assert backend.process.size is None, "a non-holder reflowed somebody else's pty"
             echoes = [
@@ -868,7 +974,7 @@ class TestStrictClaimGating:
                     "action": {"type": "terminal/resized", "cols": 120, "rows": 40},
                 },
             )
-            await owner.collect(seconds=0.3)
+            await owner.collect_until(lambda: backend.process.size == (120, 40), timeout=10.0)
             assert backend.process.size == (120, 40)
         finally:
             await host.aclose()

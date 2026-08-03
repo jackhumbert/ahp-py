@@ -9,7 +9,7 @@ is served through a scoped `resourceRead`, so a diff needs the bytes as they wer
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Callable, Mapping
 from typing import Any
 
 import pytest
@@ -39,6 +39,66 @@ async def host() -> AsyncIterator[Host]:
         await host.aclose()
 
 
+async def _until(ready: Callable[[], bool], *, timeout: float = 10.0) -> None:
+    """Poll *ready* rather than the wire.
+
+    `FakeClient.collect_until` only re-tests its predicate when a notification
+    arrives, so it is the right tool for a condition ON the client's own
+    notifications and the wrong one for a condition on host state the client
+    is not subscribed to -- most of this module, where the assertions read
+    `host.sequencer.state_of(...)` and the changeset channel carries no traffic
+    this client would see. Waiting on a wire that has nothing to say costs the
+    whole timeout.
+
+    Returns rather than raising, for the same reason `collect_until` does: the
+    caller's own assertion then produces the failure message.
+    """
+    deadline = asyncio.get_running_loop().time() + timeout
+    while not ready() and asyncio.get_running_loop().time() < deadline:
+        await asyncio.sleep(0.01)
+
+
+def _catalogue_entries(host: Host, uri: str) -> list[dict[str, Any]]:
+    state = host.sequencer.state_of(uri) or {}
+    entries: list[dict[str, Any]] = state.get("changesets") or []
+    return entries
+
+
+def _operation_status(host: Host, channel: str) -> str | None:
+    state = host.sequencer.state_of(channel) or {}
+    operations = state.get("operations") or []
+    status: str | None = operations[0].get("status") if operations else None
+    return status
+
+
+def _reviewed(host: Host, channel: str) -> bool:
+    state = host.sequencer.state_of(channel) or {}
+    files = state.get("files") or []
+    return bool(files and files[0].get("reviewed"))
+
+
+def _statuses(client: FakeClient, channel: str) -> list[str]:
+    return [
+        a["action"]["status"]
+        for a in client.actions(channel)
+        if a["action"]["type"] == "changeset/operationStatusChanged"
+    ]
+
+
+def _review_echoes(client: FakeClient, channel: str) -> list[dict[str, Any]]:
+    return [
+        a for a in client.actions(channel) if a["action"]["type"] == "changeset/filesReviewChanged"
+    ]
+
+
+def _roll_ups(client: FakeClient) -> list[dict[str, Any]]:
+    return [
+        n["params"]["changes"]
+        for n in client.notifications
+        if n.get("method") == "root/sessionSummaryChanged"
+    ]
+
+
 async def _session(host: Host, uri: str) -> FakeClient:
     client_transport, server_transport = memory_pair()
     task = asyncio.create_task(host.serve(server_transport))
@@ -54,7 +114,10 @@ async def _session(host: Host, uri: str) -> FakeClient:
         },
     )
     await client.request("createSession", {"channel": uri, "provider": "echo"})
-    await client.collect(seconds=0.3)
+    # Every test here reads the session's chat or publishes into it, so the
+    # session being *listed* is not enough: wait for the chat the host mints
+    # with it.
+    await _until(lambda: bool((host.sequencer.state_of(uri) or {}).get("chats")))
     await client.request("subscribe", {"channel": uri})
     return client
 
@@ -71,7 +134,7 @@ class TestPublishing:
         uri = "echo:/cs-1"
         client = await _session(host, uri)
         channel = await host.publish_changeset(uri, Changeset(label="Session changes"), [_EDIT])
-        await client.collect(seconds=0.3)
+        await _until(lambda: bool(_catalogue_entries(host, uri)))
 
         state = (await client.request("subscribe", {"channel": uri}))["result"]["snapshot"]["state"]
         catalogue = state["changesets"]
@@ -102,7 +165,9 @@ class TestPublishing:
         uri = "echo:/cs-3"
         client = await _session(host, uri)
         await host.publish_changeset(uri, Changeset(label="c"), [_EDIT])
-        await client.collect(seconds=0.3)
+        await client.collect_until(
+            lambda: any("changes" in c for c in _roll_ups(client)), timeout=10.0
+        )
         item = (await client.request("listSessions", {"channel": ROOT_URI}))["result"]["items"][0]
         assert item["changes"] == {"files": 1, "additions": 1, "deletions": 0}
 
@@ -117,18 +182,14 @@ class TestPublishing:
         """
         uri = "echo:/cs-3b"
         client = await _session(host, uri)
-        await client.collect(seconds=0.2)
         await host.publish_changeset(uri, Changeset(label="c"), [_EDIT])
-        await client.collect(seconds=0.3)
+        await client.collect_until(
+            lambda: any("changes" in c for c in _roll_ups(client)), timeout=10.0
+        )
 
         state = (await client.request("subscribe", {"channel": uri}))["result"]["snapshot"]["state"]
         assert "changes" not in state, "an undeclared key is served in SessionState"
-        summaries = [
-            n["params"]["changes"]
-            for n in client.notifications
-            if n.get("method") == "root/sessionSummaryChanged"
-        ]
-        assert any("changes" in c for c in summaries), "the roll-up reached nobody"
+        assert any("changes" in c for c in _roll_ups(client)), "the roll-up reached nobody"
 
     async def test_content_is_readable_without_any_filesystem(self, host: Host) -> None:
         """The point of the store. This host installs no resource provider at
@@ -225,7 +286,10 @@ class TestPublishing:
         await client.request("subscribe", {"channel": channel})
 
         await client.request("disposeSession", {"channel": uri})
-        await client.collect(seconds=0.3)
+        await client.collect_until(
+            lambda: "changeset/cleared" in [e["action"]["type"] for e in client.actions(channel)],
+            timeout=10.0,
+        )
 
         kinds = [e["action"]["type"] for e in client.actions(channel)]
         assert "changeset/cleared" in kinds, "the subscriber never heard the changeset end"
@@ -253,12 +317,8 @@ class TestReview:
                 },
             },
         )
-        await client.collect(seconds=0.3)
-        echoes = [
-            e
-            for e in client.actions(channel)
-            if e["action"]["type"] == "changeset/filesReviewChanged"
-        ]
+        await client.collect_until(lambda: bool(_review_echoes(client, channel)), timeout=10.0)
+        echoes = _review_echoes(client, channel)
         assert echoes
         assert "rejectionReason" in echoes[-1]
 
@@ -280,7 +340,7 @@ class TestReview:
                 },
             },
         )
-        await client.collect(seconds=0.3)
+        await _until(lambda: _reviewed(host, channel))
         state = (await client.request("subscribe", {"channel": channel}))["result"]["snapshot"][
             "state"
         ]
@@ -322,7 +382,14 @@ class TestTheCatalogueStaysCurrent:
             Changeset(uri=channel, label="After", description="new", reviewable=True),
             [_EDIT],
         )
-        await client.collect(seconds=0.3)
+
+        def relabelled() -> bool:
+            frames = self._catalogue(client, uri)
+            return bool(frames and frames[-1] and frames[-1][0].get("label") == "After")
+
+        # The re-emission is what this is about, so wait for the action itself:
+        # the snapshot below would be right even if it never went out.
+        await client.collect_until(relabelled, timeout=10.0)
 
         state = (await client.request("subscribe", {"channel": uri}))["result"]["snapshot"]["state"]
         entry = state["changesets"][0]
@@ -341,6 +408,12 @@ class TestTheCatalogueStaysCurrent:
         client = await _session(host, uri)
         changeset = Changeset(label="c", reviewable=True)
         await host.publish_changeset(uri, changeset, [_EDIT])
+        # BOTH waits stay fixed, and the first is the subtler of the two. The
+        # baseline has to be everything the first publish will EVER emit -- a
+        # condition wait for "at least one frame" would return on the first and
+        # bank a low number, which the second wait would then blame on the
+        # republish. And the second is the negative assertion itself: "nothing
+        # more arrived" means nothing unless time actually passed.
         await client.collect(seconds=0.3)
         once = len(self._catalogue(client, uri))
 
@@ -359,7 +432,13 @@ class TestTheCatalogueStaysCurrent:
             uri, Changeset(uri=channel, label="c", reviewable=False), [_EDIT]
         )
         await client.request("subscribe", {"channel": channel})
-        await client.collect(seconds=0.2)
+        # Both publishes are awaited, so the catalogue is already settled; what
+        # this waits for is the second one having replaced the first entry.
+        await _until(
+            lambda: (
+                bool(entries := _catalogue_entries(host, uri)) and "capabilities" not in entries[0]
+            )
+        )
 
         state = (await client.request("subscribe", {"channel": uri}))["result"]["snapshot"]["state"]
         assert "capabilities" not in state["changesets"][0]
@@ -376,12 +455,9 @@ class TestTheCatalogueStaysCurrent:
                 },
             },
         )
-        await client.collect(seconds=0.3)
-        echoes = [
-            e
-            for e in client.actions(channel)
-            if e["action"]["type"] == "changeset/filesReviewChanged"
-        ]
+        await client.collect_until(lambda: bool(_review_echoes(client, channel)), timeout=10.0)
+        echoes = _review_echoes(client, channel)
+        assert echoes
         assert "rejectionReason" in echoes[-1]
 
 
@@ -423,13 +499,11 @@ class TestOperations:
         assert result["result"] == {}
         assert ran == ["publish"]
 
-        await client.collect(seconds=0.3)
-        statuses = [
-            e["action"]["status"]
-            for e in client.actions(channel)
-            if e["action"]["type"] == "changeset/operationStatusChanged"
-        ]
-        assert statuses == ["running", "idle"]
+        # `idle` is the terminal frame of an invocation, so the equality below
+        # is comparing a finished sequence rather than however much of one had
+        # arrived by the time a fixed wait expired.
+        await client.collect_until(lambda: "idle" in _statuses(client, channel), timeout=10.0)
+        assert _statuses(client, channel) == ["running", "idle"]
 
     async def test_a_failing_operation_reports_an_error_rather_than_raising(
         self, host: Host
@@ -452,7 +526,7 @@ class TestOperations:
         await client.request(
             "invokeChangesetOperation", {"channel": channel, "operationId": "risky"}
         )
-        await client.collect(seconds=0.3)
+        await client.collect_until(lambda: "error" in _statuses(client, channel), timeout=10.0)
         errors_seen = [
             e["action"]
             for e in client.actions(channel)
@@ -592,7 +666,7 @@ class TestOperationTargets:
                 "target": {"kind": "resource", "resource": "file:///work/a.txt"},
             },
         )
-        await client.collect(seconds=0.3)
+        await _until(lambda: bool(seen))
 
         assert seen == [{"kind": "resource", "resource": "file:///work/a.txt"}]
 
@@ -668,7 +742,7 @@ class TestOperationTargets:
         await client.request(
             "invokeChangesetOperation", {"channel": channel, "operationId": "approve"}
         )
-        await client.collect(seconds=0.3)
+        await _until(lambda: len(seen) == 1)
         assert seen == [None]
 
     async def test_a_range_target_must_carry_its_range(self, host: Host) -> None:
@@ -729,6 +803,11 @@ class TestOperationMembership:
     written `if declared` -- so an undeclared id skipped scope and target
     validation too. Reachable on the shipped demo, which gates `commit` out of
     the published list while leaving its handler registered.
+
+    Every wait in this class stays a FIXED one. The assertion each time is that
+    a handler did NOT run, and the failure it guards against is a refusal that
+    returns an error to the caller while dispatching the work anyway -- which a
+    condition wait would return before ever seeing.
     """
 
     async def test_an_undeclared_operation_is_refused(self, host: Host) -> None:
@@ -817,7 +896,7 @@ class TestOperationMembership:
         first = await client.request(
             "invokeChangesetOperation", {"channel": channel, "operationId": "commit"}
         )
-        await client.collect(seconds=0.3)
+        await _until(lambda: bool(ran))
         assert "error" not in first
         assert ran == ["commit"]
 
@@ -825,6 +904,8 @@ class TestOperationMembership:
         second = await client.request(
             "invokeChangesetOperation", {"channel": channel, "operationId": "commit"}
         )
+        # Fixed, like the rest of this class: `ran` staying at one entry is the
+        # assertion, and it only means anything after time has passed.
         await client.collect(seconds=0.3)
         assert second["error"]["code"] == -32602
         assert ran == ["commit"]
@@ -865,7 +946,9 @@ class TestReviewSurvivesARepublish:
                 },
             },
         )
-        await client.collect(seconds=0.3)
+        # The tick has to be RECORDED before the republish, or the republish it
+        # is supposed to survive happens first and the test proves nothing.
+        await _until(lambda: _reviewed(host, channel))
 
         # The republish an operation triggers.
         await host.publish_changeset(
@@ -889,7 +972,12 @@ class TestReviewSurvivesARepublish:
         ]
         file_id = state["files"][0]["id"]
 
-        for flag in (True, False):
+        async def echoed(count: int) -> None:
+            await client.collect_until(
+                lambda: len(_review_echoes(client, channel)) >= count, timeout=10.0
+            )
+
+        for dispatched, flag in enumerate((True, False), start=1):
             await client.notify(
                 "dispatchAction",
                 {
@@ -902,7 +990,11 @@ class TestReviewSurvivesARepublish:
                     },
                 },
             )
-            await client.collect(seconds=0.2)
+            # Counted echoes, not the flag itself: the untick's end state is
+            # "not reviewed", which is already true before the host has seen
+            # it -- so waiting on the flag would let the republish overtake the
+            # untick and the final assertion would pass for the wrong reason.
+            await echoed(dispatched)
 
         await host.publish_changeset(uri, changeset, [change])
         after = (await client.request("subscribe", {"channel": channel}))["result"]["snapshot"][
@@ -994,13 +1086,8 @@ class TestOperationsAreHonestAboutFailureAndTiming:
         assert "upstream said no" in response["error"]["message"]
 
         # And the status still goes out, for every other subscriber.
-        await client.collect(seconds=0.3)
-        statuses = [
-            a["action"]["status"]
-            for a in client.actions(channel)
-            if a["action"]["type"] == "changeset/operationStatusChanged"
-        ]
-        assert "error" in statuses
+        await client.collect_until(lambda: "error" in _statuses(client, channel), timeout=10.0)
+        assert "error" in _statuses(client, channel)
 
     async def test_operations_are_disabled_during_a_turn(self) -> None:
         # A provider slow enough that the turn is genuinely in flight when the
@@ -1039,7 +1126,10 @@ class TestOperationsAreHonestAboutFailureAndTiming:
         )
         # The turn starts on a NOTIFICATION, so let it actually begin --
         # otherwise the invoke races ahead of it and is legitimately allowed.
-        await asyncio.sleep(0.15)
+        # `running()` is the exact thing the gate consults, so this waits for
+        # the state that makes the refusal below mean something rather than for
+        # an interval that usually covers it.
+        await _until(lambda: bool(host._sessions[uri].running()))
         refused = await client.request(
             "invokeChangesetOperation", {"channel": channel, "operationId": "commit"}
         )
@@ -1105,7 +1195,22 @@ class TestTheDisabledGateIsReEvaluated:
             },
         )
 
+    async def _turn_in_flight(self, host: Host, uri: str) -> None:
+        """Wait until a turn is genuinely running.
+
+        `running()` is what the gate itself consults, and the publish that
+        follows only reproduces the reported shape if it lands while that is
+        true -- which a fixed sleep asserts by hoping.
+        """
+        await _until(lambda: bool(host._sessions[uri].running()))
+
     async def _settle(self, host: Host, uri: str) -> None:
+        """Wait for the turn to end AND for the un-greying to have had its go.
+
+        Kept for the one test whose assertion is that the status did NOT move:
+        there the gate running is the event of interest, and no condition on
+        the status can wait for a change that must not happen.
+        """
         for _ in range(60):
             await asyncio.sleep(0.05)
             if not host._sessions[uri].running():
@@ -1127,14 +1232,14 @@ class TestTheDisabledGateIsReEvaluated:
             await client.request("subscribe", {"channel": chat})
 
             await self._start_turn(client, chat)
-            await asyncio.sleep(0.1)
+            await self._turn_in_flight(host, uri)
             changeset = Changeset(
                 label="c", operations=[ChangesetOperation(id="commit", label="Commit")]
             )
             channel = await host.publish_changeset(uri, changeset, [_EDIT])
             assert host.sequencer.state_of(channel)["operations"][0]["status"] == "disabled"
 
-            await self._settle(host, uri)
+            await _until(lambda: _operation_status(host, channel) == "idle")
             assert host.sequencer.state_of(channel)["operations"][0]["status"] == "idle"
         finally:
             await host.aclose()
@@ -1151,20 +1256,19 @@ class TestTheDisabledGateIsReEvaluated:
             chat = state["chats"][0]["resource"]
             await client.request("subscribe", {"channel": chat})
             await self._start_turn(client, chat)
-            await asyncio.sleep(0.1)
+            await self._turn_in_flight(host, uri)
             changeset = Changeset(
                 label="c", operations=[ChangesetOperation(id="commit", label="Commit")]
             )
             channel = await host.publish_changeset(uri, changeset, [_EDIT])
             await client.request("subscribe", {"channel": channel})
-            await self._settle(host, uri)
-            await client.collect(seconds=0.3)
+            # The action reaching this subscriber IS the assertion, so it is
+            # what to wait for -- the turn ending is only the cause.
+            await client.collect_until(
+                lambda: _statuses(client, channel)[-1:] == ["idle"], timeout=10.0
+            )
 
-            statuses = [
-                a["action"]["status"]
-                for a in client.actions(channel)
-                if a["action"]["type"] == "changeset/operationStatusChanged"
-            ]
+            statuses = _statuses(client, channel)
             assert statuses[-1] == "idle", statuses
         finally:
             await host.aclose()
@@ -1188,10 +1292,14 @@ class TestTheDisabledGateIsReEvaluated:
             assert host.sequencer.state_of(channel)["operations"][0]["status"] == "idle"
 
             await self._start_turn(client, chat)
-            await asyncio.sleep(0.15)
+            # Not `_turn_in_flight`: the greying is published from inside the
+            # same handler that registers the turn, so "a turn is running" is
+            # true a moment before the status has moved. The assertion below is
+            # still the one that reports -- this only stops it firing early.
+            await _until(lambda: _operation_status(host, channel) == "disabled")
             assert host.sequencer.state_of(channel)["operations"][0]["status"] == "disabled"
 
-            await self._settle(host, uri)
+            await _until(lambda: _operation_status(host, channel) == "idle")
             assert host.sequencer.state_of(channel)["operations"][0]["status"] == "idle"
         finally:
             await host.aclose()
@@ -1227,6 +1335,10 @@ class TestTheDisabledGateIsReEvaluated:
             assert host.sequencer.state_of(channel)["operations"][0]["status"] == "error"
 
             await self._start_turn(client, chat)
+            # Both waits here stay real elapsed time. The assertion is that the
+            # status did NOT move at either end of the turn, and there is no
+            # condition to wait for when the correct outcome is "nothing
+            # happened" -- a condition wait would return at once and prove it.
             await asyncio.sleep(0.15)
             assert host.sequencer.state_of(channel)["operations"][0]["status"] == "error"
             await self._settle(host, uri)

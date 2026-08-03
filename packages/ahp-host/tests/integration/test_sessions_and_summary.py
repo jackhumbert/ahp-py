@@ -16,7 +16,7 @@ wire cannot express it -- see `TestTheSummaryCacheCannotBeToldAFieldIsGone`.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from typing import Any
 
 import pytest
@@ -85,7 +85,10 @@ async def _session(client: FakeClient, uri: str) -> str:
     """Create a session, subscribe to it, and answer with its default chat."""
     result = await client.request("createSession", {"channel": uri, "provider": "echo"})
     assert "error" not in result, result
-    await client.collect(seconds=0.3)
+    # The announcement, not a moment: several tests here rebuild a client-side
+    # cache out of `root/sessionAdded` + `root/sessionSummaryChanged`, so the
+    # first of those frames has to be in `notifications` before they start.
+    await client.collect_until(lambda: _announced(client, uri), timeout=10.0)
     state = (await client.request("subscribe", {"channel": uri}))["result"]["snapshot"]["state"]
     chat: str = state["chats"][0]["resource"]
     await client.request("subscribe", {"channel": chat})
@@ -114,12 +117,49 @@ def _state(host: Host, uri: str) -> dict[str, Any]:
     return state
 
 
-def _entry(host: Host, session: str, chat: str) -> dict[str, Any]:
-    """One chat's entry in `SessionState.chats[]`."""
+def _catalogued(host: Host, session: str, chat: str) -> dict[str, Any]:
+    """One chat's entry in `SessionState.chats[]`, or `{}` when it has none.
+
+    The non-raising twin of `_entry`: a wait predicate has to be able to answer
+    "not yet" without blowing up, since it is called before the thing it is
+    waiting for has happened.
+    """
     for candidate in _state(host, session)["chats"]:
         if candidate["resource"] == chat:
             return dict(candidate)
-    raise AssertionError(f"{chat} is not in the catalogue")
+    return {}
+
+
+def _entry(host: Host, session: str, chat: str) -> dict[str, Any]:
+    """One chat's entry in `SessionState.chats[]`."""
+    found = _catalogued(host, session, chat)
+    if not found:
+        raise AssertionError(f"{chat} is not in the catalogue")
+    return found
+
+
+def _announced(client: FakeClient, uri: str) -> bool:
+    """Has the root channel announced *uri* yet?"""
+    return any(
+        note.get("method") == "root/sessionAdded"
+        and (note.get("params") or {})["summary"]["resource"] == uri
+        for note in client.notifications
+    )
+
+
+def _active_turn(host: Host, chat: str) -> str | None:
+    """The id of *chat*'s active turn, or `None` -- safe inside a predicate."""
+    active = (host.sequencer.state_of(chat) or {}).get("activeTurn")
+    return str(active["id"]) if isinstance(active, dict) else None
+
+
+def _landed(host: Host, chat: str, turn: str) -> bool:
+    """Has *turn* reached *chat*'s completed list?
+
+    `createChat` refuses a source turn that has not landed, so a wait for this
+    is a wait for the next call to be legal rather than for a plausible moment.
+    """
+    return any(t.get("id") == turn for t in (host.sequencer.state_of(chat) or {}).get("turns", []))
 
 
 def _terminal(client: FakeClient, chat: str) -> list[str]:
@@ -132,12 +172,23 @@ def _terminal(client: FakeClient, chat: str) -> list[str]:
     ]
 
 
-def _ready(client: FakeClient, chat: str) -> str:
+def _announced_call(client: FakeClient, chat: str) -> str | None:
+    """The id of the tool call *chat* is waiting on, or `None`.
+
+    The non-raising twin of `_ready`, for use inside a wait predicate.
+    """
     for envelope in client.actions(chat):
         if envelope["action"].get("type") == "chat/toolCallReady":
             call_id: str = envelope["action"]["toolCallId"]
             return call_id
-    raise AssertionError("no tool call was ever announced")
+    return None
+
+
+def _ready(client: FakeClient, chat: str) -> str:
+    call_id = _announced_call(client, chat)
+    if call_id is None:
+        raise AssertionError("no tool call was ever announced")
+    return call_id
 
 
 class TestTheChatCatalogueCanRetractAField:
@@ -149,11 +200,23 @@ class TestTheChatCatalogueCanRetractAField:
     already dropped. Two host states disagreeing about one chat.
     """
 
-    async def _tick(self, client: FakeClient, session: str, seq: int) -> None:
+    async def _tick(
+        self,
+        client: FakeClient,
+        session: str,
+        seq: int,
+        until: Callable[[], bool] | None = None,
+    ) -> None:
         """Anything at all through `dispatchAction`, to run the mirror.
 
         Every client dispatch on a session-owned channel ends in
         `_mirror_summary`; this is the cheapest action that reaches it.
+
+        *until* is what the caller expects the mirror to have DONE, waited for
+        directly. `None` keeps a real elapsed wait, which is what a caller
+        asserting over *everything* the mirror emitted -- or over what it must
+        NOT emit -- needs; a condition would return on the first frame and leave
+        the rest of them unexamined in the transport.
         """
         await client.notify(
             "dispatchAction",
@@ -163,7 +226,10 @@ class TestTheChatCatalogueCanRetractAField:
                 "action": {"type": "session/isReadChanged", "isRead": seq % 2 == 1},
             },
         )
-        await client.collect(seconds=0.3)
+        if until is None:
+            await client.collect(seconds=0.3)
+        else:
+            await client.collect_until(until, timeout=10.0)
 
     async def test_a_cleared_activity_leaves_the_entry(self, host: Host) -> None:
         client = await _client(host)
@@ -174,12 +240,18 @@ class TestTheChatCatalogueCanRetractAField:
         await host.sequencer.publish(
             chat, {"type": "chat/activityChanged", "activity": "Compiling"}
         )
-        await self._tick(client, uri, 1)
+        await self._tick(
+            client, uri, 1, lambda: _catalogued(host, uri, chat).get("activity") == "Compiling"
+        )
         assert _entry(host, uri, chat)["activity"] == "Compiling"
 
         # Cleared the way the schema says to clear it: "omit or set `undefined`".
         await host.sequencer.publish(chat, {"type": "chat/activityChanged"})
-        await self._tick(client, uri, 2)
+        # The retraction landing IS the assertion below, so it is what we wait
+        # for: it starts false (the entry still says "Compiling") and the wait
+        # ends when the mirror clears it, or times out and lets the assertion
+        # say which activity was left behind.
+        await self._tick(client, uri, 2, lambda: "activity" not in _catalogued(host, uri, chat))
 
         assert "activity" not in _entry(host, uri, chat), (
             "the catalogue kept an activity the chat channel had already cleared"
@@ -195,10 +267,15 @@ class TestTheChatCatalogueCanRetractAField:
         uri = "echo:/retract-2"
         chat = await _session(client, uri)
         await host.sequencer.publish(chat, {"type": "chat/activityChanged", "activity": "Indexing"})
-        await self._tick(client, uri, 1)
+        await self._tick(
+            client, uri, 1, lambda: _catalogued(host, uri, chat).get("activity") == "Indexing"
+        )
         client.notifications.clear()
 
         await host.sequencer.publish(chat, {"type": "chat/activityChanged"})
+        # Elapsed, deliberately: "expected ONE upsert" is an assertion about the
+        # second one not existing, and a condition wait would return on the
+        # first and leave a duplicate sitting undelivered in the transport.
         await self._tick(client, uri, 2)
 
         upserts = [
@@ -221,8 +298,13 @@ class TestTheChatCatalogueCanRetractAField:
         uri = "echo:/retract-3"
         chat = await _session(client, uri)
         await host.sequencer.publish(chat, {"type": "chat/activityChanged", "activity": "Linting"})
-        await self._tick(client, uri, 1)
+        await self._tick(
+            client, uri, 1, lambda: _catalogued(host, uri, chat).get("activity") == "Linting"
+        )
         await host.sequencer.publish(chat, {"type": "chat/activityChanged"})
+        # Elapsed, deliberately: the assertions below run over EVERY frame that
+        # arrived, so stopping at the first interesting one would quietly shrink
+        # the set of frames being checked for a null.
         await self._tick(client, uri, 2)
 
         for envelope in client.actions(uri):
@@ -239,7 +321,9 @@ class TestTheChatCatalogueCanRetractAField:
         uri = "echo:/retract-4"
         chat = await _session(client, uri)
         await host.sequencer.publish(chat, {"type": "chat/activityChanged", "activity": "Working"})
-        await self._tick(client, uri, 1)
+        await self._tick(
+            client, uri, 1, lambda: _catalogued(host, uri, chat).get("activity") == "Working"
+        )
         # Drop the entry out from under the mirror, leaving `published_chats`
         # still holding the field that is about to be retracted.
         session = host._sessions[uri]
@@ -249,6 +333,9 @@ class TestTheChatCatalogueCanRetractAField:
 
         await host.sequencer.publish(chat, {"type": "chat/activityChanged"})
         await host._mirror_summary(session)
+        # Elapsed, deliberately: the assertion is that nothing re-added the
+        # chat, and a wait for "still empty" would be satisfied instantly and
+        # prove nothing.
         await client.collect(seconds=0.3)
 
         assert not _state(host, uri)["chats"], "a retraction re-added a removed chat"
@@ -279,7 +366,17 @@ class TestTheSummaryCacheCannotBeToldAFieldIsGone:
 
     async def _run_a_tool_turn(self, host: Host, client: FakeClient, uri: str, chat: str) -> None:
         await _turn(client, chat)
-        await client.collect(seconds=0.5)
+        # BOTH halves of "the tool is running and waiting": the session's
+        # activity is published before the chat's `chat/toolCallReady` reaches
+        # this client, so waiting on the activity alone leaves the confirmation
+        # below with no call id to name.
+        await client.collect_until(
+            lambda: (
+                _state(host, uri).get("activity") == "Echo Tool"
+                and _announced_call(client, chat) is not None
+            ),
+            timeout=10.0,
+        )
         assert _state(host, uri).get("activity") == "Echo Tool"
         await client.notify(
             "dispatchAction",
@@ -297,6 +394,13 @@ class TestTheSummaryCacheCannotBeToldAFieldIsGone:
                 },
             },
         )
+        # Elapsed, deliberately. `test_the_incremental_cache_keeps_the_last_activity`
+        # rebuilds the client's cache from every `root/sessionSummaryChanged`
+        # and then compares it field-for-field with `listSessions`, so it needs
+        # the WHOLE tail of the turn delivered -- and `_mirror_summary` emits
+        # that notification last, after the state change any condition here
+        # would key on. Stopping at the state change would leave the final
+        # frame in the transport and make the comparison a race.
         await client.collect(seconds=0.6)
 
     async def test_the_authoritative_catalogue_is_right(self, tooled: Host) -> None:
@@ -335,7 +439,21 @@ class TestTheSummaryCacheCannotBeToldAFieldIsGone:
 class TestARenameNeedsATitle:
     """`SessionTitleChangedAction` declares `"required": ["type", "title"]`."""
 
-    async def _rename(self, client: FakeClient, uri: str, seq: int, **payload: Any) -> None:
+    async def _rename(
+        self,
+        client: FakeClient,
+        uri: str,
+        seq: int,
+        until: Callable[[], bool],
+        **payload: Any,
+    ) -> None:
+        """Dispatch a rename and wait for the host's answer to it.
+
+        *until* is that answer -- the new title, or the rejection. Waiting for
+        one of them is what makes the accompanying negative assertion ("and the
+        title did not change", "and nothing was rejected") mean anything: the
+        dispatch has demonstrably been processed by then.
+        """
         await client.notify(
             "dispatchAction",
             {
@@ -344,7 +462,7 @@ class TestARenameNeedsATitle:
                 "action": {"type": "session/titleChanged", **payload},
             },
         )
-        await client.collect(seconds=0.3)
+        await client.collect_until(until, timeout=10.0)
 
     def _rejections(self, client: FakeClient, uri: str) -> list[str]:
         return [
@@ -360,7 +478,7 @@ class TestARenameNeedsATitle:
         await _session(client, uri)
         before = _state(host, uri)["title"]
 
-        await self._rename(client, uri, 1, **payload)
+        await self._rename(client, uri, 1, lambda: bool(self._rejections(client, uri)), **payload)
 
         assert _state(host, uri)["title"] == before
         assert_valid_state("session", _state(host, uri))
@@ -371,25 +489,41 @@ class TestARenameNeedsATitle:
         uri = "echo:/title-2"
         await _session(client, uri)
 
-        await self._rename(client, uri, 1, title="Refactor the parser")
+        await self._rename(
+            client,
+            uri,
+            1,
+            lambda: _state(host, uri)["title"] == "Refactor the parser",
+            title="Refactor the parser",
+        )
 
         assert _state(host, uri)["title"] == "Refactor the parser"
         assert not self._rejections(client, uri)
 
-    async def test_the_cached_summary_follows_a_real_rename(self, host: Host) -> None:
-        client = await _client(host)
-        uri = "echo:/title-3"
-        await _session(client, uri)
-        await self._rename(client, uri, 1, title="Ship it")
-
-        renames = [
+    def _cached_titles(self, client: FakeClient, uri: str) -> list[str]:
+        return [
             note["params"]["changes"]["title"]
             for note in client.notifications
             if note.get("method") == "root/sessionSummaryChanged"
             and note["params"]["session"] == uri
             and "title" in note["params"]["changes"]
         ]
-        assert renames[-1] == "Ship it"
+
+    async def test_the_cached_summary_follows_a_real_rename(self, host: Host) -> None:
+        client = await _client(host)
+        uri = "echo:/title-3"
+        # The end state is the cache's LAST word on the title, which is what the
+        # assertion reads -- not merely that some frame mentioned it.
+        await _session(client, uri)
+        await self._rename(
+            client,
+            uri,
+            1,
+            lambda: self._cached_titles(client, uri)[-1:] == ["Ship it"],
+            title="Ship it",
+        )
+
+        assert self._cached_titles(client, uri)[-1] == "Ship it"
 
 
 class TestTheSeededTitleFitsItsCap:
@@ -435,7 +569,15 @@ class TestDisposeEndsTheTurnItStops:
     async def _park_a_turn(self, host: Host, client: FakeClient, chat: str) -> None:
         """Start a turn and leave it waiting on a tool confirmation."""
         await _turn(client, chat, text="run it", turn="live")
-        await client.collect(seconds=0.5)
+        # Parked, not merely started: the tool call has to have been ANNOUNCED
+        # for the turn to be waiting on a confirmation, which is the state every
+        # caller of this then disposes out from under.
+        await client.collect_until(
+            lambda: (
+                _active_turn(host, chat) == "live" and _announced_call(client, chat) is not None
+            ),
+            timeout=10.0,
+        )
         assert _state(host, chat)["activeTurn"]["id"] == "live"
 
     async def test_dispose_session_cancels_the_turn_on_the_wire(self, tooled: Host) -> None:
@@ -446,6 +588,9 @@ class TestDisposeEndsTheTurnItStops:
         client.notifications.clear()
 
         await client.request("disposeSession", {"channel": uri})
+        # Elapsed, deliberately: "exactly one terminal action" is an assertion
+        # that a SECOND one never arrives, and a condition wait would return on
+        # the first and never see the duplicate it is there to catch.
         await client.collect(seconds=0.4)
 
         assert _terminal(client, chat) == ["chat/turnCancelled"]
@@ -456,9 +601,17 @@ class TestDisposeEndsTheTurnItStops:
         chat = await _session(client, uri)
         await self._park_a_turn(tooled, client, chat)
         client.notifications.clear()
+        # Load-bearing, and small on purpose. `duration` is whole milliseconds
+        # of measured elapsed time, so the turn has to actually run for a
+        # measurable moment before it is disposed or the `> 0` below stops
+        # being a fact about the host and starts being one about the machine.
+        await asyncio.sleep(0.01)
 
         await client.request("disposeSession", {"channel": uri})
-        await client.collect(seconds=0.4)
+        await client.collect_until(
+            lambda: bool(_terminal(client, chat)),
+            timeout=10.0,
+        )
 
         cancelled = next(
             envelope["action"]
@@ -479,6 +632,8 @@ class TestDisposeEndsTheTurnItStops:
         client.notifications.clear()
 
         await client.request("disposeSession", {"channel": uri})
+        # Elapsed, deliberately: the assertion is that nothing was said at all,
+        # and a wait for silence is over before it starts.
         await client.collect(seconds=0.4)
 
         assert _terminal(client, chat) == []
@@ -491,7 +646,9 @@ class TestDisposeEndsTheTurnItStops:
         # A side chat needs a landed source turn, so the default chat runs one
         # first -- and finishes it, or `createChat` refuses the source.
         await _turn(client, default, text="seed", turn="seed")
-        await client.collect(seconds=0.5)
+        await client.collect_until(
+            lambda: _announced_call(client, default) is not None, timeout=10.0
+        )
         await client.notify(
             "dispatchAction",
             {
@@ -508,7 +665,10 @@ class TestDisposeEndsTheTurnItStops:
                 },
             },
         )
-        await client.collect(seconds=0.6)
+        # Landed, not "probably landed": `createChat` refuses a source turn that
+        # is not in the chat's completed list, and the failure mode of getting
+        # this wrong is an error response the next line asserts past.
+        await client.collect_until(lambda: _landed(tooled, default, "seed"), timeout=10.0)
         created = await client.request(
             "createChat",
             {
@@ -523,6 +683,9 @@ class TestDisposeEndsTheTurnItStops:
         await self._park_a_turn(tooled, client, "ahp-chat:/aside")
         client.notifications.clear()
         await client.request("disposeChat", {"channel": "ahp-chat:/aside"})
+        # Elapsed, deliberately: the assertion that matters here is the negative
+        # one -- the sibling chat was NOT touched -- and it needs real time in
+        # which the host could have touched it.
         await client.collect(seconds=0.4)
 
         assert _terminal(client, "ahp-chat:/aside") == ["chat/turnCancelled"]

@@ -7,7 +7,7 @@ protocol; the separate interop job proves a real client agrees.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 from typing import Any
 
@@ -48,10 +48,56 @@ class FakeClient:
         await self.transport.send({"jsonrpc": "2.0", "method": method, "params": params})
 
     async def collect(self, *, seconds: float = 0.2) -> list[dict[str, Any]]:
-        """Drain notifications for a moment."""
+        """Drain notifications for a fixed moment.
+
+        Costs the full *seconds* whenever the stream goes quiet, which is the
+        normal case. Correct for a NEGATIVE assertion -- "nothing arrived" needs
+        a real wait to mean anything -- and wasteful for a positive one, where
+        :meth:`collect_until` says what it is waiting for and stops there.
+        """
         deadline = asyncio.get_running_loop().time() + seconds
         while asyncio.get_running_loop().time() < deadline:
             remaining = deadline - asyncio.get_running_loop().time()
+            try:
+                message = await asyncio.wait_for(self.transport.receive(), timeout=remaining)
+            except TimeoutError:
+                break
+            if message is None:
+                break
+            self.notifications.append(message)
+        return self.notifications
+
+    async def collect_until(
+        self,
+        ready: Callable[[], bool],
+        *,
+        timeout: float = 5.0,
+    ) -> list[dict[str, Any]]:
+        """Drain until *ready* holds, or *timeout* passes.
+
+        Two reasons this exists, and the second is the important one.
+
+        A fixed `collect(seconds=0.5)` costs half a second every time even when
+        the work finished in five milliseconds. Across this suite that was 398
+        waits totalling 189 seconds of a 313-second run -- sixty per cent of the
+        wall clock spent asleep.
+
+        And a fixed wait is a RACE. It passes on a fast laptop and fails on a
+        loaded CI runner, which is the worst failure a suite can have: one that
+        appears only where nobody can attach a debugger. A condition with a
+        generous timeout is strictly more robust than a sleep short enough to be
+        fast, because the timeout only has to beat the pathological case rather
+        than the typical one.
+
+        Returns rather than raising on timeout, deliberately: the caller's own
+        assertion then produces the message, and "expected the turn to complete,
+        got activeTurn=..." beats "TimeoutError".
+        """
+        deadline = asyncio.get_running_loop().time() + timeout
+        while not ready():
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                break
             try:
                 message = await asyncio.wait_for(self.transport.receive(), timeout=remaining)
             except TimeoutError:

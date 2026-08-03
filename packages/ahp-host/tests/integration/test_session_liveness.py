@@ -93,7 +93,11 @@ async def _client(host: Host, client_id: str = "c1") -> FakeClient:
 
 async def _session(host: Host, client: FakeClient, uri: str) -> str:
     await client.request("createSession", {"channel": uri, "provider": "echo"})
-    await client.collect(seconds=0.3)
+    # Bring-up runs AFTER the create response, and it is what registers the
+    # default chat and publishes `session/ready`. Waited for rather than slept
+    # through: the line below indexes `chats[0]`, so a wait that ends early is
+    # an IndexError rather than a diagnosis.
+    await client.collect_until(lambda: _is_ready(host, uri), timeout=10.0)
     state = (await client.request("subscribe", {"channel": uri}))["result"]["snapshot"]["state"]
     chat: str = state["chats"][0]["resource"]
     return chat
@@ -116,7 +120,7 @@ async def _turn(client: FakeClient, chat: str, *, text: str = "hello", turn: str
 
 
 async def _side_chat(
-    client: FakeClient, session: str, default: str, name: str, *, seed: str = "seed"
+    host: Host, client: FakeClient, session: str, default: str, name: str, *, seed: str = "seed"
 ) -> str:
     """Open a side chat off a real turn in the default chat.
 
@@ -127,13 +131,7 @@ async def _side_chat(
     await _turn(client, default, text=seed, turn="seed-turn")
     # Waited for, not slept through: `createChat` refuses a source turn that
     # has not landed yet, and how long a turn takes is the fixture's business.
-    for _ in range(40):
-        await client.collect(seconds=0.1)
-        state = (await client.request("subscribe", {"channel": default}))["result"]["snapshot"][
-            "state"
-        ]
-        if any(turn.get("id") == "seed-turn" for turn in state.get("turns", [])):
-            break
+    await _ran(host, client, default, "seed-turn")
     result = await client.request(
         "createChat",
         {
@@ -151,6 +149,69 @@ def _state(host: Host, uri: str) -> dict[str, Any]:
     state = host.sequencer.state_of(uri)
     assert isinstance(state, dict)
     return state
+
+
+def _at(host: Host, uri: str) -> dict[str, Any]:
+    """*uri*'s state, or empty. `_state` asserts; a wait predicate must not."""
+    state = host.sequencer.state_of(uri)
+    return state if isinstance(state, dict) else {}
+
+
+def _is_ready(host: Host, uri: str) -> bool:
+    """The session has finished coming up and has its default chat listed."""
+    state = _at(host, uri)
+    return state.get("lifecycle") == "ready" and bool(state.get("chats"))
+
+
+def _summary_status(host: Host, uri: str) -> int:
+    status = host._full_summary(host._sessions[uri])["status"]
+    assert isinstance(status, int)
+    return status
+
+
+async def _ran(
+    host: Host, client: FakeClient, chat: str, turn: str, *, timeout: float = 10.0
+) -> None:
+    """Wait for *turn* to land in *chat*'s completed list.
+
+    `chat/turnStarted` only sets `activeTurn`; a turn reaches `turns` when it
+    completes, so this is the turn genuinely being OVER rather than begun.
+    """
+    await client.collect_until(
+        lambda: any(t.get("id") == turn for t in _at(host, chat).get("turns", [])),
+        timeout=timeout,
+    )
+
+
+async def _titled(
+    host: Host, client: FakeClient, uri: str, title: str, *, timeout: float = 10.0
+) -> None:
+    """Wait for *uri*'s published title to be *title*."""
+    await client.collect_until(lambda: _at(host, uri).get("title") == title, timeout=timeout)
+
+
+async def _no_activity(host: Host, client: FakeClient, uri: str, *, timeout: float = 10.0) -> None:
+    """Wait for *uri* to stop advertising an activity.
+
+    Clearing it is the LAST thing a turn does and it happens in a detached
+    task, so the turn being over does not imply this yet -- the absence of the
+    key is the only honest thing to wait on.
+    """
+    await client.collect_until(lambda: "activity" not in _at(host, uri), timeout=timeout)
+
+
+def _ready_call(client: FakeClient, chat: str) -> str | None:
+    """The id of the tool call *chat* announced, if one has been announced."""
+    for note in client.notifications:
+        if note.get("method") != "action":
+            continue
+        envelope = note["params"]
+        if envelope.get("channel") != chat:
+            continue
+        if envelope["action"].get("type") == "chat/toolCallReady":
+            call_id: str = envelope["action"]["toolCallId"]
+            return call_id
+    return None
 
 
 def _summaries(client: FakeClient, session: str) -> list[dict[str, Any]]:
@@ -173,7 +234,7 @@ class TestTitleFromTheFirstMessage:
         assert _state(host, uri)["title"] == "New Session"
 
         await _turn(client, chat, text="add a retry to the fetch helper")
-        await client.collect(seconds=0.5)
+        await _titled(host, client, uri, "add a retry to the fetch helper")
 
         assert _state(host, uri)["title"] == "add a retry to the fetch helper"
 
@@ -183,9 +244,12 @@ class TestTitleFromTheFirstMessage:
         chat = await _session(host, client, uri)
 
         await _turn(client, chat, text="first", turn="t1")
-        await client.collect(seconds=0.5)
+        await _titled(host, client, uri, "first")
         await _turn(client, chat, text="second", turn="t2")
-        await client.collect(seconds=0.5)
+        # The rename, if it happened, would happen at the START of `t2`: the
+        # host seeds the title before it creates the turn task. So `t2` being
+        # over is strictly past the moment this test is watching for.
+        await _ran(host, client, chat, "t2")
 
         assert _state(host, uri)["title"] == "first"
 
@@ -204,10 +268,10 @@ class TestTitleFromTheFirstMessage:
                 "action": {"type": "session/titleChanged", "title": "Refactor"},
             },
         )
-        await client.collect(seconds=0.3)
+        await _titled(host, client, uri, "Refactor")
 
         await _turn(client, chat, text="do the thing")
-        await client.collect(seconds=0.5)
+        await _ran(host, client, chat, "t1")
 
         assert _state(host, uri)["title"] == "Refactor"
 
@@ -217,11 +281,13 @@ class TestTitleFromTheFirstMessage:
         client = await _client(host)
         uri = "echo:/t-4"
         default = await _session(host, client, uri)
-        aside = await _side_chat(client, uri, default, "ahp-chat:/aside", seed="build the parser")
+        aside = await _side_chat(
+            host, client, uri, default, "ahp-chat:/aside", seed="build the parser"
+        )
         assert _state(host, uri)["title"] == "build the parser"
 
         await _turn(client, aside, text="what does this do?", turn="aside-1")
-        await client.collect(seconds=0.5)
+        await _ran(host, client, aside, "aside-1")
 
         assert _state(host, uri)["title"] == "build the parser"
 
@@ -231,7 +297,7 @@ class TestTitleFromTheFirstMessage:
         chat = await _session(host, client, uri)
 
         await _turn(client, chat, text="   \n  ")
-        await client.collect(seconds=0.5)
+        await _ran(host, client, chat, "t1")
 
         assert _state(host, uri)["title"] == "New Session"
 
@@ -286,19 +352,11 @@ class TestActivity:
                 },
             },
         )
-        await client.collect(seconds=0.5)
 
     def _ready(self, client: FakeClient, chat: str) -> str:
-        for note in client.notifications:
-            if note.get("method") != "action":
-                continue
-            envelope = note["params"]
-            if envelope.get("channel") != chat:
-                continue
-            if envelope["action"].get("type") == "chat/toolCallReady":
-                call_id: str = envelope["action"]["toolCallId"]
-                return call_id
-        raise AssertionError("no tool call was ever announced")
+        call_id = _ready_call(client, chat)
+        assert call_id is not None, "no tool call was ever announced"
+        return call_id
 
     async def test_a_running_tool_names_itself(self, tooled: Host) -> None:
         client = await _client(tooled)
@@ -307,13 +365,24 @@ class TestActivity:
         await client.request("subscribe", {"channel": chat})
 
         await _turn(client, chat, text="hello")
-        await client.collect(seconds=0.5)
+        # BOTH, because the confirmation below needs the announced call id and
+        # stopping at the activity alone could leave that notification still in
+        # the transport -- "no tool call was ever announced" for a call that
+        # simply had not been read yet.
+        await client.collect_until(
+            lambda: (
+                _at(tooled, uri).get("activity") == "Echo Tool"
+                and _ready_call(client, chat) is not None
+            ),
+            timeout=10.0,
+        )
 
         # The turn is parked on the confirmation, so the tool is genuinely
         # running right now.
         assert _state(tooled, uri).get("activity") == "Echo Tool"
 
         await self._confirm(client, chat, self._ready(client, chat))
+        await _no_activity(tooled, client, uri)
         assert "activity" not in _state(tooled, uri), "activity outlived the turn"
 
     async def test_the_summary_moves_with_it(self, tooled: Host) -> None:
@@ -327,7 +396,12 @@ class TestActivity:
         client.notifications.clear()
 
         await _turn(client, chat, text="hello")
-        await client.collect(seconds=0.5)
+        await client.collect_until(
+            lambda: any(
+                changes.get("activity") == "Echo Tool" for changes in _summaries(client, uri)
+            ),
+            timeout=10.0,
+        )
 
         assert any(changes.get("activity") == "Echo Tool" for changes in _summaries(client, uri)), (
             "the session list never saw it"
@@ -342,7 +416,9 @@ class TestActivity:
         await client.request("subscribe", {"channel": chat})
 
         await _turn(client, chat, text="hello")
-        await client.collect(seconds=0.5)
+        await client.collect_until(
+            lambda: _at(tooled, uri).get("activity") == "Echo Tool", timeout=10.0
+        )
         assert _state(tooled, uri).get("activity") == "Echo Tool"
 
         await client.notify(
@@ -353,7 +429,7 @@ class TestActivity:
                 "action": {"type": "chat/turnCancelled", "turnId": "t1"},
             },
         )
-        await client.collect(seconds=0.6)
+        await _no_activity(tooled, client, uri)
 
         assert "activity" not in _state(tooled, uri)
 
@@ -361,7 +437,7 @@ class TestActivity:
 class TestUnread:
     """`session/isReadChanged` is a two-party protocol and we shipped one half."""
 
-    async def _read(self, client: FakeClient, uri: str, seq: int) -> None:
+    async def _read(self, host: Host, client: FakeClient, uri: str, seq: int) -> None:
         await client.notify(
             "dispatchAction",
             {
@@ -370,18 +446,24 @@ class TestUnread:
                 "action": {"type": "session/isReadChanged", "isRead": True},
             },
         )
-        await client.collect(seconds=0.3)
+        await client.collect_until(
+            lambda: bool(_at(host, uri).get("status", 0) & SessionStatus.IS_READ), timeout=10.0
+        )
 
     async def test_an_answer_makes_a_read_session_unread_again(self, host: Host) -> None:
         client = await _client(host)
         uri = "echo:/u-1"
         chat = await _session(host, client, uri)
         await client.request("subscribe", {"channel": uri})
-        await self._read(client, uri, 1)
+        await self._read(host, client, uri, 1)
         assert _state(host, uri)["status"] & SessionStatus.IS_READ
 
         await _turn(client, chat, text="hello")
-        await client.collect(seconds=0.8)
+        # The dot comes back from a DETACHED task after the turn, so the turn
+        # being over does not imply it yet -- this waits for the bit itself.
+        await client.collect_until(
+            lambda: not _at(host, uri).get("status", 0) & SessionStatus.IS_READ, timeout=10.0
+        )
 
         assert not _state(host, uri)["status"] & SessionStatus.IS_READ
 
@@ -391,7 +473,7 @@ class TestUnread:
         uri = "echo:/u-2"
         chat = await _session(host, client, uri)
         await client.request("subscribe", {"channel": uri})
-        await self._read(client, uri, 1)
+        await self._read(host, client, uri, 1)
         await client.notify(
             "dispatchAction",
             {
@@ -400,9 +482,15 @@ class TestUnread:
                 "action": {"type": "session/activeClientSet", "clientId": "c1"},
             },
         )
-        await client.collect(seconds=0.3)
+        # The whole point of the test is that somebody is WATCHING, and that is
+        # `activeClients`. Racing the turn against this dispatch would test the
+        # other branch by accident.
+        await client.collect_until(lambda: bool(_at(host, uri).get("activeClients")), timeout=10.0)
 
         await _turn(client, chat, text="hello")
+        # Fixed on purpose. The claim is that nothing arrived -- `_mark_unread`
+        # runs detached after the turn and DECLINES -- and a condition wait on
+        # a bit that is already set returns instantly and proves nothing.
         await client.collect(seconds=0.8)
 
         assert _state(host, uri)["status"] & SessionStatus.IS_READ
@@ -417,6 +505,9 @@ class TestUnread:
         client.notifications.clear()
 
         await _turn(client, chat, text="hello")
+        # Fixed on purpose, same reason: "one action per turn that was already
+        # unread is pure noise" is a claim about what was NOT published, and
+        # `_mark_unread` is detached, so only elapsed time can support it.
         await client.collect(seconds=0.8)
 
         assert not any("isRead" in str(changes) for changes in _summaries(client, uri))
@@ -430,13 +521,20 @@ class TestSideChatPromotion:
         client = await _client(slow)
         uri = "echo:/p-1"
         default = await _session(slow, client, uri)
-        worker = await _side_chat(client, uri, default, "ahp-chat:/worker")
+        worker = await _side_chat(slow, client, uri, default, "ahp-chat:/worker")
 
         await _turn(client, worker, text="hello there, this takes a while", turn="w1")
-        await asyncio.sleep(0.25)
-        status = slow._full_summary(slow._sessions[uri])["status"]
+        # Sampled at the first moment the summary claims to be working, not at
+        # a fixed 0.25s -- the turn takes 0.3s, so the old sample was one loaded
+        # runner away from landing after the turn it was trying to observe.
+        # Both assertions read the SAME sample: "Idle and InProgress at once"
+        # is only a statement about one snapshot.
+        await client.collect_until(
+            lambda: bool(_summary_status(slow, uri) & SessionStatus.IN_PROGRESS), timeout=10.0
+        )
+        status = _summary_status(slow, uri)
 
-        await client.collect(seconds=1.2)
+        await _ran(slow, client, worker, "w1")
         assert status & SessionStatus.IN_PROGRESS, "a working side chat left the session Idle"
         assert not status & SessionStatus.IDLE, "Idle and InProgress at once"
 
@@ -444,12 +542,22 @@ class TestSideChatPromotion:
         client = await _client(slow)
         uri = "echo:/p-3"
         default = await _session(slow, client, uri)
-        worker = await _side_chat(client, uri, default, "ahp-chat:/worker")
+        worker = await _side_chat(slow, client, uri, default, "ahp-chat:/worker")
 
         await _turn(client, worker, text="hi", turn="w1")
-        await client.collect(seconds=1.5)
+        # The turn having RUN is half the condition and it is the half that
+        # keeps this honest: a bare wait for "not in progress" is satisfied
+        # before the turn is picked up at all, and would pass on a host that
+        # never promotes a side chat in the first place.
+        await client.collect_until(
+            lambda: (
+                any(t.get("id") == "w1" for t in _at(slow, worker).get("turns", []))
+                and not _summary_status(slow, uri) & SessionStatus.IN_PROGRESS
+            ),
+            timeout=10.0,
+        )
 
-        status = slow._full_summary(slow._sessions[uri])["status"]
+        status = _summary_status(slow, uri)
         assert not status & SessionStatus.IN_PROGRESS
 
     async def test_needing_input_outranks_merely_working(self, slow: Host) -> None:
@@ -459,13 +567,21 @@ class TestSideChatPromotion:
         client = await _client(slow)
         uri = "echo:/p-2"
         default = await _session(slow, client, uri)
-        busy = await _side_chat(client, uri, default, "ahp-chat:/a-busy")
-        blocked = await _side_chat(client, uri, default, "ahp-chat:/z-blocked")
+        busy = await _side_chat(slow, client, uri, default, "ahp-chat:/a-busy")
+        blocked = await _side_chat(slow, client, uri, default, "ahp-chat:/z-blocked")
 
-        # Both really running...
+        # Both really running -- waited for rather than assumed after 0.1s,
+        # because a chat's status is DERIVED from its active turn and the
+        # publishes below say nothing about a chat that has not started one.
         await _turn(client, busy, text="hello there, this takes a while", turn="b1")
         await _turn(client, blocked, text="hello there, this takes a while", turn="z1")
-        await asyncio.sleep(0.1)
+        await client.collect_until(
+            lambda: (
+                _at(slow, busy).get("activeTurn") is not None
+                and _at(slow, blocked).get("activeTurn") is not None
+            ),
+            timeout=10.0,
+        )
         # ...and one of them really waiting on a human. Published exactly as the
         # host publishes it when a provider parks, rather than written into
         # state -- the chat's status is DERIVED from its active turn, so a
@@ -487,7 +603,9 @@ class TestSideChatPromotion:
         assert summary["status"] & SessionStatus.INPUT_NEEDED == SessionStatus.INPUT_NEEDED
         assert summary["activity"] == "blocked", "the busier-but-earlier chat won"
 
-        await client.collect(seconds=1.5)
+        # Let both turns finish rather than tearing the host down through them.
+        await _ran(slow, client, busy, "b1")
+        await _ran(slow, client, blocked, "z1")
 
 
 class TestPromotionRank:

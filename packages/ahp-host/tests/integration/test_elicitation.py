@@ -56,10 +56,16 @@ async def _attach(host: Host, client_id: str) -> FakeClient:
     return client
 
 
-async def _open_chat(client: FakeClient, uri: str) -> str:
+async def _open_chat(host: Host, client: FakeClient, uri: str) -> str:
     """Create a session and subscribe to its chat, without starting a turn."""
     await client.request("createSession", {"channel": uri, "provider": "echo"})
-    await client.collect(seconds=0.3)
+    # The default chat is registered after the response goes out, and the next
+    # line indexes `chats[0]`: wait for the entry itself rather than for a fixed
+    # moment that was long enough only on an idle machine.
+    await client.collect_until(
+        lambda: bool((host.sequencer.state_of(uri) or {}).get("chats")),
+        timeout=10.0,
+    )
     state = (await client.request("subscribe", {"channel": uri}))["result"]["snapshot"]["state"]
     chat_uri: str = state["chats"][0]["resource"]
     await client.request("subscribe", {"channel": chat_uri})
@@ -82,8 +88,8 @@ async def _send(client: FakeClient, chat_uri: str) -> None:
     )
 
 
-async def _start_turn(client: FakeClient, uri: str) -> str:
-    chat_uri = await _open_chat(client, uri)
+async def _start_turn(host: Host, client: FakeClient, uri: str) -> str:
+    chat_uri = await _open_chat(host, client, uri)
     await _send(client, chat_uri)
     return chat_uri
 
@@ -96,10 +102,48 @@ def _open_request(client: FakeClient, chat_uri: str) -> dict[str, Any] | None:
     return None
 
 
+def _open_part(host: Host, chat_uri: str) -> dict[str, Any] | None:
+    """The unresolved input-request part in the chat's live state, if any."""
+    active = (host.sequencer.state_of(chat_uri) or {}).get("activeTurn") or {}
+    for part in active.get("responseParts", []):
+        if part.get("kind") == "inputRequest" and "response" not in part:
+            answered: dict[str, Any] = part
+            return answered
+    return None
+
+
+async def _asked(client: FakeClient, chat_uri: str, *, timeout: float = 10.0) -> None:
+    """Wait until the provider's input request has reached *client*.
+
+    The request id every caller then dispatches against comes off the CLIENT's
+    action stream, so this waits for the notification rather than for the host
+    state that precedes it -- the state landing first is exactly the race a
+    fixed wait papered over.
+    """
+    await client.collect_until(lambda: _open_request(client, chat_uri) is not None, timeout=timeout)
+
+
+def _deltas(client: FakeClient, chat_uri: str) -> str:
+    return "".join(
+        envelope["action"].get("content", "")
+        for envelope in client.actions(chat_uri)
+        if envelope["action"]["type"] == "chat/delta"
+    )
+
+
+async def _said(client: FakeClient, chat_uri: str, text: str, *, timeout: float = 10.0) -> None:
+    """Wait until *text* appears in the deltas *client* has seen on *chat_uri*."""
+    await client.collect_until(lambda: text in _deltas(client, chat_uri), timeout=timeout)
+
+
 class TestElicitation:
     async def test_the_agent_suspends_and_publishes_a_request(self, elicit: Host) -> None:
         client = await _attach(elicit, "solo")
-        chat_uri = await _start_turn(client, "echo:/elicit-1")
+        chat_uri = await _start_turn(elicit, client, "echo:/elicit-1")
+        # NOT a condition wait: the second half of this test asserts the turn is
+        # STILL OPEN, which is a claim about what did not happen next. Returning
+        # the instant the request arrives would let a host that published the
+        # request and then ended the turn pass. This one keeps its elapsed wait.
         await client.collect(seconds=0.4)
 
         request = _open_request(client, chat_uri)
@@ -116,8 +160,8 @@ class TestElicitation:
 
     async def test_answering_resumes_the_turn_with_the_answer(self, elicit: Host) -> None:
         client = await _attach(elicit, "solo")
-        chat_uri = await _start_turn(client, "echo:/elicit-2")
-        await client.collect(seconds=0.4)
+        chat_uri = await _start_turn(elicit, client, "echo:/elicit-2")
+        await _asked(client, chat_uri)
         request = _open_request(client, chat_uri)
         assert request is not None
 
@@ -136,21 +180,17 @@ class TestElicitation:
                 },
             },
         )
-        await client.collect(seconds=0.5)
+        await _said(client, chat_uri, "HELLO")
 
-        deltas = "".join(
-            envelope["action"].get("content", "")
-            for envelope in client.actions(chat_uri)
-            if envelope["action"]["type"] == "chat/delta"
-        )
+        deltas = _deltas(client, chat_uri)
         assert "HELLO" in deltas, f"the answer never reached the provider: {deltas!r}"
 
     async def test_declining_is_delivered_as_an_outcome_not_a_cancellation(
         self, elicit: Host
     ) -> None:
         client = await _attach(elicit, "solo")
-        chat_uri = await _start_turn(client, "echo:/elicit-3")
-        await client.collect(seconds=0.4)
+        chat_uri = await _start_turn(elicit, client, "echo:/elicit-3")
+        await _asked(client, chat_uri)
         request = _open_request(client, chat_uri)
         assert request is not None
 
@@ -166,12 +206,8 @@ class TestElicitation:
                 },
             },
         )
-        await client.collect(seconds=0.5)
-        deltas = "".join(
-            envelope["action"].get("content", "")
-            for envelope in client.actions(chat_uri)
-            if envelope["action"]["type"] == "chat/delta"
-        )
+        await _said(client, chat_uri, "(cancelled)")
+        deltas = _deltas(client, chat_uri)
         assert "(cancelled)" in deltas
 
     async def test_cancelling_the_turn_frees_the_suspended_provider(self, elicit: Host) -> None:
@@ -179,8 +215,8 @@ class TestElicitation:
         the provider stays blocked forever and the chat never leaves
         InputNeeded."""
         client = await _attach(elicit, "solo")
-        chat_uri = await _start_turn(client, "echo:/elicit-4")
-        await client.collect(seconds=0.4)
+        chat_uri = await _start_turn(elicit, client, "echo:/elicit-4")
+        await client.collect_until(lambda: len(elicit.pending) == 1, timeout=10.0)
         assert len(elicit.pending) == 1
 
         await client.notify(
@@ -191,7 +227,10 @@ class TestElicitation:
                 "action": {"type": "chat/turnCancelled", "turnId": "t1"},
             },
         )
-        await client.collect(seconds=0.4)
+        # A real transition, not a vacuous one: the assertion above established
+        # the count was 1 before the cancel, so reaching 0 can only mean the
+        # cancel freed it.
+        await client.collect_until(lambda: len(elicit.pending) == 0, timeout=10.0)
         assert len(elicit.pending) == 0, "a cancelled turn left its request parked"
 
     async def test_an_unknown_request_id_is_rejected_and_echoed(self, elicit: Host) -> None:
@@ -199,8 +238,8 @@ class TestElicitation:
         unresolved input-request part has the matching requestId." The reducers
         check none of this."""
         client = await _attach(elicit, "solo")
-        chat_uri = await _start_turn(client, "echo:/elicit-5")
-        await client.collect(seconds=0.4)
+        chat_uri = await _start_turn(elicit, client, "echo:/elicit-5")
+        await _asked(client, chat_uri)
 
         await client.notify(
             "dispatchAction",
@@ -214,7 +253,16 @@ class TestElicitation:
                 },
             },
         )
-        await client.collect(seconds=0.3)
+        # The echo is what proves the forged action was PROCESSED, which is what
+        # makes the `pending` count below mean anything: a bare sleep only ever
+        # guessed at that.
+        await client.collect_until(
+            lambda: any(
+                envelope["action"]["type"] == "chat/inputCompleted"
+                for envelope in client.actions(chat_uri)
+            ),
+            timeout=10.0,
+        )
         echoes = [
             envelope
             for envelope in client.actions(chat_uri)
@@ -235,10 +283,12 @@ class TestElicitation:
 
         # Both attached before the turn, which is the shape AHP is for: two
         # front-ends on one live session.
-        chat_uri = await _open_chat(alice, "echo:/elicit-6")
+        chat_uri = await _open_chat(elicit, alice, "echo:/elicit-6")
         await bob.request("subscribe", {"channel": chat_uri})
         await _send(alice, chat_uri)
-        await asyncio.gather(alice.collect(seconds=0.4), bob.collect(seconds=0.4))
+        # Both, because both are subscribed and both connections have to keep
+        # draining; the assertion below reads the request off BOB.
+        await asyncio.gather(_asked(alice, chat_uri), _asked(bob, chat_uri))
 
         request = _open_request(bob, chat_uri)
         assert request is not None, "the peer never saw the open request"
@@ -258,13 +308,9 @@ class TestElicitation:
                 },
             },
         )
-        await asyncio.gather(alice.collect(seconds=0.5), bob.collect(seconds=0.5))
+        await asyncio.gather(_said(alice, chat_uri, "HELLO"), _said(bob, chat_uri, "HELLO"))
 
-        deltas = "".join(
-            envelope["action"].get("content", "")
-            for envelope in alice.actions(chat_uri)
-            if envelope["action"]["type"] == "chat/delta"
-        )
+        deltas = _deltas(alice, chat_uri)
         assert "HELLO" in deltas, "the originating client never saw the resumed turn"
 
     async def test_a_late_subscriber_sees_the_open_request_in_its_snapshot(
@@ -278,8 +324,10 @@ class TestElicitation:
         same path a reconnecting VS Code takes.
         """
         alice = await _attach(elicit, "alice")
-        chat_uri = await _start_turn(alice, "echo:/elicit-7")
-        await alice.collect(seconds=0.4)
+        chat_uri = await _start_turn(elicit, alice, "echo:/elicit-7")
+        # The latecomer reads the request out of SHARED STATE, so that is what
+        # this waits for -- the same object the snapshot below is built from.
+        await alice.collect_until(lambda: _open_part(elicit, chat_uri) is not None, timeout=10.0)
 
         latecomer = await _attach(elicit, "latecomer")
         snapshot = (await latecomer.request("subscribe", {"channel": chat_uri}))["result"][
@@ -295,10 +343,10 @@ class TestElicitation:
         every subscriber observes the merged answers map." """
         alice = await _attach(elicit, "alice")
         bob = await _attach(elicit, "bob")
-        chat_uri = await _open_chat(alice, "echo:/elicit-8")
+        chat_uri = await _open_chat(elicit, alice, "echo:/elicit-8")
         await bob.request("subscribe", {"channel": chat_uri})
         await _send(alice, chat_uri)
-        await asyncio.gather(alice.collect(seconds=0.4), bob.collect(seconds=0.4))
+        await asyncio.gather(_asked(alice, chat_uri), _asked(bob, chat_uri))
         request = _open_request(bob, chat_uri)
         assert request is not None
 
@@ -316,7 +364,18 @@ class TestElicitation:
                 },
             },
         )
-        await asyncio.gather(alice.collect(seconds=0.3), bob.collect(seconds=0.3))
+
+        # Alice's accept below carries no answer of its own, so it may only be
+        # dispatched once Bob's draft is IN the merged state -- otherwise the
+        # test measures nothing but the ordering of two sleeps.
+        def drafted() -> bool:
+            request_state = (_open_part(elicit, chat_uri) or {}).get("request") or {}
+            return "style" in (request_state.get("answers") or {})
+
+        await asyncio.gather(
+            bob.collect_until(drafted, timeout=10.0),
+            alice.collect_until(drafted, timeout=10.0),
+        )
         await alice.notify(
             "dispatchAction",
             {
@@ -329,11 +388,7 @@ class TestElicitation:
                 },
             },
         )
-        await alice.collect(seconds=0.5)
+        await _said(alice, chat_uri, "HELLO")
 
-        deltas = "".join(
-            envelope["action"].get("content", "")
-            for envelope in alice.actions(chat_uri)
-            if envelope["action"]["type"] == "chat/delta"
-        )
+        deltas = _deltas(alice, chat_uri)
         assert "HELLO" in deltas, "the draft from the other client was not carried into the outcome"

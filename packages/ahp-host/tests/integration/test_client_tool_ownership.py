@@ -67,12 +67,19 @@ async def _attach(host: Host, client_id: str) -> FakeClient:
     return client
 
 
-async def _session(client: FakeClient, uri: str, *, owner: str | None = None) -> tuple[str, str]:
+async def _session(
+    host: Host, client: FakeClient, uri: str, *, owner: str | None = None
+) -> tuple[str, str]:
     params: dict[str, Any] = {"channel": uri, "provider": "echo"}
     if owner is not None:
         params["activeClient"] = {"clientId": owner, "displayName": "Owner", "tools": _TOOLS}
     await client.request("createSession", params)
-    await client.collect(seconds=0.3)
+    # The default chat, not a moment: the next line indexes `chats[0]` out of
+    # the snapshot, so "the session has a chat" is the condition the fixed wait
+    # this replaces was standing in for.
+    await client.collect_until(
+        lambda: bool((host.sequencer.state_of(uri) or {}).get("chats")), timeout=10.0
+    )
     state = (await client.request("subscribe", {"channel": uri}))["result"]["snapshot"]["state"]
     chat_uri: str = state["chats"][0]["resource"]
     await client.request("subscribe", {"channel": chat_uri})
@@ -107,21 +114,89 @@ def _action(client: FakeClient, channel: str, kind: str) -> dict[str, Any] | Non
     return None
 
 
-def _rejection(client: FakeClient, channel: str, kind: str, origin: str) -> str | None:
-    """The `rejectionReason` on this client's own echoed action, if any.
+def _echoes(client: FakeClient, channel: str, kind: str, origin: str) -> list[dict[str, Any]]:
+    """This client's own echoes of *kind*, newest last.
 
     Filtered by origin because the host publishes actions of the same type
     itself, and an unfiltered search finds the host's frame instead.
     """
-    echoes = [
+    return [
         envelope
         for envelope in client.actions(channel)
         if envelope["action"]["type"] == kind
         and envelope.get("origin", {}).get("clientId") == origin
     ]
+
+
+def _rejection(client: FakeClient, channel: str, kind: str, origin: str) -> str | None:
+    """The `rejectionReason` on this client's own echoed action, if any."""
+    echoes = _echoes(client, channel, kind, origin)
     assert echoes, "a rejected action MUST still be echoed"
     reason: str | None = echoes[-1].get("rejectionReason")
     return reason
+
+
+async def _refused(
+    client: FakeClient, channel: str, kind: str, origin: str, *, timeout: float = 10.0
+) -> None:
+    """Wait for this client's own *kind* to come back carrying a rejection.
+
+    The rejection IS the answer here: `_dispatch_action` publishes the echo and
+    returns, so a refused action never reaches the park at all. Waiting for the
+    echo rather than for a fixed moment leaves the caller's own assertions to
+    say what went wrong -- an unrefused action times out and then fails on
+    "the denial was not refused" rather than on a TimeoutError.
+    """
+    await client.collect_until(
+        lambda: any(e.get("rejectionReason") for e in _echoes(client, channel, kind, origin)),
+        timeout=timeout,
+    )
+
+
+async def _parked(host: Host, client: FakeClient, chat_uri: str, *, timeout: float = 10.0) -> None:
+    """Wait for the call to be RUNNING on exactly one suspended request.
+
+    Both halves, and the status is the load-bearing one. `run_client_tool` opens
+    the park BEFORE it publishes `chat/toolCallStart`, and `chat/toolCallReady`
+    -- the frame that actually moves the call to `running` -- comes after that
+    again. So `len(host.pending) == 1` is true a moment before the state every
+    caller of this goes on to assert on, and a wait on the park count alone
+    returns early and fails on `'streaming' != 'running'` under any hiccup in
+    that window. Measured: half a millisecond of delay on the ready publish is
+    enough.
+    """
+    await client.collect_until(
+        lambda: len(host.pending) == 1 and _tool_call(host, chat_uri).get("status") == "running",
+        timeout=timeout,
+    )
+
+
+async def _confirming(
+    host: Host, client: FakeClient, chat_uri: str, *, timeout: float = 10.0
+) -> None:
+    """Wait for the call to reach `pending-confirmation`.
+
+    The STATUS, not the park count: these tests turn on which kind of answer a
+    call is waiting for, and a park exists a moment before the reducer has moved
+    the call into the state that says so.
+    """
+    await client.collect_until(
+        lambda: _tool_call(host, chat_uri).get("status") == "pending-confirmation",
+        timeout=timeout,
+    )
+
+
+async def _turn_over(client: FakeClient, chat_uri: str, *, timeout: float = 10.0) -> None:
+    """Wait until *client* holds the turn's terminal frame.
+
+    Client-side rather than host-side on purpose: frames arrive in order, so
+    once `chat/turnComplete` is in hand every delta of that turn is too -- and
+    the deltas are what the assertions after this read. A host-side condition
+    would be satisfied while those frames were still in flight.
+    """
+    await client.collect_until(
+        lambda: _action(client, chat_uri, "chat/turnComplete") is not None, timeout=timeout
+    )
 
 
 def _deltas(client: FakeClient, chat_uri: str) -> str:
@@ -167,9 +242,9 @@ class TestParkKind:
 
     async def _park(self, host: Host, uri: str) -> tuple[FakeClient, str, str]:
         client = await _attach(host, "owner")
-        session_uri, chat_uri = await _session(client, uri, owner="owner")
+        session_uri, chat_uri = await _session(host, client, uri, owner="owner")
         await _send(client, chat_uri)
-        await client.collect(seconds=0.4)
+        await _parked(host, client, chat_uri)
         assert len(host.pending) == 1, "the provider never asked the client to run anything"
         return client, session_uri, chat_uri
 
@@ -201,7 +276,7 @@ class TestParkKind:
                 },
             },
         )
-        await client.collect(seconds=0.5)
+        await _turn_over(client, chat_uri)
 
         deltas = _deltas(client, chat_uri)
         assert "refused" in deltas, deltas
@@ -227,7 +302,7 @@ class TestParkKind:
                 "reason": "denied",
             },
         )
-        await client.collect(seconds=0.4)
+        await _refused(client, chat_uri, "chat/toolCallConfirmed", "owner")
 
         reason = _rejection(client, chat_uri, "chat/toolCallConfirmed", "owner")
         assert reason is not None, "the denial was not refused"
@@ -253,7 +328,7 @@ class TestParkKind:
                 "confirmed": "user-action",
             },
         )
-        await client.collect(seconds=0.4)
+        await _refused(client, chat_uri, "chat/toolCallConfirmed", "owner")
 
         reason = _rejection(client, chat_uri, "chat/toolCallConfirmed", "owner")
         assert reason is not None, "the action was not refused"
@@ -270,9 +345,9 @@ class TestParkKind:
         host = Host(EchoProvider(confirm_tools=True), LoopbackSingleUserPolicy())
         try:
             client = await _attach(host, "owner")
-            _, chat_uri = await _session(client, "echo:/park-complete")
+            _, chat_uri = await _session(host, client, "echo:/park-complete")
             await _send(client, chat_uri)
-            await client.collect(seconds=0.4)
+            await _confirming(host, client, chat_uri)
             assert _tool_call(host, chat_uri)["status"] == "pending-confirmation"
 
             await _dispatch(
@@ -285,7 +360,7 @@ class TestParkKind:
                     "result": {"content": [], "success": True, "pastTenseMessage": "Did it"},
                 },
             )
-            await client.collect(seconds=0.4)
+            await _refused(client, chat_uri, "chat/toolCallComplete", "owner")
 
             reason = _rejection(client, chat_uri, "chat/toolCallComplete", "owner")
             assert reason is not None, "the action was not refused"
@@ -314,11 +389,11 @@ class TestOwnership:
         consumed a result from a client that was never asked, and the transcript
         recorded it as the owner's work."""
         owner = await _attach(host, "owner")
-        _, chat_uri = await _session(owner, "echo:/own-1", owner="owner")
+        _, chat_uri = await _session(host, owner, "echo:/own-1", owner="owner")
         intruder = await _attach(host, "intruder")
         await intruder.request("subscribe", {"channel": chat_uri})
         await _send(owner, chat_uri)
-        await owner.collect(seconds=0.4)
+        await _parked(host, owner, chat_uri)
         assert len(host.pending) == 1
 
         await _dispatch(
@@ -331,7 +406,7 @@ class TestOwnership:
                 "result": {"content": [], "success": True, "pastTenseMessage": "Not mine to run"},
             },
         )
-        await intruder.collect(seconds=0.4)
+        await _refused(intruder, chat_uri, "chat/toolCallComplete", "intruder")
 
         reason = _rejection(intruder, chat_uri, "chat/toolCallComplete", "intruder")
         assert reason is not None, "the intruder's completion was not refused"
@@ -342,9 +417,9 @@ class TestOwnership:
     async def test_the_owner_still_completes_it(self, host: Host) -> None:
         """The ownership check must not break the flow it protects."""
         owner = await _attach(host, "owner")
-        _, chat_uri = await _session(owner, "echo:/own-2", owner="owner")
+        _, chat_uri = await _session(host, owner, "echo:/own-2", owner="owner")
         await _send(owner, chat_uri)
-        await owner.collect(seconds=0.4)
+        await _parked(host, owner, chat_uri)
 
         await _dispatch(
             owner,
@@ -360,7 +435,7 @@ class TestOwnership:
                 },
             },
         )
-        await owner.collect(seconds=0.5)
+        await _turn_over(owner, chat_uri)
         assert "ran it locally" in _deltas(owner, chat_uri)
         assert len(host.pending) == 0
 
@@ -372,11 +447,11 @@ class TestOwnership:
         host = Host(EchoProvider(confirm_tools=True), LoopbackSingleUserPolicy())
         try:
             starter = await _attach(host, "starter")
-            _, chat_uri = await _session(starter, "echo:/own-3")
+            _, chat_uri = await _session(host, starter, "echo:/own-3")
             approver = await _attach(host, "approver")
             await approver.request("subscribe", {"channel": chat_uri})
             await _send(starter, chat_uri)
-            await starter.collect(seconds=0.4)
+            await _confirming(host, starter, chat_uri)
 
             await _dispatch(
                 approver,
@@ -389,7 +464,18 @@ class TestOwnership:
                     "confirmed": "user-action",
                 },
             )
-            await approver.collect(seconds=0.5)
+            # Both halves: the echo, which `_rejection` needs before it can
+            # report the absence of a reason, and the resolved park, which is
+            # what an accepted approval actually does. A refusal would leave the
+            # park open, so this waits out its timeout and then fails on the
+            # assertion rather than passing early on a half-applied frame.
+            await approver.collect_until(
+                lambda: (
+                    bool(_echoes(approver, chat_uri, "chat/toolCallConfirmed", "approver"))
+                    and len(host.pending) == 0
+                ),
+                timeout=10.0,
+            )
             assert _rejection(approver, chat_uri, "chat/toolCallConfirmed", "approver") is None
             assert len(host.pending) == 0
         finally:
@@ -417,12 +503,18 @@ class TestOwnerLeaves:
 
     async def _park(self, host: Host, uri: str) -> tuple[FakeClient, FakeClient, str, str]:
         owner = await _attach(host, "owner")
-        session_uri, chat_uri = await _session(owner, uri, owner="owner")
+        session_uri, chat_uri = await _session(host, owner, uri, owner="owner")
         watcher = await _attach(host, "watcher")
         await watcher.request("subscribe", {"channel": session_uri})
         await watcher.request("subscribe", {"channel": chat_uri})
         await _send(owner, chat_uri)
-        await owner.collect(seconds=0.4)
+        # The advertisement as well as the park: these tests are about what
+        # happens to `inputNeeded` when the owner goes, so it has to be there
+        # before the owner goes.
+        await owner.collect_until(
+            lambda: len(host.pending) == 1 and bool(_input_needed(host, session_uri)),
+            timeout=10.0,
+        )
         assert len(host.pending) == 1
         assert _input_needed(host, session_uri)[0]["kind"] == "toolClientExecution"
         return owner, watcher, session_uri, chat_uri
@@ -431,7 +523,18 @@ class TestOwnerLeaves:
         owner, watcher, session_uri, chat_uri = await self._park(host, "echo:/leave-1")
 
         await owner.transport.close()
-        await watcher.collect(seconds=0.6)
+        # Every end state this test asserts, including the watcher's own copy of
+        # the terminal frame -- `chat/turnComplete` is the last of them, so a
+        # condition that stopped short of it could still be read too early.
+        await watcher.collect_until(
+            lambda: (
+                _tool_call(host, chat_uri).get("status") == "completed"
+                and _input_needed(host, session_uri) == []
+                and len(host.pending) == 0
+                and _action(watcher, chat_uri, "chat/turnComplete") is not None
+            ),
+            timeout=10.0,
+        )
 
         call = _tool_call(host, chat_uri)
         assert call["status"] == "completed", "the call is still waiting on a client that is gone"
@@ -450,7 +553,14 @@ class TestOwnerLeaves:
         await _dispatch(
             owner, session_uri, {"type": "session/activeClientRemoved", "clientId": "owner"}
         )
-        await watcher.collect(seconds=0.6)
+        await watcher.collect_until(
+            lambda: (
+                _tool_call(host, chat_uri).get("status") == "completed"
+                and _input_needed(host, session_uri) == []
+                and len(host.pending) == 0
+            ),
+            timeout=10.0,
+        )
 
         call = _tool_call(host, chat_uri)
         assert call["status"] == "completed"
@@ -464,6 +574,10 @@ class TestOwnerLeaves:
         owner, watcher, session_uri, chat_uri = await self._park(host, "echo:/leave-3")
 
         await watcher.transport.close()
+        # A FIXED wait, kept deliberately. Every assertion below is negative --
+        # nothing changed -- and the state they read already holds, so a
+        # condition wait would return instantly and prove only that the host had
+        # not yet reacted to the disconnect. The elapsed time IS the test.
         await owner.collect(seconds=0.4)
 
         assert _tool_call(host, chat_uri)["status"] == "running"

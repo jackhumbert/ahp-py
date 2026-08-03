@@ -94,6 +94,41 @@ def _state(host: Host, uri: str) -> dict[str, Any]:
     return state
 
 
+async def _settled(host: Host, client: FakeClient, chat: str, turn: str) -> None:
+    """Wait for *turn* to reach the chat's completed list.
+
+    Named rather than slept through: `createChat` refuses a source turn that has
+    not landed, so the fixed wait this replaces was a race whose failure mode
+    was an error response the caller then asserted past.
+    """
+    await client.collect_until(
+        lambda: any(
+            t.get("id") == turn for t in (host.sequencer.state_of(chat) or {}).get("turns", [])
+        ),
+        timeout=10.0,
+    )
+
+
+async def _idle(host: Host, client: FakeClient, chat: str, *, timeout: float = 10.0) -> None:
+    """Wait for *chat* to have no active turn."""
+    await client.collect_until(
+        lambda: (host.sequencer.state_of(chat) or {}).get("activeTurn") is None,
+        timeout=timeout,
+    )
+
+
+async def _ran(
+    host: Host, client: FakeClient, chat: str, turn: str, *, timeout: float = 10.0
+) -> None:
+    """Wait for *turn* to appear in *chat*'s completed list."""
+    await client.collect_until(
+        lambda: any(
+            t.get("id") == turn for t in (host.sequencer.state_of(chat) or {}).get("turns", [])
+        ),
+        timeout=timeout,
+    )
+
+
 def _rejections(client: FakeClient) -> list[str]:
     return [
         note["params"]["rejectionReason"]
@@ -111,13 +146,7 @@ class TestCancellingOneChatLeavesTheOtherAlone:
     async def _two_chats(self, host: Host, client: FakeClient, uri: str) -> tuple[str, str]:
         default = await _session(host, client, uri)
         await _turn(client, default, text="seed", turn="seed-turn")
-        for _ in range(40):
-            await client.collect(seconds=0.1)
-            state = (await client.request("subscribe", {"channel": default}))["result"]["snapshot"][
-                "state"
-            ]
-            if any(t.get("id") == "seed-turn" for t in state.get("turns", [])):
-                break
+        await _settled(host, client, default, "seed-turn")
         result = await client.request(
             "createChat",
             {
@@ -150,7 +179,7 @@ class TestCancellingOneChatLeavesTheOtherAlone:
                 "action": {"type": "chat/turnCancelled", "turnId": "turn-A"},
             },
         )
-        await client.collect(seconds=2.5)
+        await _idle(slow, client, b)
 
         assert _state(slow, b)["activeTurn"] is None, "B never finished"
         assert [t["id"] for t in _state(slow, b)["turns"]] == ["turn-B"]
@@ -175,11 +204,11 @@ class TestCancellingOneChatLeavesTheOtherAlone:
                 "action": {"type": "chat/turnCancelled", "turnId": "turn-A"},
             },
         )
-        await client.collect(seconds=2.5)
+        await _idle(slow, client, b)
         client.notifications.clear()
 
         await _turn(client, b, text="again", turn="turn-B2", seq=13)
-        await client.collect(seconds=2.5)
+        await _ran(slow, client, b, "turn-B2")
 
         assert not _rejections(client), "B was bricked"
         assert "turn-B2" in [t["id"] for t in _state(slow, b)["turns"]]
@@ -201,7 +230,7 @@ class TestCancellingOneChatLeavesTheOtherAlone:
                 "action": {"type": "chat/turnCancelled", "turnId": "turn-A"},
             },
         )
-        await client.collect(seconds=2.5)
+        await _idle(slow, client, a)
 
         assert _state(slow, a)["turns"][-1]["state"] == "cancelled"
 
@@ -218,7 +247,7 @@ class TestCancellingOneChatLeavesTheOtherAlone:
         await asyncio.sleep(0.2)
         during = slow.counters()["activeTurns"]
 
-        await client.collect(seconds=2.5)
+        await client.collect_until(lambda: slow.counters()["activeTurns"] == 0, timeout=10.0)
         assert during == 2, f"two chats were working; counted {during}"
 
 
@@ -232,13 +261,7 @@ class TestCreateChatWithAnInitialMessage:
     async def _fork(self, host: Host, client: FakeClient, uri: str, text: str) -> str:
         default = await _session(host, client, uri)
         await _turn(client, default, text="seed", turn="seed-turn")
-        for _ in range(40):
-            await client.collect(seconds=0.1)
-            state = (await client.request("subscribe", {"channel": default}))["result"]["snapshot"][
-                "state"
-            ]
-            if any(t.get("id") == "seed-turn" for t in state.get("turns", [])):
-                break
+        await _settled(host, client, default, "seed-turn")
         result = await client.request(
             "createChat",
             {
@@ -255,7 +278,9 @@ class TestCreateChatWithAnInitialMessage:
     async def test_the_agent_actually_answers_it(self, slow: Host) -> None:
         client = await _client(slow)
         chat = await self._fork(slow, client, "echo:/init-1", "please answer this")
-        await client.collect(seconds=3.0)
+        await client.collect_until(
+            lambda: bool((slow.sequencer.state_of(chat) or {}).get("turns")), timeout=10.0
+        )
 
         turns = _state(slow, chat)["turns"]
         assert len(turns) == 1, f"the initial message never ran: {turns}"
@@ -265,11 +290,11 @@ class TestCreateChatWithAnInitialMessage:
     async def test_the_chat_is_usable_afterwards(self, slow: Host) -> None:
         client = await _client(slow)
         chat = await self._fork(slow, client, "echo:/init-2", "first")
-        await client.collect(seconds=3.0)
+        await _idle(slow, client, chat)
         client.notifications.clear()
 
         await _turn(client, chat, text="second", turn="after", seq=20)
-        await client.collect(seconds=2.5)
+        await _ran(slow, client, chat, "after")
 
         assert not _rejections(client), "the chat was wedged from birth"
         assert "after" in [t["id"] for t in _state(slow, chat)["turns"]]
