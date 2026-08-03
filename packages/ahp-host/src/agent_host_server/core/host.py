@@ -4782,16 +4782,26 @@ class Host:
         return command or None
 
     def _advertised_prefix(self) -> str:
-        """`!` when a real backend is installed, else the empty string.
+        """`!` when a backend is installed **and actually runs commands**.
 
         Read from the same condition `initialize` publishes, so the two cannot
         say different things.
+
+        The class check alone was not enough. A host may install a backend that
+        deliberately executes nothing — to satisfy a client that opens a terminal
+        unconditionally, and explain itself in the panel instead of refusing and
+        producing an error toast on every focus. Such a backend must NOT advertise
+        `!`, for exactly the reason the refusing default does not: it would turn a
+        working input into a dead end.
+
+        Feature-detected via `runs_commands`, defaulting True, so every existing
+        backend is unaffected and only one that opts out is treated as inert.
         """
-        return (
-            TERMINAL_COMMAND_PREFIX
-            if self.terminals.__class__ is not RefusingTerminalBackend
-            else ""
-        )
+        if self.terminals.__class__ is RefusingTerminalBackend:
+            return ""
+        if getattr(self.terminals, "runs_commands", True) is False:
+            return ""
+        return TERMINAL_COMMAND_PREFIX
 
     async def _run_terminal_command(
         self, session: _Session, channel: str, action: Mapping[str, Any], command: str

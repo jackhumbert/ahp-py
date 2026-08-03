@@ -24,6 +24,14 @@ versions each release speaks.
   `docs/deferred-upstream.md` U1), it just stops the message lying about whose
   fault it is.
 
+- **`runs_commands` on a terminal backend** (feature-detected, defaults True) now
+  gates whether the host advertises the `!command` prefix. The class check alone was
+  not enough: a host may install a backend that deliberately executes nothing — to
+  satisfy a client that opens a terminal unconditionally and explain itself in the
+  panel rather than refusing and producing an error toast on every window focus.
+  Advertising `!` for such a backend turns a working input into a dead end, which is
+  the same reason the refusing default does not advertise it.
+
 ### Documentation
 
 - **`docs/deferred-upstream.md`** — measured defects belonging to the spec or to VS
