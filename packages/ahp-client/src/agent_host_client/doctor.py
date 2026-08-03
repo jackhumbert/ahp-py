@@ -149,11 +149,19 @@ def _check_initialize(result: Mapping[str, Any], offered: Sequence[str]) -> list
                 )
             )
             state = snapshot.get("state")
+            # Report the type of the value under assertion, not of its
+            # container: naming `state` here made a passing check read
+            # "agents is an array: got dict", and on a real failure it said
+            # "dict" whatever `agents` held -- naming nothing that could be
+            # filed, which is the one thing this probe exists to produce.
+            agents = state.get("agents") if isinstance(state, Mapping) else None
             findings.append(
                 Finding(
-                    isinstance(state, Mapping) and isinstance(state.get("agents"), list),
+                    isinstance(agents, list),
                     "RootState.agents is an array",
-                    f"got {type(state).__name__}",
+                    f"got {type(agents).__name__}"
+                    if isinstance(state, Mapping)
+                    else f"state is {type(state).__name__}, not an object",
                     "reference/root#rootstate",
                 )
             )

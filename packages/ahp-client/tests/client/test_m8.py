@@ -129,6 +129,44 @@ async def test_a_root_uri_missing_a_slash_is_caught() -> None:
     await host.stop()
 
 
+async def test_a_non_array_agents_is_caught_and_names_the_value() -> None:
+    """The detail has to name the value under assertion, not its container.
+
+    Reporting `type(state)` made the *passing* case read "agents is an array:
+    got dict" -- and on a real failure it said "dict" whatever `agents` held,
+    which is unfileable. `doctor` exists to turn adoption into bug reports, so a
+    finding that cannot say what was wrong is not doing its job.
+    """
+    host = echo_host()
+    host.on(
+        "initialize",
+        lambda _p: {
+            "protocolVersion": "0.7.0",
+            "serverSeq": 1,
+            "snapshots": [
+                {"resource": "ahp-root://", "state": {"agents": {"copilot": {}}}, "fromSeq": 1}
+            ],
+        },
+    )
+    await host.start()
+    report = await diagnose(host.transport())
+    agents = next(f for f in report.findings if f.check == "RootState.agents is an array")
+    assert not agents.ok
+    assert agents.detail == "got dict"
+    await host.stop()
+
+
+async def test_a_conformant_hosts_agents_finding_names_the_array() -> None:
+    """The counterpart: passing must not report the container's type either."""
+    host = echo_host()
+    await host.start()
+    report = await diagnose(host.transport())
+    agents = next(f for f in report.findings if f.check == "RootState.agents is an array")
+    assert agents.ok
+    assert agents.detail == "got list"
+    await host.stop()
+
+
 async def test_a_version_we_never_offered_is_caught() -> None:
     host = echo_host(protocol_version="0.3.0")
     await host.start()
