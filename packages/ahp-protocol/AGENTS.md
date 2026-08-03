@@ -177,6 +177,34 @@ A change is not finished until:
   the evidence that made it non-obvious — a spec sentence, an offset in the
   client bundle, a wire frame.
 
+## Cutting a release
+
+Both consumers pin this package with `~=`, so a release here is a release for
+them. Four steps, in order:
+
+1. **Bump `__version__`** in `src/agent_host_protocol/__init__.py`. That is the
+   only place; `pyproject.toml` reads it from there.
+2. **Give the CHANGELOG a section with that exact heading** — `## [0.1.0] - …`,
+   not `## [Unreleased]`. The release job extracts the section by heading and
+   **fails when it finds nothing**, deliberately: a release nobody described is
+   worse than one that did not happen.
+3. **Tag `v<version>`.** The publish workflow refuses a tag that disagrees with
+   the packaged version, so the two cannot drift apart at the one moment it
+   would be permanent.
+4. That triggers a build, a wheel that is installed and *run* from outside the
+   checkout, then PyPI via trusted publishing (OIDC — no token exists to leak),
+   then a GitHub release.
+
+**One-time setup before the first tag**, which nobody can do from here: PyPI
+needs a *pending publisher* configured for the project — owner `jackhumbert`,
+repository `agent-host-protocol-py`, workflow `publish.yml`, environment
+`pypi`. Without it the publish step fails with an authentication error that
+looks like a workflow bug and is not.
+
+The order across the three repos is forced: this package must reach an index
+before `agent-host-server` or `agent-host-client` can be installed at all,
+because their dependency on it cannot resolve until it is there.
+
 ## Absorbing a new upstream spec release
 
 Full procedure in [`UPSTREAM.md`](UPSTREAM.md). The step people skip: **diff

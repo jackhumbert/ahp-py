@@ -56,25 +56,6 @@ jobs:
       - name: Fail if _generated.py is stale
         run: git diff --exit-code -- src/agent_host_protocol/types/_generated.py
 
-  sibling-drift:
-    # Until agent-host-server-py is migrated onto this package (ADR 0002), it
-    # carries its own copy of the extracted tree and the two can diverge. This
-    # job reports the divergence rather than failing on it -- a fix landing in
-    # either repo is legitimate; a fix landing in only one is the hazard.
-    runs-on: ubuntu-latest
-    continue-on-error: true
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      - uses: actions/checkout@v4
-        with:
-          repository: jackhumbert/agent-host-server-py
-          path: .sibling
-      - name: Report drift from the sibling's copy
-        run: python scripts/check_sibling_drift.py --sibling .sibling
-
   wheel-is-installable:
     # `tests/unit/test_packaging.py` looks INSIDE the built wheel from a source
     # checkout. This installs it and runs it from a directory that is not the

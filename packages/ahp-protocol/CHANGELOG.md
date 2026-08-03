@@ -29,6 +29,16 @@ the spec revision it targets.
   host or the client has broken the point of the extraction, and finding that
   out at their next release is too late.
 
+### Removed
+
+- `scripts/check_sibling_drift.py` and its CI job. It existed to make divergence
+  visible while the host still carried its own copy of this tree — and that
+  premise stopped being true when the host migrated onto this distribution.
+  Packaging enforces what the script watched for: there is one copy now, and you
+  cannot import upwards across a wheel. Its docstring had become the thing
+  `AGENTS.md` warns about, a document asserting the absence of something that
+  shipped.
+
 ### Changed
 
 - The version is single-sourced from `__init__.py` through hatchling's dynamic
