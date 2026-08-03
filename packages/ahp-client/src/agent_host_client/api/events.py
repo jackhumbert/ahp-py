@@ -219,7 +219,7 @@ class ToolCallReady(_ToolCall):
         self,
         *,
         option_id: str | None = None,
-        edited_input: Any = None,
+        edited_input: str | None = None,
         confirmed: actions.ConfirmationReason = "user-action",
     ) -> None:
         """Approve, as an explicit user action unless told otherwise.
@@ -228,6 +228,10 @@ class ToolCallReady(_ToolCall):
         the call was allowed to run -- a standing setting reads differently from
         a human clicking yes, and a UI replaying the transcript has nothing else
         to distinguish them.
+
+        *edited_input* is a **string** -- `editedToolInput?: string` -- because
+        only the inline form of `ToolInput` is client-editable; a structured
+        value here would put a shape on the wire no peer's reducer can render.
         """
         send = self._dispatcher()
         send(

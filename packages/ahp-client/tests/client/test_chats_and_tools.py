@@ -129,7 +129,12 @@ async def test_create_chat_sends_both_uris_and_they_are_not_the_same_one() -> No
 
 
 async def test_create_chat_carries_the_optional_fields_it_is_given() -> None:
-    host = _session_host(capabilities={"multipleChats": {"fork": True}})
+    # `workingDirectories` needs its own advertisement: "A client MUST NOT
+    # supply this field unless the agent advertises
+    # `AgentCapabilities.multipleWorkingDirectories`."
+    host = _session_host(
+        capabilities={"multipleChats": {"fork": True}, "multipleWorkingDirectories": {}}
+    )
     await host.start()
     async with connect(transport=host.transport()) as client:
         session = await client.create_session(provider="echo")
@@ -139,9 +144,48 @@ async def test_create_chat_carries_the_optional_fields_it_is_given() -> None:
             working_directories=["file:///work"],
         )
         params = _sent(host, "createChat")[-1]
-        assert params["initialMessage"] == {"text": "pick up from here"}
+        # The string convenience carries the required `origin` too: `Message`
+        # requires `[text, origin]`, and "a client is only allowed to send
+        # `MessageKind.User` messages" -- an origin-less Message is republished
+        # verbatim inside the host's `chat/turnStarted` and frozen into every
+        # peer's transcript.
+        assert params["initialMessage"] == {
+            "text": "pick up from here",
+            "origin": {"kind": "user"},
+        }
         assert params["source"]["kind"] == "fork"
         assert params["workingDirectories"] == ["file:///work"]
+    await host.stop()
+
+
+async def test_working_directories_on_create_chat_need_their_own_advertisement() -> None:
+    """The same told-in-advance MUST NOT as `multipleChats`, gated the same
+    way -- and a presence flag, so `{}` advertises support."""
+    host = _session_host(capabilities={"multipleChats": {}})
+    await host.start()
+    async with connect(transport=host.transport()) as client:
+        session = await client.create_session(provider="echo")
+        with pytest.raises(AhpClientError, match="multipleWorkingDirectories"):
+            await session.create_chat(working_directories=["file:///work"])
+        assert _sent(host, "createChat") == []
+    await host.stop()
+
+
+async def test_a_second_working_directory_on_create_session_needs_the_advertisement() -> None:
+    """ "When absent, clients ... MUST NOT set more than one entry in
+    `CreateSessionParams.workingDirectories`" -- refused locally, like the
+    sibling MUST NOTs, rather than making the host enforce a rule we were told
+    about in advance. One entry stays fine: that is the pre-capability shape."""
+    host = _session_host()
+    await host.start()
+    async with connect(transport=host.transport()) as client:
+        with pytest.raises(AhpClientError, match="multipleWorkingDirectories"):
+            await client.create_session(
+                provider="echo", working_directories=["file:///a", "file:///b"]
+            )
+        assert _sent(host, "createSession") == []
+        await client.create_session(provider="echo", working_directories=["file:///a"])
+        assert _sent(host, "createSession")[-1]["workingDirectories"] == ["file:///a"]
     await host.stop()
 
 
@@ -316,8 +360,14 @@ async def test_a_tool_advertised_without_an_executor_is_denied_not_dropped() -> 
         assert created["activeClient"]["tools"] == [{"name": "usages"}]
         chat = await session.chat()
         await host.push(chat.uri, {"type": "chat/turnStarted", "turnId": "t1"})
+        # `clientId` is required on `ToolCallClientContributor`, and `owns()`
+        # only answers calls addressed to this client by id.
         await host._emit_tool(
-            chat.uri, "t1", FakeToolCall("tc1", "usages", contributor={"kind": "client"})
+            chat.uri,
+            "t1",
+            FakeToolCall(
+                "tc1", "usages", contributor={"kind": "client", "clientId": client.client_id}
+            ),
         )
         await _settle(lambda: _denials(host))
         denial = _denials(host)[-1]
@@ -364,12 +414,339 @@ async def test_a_republished_ready_does_not_run_the_tool_twice() -> None:
         session = await client.create_session(provider="echo", tools=tools)
         chat = await session.chat()
         await host.push(chat.uri, {"type": "chat/turnStarted", "turnId": "t1"})
-        call = FakeToolCall("tc1", "usages", contributor={"kind": "client"})
+        call = FakeToolCall(
+            "tc1", "usages", contributor={"kind": "client", "clientId": client.client_id}
+        )
         await host._emit_tool(chat.uri, "t1", call)
         await _settle(lambda: runs == 1)
         await host._emit_tool(chat.uri, "t1", call)
         await asyncio.sleep(0.1)
         assert runs == 1
+    await host.stop()
+
+
+async def test_a_client_contributor_without_a_client_id_is_not_ours() -> None:
+    """`ToolCallClientContributor` requires both `kind` and `clientId`, so a
+    kind=client contributor without one is malformed data, not a broadcast --
+    treating it as "whichever client is active, which is us" made every active
+    client execute or deny the same call."""
+    host = _session_host()
+    await host.start()
+    async with connect(transport=host.transport()) as client:
+        tools = ClientToolHost(client.protocol, client_id=client.client_id)
+        tools.register({"name": "usages"}, lambda _a: _ok())
+        session = await client.create_session(provider="echo", tools=tools)
+        chat = await session.chat()
+        await host.push(chat.uri, {"type": "chat/turnStarted", "turnId": "t1"})
+        await host._emit_tool(
+            chat.uri, "t1", FakeToolCall("tc1", "usages", contributor={"kind": "client"})
+        )
+        await asyncio.sleep(0.1)
+        assert _dispatched(host, "chat/toolCallComplete") == []
+        assert _denials(host) == []
+    await host.stop()
+
+
+async def test_a_gated_client_call_waits_for_approval_and_then_runs() -> None:
+    """Only *typically* does a host auto-confirm a client tool. A ready
+    without `confirmed` leaves the call `pending-confirmation` -- not handed
+    over, and running it would execute a tool nobody approved. The approval
+    that later hands it over arrives as `chat/toolCallConfirmed` (there is no
+    second ready), which carries neither `toolName` nor `toolInput` -- the
+    mirror has both."""
+    host = _session_host()
+    await host.start()
+    async with connect(transport=host.transport()) as client:
+        tools = ClientToolHost(client.protocol, client_id=client.client_id)
+        seen: list[Any] = []
+
+        async def usages(action: dict[str, Any]) -> dict[str, Any]:
+            seen.append(action.get("toolInput"))
+            return await _ok()
+
+        tools.register({"name": "usages"}, usages)
+        session = await client.create_session(provider="echo", tools=tools)
+        chat = await session.chat()
+        await host.push(chat.uri, {"type": "chat/turnStarted", "turnId": "t1"})
+        await host.push(
+            chat.uri,
+            {
+                "type": "chat/toolCallStart",
+                "turnId": "t1",
+                "toolCallId": "tc1",
+                "toolName": "usages",
+                "contributor": {"kind": "client", "clientId": client.client_id},
+            },
+        )
+        # Gated: no `confirmed`, so the reducer holds the call at
+        # `pending-confirmation`, never `running`.
+        await host.push(
+            chat.uri,
+            {
+                "type": "chat/toolCallReady",
+                "turnId": "t1",
+                "toolCallId": "tc1",
+                "invocationMessage": "Running usages",
+                "toolInput": '{"symbol": "connect"}',
+            },
+        )
+        await asyncio.sleep(0.15)
+        assert seen == []
+        assert _dispatched(host, "chat/toolCallComplete") == []
+        # Somebody approves -- possibly on another client entirely.
+        await host.push(
+            chat.uri,
+            {
+                "type": "chat/toolCallConfirmed",
+                "turnId": "t1",
+                "toolCallId": "tc1",
+                "approved": True,
+                "confirmed": "user-action",
+            },
+        )
+        await _settle(lambda: _dispatched(host, "chat/toolCallComplete"))
+        # The input reached the executor from state, and exactly once.
+        assert seen == ['{"symbol": "connect"}']
+        completion = _dispatched(host, "chat/toolCallComplete")[-1]
+        assert completion["turnId"] == "t1"
+        assert completion["toolCallId"] == "tc1"
+    await host.stop()
+
+
+async def test_two_sessions_on_one_connection_do_not_double_run_a_call() -> None:
+    """`owns()` matches on `clientId`, which is identical for every session
+    this `Client` created -- so only the per-session chat scoping keeps two
+    pumps from both answering one call, double-executing the tool and
+    overwriting the first `chat/toolCallComplete` with the second."""
+    host = FakeHost(agents=[{"provider": "echo", "displayName": "Echo"}])
+    chat_of = {"echo:/a": "ahp-chat://a", "echo:/b": "ahp-chat://b"}
+
+    def subscribe(params: dict[str, Any]) -> dict[str, Any]:
+        channel = params["channel"]
+        if channel.startswith("ahp-chat:"):
+            body: Any = {"turns": [], "activeTurn": None}
+        elif channel == "ahp-root://":
+            body = host.root_state
+        else:
+            body = {
+                "lifecycle": "ready",
+                "defaultChat": chat_of[channel],
+                "interactivity": "full",
+            }
+        return {"snapshot": {"resource": channel, "state": body, "fromSeq": host._server_seq}}
+
+    host.on("initialize", lambda params: _initialize(host, params))
+    host.on("listSessions", lambda _p: {"items": []})
+    host.on("subscribe", subscribe)
+    host.on("createSession", lambda _p: {})
+    host.on("disposeSession", lambda _p: {})
+    await host.start()
+    async with connect(transport=host.transport()) as client:
+        runs: list[str] = []
+
+        def tool_host(tag: str) -> ClientToolHost:
+            tools = ClientToolHost(client.protocol, client_id=client.client_id)
+
+            async def run(_action: dict[str, Any]) -> dict[str, Any]:
+                runs.append(tag)
+                return await _ok()
+
+            tools.register({"name": "usages"}, run)
+            return tools
+
+        a = await client.create_session(provider="echo", uri="echo:/a", tools=tool_host("a"))
+        b = await client.create_session(provider="echo", uri="echo:/b", tools=tool_host("b"))
+        chat_a = await a.chat()
+        await b.chat()  # B's pump is live and watching its own chats
+        await host.push(chat_a.uri, {"type": "chat/turnStarted", "turnId": "t1"})
+        await host._emit_tool(
+            chat_a.uri,
+            "t1",
+            FakeToolCall(
+                "tc1", "usages", contributor={"kind": "client", "clientId": client.client_id}
+            ),
+        )
+        await _settle(lambda: runs)
+        await asyncio.sleep(0.2)
+        assert runs == ["a"]
+        assert len(_dispatched(host, "chat/toolCallComplete")) == 1
+    await host.stop()
+
+
+async def test_a_call_the_tap_never_delivered_is_executed_from_state() -> None:
+    """The pump is level-triggered on the mirror, not edge-triggered on the
+    events tap. The tap is bounded and drop-oldest, so under load a
+    `chat/toolCallReady` can be evicted before a slow reader sees it -- the
+    mirror still shows the call running, and the next wake finds it."""
+    host = _session_host()
+    await host.start()
+    async with connect(transport=host.transport()) as client:
+        tools = ClientToolHost(client.protocol, client_id=client.client_id)
+        runs = 0
+
+        async def counted(_action: dict[str, Any]) -> dict[str, Any]:
+            nonlocal runs
+            runs += 1
+            return await _ok()
+
+        tools.register({"name": "usages"}, counted)
+        session = await client.create_session(provider="echo", tools=tools)
+        chat = await session.chat()
+        # Drive the handover through the mirror alone: these envelopes never
+        # reach the events tap, which is exactly what an eviction (or a
+        # disconnected window) looks like to the pump.
+        for action in (
+            {"type": "chat/turnStarted", "turnId": "t1"},
+            {
+                "type": "chat/toolCallStart",
+                "turnId": "t1",
+                "toolCallId": "tc1",
+                "toolName": "usages",
+                "contributor": {"kind": "client", "clientId": client.client_id},
+            },
+            {
+                "type": "chat/toolCallReady",
+                "turnId": "t1",
+                "toolCallId": "tc1",
+                "invocationMessage": "Running usages",
+                "confirmed": "not-needed",
+            },
+        ):
+            client.mirror.apply(
+                {"channel": chat.uri, "action": action, "serverSeq": host.next_server_seq()}
+            )
+        await asyncio.sleep(0.1)
+        assert runs == 0  # no event has woken the pump yet
+        # Any event on this session's channels is the clock.
+        await host.push(session.uri, {"type": "session/titleChanged", "title": "T"})
+        await _settle(lambda: runs == 1)
+        completion = _dispatched(host, "chat/toolCallComplete")[-1]
+        assert completion["turnId"] == "t1"
+        assert completion["toolCallId"] == "tc1"
+    await host.stop()
+
+
+async def test_work_already_handed_over_in_the_snapshot_is_picked_up_on_attach() -> None:
+    """A snapshot-arm reconnect replays no actions, so a call handed over
+    while this client was away produces no event, ever. The designed recovery
+    path is `SessionState.inputNeeded`: `toolClientExecution` entries exist
+    "so a client that provides the tool can pick up the work without
+    subscribing to the owning chat" -- and they are all a fresh snapshot needs
+    to carry."""
+    host = _session_host(
+        inputNeeded=[
+            {
+                "kind": "toolClientExecution",
+                "id": f"{CHAT}#tc1",
+                "chat": CHAT,
+                "turnId": "t1",
+                "toolCall": {
+                    "toolCallId": "tc1",
+                    "toolName": "usages",
+                    "status": "running",
+                    "confirmed": "not-needed",
+                    "toolInput": "{}",
+                    "contributor": {"kind": "client", "clientId": "me"},
+                },
+            }
+        ]
+    )
+    await host.start()
+    async with connect(transport=host.transport(), client_id="me") as client:
+        tools = ClientToolHost(client.protocol, client_id=client.client_id)
+        runs = 0
+
+        async def counted(_action: dict[str, Any]) -> dict[str, Any]:
+            nonlocal runs
+            runs += 1
+            return await _ok()
+
+        tools.register({"name": "usages"}, counted)
+        await client.create_session(provider="echo", tools=tools)
+        await _settle(lambda: runs == 1)
+        completion = _dispatched(host, "chat/toolCallComplete")[-1]
+        assert completion["turnId"] == "t1"
+        assert completion["toolCallId"] == "tc1"
+    await host.stop()
+
+
+async def test_a_slow_tool_does_not_block_later_calls() -> None:
+    """Each executor runs on its own task. Awaited inline, one hung tool
+    stalls the pump's reader while the bounded fan-in tap fills behind it, and
+    every later call -- including the auto-denials `ClientToolHost`
+    guarantees -- waits on an unrelated tool."""
+    host = _session_host()
+    await host.start()
+    async with connect(transport=host.transport()) as client:
+        tools = ClientToolHost(client.protocol, client_id=client.client_id)
+        release = asyncio.Event()
+
+        async def slow(_action: dict[str, Any]) -> dict[str, Any]:
+            await release.wait()
+            return await _ok()
+
+        async def fast(_action: dict[str, Any]) -> dict[str, Any]:
+            return await _ok()
+
+        tools.register({"name": "slow"}, slow)
+        tools.register({"name": "fast"}, fast)
+        session = await client.create_session(provider="echo", tools=tools)
+        chat = await session.chat()
+        await host.push(chat.uri, {"type": "chat/turnStarted", "turnId": "t1"})
+        ours = {"kind": "client", "clientId": client.client_id}
+        await host._emit_tool(chat.uri, "t1", FakeToolCall("tc1", "slow", contributor=ours))
+        await host._emit_tool(chat.uri, "t1", FakeToolCall("tc2", "fast", contributor=ours))
+
+        def completed(tool_call_id: str) -> list[dict[str, Any]]:
+            return [
+                c
+                for c in _dispatched(host, "chat/toolCallComplete")
+                if c["toolCallId"] == tool_call_id
+            ]
+
+        await _settle(lambda: completed("tc2"))
+        assert completed("tc1") == []  # still running, blocking nothing
+        release.set()
+        await _settle(lambda: completed("tc1"))
+    await host.stop()
+
+
+async def test_a_fork_needs_no_provider_because_the_source_session_has_one() -> None:
+    """`CreateSessionParams.provider` is optional (`provider?: string`): a fork
+    inherits it from the source session, so a wrapper requiring it made the
+    fork flow unexpressible without lying to the annotation `mypy --strict`
+    enforces."""
+    host = _session_host()
+    await host.start()
+    async with connect(transport=host.transport()) as client:
+        await client.protocol.create_session(
+            "echo:/fork-1", fork={"session": "echo:/source", "turnId": "t1"}
+        )
+        params = _sent(host, "createSession")[-1]
+        assert "provider" not in params
+        assert params["fork"] == {"session": "echo:/source", "turnId": "t1"}
+    await host.stop()
+
+
+# ── fetchTurns ───────────────────────────────────────────────────────────────
+
+
+async def test_fetch_turns_takes_the_chat_channel_not_the_session() -> None:
+    """`FetchTurnsParams.channel` is documented "Chat URI" -- the URI from
+    `ChatState` / the session's `defaultChat` -- and the reference host
+    rejects a session URI with InvalidParams ("... is not a chat channel").
+    The wrapper's old signature named the parameter `session`, teaching every
+    caller exactly the argument that cannot work."""
+    host = _session_host()
+    host.on("fetchTurns", lambda _p: {})
+    await host.start()
+    async with connect(transport=host.transport()) as client:
+        session = await client.create_session(provider="echo")
+        chat = await session.chat()
+        await client.protocol.fetch_turns(chat.uri, cursor="page-2")
+        params = _sent(host, "fetchTurns")[-1]
+        assert params["channel"] == chat.uri
+        assert params["cursor"] == "page-2"
     await host.stop()
 
 

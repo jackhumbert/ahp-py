@@ -12,6 +12,7 @@ from agent_host_client.client.client import (
 from agent_host_client.client.errors import (
     AhpClientError,
     ClientClosed,
+    InvalidArgument,
     ProtocolVersionError,
     ProtocolViolation,
     RequestTimeout,
@@ -66,6 +67,7 @@ __all__ = [
     "DispatchHandle",
     "DroppedEvents",
     "GapPolicy",
+    "InvalidArgument",
     "MalformedFrame",
     "OtlpEvent",
     "PendingAction",

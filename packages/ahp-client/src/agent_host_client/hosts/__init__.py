@@ -15,6 +15,7 @@ from agent_host_client.hosts.policy import (
     immediate_forever_policy,
 )
 from agent_host_client.hosts.runtime import (
+    AuthCheck,
     HostConfig,
     HostNotConnected,
     HostRuntime,
@@ -27,6 +28,7 @@ from agent_host_client.hosts.runtime import (
 )
 
 __all__ = [
+    "AuthCheck",
     "Backoff",
     "ClientIdStore",
     "FileClientIdStore",

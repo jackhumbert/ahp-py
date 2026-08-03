@@ -118,9 +118,10 @@ async def test_a_file_inside_the_root_reads(tmp_path: Path) -> None:
     server = _server(tmp_path)
     result = await server.handle("resourceRead", {"uri": file_uri(tmp_path / "inside.txt")})
     # `ResourceReadResult` is `{data, encoding}`, both required; there is no
-    # `content` property, and a host reading `data` got nothing at all.
-    assert result == {"data": "hello", "encoding": "utf-8", "etag": result["etag"]}
-    assert result["etag"].startswith('W/"')
+    # `content` property, and a host reading `data` got nothing at all. No
+    # `etag` either: that member is declared on `ResourceResolveResult` alone,
+    # and a strict peer validator rejects the undeclared extra.
+    assert result == {"data": "hello", "encoding": "utf-8"}
 
 
 async def test_a_path_outside_the_root_is_denied(tmp_path: Path) -> None:
@@ -181,7 +182,10 @@ async def test_writing_is_refused_by_default(tmp_path: Path) -> None:
 async def test_writing_works_once_granted(tmp_path: Path) -> None:
     server = _server(tmp_path, writable=True)
     target = tmp_path / "new.txt"
-    await server.handle("resourceWrite", {"uri": file_uri(target), "data": "written"})
+    result = await server.handle("resourceWrite", {"uri": file_uri(target), "data": "written"})
+    # "An empty object on success" -- `ResourceWriteResult` declares no
+    # properties, so the fresh etag comes from `resourceResolve`, not here.
+    assert result == {}
     assert target.read_text(encoding="utf-8") == "written"
 
 
@@ -208,6 +212,19 @@ async def test_if_match_accepts_the_current_etag(tmp_path: Path) -> None:
     current = (await server.handle("resourceResolve", {"uri": uri}))["etag"]
     await server.handle("resourceWrite", {"uri": uri, "data": "x", "ifMatch": current})
     assert (tmp_path / "inside.txt").read_text(encoding="utf-8") == "x"
+
+
+async def test_if_match_on_a_missing_file_conflicts_rather_than_creating(tmp_path: Path) -> None:
+    """A file deleted between resolve and write has no current etag for any
+    token to match, so the write MUST conflict -- recreating it would defeat
+    the lost-update guard `ifMatch` exists for."""
+    server = _server(tmp_path, writable=True)
+    target = tmp_path / "deleted-since-resolve.txt"
+    with pytest.raises(Conflict):
+        await server.handle(
+            "resourceWrite", {"uri": file_uri(target), "data": "x", "ifMatch": 'W/"5-1"'}
+        )
+    assert not target.exists()
 
 
 async def test_append_uses_byte_offsets(tmp_path: Path) -> None:
@@ -456,6 +473,31 @@ async def test_an_unpublished_virtual_uri_is_denied_not_granted() -> None:
         await virtual.handle("resourceRequest", {"uri": "virtual://nope"})
 
 
+async def test_listing_a_missing_virtual_uri_is_an_error_not_an_empty_directory() -> None:
+    """ "The server MUST return success only if the target exists and is a
+    directory." A success-empty answer for a typo'd URI renders as a
+    legitimately empty plugin: the host walking down from the plugin root stops
+    at the first empty listing, with no error anywhere."""
+    virtual = VirtualResourceServer()
+    virtual.put("plugins/skills/one.md", "# One")
+    with pytest.raises(NotFound):
+        await virtual.handle("resourceList", {"uri": "virtual://plugins/skilz"})
+
+
+async def test_listing_a_virtual_blob_is_not_a_directory() -> None:
+    virtual = VirtualResourceServer()
+    virtual.put("plugins/skills/one.md", "# One")
+    with pytest.raises(NotFound, match="not a directory"):
+        await virtual.handle("resourceList", {"uri": "virtual://plugins/skills/one.md"})
+
+
+async def test_the_virtual_prefix_root_may_legitimately_list_empty() -> None:
+    """An empty server still exists at its own root; only URIs below it are
+    refusable as absent."""
+    virtual = VirtualResourceServer()
+    assert await virtual.handle("resourceList", {"uri": "virtual://"}) == {"entries": []}
+
+
 # ── end to end, host-driven ──────────────────────────────────────────────────
 
 
@@ -619,6 +661,51 @@ async def test_a_failing_tool_reports_an_error_result_rather_than_crashing() -> 
     assert result["success"] is False
     assert result["pastTenseMessage"]
     assert "tool exploded" in result["content"][0]["text"]
+
+
+async def test_a_content_ref_tool_input_is_resolved_before_the_executor_runs() -> None:
+    """`ToolInput` is `string | ContentRef`: the referenced form is a `{uri}`
+    the host stores the real payload behind, and an executor handed it raw
+    receives an address where it expects arguments. Fetched with the forward
+    `resourceRead` fresh per invocation (plan §8), never cached across
+    confirmation -- on an edited approval the host replaces the resource
+    contents, so a cached copy is the pre-edit input the user rejected."""
+    host = echo_host()
+    reads: list[str] = []
+
+    def resource_read(params: dict[str, Any]) -> dict[str, Any]:
+        reads.append(str(params["uri"]))
+        return {"data": "the real payload", "encoding": "utf-8"}
+
+    host.on("resourceRead", resource_read)
+    await host.start()
+    client = AhpClient(host.transport())
+    await client.connect()
+    tools = ClientToolHost(client, client_id="me")
+    seen: list[Any] = []
+
+    async def capture(action: dict[str, Any]) -> dict[str, Any]:
+        seen.append(action["toolInput"])
+        return {"success": True, "pastTenseMessage": "Ran"}
+
+    tools.register({"name": "cap"}, capture)
+    for _ in range(2):
+        await tools.execute(
+            CHAT,
+            {
+                "type": "chat/toolCallReady",
+                "turnId": "turn-1",
+                "toolCallId": "t1",
+                "toolInput": {"uri": "ahp-content://blob/1"},
+            },
+            tool_name="cap",
+        )
+    await asyncio.sleep(0.02)
+    assert seen == ["the real payload", "the real payload"]
+    # Two invocations, two reads: fresh per invocation, no cache.
+    assert reads == ["ahp-content://blob/1", "ahp-content://blob/1"]
+    await client.shutdown()
+    await host.stop()
     await client.shutdown()
     await host.stop()
 

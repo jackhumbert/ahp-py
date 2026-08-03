@@ -374,6 +374,48 @@ def test_an_empty_identifier_is_refused_rather_than_sent() -> None:
         actions.tool_call_complete(TURN, "", result={"success": True, "pastTenseMessage": "x"})
 
 
+def test_optional_spec_fields_are_reachable_through_the_constructors() -> None:
+    """The constructors deliberately take no `**extra`, so an optional field
+    upstream defines is unreachable without a named parameter -- and the
+    features behind them (`requiresResultConfirmation`, attachments, denial
+    suggestions) simply do not exist through the typed surface."""
+    started = actions.turn_started(
+        TURN,
+        text="hi",
+        model="gpt-x",
+        attachments=[{"uri": "file:///a.py"}],
+        queued_message_id="q1",
+    )
+    # A bare-string model is wrapped: `Message.model` is a `ModelSelection`
+    # object `{id, config?}`, and the bare string is wire-invalid.
+    assert started["message"]["model"] == {"id": "gpt-x"}
+    assert started["message"]["attachments"] == [{"uri": "file:///a.py"}]
+    assert started["queuedMessageId"] == "q1"
+
+    complete = actions.tool_call_complete(
+        TURN,
+        "tc1",
+        result={"success": True, "pastTenseMessage": "x"},
+        requires_result_confirmation=True,
+    )
+    assert complete["requiresResultConfirmation"] is True
+
+    denied = actions.tool_call_denied(
+        TURN,
+        "tc1",
+        user_suggestion={"text": "try Y instead", "origin": {"kind": "user"}},
+        reason_message="too broad",
+    )
+    assert denied["userSuggestion"]["text"] == "try Y instead"
+    assert denied["reasonMessage"] == "too broad"
+
+    # And when not asked for, none of them appear -- absent, not null.
+    bare = actions.turn_started(TURN, text="hi")
+    assert "model" not in bare["message"]
+    assert "attachments" not in bare["message"]
+    assert "queuedMessageId" not in bare
+
+
 def test_a_failed_tool_reports_a_result_the_schema_recognises() -> None:
     """`ToolCallResult` requires `success` and `pastTenseMessage`, its content
     blocks are keyed by `type`, and it has no `isError` -- that is MCP's

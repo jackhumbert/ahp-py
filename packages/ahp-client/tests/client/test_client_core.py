@@ -8,6 +8,7 @@ one is wrong, not by method name.
 from __future__ import annotations
 
 import asyncio
+import json
 from collections.abc import Mapping
 from typing import Any
 
@@ -26,9 +27,45 @@ from agent_host_client.client import (
     SessionAdded,
     TransportError,
 )
-from agent_host_client.client.errors import MethodNotFound, NotFound, is_session_gone
-from agent_host_client.client.events import MalformedFrame, OtlpEvent, ProgressEvent
+from agent_host_client.client.errors import (
+    MethodNotFound,
+    NotFound,
+    UnsupportedProtocolVersion,
+    is_session_gone,
+)
+from agent_host_client.client.events import (
+    MalformedFrame,
+    OtlpEvent,
+    ProgressEvent,
+    UnknownResponse,
+)
 from agent_host_client.testing import FakeRpcError, echo_host
+
+
+class _EagerTransport:
+    """A transport that parses eagerly, the way a third-party one may.
+
+    Neither shipped transport used to raise ``json.JSONDecodeError`` from
+    ``receive()``, which is exactly why the client's handling of one was never
+    exercised -- and was wrong.
+    """
+
+    def __init__(self) -> None:
+        self.frames: asyncio.Queue[dict[str, Any] | Exception | None] = asyncio.Queue()
+        self.closed = False
+
+    async def send(self, message: Mapping[str, Any]) -> None:
+        return None
+
+    async def receive(self) -> dict[str, Any] | None:
+        item = await self.frames.get()
+        if isinstance(item, Exception):
+            raise item
+        return item
+
+    async def close(self) -> None:
+        self.closed = True
+        self.frames.put_nowait(None)
 
 
 async def _connected(**config: Any) -> tuple[AhpClient, Any]:
@@ -176,6 +213,53 @@ async def test_cancelling_a_request_does_not_leave_a_resolvable_entry() -> None:
     with pytest.raises(asyncio.CancelledError):
         await task
     assert client._pending == {}
+    await client.shutdown()
+    await host.stop()
+
+
+async def test_cancelling_a_timed_request_pops_the_entry_and_drops_the_late_response() -> None:
+    """The default path runs under `asyncio.shield`, and a caller's cancellation
+    stops there: the inner future stayed pending, the finally's guard saw
+    nothing, and the entry leaked until tear-down -- where a late response
+    settled a future nobody retrieves instead of firing `UnknownResponse`."""
+    client, host = await _connected(request_timeout=30.0)
+    release = asyncio.Event()
+
+    async def slow(_p: dict[str, Any]) -> dict[str, Any]:
+        await release.wait()
+        return {}
+
+    host.on("listSessions", slow)
+    diagnostics = client.diagnostics()
+    task = asyncio.get_running_loop().create_task(
+        client.request("listSessions", {"channel": ROOT_URI})
+    )
+    await asyncio.sleep(0.01)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert client._pending == {}
+    release.set()  # the id is burned; the late response is dropped, with a diagnostic
+    diagnostic = await asyncio.wait_for(diagnostics.__anext__(), 1)
+    assert isinstance(diagnostic, UnknownResponse)
+    assert client.connection_state.status == "connected"
+    await client.shutdown()
+    await host.stop()
+
+
+async def test_counter_seeds_let_a_successor_continue_the_predecessors_numbering() -> None:
+    """One client is one transport, so "ids never reset across transport swaps"
+    is the supervisor's promise to keep -- these seeds are how it can."""
+    host = echo_host()
+    await host.start()
+    client = AhpClient(host.transport(), first_request_id=66, first_client_seq=42)
+    await client.connect()
+    await client.ping()
+    handle = client.dispatch("ahp-chat:/c", {"type": "chat/draftChanged", "draft": "x"})
+    assert next(m for m in host.received if m.get("method") == "ping")["id"] == 66
+    assert handle.client_seq == 42
+    assert client.next_request_id == 67
+    assert client.next_client_seq == 43
     await client.shutdown()
     await host.stop()
 
@@ -482,9 +566,121 @@ async def test_a_flood_of_malformed_frames_gives_up() -> None:
     assert client.connection_state.status == "closed"
     assert isinstance(client.connection_state.error, TransportError)
     assert client.connection_state.error.kind == "protocol"
+    # Tear-down alone settles futures but held the socket open; a bare client
+    # has no supervisor to close it, so giving up must close it too.
+    assert await asyncio.wait_for(host_side.receive(), 1) is None
+
+
+async def test_a_decode_error_from_an_eager_transport_does_not_end_the_read_loop() -> None:
+    """The `JSONDecodeError` handler used to sit outside the while loop: one bad
+    frame returned from the coroutine, leaving the state "connected" with
+    nobody reading -- every later request waited out its full timeout."""
+    transport = _EagerTransport()
+    client = AhpClient(transport, ClientConfig(request_timeout=1.0))
+    await client.connect()
+    diagnostics = client.diagnostics()
+    tap = client.events()
+
+    transport.frames.put_nowait(json.JSONDecodeError("bad frame", "{", 0))
+    transport.frames.put_nowait(
+        {
+            "jsonrpc": "2.0",
+            "method": "root/sessionAdded",
+            "params": {"channel": ROOT_URI, "summary": {"resource": "s:/1"}},
+        }
+    )
+    diagnostic = await asyncio.wait_for(diagnostics.__anext__(), 1)
+    assert isinstance(diagnostic, MalformedFrame)
+    event = await asyncio.wait_for(tap.__anext__(), 1)
+    assert isinstance(event.event, SessionAdded)
+    assert client.connection_state.status == "connected"
+    await client.shutdown()
+
+
+async def test_a_flood_of_decode_errors_gives_up_and_closes_the_transport() -> None:
+    transport = _EagerTransport()
+    client = AhpClient(transport)
+    await client.connect()
+    for _ in range(8):
+        transport.frames.put_nowait(json.JSONDecodeError("bad frame", "{", 0))
+    await asyncio.sleep(0.02)
+    assert client.connection_state.status == "closed"
+    assert isinstance(client.connection_state.error, TransportError)
+    assert client.connection_state.error.kind == "protocol"
+    assert transport.closed
+
+
+async def test_an_unexpected_reader_failure_surfaces_on_the_connection_state() -> None:
+    """The class docstring promises done-callbacks that surface failures. A
+    discard-only callback swallowed the exception, and the reader died with the
+    state stuck "connected" -- the silent-hang class, not a tear-down."""
+    transport = _EagerTransport()
+    client = AhpClient(transport)
+    await client.connect()
+    transport.frames.put_nowait(RuntimeError("not in the read loop's caught set"))
+    await asyncio.sleep(0.02)
+    assert client.connection_state.status == "closed"
+    assert isinstance(client.connection_state.error, TransportError)
+    assert client.connection_state.error.kind == "protocol"
+    await client.shutdown()
+
+
+async def test_a_raising_mirror_costs_one_frame_not_the_connection() -> None:
+    """`_on_notification` documents that an exception must never escape; the
+    per-frame guard is what enforces it. One bad envelope becomes a counted
+    diagnostic under the malformed-frame policy, not the end of the reader."""
+    from agent_host_client.client.mirror import ApplyOutcome, StateMirror
+
+    class _Faulty(StateMirror):
+        def apply(self, envelope: Mapping[str, Any]) -> ApplyOutcome:
+            raise RuntimeError("reducer went wrong")
+
+    client, host = await _connected()
+    client.set_state_mirror(_Faulty(client_id="c1"))
+    diagnostics = client.diagnostics()
+    await host.push("ahp-chat:/c", {"type": "chat/turnStarted", "turnId": "t"})
+    diagnostic = await asyncio.wait_for(diagnostics.__anext__(), 1)
+    assert isinstance(diagnostic, MalformedFrame)
+    assert client.connection_state.status == "connected"
+    await client.ping()  # the connection is still fully usable
+    await client.shutdown()
+    await host.stop()
+
+
+async def test_a_boolean_response_id_does_not_settle_request_one() -> None:
+    """`isinstance(True, int)` holds and `True == 1` as a dict key, so a frame
+    with `"id": true` settled request 1 with the wrong payload before the guard
+    excluded bool -- the same discipline as `_absorb_server_seq`."""
+    client_side, host_side = memory_pair()
+    client = AhpClient(client_side, ClientConfig(request_timeout=1.0))
+    await client.connect()
+    diagnostics = client.diagnostics()
+    task = asyncio.get_running_loop().create_task(client.request("ping", {"channel": ROOT_URI}))
+    await asyncio.sleep(0.01)
+    await host_side.send({"jsonrpc": "2.0", "id": True, "result": {"wrong": True}})
+    diagnostic = await asyncio.wait_for(diagnostics.__anext__(), 1)
+    assert isinstance(diagnostic, UnknownResponse)
+    assert not task.done()  # request 1 is still waiting for its real answer
+    await host_side.send({"jsonrpc": "2.0", "id": 1, "result": {}})
+    assert await asyncio.wait_for(task, 1) == {}
+    await client.shutdown()
 
 
 # ── error taxonomy ───────────────────────────────────────────────────────────
+
+
+def test_supported_versions_reads_the_field_the_schema_names() -> None:
+    """`errors.schema.json` and `errors.ts:157` name it `supportedVersions`;
+    reading only the longer spelling parsed the one frame that explains a
+    handshake failure to an empty tuple against every conformant host."""
+    conformant = UnsupportedProtocolVersion(
+        -32005, "no", {"supportedVersions": ["0.7.0", ">=0.1.0 <0.3.0"]}
+    )
+    assert conformant.supported_versions == ("0.7.0", ">=0.1.0 <0.3.0")
+    # The shared package's own helper emitted the legacy spelling; tolerated.
+    legacy = UnsupportedProtocolVersion(-32005, "no", {"supportedProtocolVersions": ["0.6.0"]})
+    assert legacy.supported_versions == ("0.6.0",)
+    assert UnsupportedProtocolVersion(-32005, "no", None).supported_versions == ()
 
 
 def test_is_session_gone_unifies_the_two_codes_hosts_actually_use() -> None:

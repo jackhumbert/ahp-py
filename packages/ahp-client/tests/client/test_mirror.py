@@ -127,6 +127,26 @@ def test_an_unregistered_channel_is_reported_not_silently_swallowed() -> None:
     assert mirror.apply(_envelope("nope:/1", {"type": "x"})) is ApplyOutcome.UNKNOWN_CHANNEL
 
 
+def test_the_authorityless_root_spelling_is_the_same_channel() -> None:
+    """VS Code matches the root channel by scheme -- `isAhpRootChannel`
+    (sessionState.ts:478-487), which its doc says to always prefer over a
+    direct `=== ROOT_STATE_URI` comparison -- because the authority-less form
+    round-trips out of URI normalisation as `'ahp-root:'`. An exact-string
+    lookup drops that variant as UNKNOWN_CHANNEL and silently freezes root
+    state against a host that normalises URIs."""
+    mirror, _ = _mirror()
+    mirror.apply_snapshot(_snapshot("ahp-root:", {"agents": [], "activeSessions": 0}, from_seq=1))
+    assert sorted(mirror.channels) == [ROOT]  # the snapshot bound the canonical key
+
+    outcome = mirror.apply(
+        _envelope(
+            "ahp-root:", {"type": "root/activeSessionsChanged", "activeSessions": 3}, server_seq=2
+        )
+    )
+    assert outcome is ApplyOutcome.APPLIED
+    assert mirror.state(ROOT)["activeSessions"] == 3
+
+
 # ── reconciliation ───────────────────────────────────────────────────────────
 
 
@@ -278,6 +298,43 @@ def test_matching_is_exact_not_cumulative() -> None:
     assert [p.client_seq for p in mirror.pending(ROOT)] == [1, 2]
 
 
+def test_a_foreign_terminal_action_promotes_the_pending_turn_start() -> None:
+    """`_promotePendingTurnStartIfTerminal` (agentSubscription.ts:483-501): a
+    backend-originated `chat/turnComplete` can arrive without ever echoing the
+    `chat/turnStarted` we dispatched -- no clientSeq, so `_retire` never
+    matches. Without the promotion the reducer's `_end_turn` no-ops, the
+    pending entry survives with nothing that can ever retire it, `optimistic`
+    renders a stuck active turn forever, and the turn never reaches confirmed
+    history."""
+    mirror, _ = _mirror()
+    mirror.apply_snapshot(_snapshot(CHAT, {"turns": [], "status": 1}, from_seq=1))
+    mirror.record_pending(CHAT, {"type": "chat/turnStarted", "turnId": "t1"}, 1)
+    assert mirror.state(CHAT)["activeTurn"]["id"] == "t1"
+
+    outcome = mirror.apply(
+        _envelope(CHAT, {"type": "chat/turnComplete", "turnId": "t1"}, server_seq=2)
+    )
+    assert outcome is ApplyOutcome.APPLIED
+    assert mirror.pending(CHAT) == ()
+    confirmed = mirror.confirmed(CHAT)
+    assert [turn["id"] for turn in confirmed["turns"]] == ["t1"]
+    assert confirmed["activeTurn"] is None
+    assert mirror.state(CHAT)["activeTurn"] is None
+
+
+def test_the_promotion_only_retires_the_turn_the_terminal_action_names() -> None:
+    """The reference matches on `turnId`, not on "any pending start": a
+    terminal action for someone else's turn must leave our optimistic turn
+    alone."""
+    mirror, _ = _mirror()
+    mirror.apply_snapshot(_snapshot(CHAT, {"turns": [], "status": 1}, from_seq=1))
+    mirror.record_pending(CHAT, {"type": "chat/turnStarted", "turnId": "mine"}, 1)
+
+    mirror.apply(_envelope(CHAT, {"type": "chat/turnCancelled", "turnId": "theirs"}, server_seq=2))
+    assert [p.client_seq for p in mirror.pending(CHAT)] == [1]
+    assert mirror.state(CHAT)["activeTurn"]["id"] == "mine"
+
+
 # ── gaps ─────────────────────────────────────────────────────────────────────
 
 
@@ -329,6 +386,23 @@ def test_a_late_subscriptions_baseline_carries_the_global_mark_with_it() -> None
     mirror.apply(_envelope(ROOT, {"type": "root/agentsChanged", "agents": []}, server_seq=2))
     mirror.apply_snapshot(_snapshot(CHAT, {"turns": [], "status": 1}, from_seq=50))
     mirror.apply(_envelope(ROOT, {"type": "root/agentsChanged", "agents": []}, server_seq=51))
+    assert not [d for d in seen if isinstance(d, SequenceGap)]
+
+
+def test_a_hole_right_after_a_from_seq_zero_snapshot_is_still_a_hole() -> None:
+    """A fresh host's snapshot legitimately reports `fromSeq: 0`, and zero is a
+    real baseline, not the absence of one. Gating the check on `not previous`
+    made a loss in the stream's very first envelopes -- seq 5 arriving first --
+    the one gap this check could never see."""
+    mirror, seen = _mirror()
+    mirror.apply_snapshot(_snapshot(ROOT, {"agents": []}, from_seq=0))
+    mirror.apply(_envelope(ROOT, {"type": "root/agentsChanged", "agents": []}, server_seq=5))
+    assert [d for d in seen if isinstance(d, SequenceGap)] == [SequenceGap(ROOT, 1, 5)]
+
+    # And the contiguous case: seq 1 is exactly what baseline 0 expects next.
+    mirror, seen = _mirror()
+    mirror.apply_snapshot(_snapshot(ROOT, {"agents": []}, from_seq=0))
+    mirror.apply(_envelope(ROOT, {"type": "root/agentsChanged", "agents": []}, server_seq=1))
     assert not [d for d in seen if isinstance(d, SequenceGap)]
 
 
@@ -428,6 +502,48 @@ def test_missing_channels_are_forgotten() -> None:
     mirror.apply_snapshot(_snapshot(ROOT, {"agents": []}))
     mirror.mark_missing([ROOT])
     assert ROOT not in mirror.channels
+
+
+# ── the optimistic read ──────────────────────────────────────────────────────
+
+
+def test_a_dispatch_that_races_the_snapshot_stays_pending_without_reducing() -> None:
+    """VS Code's `_recomputeOptimistic` replays only onto a base that exists
+    (agentSubscription.ts:509-526) and its value stays `undefined` until the
+    snapshot. The reducers spread `{**state}` and raise TypeError on `None`, so
+    without the same guard a dispatch in the subscribe round-trip window makes
+    the very next read blow up."""
+    mirror, _ = _mirror()
+    mirror.bind(CHAT, "chat")
+    mirror.record_pending(CHAT, {"type": "chat/turnStarted", "turnId": "t1"}, 1)
+    assert mirror.state(CHAT) is None  # pending, not reduced -- and not a TypeError
+
+    mirror.apply_snapshot(_snapshot(CHAT, {"turns": [], "status": 1}, from_seq=1))
+    assert mirror.state(CHAT)["activeTurn"]["id"] == "t1"  # replayed once there is a base
+
+
+def test_two_reads_with_nothing_in_between_agree() -> None:
+    """The chat reducer stamps `modifiedAt` from the clock on every run, so
+    replaying pending per READ means two consecutive reads never compare equal
+    and drift with the wall clock while nothing arrives -- defeating the
+    equality-based change detection the reference's compute-on-event model
+    supports. The replay is cached against the channel version and recomputed
+    only after a write."""
+    mirror, _ = _mirror()
+    mirror.apply_snapshot(_snapshot(CHAT, {"turns": [], "status": 1}, from_seq=1))
+    mirror.record_pending(CHAT, {"type": "chat/turnStarted", "turnId": "t1"}, 1)
+
+    first = mirror.state(CHAT)
+    assert mirror.state(CHAT) is first  # identical, not merely equal
+
+    # A write invalidates: a foreign action rebases the pending queue.
+    mirror.apply(
+        _envelope(CHAT, {"type": "chat/activityChanged", "activity": "thinking"}, server_seq=2)
+    )
+    rebased = mirror.state(CHAT)
+    assert rebased is not first
+    assert rebased["activity"] == "thinking"
+    assert rebased["activeTurn"]["id"] == "t1"
 
 
 # ── properties ───────────────────────────────────────────────────────────────
@@ -543,3 +659,61 @@ def test_using_the_mirror_from_two_threads_fails_loudly() -> None:
     assert len(caught) == 1
     assert isinstance(caught[0], RuntimeError)
     assert "two threads" in str(caught[0])
+
+
+def test_reading_optimistic_state_off_thread_fails_as_loudly_as_writing() -> None:
+    """`state()` REDUCES whenever the pending queue is dirty, so
+    `asyncio.to_thread(render, mirror.state(uri))` is the same silent clock
+    hazard as an off-loop `apply()` -- invariant 13's failure must be loud on
+    the read path too."""
+    import threading
+
+    mirror, _ = _mirror()
+    mirror.apply_snapshot(_snapshot(ROOT, {"agents": []}, from_seq=0))
+    caught: list[BaseException] = []
+
+    def other_thread() -> None:
+        try:
+            mirror.state(ROOT)
+        except BaseException as exc:
+            caught.append(exc)
+
+    worker = threading.Thread(target=other_thread)
+    worker.start()
+    worker.join()
+    assert len(caught) == 1
+    assert isinstance(caught[0], RuntimeError)
+
+
+async def test_the_running_loops_thread_wins_the_pin_over_a_pre_loop_reader() -> None:
+    """Invariant 13 names the RUNNING LOOP's thread as the authority, not
+    whichever thread called first. A pre-loop reader that won the pin would
+    otherwise make the client's own read loop the "wrong" thread and take the
+    connection down with the complaint -- the RuntimeError must land on the
+    off-loop reader instead."""
+    import threading
+
+    mirror, _ = _mirror()
+    outcomes: list[BaseException | None] = []
+
+    def off_loop_read() -> None:
+        try:
+            mirror.state(ROOT)
+            outcomes.append(None)
+        except BaseException as exc:
+            outcomes.append(exc)
+
+    early = threading.Thread(target=off_loop_read)
+    early.start()
+    early.join()
+    assert outcomes == [None]  # the pre-loop reader pinned first, harmlessly
+
+    # The loop's thread adopts the pin rather than dying on it...
+    mirror.apply_snapshot(_snapshot(ROOT, {"agents": []}, from_seq=0))
+    assert mirror.state(ROOT) == {"agents": []}
+
+    # ...and the eventual complaint lands on the off-loop reader.
+    late = threading.Thread(target=off_loop_read)
+    late.start()
+    late.join()
+    assert isinstance(outcomes[1], RuntimeError)

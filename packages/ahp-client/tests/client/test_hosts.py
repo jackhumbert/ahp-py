@@ -100,6 +100,21 @@ async def test_a_stored_client_id_is_reused_across_runtimes() -> None:
     await factory.stop()
 
 
+async def test_an_explicitly_supplied_client_id_is_still_written_back() -> None:
+    """Plan section 6.3: resolution is explicit -> stored -> uuid4(), and the
+    resolved value is ALWAYS written back. A process that passes the id once
+    and later relies on the store would otherwise load a stale or fresh id and
+    silently lose its reconnect identity."""
+    store = InMemoryClientIdStore()
+    factory = _Factory()
+    runtime = HostRuntime(HostConfig(factory, label="h", client_id="chosen", client_id_store=store))
+    await runtime.start()
+    assert runtime.client_id == "chosen"
+    assert await store.load("h") == "chosen"
+    await runtime.shutdown()
+    await factory.stop()
+
+
 async def test_the_file_store_round_trips_and_is_owner_only(tmp_path: Path) -> None:
     store = FileClientIdStore(tmp_path)
     assert await store.load("h") is None
@@ -644,6 +659,241 @@ async def test_a_resent_client_seq_cannot_collide_with_the_next_new_dispatch() -
     assert _sent() == [1, 2, 3, 4]
     await runtime.shutdown()
     await factory.stop()
+
+
+async def test_a_non_root_initial_subscription_survives_a_second_connection() -> None:
+    """The regression: a bare non-root URI in `initial_subscriptions` was
+    recorded with reducer name `""`, which `apply_snapshot` reads as a real
+    name -- only `None` engages the shape-sniffing fallback -- so `bind()`
+    raised KeyError on every reconnect that took a snapshot path, until the
+    policy exhausted into `failed`. First connect hid it because the snapshots
+    loop used to run before the dict was populated."""
+    chat = "ahp-chat://c/pinned"
+
+    def _snapshots(from_seq: int) -> list[dict[str, Any]]:
+        return [
+            {
+                "resource": ROOT_URI,
+                "state": {"agents": [], "activeSessions": 0},
+                "fromSeq": from_seq,
+            },
+            {"resource": chat, "state": {"turns": [], "status": 1}, "fromSeq": from_seq},
+        ]
+
+    first, second = echo_host(server_seq=3), echo_host()
+    first.on(
+        "initialize",
+        lambda _p: {
+            "protocolVersion": "0.7.0",
+            "serverSeq": 3,
+            "serverInfo": {"name": "FakeHost", "version": "0"},
+            "snapshots": _snapshots(3),
+        },
+    )
+    second.on("reconnect", lambda _p: {"type": "snapshot", "snapshots": _snapshots(5)})
+    factory = _ScriptedFactory(first, second)
+    runtime = HostRuntime(
+        HostConfig(
+            factory,
+            label="h",
+            initial_subscriptions=(ROOT_URI, chat),
+            reconnect_policy=immediate_forever_policy(),
+        )
+    )
+    await runtime.start()
+    assert runtime.mirror.channels[chat].reducer_name == "chat"  # sniffed from the shape
+
+    await first.stop()
+    await _spin(lambda: runtime.generation == 2)
+    assert runtime.generation == 2
+    assert runtime.state.status == "connected"
+    assert runtime.mirror.channels[chat].reducer_name == "chat"
+    assert runtime.mirror.state(chat) == {"turns": [], "status": 1}
+    await runtime.shutdown()
+    await factory.stop()
+
+
+async def test_a_stated_channel_kind_binds_a_snapshot_sniffing_would_decline() -> None:
+    """The `(uri, reducer_name)` form of `initial_subscriptions` is the caller
+    stating the kind it already knows -- invariant 1's preferred source. An
+    empty snapshot is genuinely ambiguous and the fallback declines it, so only
+    the stated kind can bind this channel at all."""
+    chat = "ahp-chat://c/empty"
+    host = echo_host()
+    host.on(
+        "initialize",
+        lambda _p: {
+            "protocolVersion": "0.7.0",
+            "serverSeq": 0,
+            "serverInfo": {"name": "FakeHost", "version": "0"},
+            "snapshots": [{"resource": chat, "state": {}, "fromSeq": 0}],
+        },
+    )
+    factory = _ScriptedFactory(host)
+    runtime = HostRuntime(HostConfig(factory, label="h", initial_subscriptions=((chat, "chat"),)))
+    await runtime.start()
+    assert runtime.mirror.channels[chat].reducer_name == "chat"
+    assert runtime.mirror.confirmed(chat) == {}
+    await runtime.shutdown()
+    await factory.stop()
+
+
+async def test_a_subscription_made_while_the_reconnect_was_in_flight_survives_it() -> None:
+    """Plan section 6.3: the snapshot arm keeps a URI iff surviving *or not
+    prior*. One subscribed while the reconnect RPC was in flight cannot be in
+    the host's answer, and pruning it would silently discard the recorded
+    intent `subscribe()` promises the next handshake will carry. Only what the
+    host was actually asked about is the host's to decline -- and that half
+    still prunes."""
+    doomed = "ahp-chat://c/declined"
+    added = "ahp-chat://c/in-flight"
+    first, second = echo_host(), echo_host()
+    first.on(
+        "subscribe",
+        lambda p: {
+            "snapshot": {
+                "resource": p["channel"],
+                "state": {"turns": [], "status": 1},
+                "fromSeq": 1,
+            }
+        },
+    )
+    reconnect_started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def held_reconnect(_p: Any) -> Any:
+        reconnect_started.set()
+        await release.wait()
+        # The host resumes root only: `doomed` was asked about and declined.
+        return {
+            "type": "snapshot",
+            "snapshots": [
+                {"resource": ROOT_URI, "state": {"agents": [], "activeSessions": 0}, "fromSeq": 9}
+            ],
+        }
+
+    second.on("reconnect", held_reconnect)
+    factory = _ScriptedFactory(first, second)
+    runtime = HostRuntime(
+        HostConfig(factory, label="h", reconnect_policy=immediate_forever_policy())
+    )
+    await runtime.start()
+    await runtime.subscribe(doomed, "chat")
+    runtime._server_seq = 4  # history to resume
+
+    await first.stop()
+    await asyncio.wait_for(reconnect_started.wait(), 5)
+    with pytest.raises(HostNotConnected):
+        await runtime.subscribe(added, "chat")  # records intent, then raises
+    release.set()
+
+    await _spin(lambda: runtime.generation == 2)
+    assert runtime.generation == 2
+    assert runtime.subscribed(added)
+    assert added in runtime.mirror.channels  # bound, its snapshot rides the next handshake
+    assert not runtime.subscribed(doomed)
+    assert doomed not in runtime.mirror.channels
+    await runtime.shutdown()
+    await factory.stop()
+
+
+# ── the auth re-check ────────────────────────────────────────────────────────
+
+
+async def test_the_auth_check_reruns_after_every_reconnect_before_connected() -> None:
+    """Plan section 6.3: "Reconnect must re-check authentication."
+    `auth/required` is ephemeral and never replayed (spec authentication.md,
+    Auth Expiry), and only the supervisor knows a reconnect happened -- so the
+    hook runs against every fresh client, before the state flips to connected,
+    and a caller released by `start(wait=True)` is never handed a connection
+    nobody re-verified."""
+    statuses: list[str] = []
+
+    async def check(_client: Any) -> None:
+        statuses.append(runtime.state.status)
+
+    factory = _Factory()
+    runtime = HostRuntime(
+        HostConfig(
+            factory, label="h", auth_check=check, reconnect_policy=immediate_forever_policy()
+        )
+    )
+    await runtime.start()
+    assert statuses == ["connecting"]  # ran, and before `connected`
+
+    await factory.hosts[0].stop()
+    await _spin(lambda: runtime.generation == 2)
+    assert runtime.generation == 2
+    # Re-ran against the fresh client, and still before the flip: the observed
+    # status is whatever the attempt is labelled, never `connected`.
+    assert len(statuses) == 2
+    assert "connected" not in statuses
+    await runtime.shutdown()
+    await factory.stop()
+
+
+async def test_a_failing_auth_check_fails_the_attempt_like_any_other_refusal() -> None:
+    """A failure here is classified by the reconnect policy, not special-cased:
+    the attempt dies before `connected` flips, and the supervisor dials again
+    or reaches `failed` exactly as it would for a refused handshake."""
+    calls = 0
+
+    async def check(_client: Any) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise OSError("token expired")
+
+    factory = _Factory()
+    runtime = HostRuntime(
+        HostConfig(
+            factory, label="h", auth_check=check, reconnect_policy=immediate_forever_policy()
+        )
+    )
+    await runtime.start()
+    assert calls == 2
+    assert runtime.state.status == "connected"
+    await runtime.shutdown()
+    await factory.stop()
+
+
+# ── aborting an attempt ──────────────────────────────────────────────────────
+
+
+async def test_reconnect_now_aborts_a_hung_dial() -> None:
+    """Plan section 6.3's opening step: the link comes FIRST, and every await
+    in the attempt races it. Without that, `reconnect_now()` against a
+    black-holed host only takes effect once the dial resolves on its own --
+    which is never."""
+    dialing = asyncio.Event()
+    black_hole = asyncio.Event()  # never set
+    attempts = 0
+    hosts: list[FakeHost] = []
+
+    async def factory() -> Transport:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            dialing.set()
+            await black_hole.wait()
+        host = echo_host()
+        await host.start()
+        hosts.append(host)
+        return host.transport()
+
+    runtime = HostRuntime(
+        HostConfig(factory, label="h", reconnect_policy=immediate_forever_policy())
+    )
+    starting = asyncio.ensure_future(runtime.start())
+    await asyncio.wait_for(dialing.wait(), 5)
+    await runtime.reconnect_now()
+    await asyncio.wait_for(starting, 5)
+
+    assert runtime.state.status == "connected"
+    assert attempts == 2
+    await runtime.shutdown()
+    for host in hosts:
+        await host.stop()
 
 
 # ── the cached session catalog ───────────────────────────────────────────────

@@ -14,7 +14,7 @@ from typing import Any
 import pytest
 
 from agent_host_client import ChatWatch, TurnInProgress, event_for
-from agent_host_client.api import Delta, TurnCompleted, TurnStarted, connect
+from agent_host_client.api import Delta, TurnCompleted, TurnFailed, TurnStarted, connect
 from agent_host_client.client.errors import RpcError, TransportError
 from agent_host_client.hosts.policy import (
     ReconnectPolicy,
@@ -151,6 +151,52 @@ async def test_from_start_false_skips_the_synthetic_event() -> None:
         driver = asyncio.get_running_loop().create_task(later())
         first = await asyncio.wait_for(watch.__anext__(), 1)
         assert isinstance(first, TurnCompleted)
+        await driver
+        await watch.aclose()
+    await host.stop()
+
+
+async def test_watch_does_not_decode_a_refused_action_as_the_thing_it_refused() -> None:
+    """Invariant 5: the host fans a refused action to every subscriber, and no
+    peer may apply it. Decoded by type it lies -- a refused `chat/turnStarted`
+    reads as a turn beginning, and a watcher opens a bubble for a turn that
+    will never produce anything. Two clients racing to start turns is exactly
+    this surface's scenario, so the loser's refusal is reported as the failure
+    it is; every other refusal is the originator's optimistic effect being
+    reverted, which is not this watcher's business."""
+    host = _session_host()
+    await host.start()
+    async with connect(transport=host.transport()) as client:
+        session = await client.create_session(provider="echo")
+        chat = await session.chat()
+        watch = chat.watch(from_start=False)
+
+        async def drive() -> None:
+            await asyncio.sleep(0.05)
+            # The loser of a race to start a turn: refused, and fanned out.
+            await host.push(
+                CHAT,
+                {"type": "chat/turnStarted", "turnId": "loser"},
+                rejection="a turn is already active",
+            )
+            # A rejected non-turnStarted is *skipped*, not decoded: read by
+            # type, this one is a genuine cancellation of a turn the host
+            # never cancelled -- and `TurnCancelled` is terminal.
+            await host.push(
+                CHAT,
+                {"type": "chat/turnCancelled", "turnId": "live", "duration": 1},
+                rejection="no such turn",
+            )
+            await host.push(CHAT, {"type": "chat/turnStarted", "turnId": "real"})
+
+        driver = asyncio.get_running_loop().create_task(drive())
+        first = await asyncio.wait_for(watch.__anext__(), 1)
+        assert isinstance(first, TurnFailed)
+        assert first.reason == "a turn is already active"
+        assert first.turn_id == "loser"
+        second = await asyncio.wait_for(watch.__anext__(), 1)
+        assert isinstance(second, TurnStarted)
+        assert second.turn_id == "real"
         await driver
         await watch.aclose()
     await host.stop()

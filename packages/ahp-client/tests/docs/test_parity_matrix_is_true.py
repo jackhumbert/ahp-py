@@ -20,6 +20,9 @@ from agent_host_protocol.types import ACTION_TYPES, IS_CLIENT_DISPATCHABLE
 
 from agent_host_client.client.commands import CALLER_SCOPED, COMMANDS, ROOT_SCOPED
 from agent_host_client.client.events import NOTIFICATION_METHODS
+from agent_host_client.client.mirror import REDUCER_NAMES
+from agent_host_client.serve.resources import _SNAKE, _VIRTUAL_METHODS
+from agent_host_client.serve.router import REVERSE_METHODS
 
 ROOT = Path(__file__).resolve().parents[2]
 MESSAGES = (CORPUS_ROOT / "ts" / "messages.ts").read_text(encoding="utf-8")
@@ -122,6 +125,42 @@ def test_all_nine_server_notifications_are_surfaced() -> None:
 
 def test_all_seven_reducers_are_available() -> None:
     assert len(REDUCERS) == 7
+
+
+def test_the_mirror_can_bind_every_reducer() -> None:
+    """The matrix's "Mirrored here" column derives from `REDUCER_NAMES`, the set
+    `StateMirror.bind` accepts. It must be all seven: the TS mirror wires four,
+    and matching that would inherit its `ahp-chat:`-snapshots-ignored gap."""
+    assert frozenset(REDUCERS) == REDUCER_NAMES
+
+
+def test_the_router_routes_exactly_the_vendored_reverse_methods() -> None:
+    """The matrix says every server→client request is routed; that claim is only
+    derivable while the router's set and the vendored `ServerCommandMap` agree."""
+    assert set(_map_entries("ServerCommandMap")) == REVERSE_METHODS
+
+
+def test_the_reverse_here_column_matches_the_servers_dispatch_tables() -> None:
+    """The first published matrix hardcoded '—' for the whole reverse direction
+    while the code implemented nine of ten — asserted-false documentation, the
+    exact failure class this repo exists to prevent. Parse the generated table
+    and require its ticks to equal the servers' own dispatch tables.
+
+    The one deliberate gap is also pinned: `createResourceWatch` is routed but
+    no shipped server answers it (plan §1.3 argues the watch server should stay
+    absent). A second unserved method appearing here is a decision to record,
+    not a row to shrug at.
+    """
+    served = frozenset(_SNAKE) | _VIRTUAL_METHODS
+    assert REVERSE_METHODS - served == {"createResourceWatch"}
+
+    matrix = (ROOT / "docs" / "parity.md").read_text(encoding="utf-8")
+    section = re.search(r"## Server → client requests.*?\n\n(\| Method.*?)\n\n", matrix, re.S)
+    assert section is not None, "the reverse table is missing from docs/parity.md"
+    rows = re.findall(r"\| `(\w+)` \| [^|]+ \| ([^|]+) \|", section.group(1))
+    assert {name for name, _ in rows} == REVERSE_METHODS
+    ticked = {name for name, cell in rows if "✅" in cell}
+    assert ticked == served, f"ticked: {sorted(ticked)}; served: {sorted(served)}"
 
 
 def test_dispatchable_action_count_is_pinned() -> None:

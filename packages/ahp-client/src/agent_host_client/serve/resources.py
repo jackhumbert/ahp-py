@@ -119,7 +119,10 @@ class FileResourceServer:
             raise NotFound(-32008, f"no such file: {uri}") from exc
         except IsADirectoryError as exc:
             raise NotFound(-32008, f"is a directory: {uri}") from exc
-        return {**_encode(data, params.get("encoding")), "etag": self._etag(path)}
+        # No `etag` member: `ResourceReadResult` declares `data`, `encoding`
+        # and `contentType` only -- the etag belongs to `resourceResolve`, and
+        # a strict peer validator rejects the extra member.
+        return _encode(data, params.get("encoding"))
 
     def _resource_list(self, params: Mapping[str, Any]) -> JsonObject:
         uri = _required(params, "uri")
@@ -188,7 +191,11 @@ class FileResourceServer:
         if params.get("createOnly") and path.exists():
             raise AlreadyExists(-32010, f"already exists: {uri}")
         if_match = params.get("ifMatch")
-        if if_match is not None and path.exists() and self._etag(path) != if_match:
+        if if_match is not None and (not path.exists() or self._etag(path) != if_match):
+            # A missing file conflicts too: "the server MUST fail with Conflict
+            # if the current etag does not match", and a file deleted between
+            # resolve and write has no current etag for any token to match.
+            # Recreating it would defeat the lost-update guard `ifMatch` is for.
             raise Conflict(-32011, f"etag mismatch for {uri}")
 
         # `data`, not `content`. Reading the wrong key made a conformant caller's
@@ -218,7 +225,10 @@ class FileResourceServer:
         else:
             existing = path.read_bytes() if position and path.exists() else b""
             path.write_bytes(existing[:position] + data)
-        return {"etag": self._etag(path)}
+        # "An empty object on success" -- `ResourceWriteResult` declares no
+        # properties at all. The fresh etag comes from `resourceResolve`, and a
+        # strict peer validator rejects an undeclared member here.
+        return {}
 
     def _resource_mkdir(self, params: Mapping[str, Any]) -> JsonObject:
         uri = _required(params, "uri")
@@ -346,6 +356,15 @@ class VirtualResourceServer:
             # base64.
             return _encode(data, params.get("encoding"))
         if method == "resourceList":
+            # "The server MUST return success only if the target exists and is
+            # a directory" -- an empty-success answer for a typo'd URI renders
+            # as a legitimately empty plugin, because the host walking down
+            # from the plugin root stops at the first empty listing with no
+            # error anywhere. The prefix root may legitimately list empty.
+            if uri in self._blobs:
+                raise NotFound(-32008, f"not a directory: {uri}")
+            if _key(uri) not in self._children and _key(uri) != _key(self._prefix):
+                raise NotFound(-32008, f"no such virtual resource: {uri}")
             children = self._children.get(_key(uri), [])
             return {
                 "entries": [

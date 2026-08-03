@@ -8,6 +8,7 @@ sibling host implemented with unbounded recursion.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 
 import pytest
@@ -96,14 +97,20 @@ async def test_an_abnormal_close_raises_so_the_supervisor_can_tell_them_apart() 
     server.close()  # type: ignore[attr-defined]
 
 
-async def test_a_malformed_frame_is_skipped_without_recursing() -> None:
-    """The sibling host's transport did `return await self.receive()` here, so a
-    peer streaming garbage exhausted the stack. This drives 2000 bad frames --
-    well past any recursion limit -- and then a good one."""
+async def test_a_malformed_frame_raises_rather_than_hiding_itself() -> None:
+    """The transport parses eagerly and RAISES; `AhpClient._read_loop` counts
+    and continues.
+
+    The sibling host does the opposite -- it swallows bad frames inside
+    `receive()` -- and this layering is the better one: the count becomes an
+    observable `MalformedFrame` diagnostic instead of a silent skip, so a peer
+    that is quietly corrupting half its traffic is something an operator can
+    see. The cost is that the transport alone is not a filter, which is what
+    this test pins.
+    """
 
     async def handler(connection: ServerConnection) -> None:
-        for _ in range(2000):
-            await connection.send("{not json")
+        await connection.send("{not json")
         await connection.send(json.dumps({"jsonrpc": "2.0", "id": 1, "result": {}}))
         await asyncio.sleep(0.1)
 
@@ -111,7 +118,10 @@ async def test_a_malformed_frame_is_skipped_without_recursing() -> None:
     from agent_host_client.ws.transport import WebSocketClientTransport
 
     transport = await WebSocketClientTransport.connect(url)
-    assert await asyncio.wait_for(transport.receive(), 5) == {
+    with pytest.raises(json.JSONDecodeError):
+        await asyncio.wait_for(transport.receive(), 2)
+    # The socket is still good: one bad frame is not a closed connection.
+    assert await asyncio.wait_for(transport.receive(), 2) == {
         "jsonrpc": "2.0",
         "id": 1,
         "result": {},
@@ -121,6 +131,10 @@ async def test_a_malformed_frame_is_skipped_without_recursing() -> None:
 
 
 async def test_a_json_scalar_is_not_a_json_rpc_message() -> None:
+    """Valid JSON, still not a message. It has to reach the same accounting as
+    undecodable text, or `[]` forever is a peer-driven loop that costs nothing
+    to send and never gets counted."""
+
     async def handler(connection: ServerConnection) -> None:
         await connection.send("42")
         await connection.send(json.dumps([1, 2, 3]))
@@ -131,6 +145,9 @@ async def test_a_json_scalar_is_not_a_json_rpc_message() -> None:
     from agent_host_client.ws.transport import WebSocketClientTransport
 
     transport = await WebSocketClientTransport.connect(url)
+    for _ in range(2):
+        with pytest.raises(json.JSONDecodeError):
+            await asyncio.wait_for(transport.receive(), 2)
     assert await asyncio.wait_for(transport.receive(), 2) == {
         "jsonrpc": "2.0",
         "id": 1,
@@ -138,6 +155,80 @@ async def test_a_json_scalar_is_not_a_json_rpc_message() -> None:
     }
     await transport.close()
     server.close()  # type: ignore[attr-defined]
+
+
+async def test_a_flood_of_garbage_gives_up_instead_of_recursing() -> None:
+    """The property the old test was really about, asserted where the loop now
+    lives -- and against what the client actually does.
+
+    The sibling host wrote this as `return await self.receive()`, so 5000 bad
+    frames raised `RecursionError` inside its read task: a remote crash from
+    unauthenticated input. This client counts instead, and past
+    `MALFORMED_FRAME_LIMIT` it stops -- because a peer sending nothing but junk
+    is not recovering, and holding the socket open only delays the in-flight
+    requests that are going to fail anyway.
+
+    So the assertion is not "it survives the flood". It is that the flood ends
+    in a prompt, named, catchable state rather than a stack overflow or a hang.
+    """
+    from agent_host_client.client.client import MALFORMED_FRAME_LIMIT, AhpClient
+    from agent_host_client.client.errors import ClientClosed
+    from agent_host_client.ws.transport import WebSocketClientTransport
+
+    async def handler(connection: ServerConnection) -> None:
+        with contextlib.suppress(Exception):
+            for _ in range(MALFORMED_FRAME_LIMIT * 4):
+                await connection.send("{not json")
+            # No trailing sleep: `server.close()` does not await handlers, so a
+            # sleeping one is still pending when the loop tears down and the
+            # test pays for it in wall clock. The client has already given up
+            # by frame 8 -- long before these 32 are drained -- so nothing here
+            # depends on the connection staying open.
+
+    url, server = await _echo_server(handler)
+    client = AhpClient(await WebSocketClientTransport.connect(url))
+    await client.connect()
+    try:
+        # Waiting for the teardown rather than racing it with a request: the
+        # flood crosses a real socket, so a `ping()` issued alongside it settles
+        # on whichever happens first. Bounded tightly -- this takes about 10ms,
+        # and a regression to hanging has to fail rather than merely be slow.
+        async with asyncio.timeout(5):
+            while client.connection_state.status == "connected":
+                await asyncio.sleep(0.01)
+
+        with pytest.raises(ClientClosed):
+            await client.ping()
+    finally:
+        await client.shutdown()
+        server.close()  # type: ignore[attr-defined]
+
+
+async def test_a_burst_under_the_limit_is_survived() -> None:
+    """The other half, and the one that makes the limit a policy rather than a
+    hair trigger: a peer with an encoding hiccup keeps its session."""
+    from agent_host_client.client.client import MALFORMED_FRAME_LIMIT, AhpClient
+    from agent_host_client.ws.transport import WebSocketClientTransport
+
+    async def handler(connection: ServerConnection) -> None:
+        with contextlib.suppress(websockets.exceptions.ConnectionClosed):
+            for _ in range(MALFORMED_FRAME_LIMIT - 1):
+                await connection.send("{not json")
+            async for raw in connection:
+                request = json.loads(raw)
+                if request.get("method") == "ping":
+                    await connection.send(
+                        json.dumps({"jsonrpc": "2.0", "id": request["id"], "result": {}})
+                    )
+
+    url, server = await _echo_server(handler)
+    client = AhpClient(await WebSocketClientTransport.connect(url))
+    await client.connect()
+    try:
+        await asyncio.wait_for(client.ping(), 10)
+    finally:
+        await client.shutdown()
+        server.close()  # type: ignore[attr-defined]
 
 
 async def test_connect_failure_is_a_transport_error() -> None:
@@ -197,3 +288,50 @@ async def test_websockets_is_not_imported_by_the_testing_kit() -> None:
 
     assert "websockets" not in getattr(testing, "__dict__", {})
     assert websockets is not None  # the import above is real, this is the contrast
+
+
+async def test_closing_against_a_dead_peer_does_not_wait_out_the_handshake() -> None:
+    """`websockets` runs a closing handshake with a 10s default, and against a
+    peer that is already gone it waits the whole thing out.
+
+    `AhpClient.shutdown()` awaits `transport.close()`, so an embedder calling it
+    in a `finally` after a dropped connection paid ten seconds per client -- and
+    `HostRuntime` paid it again on every reconnect. Measured at 9.99s before the
+    bound; a polite close the peer will never read is worth nothing to either
+    side.
+    """
+    from agent_host_client.ws.transport import _CLOSE_TIMEOUT, WebSocketClientTransport
+
+    async def handler(connection: ServerConnection) -> None:
+        # Accept, then vanish without completing a handshake.
+        with contextlib.suppress(Exception):
+            await asyncio.sleep(30)
+
+    url, server = await _echo_server(handler)
+    transport = await WebSocketClientTransport.connect(url)
+    started = asyncio.get_running_loop().time()
+    await transport.close()
+    elapsed = asyncio.get_running_loop().time() - started
+    server.close()  # type: ignore[attr-defined]
+
+    assert elapsed < _CLOSE_TIMEOUT + 1.0, f"close took {elapsed:.2f}s"
+
+
+async def test_a_healthy_close_is_immediate() -> None:
+    """The bound must not cost anything when the peer IS answering -- otherwise
+    every ordinary shutdown pays for the pathological case."""
+    from agent_host_client.ws.transport import WebSocketClientTransport
+
+    async def handler(connection: ServerConnection) -> None:
+        with contextlib.suppress(Exception):
+            async for message in connection:
+                await connection.send(message)
+
+    url, server = await _echo_server(handler)
+    transport = await WebSocketClientTransport.connect(url)
+    started = asyncio.get_running_loop().time()
+    await transport.close()
+    elapsed = asyncio.get_running_loop().time() - started
+    server.close()  # type: ignore[attr-defined]
+
+    assert elapsed < 0.5, f"a clean close took {elapsed:.2f}s"

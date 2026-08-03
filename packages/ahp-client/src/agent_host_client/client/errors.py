@@ -33,6 +33,7 @@ __all__ = [
     "ClientClosed",
     "Conflict",
     "ContentNotFound",
+    "InvalidArgument",
     "InvalidParams",
     "MethodNotFound",
     "NotFound",
@@ -54,6 +55,20 @@ __all__ = [
 
 class AhpClientError(Exception):
     """Base for everything this library raises."""
+
+
+class InvalidArgument(AhpClientError, ValueError):
+    """A caller's argument cannot become a valid wire value.
+
+    Both bases, on purpose. It **is** a ``ValueError`` -- that is what a bad
+    argument is in Python, and it is what the action constructors raised before
+    this class existed -- and it is an :class:`AhpClientError`, because this
+    module's promise is that one ``except`` catches the whole library and the
+    argument guards were the hole in it. The changeset review gate is the case
+    that made it matter: the documented handler is ``except AhpClientError``,
+    which caught the capability refusal and missed the empty-batch refusal one
+    line away.
+    """
 
 
 # ── transport ────────────────────────────────────────────────────────────────
@@ -173,7 +188,7 @@ class TurnInProgress(RpcError):
 
 
 class UnsupportedProtocolVersion(RpcError):
-    """-32005. ``data.supportedProtocolVersions`` explains the mismatch.
+    """-32005. ``data.supportedVersions`` explains the mismatch.
 
     Entries MAY be SemVer *range* constraints (``">=0.1.0 <0.3.0"``, ``"^0.2.0"``),
     not just exact versions, so they are surfaced verbatim rather than parsed.
@@ -182,7 +197,14 @@ class UnsupportedProtocolVersion(RpcError):
     @property
     def supported_versions(self) -> tuple[str, ...]:
         if isinstance(self.data, Mapping):
-            raw = self.data.get("supportedProtocolVersions")
+            # `supportedVersions` per errors.schema.json and errors.ts:157. The
+            # longer spelling is not in the spec, but the shared package's own
+            # error helper emitted it, so it is read as a fallback rather than
+            # letting the one frame that explains a handshake failure parse to
+            # nothing.
+            raw = self.data.get("supportedVersions")
+            if raw is None:
+                raw = self.data.get("supportedProtocolVersions")
             if isinstance(raw, Sequence) and not isinstance(raw, str | bytes):
                 return tuple(str(v) for v in raw)
         return ()

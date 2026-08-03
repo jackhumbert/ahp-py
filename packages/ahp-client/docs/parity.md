@@ -71,36 +71,41 @@ stream, because its `default:` branch returns without publishing.
 ## Server → client requests (10)
 
 The reverse direction. The TypeScript client ships a typed handler registry and
-no implementations; `ahpx` implements two of ten, read-only.
+no implementations; `ahpx` implements two of ten, read-only. Here, every method
+is routed by `serve.ResourceRouter`, and a tick means a shipped server
+(`FileResourceServer` or `VirtualResourceServer`) answers it. The rest —
+`createResourceWatch` — are declined with `-32601`, which is how a peer says no in a
+protocol with no capability object; `docs/plan.md` §1.3 records why the watch
+server stays absent.
 
 | Method | TS client | Here |
 |---|---|---|
-| `resourceRead` | — | — |
-| `resourceWrite` | — | — |
-| `resourceList` | — | — |
-| `resourceCopy` | — | — |
-| `resourceDelete` | — | — |
-| `resourceMove` | — | — |
-| `resourceResolve` | — | — |
-| `resourceMkdir` | — | — |
-| `resourceRequest` | — | — |
+| `resourceRead` | — | ✅ |
+| `resourceWrite` | — | ✅ |
+| `resourceList` | — | ✅ |
+| `resourceCopy` | — | ✅ |
+| `resourceDelete` | — | ✅ |
+| `resourceMove` | — | ✅ |
+| `resourceResolve` | — | ✅ |
+| `resourceMkdir` | — | ✅ |
+| `resourceRequest` | — | ✅ |
 | `createResourceWatch` | — | — |
 
 ## Channels (7)
 
 Reducers come from `agent-host-protocol`, so all seven are available to the
-mirror. The TypeScript `AhpStateMirror` wires four and silently ignores every
-`ahp-chat:` snapshot.
+mirror, which binds any of them by name at registration. The TypeScript
+`AhpStateMirror` wires four and silently ignores every `ahp-chat:` snapshot.
 
 | Reducer | Available | Mirrored here |
 |---|---|---|
-| `annotations` | ✅ | — |
-| `changeset` | ✅ | — |
-| `chat` | ✅ | — |
-| `resourceWatch` | ✅ | — |
-| `root` | ✅ | — |
-| `session` | ✅ | — |
-| `terminal` | ✅ | — |
+| `annotations` | ✅ | ✅ |
+| `changeset` | ✅ | ✅ |
+| `chat` | ✅ | ✅ |
+| `resourceWatch` | ✅ | ✅ |
+| `root` | ✅ | ✅ |
+| `session` | ✅ | ✅ |
+| `terminal` | ✅ | ✅ |
 
 ## Client-dispatchable actions (38 of 85)
 

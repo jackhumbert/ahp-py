@@ -14,12 +14,14 @@ from agent_host_client.api import (
     ToolCallRunning,
     TurnCompleted,
     TurnFailed,
+    UnansweredToolCallError,
     approve_all,
     auto,
     connect,
     deny_all,
     resolve_policy,
 )
+from agent_host_client.api.approvals import ManualPolicy
 from agent_host_client.client.errors import AhpClientError
 from agent_host_client.testing import FakeHost, FakeToolCall, echo_host
 
@@ -78,10 +80,18 @@ def _ready(name: str = "", annotations: dict[str, Any] | None = None) -> ToolCal
 
 
 async def test_manual_is_the_default_and_does_not_silently_approve() -> None:
-    """Silently approving is the obvious wrong default; silently approving *is*
-    what a permissive default would do."""
-    policy = resolve_policy(None)
-    assert await policy(_ready("rm")) is False
+    """Both silent answers are worse than a loud error: silently approving runs
+    a tool the user never saw, and silently denying -- what this default did
+    before -- ends the turn without the user ever learning why. The manual
+    default surfaces the event and waits (plan §7); called directly, outside a
+    stream with nothing to wait on, it raises the same specific error a drained
+    stream raises after `approval_timeout`."""
+    for value in (None, "manual", "ask"):
+        assert isinstance(resolve_policy(value), ManualPolicy)
+    with pytest.raises(UnansweredToolCallError) as caught:
+        await resolve_policy(None)(_ready("rm"))
+    assert caught.value.tool_call_id == "tc1"
+    assert caught.value.tool_name == "rm"
 
 
 async def test_string_shorthands_resolve() -> None:
@@ -204,6 +214,34 @@ async def test_a_session_we_did_not_create_is_never_disposed_on_exit() -> None:
     await host.stop()
 
 
+async def test_a_failed_creation_raises_with_the_recorded_error_not_success() -> None:
+    """`SessionLifecycle` is exactly `creating | ready | creationFailed`.
+    Testing `"failed"` -- the unrelated connection-level `HostStatus` value --
+    made the raise unreachable, so a failed creation waited out the full
+    30 s timeout and was then reported as success."""
+    host = _session_host(lifecycle="creationFailed", creationError={"message": "provider exploded"})
+    await host.start()
+    async with connect(transport=host.transport()) as client:
+        with pytest.raises(AhpClientError, match="provider exploded"):
+            # Promptly: the failure is in the subscribe snapshot, so nothing
+            # here may wait for a timeout.
+            await asyncio.wait_for(client.create_session(provider="echo"), 2)
+    await host.stop()
+
+
+async def test_a_host_that_never_reports_a_lifecycle_raises_at_the_deadline() -> None:
+    """Returning silently hands the caller a dead `Session` reported as
+    success, and makes `ready_timeout` a parameter that can never do
+    anything."""
+    host = echo_host()
+    host.on("createSession", lambda _p: {})
+    await host.start()
+    async with connect(transport=host.transport()) as client:
+        with pytest.raises(AhpClientError, match="published no lifecycle"):
+            await client.create_session(provider="echo", ready_timeout=0.2)
+    await host.stop()
+
+
 async def test_a_read_only_chat_refuses_to_send() -> None:
     """`ChatState.interactivity` is undocumented in every guide and gates
     whether a client may send at all."""
@@ -286,6 +324,57 @@ async def test_awaiting_a_turn_drains_it_and_returns_the_final_event() -> None:
         await driver
         assert isinstance(result, TurnCompleted)
         assert result.text == "done"
+    await host.stop()
+
+
+async def test_a_model_choice_is_sent_as_a_model_selection_object() -> None:
+    """`Message.model` is a `ModelSelection` **object** -- `{id, config?}` with
+    `id` required -- not a bare string. The bare string is wire-invalid: a
+    validating peer rejects the `chat/turnStarted`, and a lenient one freezes
+    the malformed `Message` into every subscriber's transcript."""
+    host = _session_host()
+    await host.start()
+    async with connect(transport=host.transport()) as client:
+        session = await client.create_session(provider="echo")
+        chat = await session.chat()
+
+        def drive(turn_id: str) -> Any:
+            async def run() -> None:
+                await asyncio.sleep(0.05)
+                await host.emit_turn(chat.uri, turn_id, text="ok")
+
+            return asyncio.get_running_loop().create_task(run())
+
+        driver = drive("t1")
+        await chat.prompt("hello", turn_id="t1", model="gpt-x", approvals="all")
+        await driver
+        started = [
+            m["params"]["action"]
+            for m in host.received
+            if m.get("method") == "dispatchAction"
+            and m["params"]["action"]["type"] == "chat/turnStarted"
+        ]
+        assert started[-1]["message"]["model"] == {"id": "gpt-x"}
+
+        # The full `ModelSelection` shape passes through untouched.
+        driver = drive("t2")
+        await chat.prompt(
+            "again",
+            turn_id="t2",
+            model={"id": "gpt-x", "config": {"reasoningEffort": "high"}},
+            approvals="all",
+        )
+        await driver
+        started = [
+            m["params"]["action"]
+            for m in host.received
+            if m.get("method") == "dispatchAction"
+            and m["params"]["action"]["type"] == "chat/turnStarted"
+        ]
+        assert started[-1]["message"]["model"] == {
+            "id": "gpt-x",
+            "config": {"reasoningEffort": "high"},
+        }
     await host.stop()
 
 
@@ -438,6 +527,144 @@ async def test_an_auto_confirmed_tool_call_is_never_answered() -> None:
         assert [e.tool_name for e in running] == ["read_file"]
         assert not [e for e in seen if isinstance(e, ToolCallReady)]
         assert _confirmations(host) == []
+    await host.stop()
+
+
+async def test_the_manual_default_raises_loudly_when_nobody_answers() -> None:
+    """Plan §7: the manual default surfaces the event, waits, and raises
+    `UnansweredToolCall(tool_call_id, tool_name)` after `approval_timeout`.
+    Silently approving runs a tool the user never saw; silently denying --
+    what this default did before -- ends the turn without the user ever
+    learning why."""
+    host = _session_host()
+    await host.start()
+    async with connect(transport=host.transport()) as client:
+        session = await client.create_session(provider="echo")
+        chat = await session.chat()
+
+        async def drive() -> None:
+            await asyncio.sleep(0.05)
+            await host.push(chat.uri, {"type": "chat/turnStarted", "turnId": "t1"})
+            await host.push(
+                chat.uri,
+                {
+                    "type": "chat/toolCallStart",
+                    "turnId": "t1",
+                    "toolCallId": "tc1",
+                    "toolName": "rm",
+                },
+            )
+            # No `confirmed`: the call is gated, awaiting somebody's answer.
+            await host.push(
+                chat.uri,
+                {
+                    "type": "chat/toolCallReady",
+                    "turnId": "t1",
+                    "toolCallId": "tc1",
+                    "invocationMessage": "rm -rf /",
+                },
+            )
+
+        driver = asyncio.get_running_loop().create_task(drive())
+        with pytest.raises(UnansweredToolCallError) as caught:
+            await chat.prompt("hello", turn_id="t1", approval_timeout=0.3)
+        await driver
+        assert caught.value.tool_call_id == "tc1"
+        assert caught.value.tool_name == "rm"
+        # Neither silent answer went on the wire.
+        assert _confirmations(host) == []
+    await host.stop()
+
+
+async def test_the_manual_default_carries_on_once_somebody_else_answers() -> None:
+    """The answer is observed on the mirror: a `chat/toolCallConfirmed` --
+    another client's, arriving as an ordinary broadcast -- moves the call off
+    `pending-confirmation`, and the reducer is the one place first-answer-wins
+    arbitration is already computed."""
+    host = _session_host()
+    await host.start()
+    async with connect(transport=host.transport()) as client:
+        session = await client.create_session(provider="echo")
+        chat = await session.chat()
+
+        async def drive() -> None:
+            await asyncio.sleep(0.05)
+            await host.push(chat.uri, {"type": "chat/turnStarted", "turnId": "t1"})
+            await host.push(
+                chat.uri,
+                {
+                    "type": "chat/toolCallStart",
+                    "turnId": "t1",
+                    "toolCallId": "tc1",
+                    "toolName": "rm",
+                },
+            )
+            await host.push(
+                chat.uri,
+                {
+                    "type": "chat/toolCallReady",
+                    "turnId": "t1",
+                    "toolCallId": "tc1",
+                    "invocationMessage": "rm -rf /",
+                },
+            )
+            await asyncio.sleep(0.2)
+            await host.push(
+                chat.uri,
+                {
+                    "type": "chat/toolCallConfirmed",
+                    "turnId": "t1",
+                    "toolCallId": "tc1",
+                    "approved": True,
+                    "confirmed": "user-action",
+                },
+            )
+            await host.push(chat.uri, {"type": "chat/turnComplete", "turnId": "t1"})
+
+        driver = asyncio.get_running_loop().create_task(drive())
+        result = await chat.prompt("hello", turn_id="t1", approval_timeout=5.0)
+        await driver
+        assert isinstance(result, TurnCompleted)
+        # The answer was not ours: this client dispatched no confirmation.
+        assert _confirmations(host) == []
+    await host.stop()
+
+
+async def test_a_finished_turn_releases_its_event_cursor() -> None:
+    """A `BroadcastQueue` trims only past its **lowest** cursor, so a reader
+    nobody closes pins the connection-wide tap forever -- one dead cursor per
+    completed `prompt()`, an events buffer parked at its 4096-entry bound, and
+    a permanent `DroppedEvents` diagnostic stream on a long-lived connection."""
+    host = _session_host()
+    await host.start()
+    async with connect(transport=host.transport()) as client:
+        session = await client.create_session(provider="echo")
+        chat = await session.chat()
+        tap = client._runtime._events
+        baseline = len(tap._cursors)
+
+        def drive(turn_id: str) -> Any:
+            async def run() -> None:
+                await asyncio.sleep(0.05)
+                await host.emit_turn(chat.uri, turn_id, text="done")
+
+            return asyncio.get_running_loop().create_task(run())
+
+        driver = drive("t1")
+        await chat.prompt("hello", turn_id="t1", approvals="all")
+        await driver
+        assert len(tap._cursors) == baseline
+
+        # An abandoned iteration releases through `aclose` -- the path `async
+        # for` never calls on `break`.
+        driver = drive("t2")
+        stream = chat.prompt("again", turn_id="t2")
+        async for _event in stream:
+            break
+        assert len(tap._cursors) == baseline + 1
+        await stream.aclose()
+        assert len(tap._cursors) == baseline
+        await driver
     await host.stop()
 
 
@@ -698,6 +925,89 @@ async def test_a_rejected_confirmation_does_not_end_the_turn() -> None:
         await driver
         assert isinstance(result, TurnCompleted)
     await host.stop()
+
+
+async def test_a_rejected_cancel_does_not_end_the_turn() -> None:
+    """`chat/turnCancelled` is modelled and terminal, so a *rejected* one
+    decoded by type reads as this turn genuinely cancelled -- ending the stream
+    for a turn the host did not cancel. Any rejected envelope other than our
+    own `chat/turnStarted` describes an action that was NOT applied, and is
+    skipped rather than decoded."""
+    host = _session_host()
+    await host.start()
+    async with connect(transport=host.transport()) as client:
+        session = await client.create_session(provider="echo")
+        chat = await session.chat()
+
+        async def drive() -> None:
+            await asyncio.sleep(0.05)
+            await host.push(chat.uri, {"type": "chat/turnStarted", "turnId": "t1"})
+            # A `Chat.cancel` racing turn completion: refused, and fanned out.
+            await host.push(
+                chat.uri,
+                {"type": "chat/turnCancelled", "turnId": "t1", "duration": 5},
+                origin={"clientId": "somebody-else", "clientSeq": 1},
+                rejection="turn already finished",
+            )
+            await host.push(chat.uri, {"type": "chat/turnComplete", "turnId": "t1"})
+
+        driver = asyncio.get_running_loop().create_task(drive())
+        result = await chat.prompt("hello", turn_id="t1", idle_timeout=1.0)
+        await driver
+        assert isinstance(result, TurnCompleted)
+    await host.stop()
+
+
+async def test_create_session_folds_in_resolved_config_defaults() -> None:
+    """Plan §7.1 step 1: `resolveSessionConfig`, best-effort. The result's
+    `values` are "server-resolved defaults to pass to `createSession`", folded
+    under the caller's own config -- the caller wins. The other half of
+    best-effort, `-32601` means unimplemented and continue, is exercised by
+    every other test in this file: the fake host answers exactly that for any
+    unregistered method."""
+    host = _session_host()
+    host.on(
+        "resolveSessionConfig",
+        lambda _p: {
+            "schema": {"type": "object", "properties": {}},
+            "values": {"target": "worktree", "baseBranch": "main"},
+        },
+    )
+    await host.start()
+    async with connect(transport=host.transport()) as client:
+        await client.create_session(provider="echo", config={"baseBranch": "develop"})
+        resolved = next(m for m in host.received if m.get("method") == "resolveSessionConfig")
+        assert resolved["params"]["provider"] == "echo"
+        created = next(m for m in host.received if m.get("method") == "createSession")
+        assert created["params"]["config"] == {"target": "worktree", "baseBranch": "develop"}
+    await host.stop()
+
+
+async def test_dispose_on_exit_false_really_is_honoured() -> None:
+    """A caller opting out of disposal is keeping the runtime alive past the
+    `with`; closing it anyway shuts the connection down under whatever they
+    kept it for."""
+    from agent_host_client.api.client import ClientContext
+    from agent_host_client.hosts.runtime import HostConfig, HostRuntime
+
+    host = echo_host()
+    await host.start()
+    transport = host.transport()
+
+    async def factory() -> Any:
+        return transport
+
+    runtime = HostRuntime(HostConfig(factory, label="kept-alive"))
+    try:
+        async with ClientContext(runtime, dispose_on_exit=False) as client:
+            pass
+        # Still alive after the `with`: the opt-out left the connection up, so
+        # a round trip still completes rather than raising "shut down".
+        await client.protocol.ping()
+        assert [m for m in host.received if m.get("method") == "ping"]
+    finally:
+        await runtime.shutdown()
+        await host.stop()
 
 
 def test_policies_are_plain_callables_so_a_caller_can_write_their_own() -> None:

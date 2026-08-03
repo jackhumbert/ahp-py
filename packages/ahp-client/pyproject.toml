@@ -92,6 +92,10 @@ ignore = [
 # `HostShutDown` and `HostNotConnected` name a supervisor *state*, not a fault
 # type; both subclass `AhpClientError`, which carries the suffix.
 "src/agent_host_client/hosts/runtime.py" = ["N818"]
+# `TerminalNotHeld` names the claim *state* the caller is in, not a fault class,
+# and it reads as the sentence it raises: the terminal is not held by you. Same
+# reasoning as `HostNotConnected`, and it subclasses `AhpClientError`.
+"src/agent_host_client/api/terminals.py" = ["N818"]
 "tests/**" = ["RUF059"]
 
 [tool.importlinter]

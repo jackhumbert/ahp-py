@@ -8,6 +8,30 @@ Every release states the protocol versions it speaks.
 
 Under construction. `docs/plan.md` is the design and its §12 is the build order.
 
+### Added — typed APIs for the surfaces that had none
+
+`docs/plan.md` §1.3, written after the first interop run, measured the axis the
+§1.1 table does not: of the seven channels, **four had no typed API at all** and
+had to be driven through `client.protocol.request`.
+
+- **Changesets.** `Session.changesets()` / `open_changeset()`, and a `Changeset`
+  with typed files, operations and review. `invoke()` validates `operationId`
+  and `target.kind` against what *that* changeset advertised — which is the
+  whole reason the wrapper earns its place, since the alternative is learning
+  your scope was wrong from a JSON-RPC error.
+- **Terminals.** `Terminal` with the claim made explicit, because the state is
+  *contended*: `terminal/claimed` is an arbitration and a refused claim is a
+  thing a caller has to be able to see. Shell integration
+  (`terminal/commandExecuted` / `commandFinished`) is surfaced, and
+  `split_terminal_command` implements the `!` shorthand now that
+  `terminalCommandPrefix` survives the handshake.
+- **Resource watches: deliberately none.** `createResourceWatch` already
+  returns the channel to subscribe to; a `watch()` helper would be four lines a
+  caller can write, and hiding the receiver-assigned channel makes the spec's
+  own advice — "do not derive it, subscribe to what comes back" — unfollowable.
+  §1.3 states the reasoning. Absent is the answer, and a wrapper that exists to
+  make a table look complete is a cost, not a feature.
+
 ### Fixed — the first interop run against a real host
 
 Driven against the sibling [`agent-host-server-py`](https://github.com/jackhubert/agent-host-server-py)
@@ -44,6 +68,12 @@ the reducer then refuses while the sender believes it succeeded.
 - **A rejected action was applied by non-originating subscribers**, diverging
   from the host permanently — reconciliation skipped the echo only for the
   client that sent it.
+- **`shutdown()` blocked for ten seconds after any abnormal teardown.**
+  `websockets` runs a closing handshake with a 10s default and waits it out
+  against a peer that is already gone, so an embedder calling `shutdown()` in a
+  `finally` paid it per client — and `HostRuntime` paid it again on every
+  reconnect. Measured at 9.99s; now bounded, with a healthy close still
+  completing in microseconds.
 
 ### Changed
 
@@ -107,8 +137,89 @@ the reducer then refuses while the sender believes it succeeded.
   the four surfaces the interop run had to drive through
   `client.protocol.request`; see `docs/plan.md` §1.3 for the other three and why
   they are not next.
+- **Changesets have a typed API.** `Session.changesets()`,
+  `Session.open_changeset()` and a `Changeset` with `files()`, `operations()`,
+  `read()`, `mark_reviewed()`, `invoke()`, `changes()` and
+  `wait_until_ready()`, plus `ChangesetInfo` / `ChangesetFile` / `FileSide` /
+  `ChangesetOperation` views and `text_range()`. Four checks a caller cannot
+  make from the params: `read()` takes a `FileSide` so the file URI cannot be
+  passed where the `ContentRef` belongs (the bytes are in a store the host owns,
+  and a diff's `before` no longer exists on disk); review is gated on
+  `capabilities.review`, re-read from the *catalogue entry* on every call
+  because the host validates against the current one; `operationId` and
+  `target.kind` are checked against the changeset's own live `operations` and
+  `scopes`; and an operation carrying a `confirmation` is refused until
+  `confirmed=True`, which is a client MUST and marks the operation destructive.
+  `uriTemplate` expansion covers the three defined shapes and percent-encodes
+  its values; a template naming any other variable is `openable == False`
+  rather than expanded. Second of the four surfaces §1.3 named.
+- **Terminals have a typed API.** `Client.create_terminal()`,
+  `Client.open_terminal()`, `Client.terminals()` and a `Terminal` with
+  `write()`, `resize()`, `rename()`, `clear()`, `hand_to()`, `take()`,
+  `output()`, `commands()`, `events()`, `wait_for_exit()` and `dispose()`, plus
+  typed `ClientClaim` / `SessionClaim` and the terminal event family. The claim
+  is read from **confirmed** state, never optimistic: `terminal/claimed` is an
+  arbitration the host can refuse, and replaying our own un-echoed claim answers
+  "you hold this" to a question that has not been decided — after which the
+  keystrokes it authorises are the ones that silently vanish. A refused envelope
+  is checked before the action type is looked up, so a rejected
+  `terminal/claimed` can never decode as a `TerminalClaimed` for *any* peer,
+  which is the interop defect this surface is named after; it arrives as
+  `TerminalRefused`, with `mine` separating our own from somebody else's.
+  `write()` raises `TerminalNotHeld` naming the holder rather than letting a
+  refused `dispatchAction` notification fail invisibly (`force=True` for a host
+  whose policy is more permissive); `hand_to()`, `resize()`, `rename()` and
+  `clear()` are deliberately ungated, because the guide's detach flow has a
+  client re-scoping and resizing a terminal it does not hold. Disposal is not
+  claim-gated either — a session claim is held by no client, so a gate would
+  make every handed-over terminal immortal. The refusal check runs **in the
+  stream**, not only in the decoder: `terminal/input` is the one action type the
+  stream filters out and also one of the two the host gates on the claim, so
+  filtering by type first destroyed the refusal one line before the decoder that
+  would have named it. `mine` asks one question on every arm of the union (did
+  this client dispatch it); `TerminalClaimed.held_by_us` is the second question
+  under its own name. `Terminal.alive` and `Terminal.exists` separate "this
+  client unsubscribed" from "a peer disposed it" from "the process ended",
+  because a dropped channel answers every read with a plausible empty value;
+  `wait_for_exit` watches both and defaults to a timeout, since a disposal
+  publishes no `terminal/exited`. `Client.terminals()` and `Terminal.commands()`
+  are typed views for the reasons the claim and `durationMs` are, and
+  `terminal_uris()` digs the host-assigned terminal channel out of a tool call's
+  content parts.
+- **The `!` shorthand is implementable for the first time.**
+  `Client.terminal_command(text)` answers whether the host will run a chat
+  message as a shell command instead of handing it to the agent, resolved
+  against the *negotiated* `terminalCommandPrefix` — `None` when the host
+  advertises none, because absence means no shorthand and a hardcoded `"!"`
+  offers it to hosts that never claimed it. A blank remainder is a message, not
+  a command. `FakeHost(terminal_command_prefix=…)` lets a downstream suite test
+  both answers. Third of the four surfaces §1.3 named; resource watches stay
+  absent, and §1.3 says why.
 
 ### Changed
+
+- **Subscriptions are refcounted in `HostRuntime`.** Two handles on one channel
+  is the ordinary case — `open_chat`, `open_changeset` and `open_terminal` each
+  mint a fresh object and none memoises — and an unrefcounted `unsubscribe` from
+  either one blinded the other with no error anywhere: the survivor's state went
+  empty, its waits returned instantly, and its dispatches vanished into a channel
+  this client no longer received. `HostRuntime.subscribed()` is the predicate
+  behind `Changeset.live` and `Terminal.alive`.
+- **The runtime's `events()` tap reports what it drops.** It is bounded (4096)
+  and had no `on_drop`, so a reader slower than a flooding pty was fast-forwarded
+  past its own `TerminalRefused` in silence. `AhpClient` wires the identical
+  queue to a `DroppedEvents` diagnostic; this one now does too.
+- **`InvalidArgument` is both an `AhpClientError` and a `ValueError`.** The
+  argument guards were the hole in "one `except` catches the whole library": the
+  documented handler for the changeset review gate is `except AhpClientError`,
+  which caught the capability refusal and missed the empty-batch refusal one line
+  away. `Changeset.wait_until_ready` and `Terminal.wait_for_exit` raise
+  `RequestTimeout` rather than the builtin `TimeoutError`, for the same reason.
+- **`invoke_changeset_operation` names `operation_id` in its signature.** It is
+  required by `InvokeChangesetOperationParams`, the host answers `-32602` without
+  it, and a `**extra`-only signature type-checks clean under `mypy --strict`
+  while omitting it — the sixth call site of the shape `client/actions.py` was
+  extracted to stop.
 
 - **A permanent connection refusal is no longer retried forever.** `TransportError`
   carries `kind="rejected"` with the HTTP `status` or WebSocket `close_code`

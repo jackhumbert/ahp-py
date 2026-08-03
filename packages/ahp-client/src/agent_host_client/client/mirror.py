@@ -12,21 +12,23 @@ Three states, per the spec's own vocabulary:
 
 * ``confirmed`` -- everything the host has acknowledged.
 * ``pending`` -- our own dispatches, applied optimistically, not yet echoed.
-* ``optimistic`` -- ``confirmed`` with ``pending`` replayed on top. Computed,
-  never stored, so a foreign action rebases the pending queue for free.
+* ``optimistic`` -- ``confirmed`` with ``pending`` replayed on top. Recomputed
+  after every write and cached between them, so a foreign action rebases the
+  pending queue for free while two reads with nothing in between agree.
 
 Render ``optimistic``. Trust ``confirmed``.
 """
 
 from __future__ import annotations
 
+import asyncio
 import threading
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Final
 
-from agent_host_protocol.channels import reducer_for_state
+from agent_host_protocol.channels import ROOT_URI, reducer_for_state
 from agent_host_protocol.reducers import REDUCERS, Reducer
 from agent_host_protocol.types import JsonObject
 
@@ -126,18 +128,41 @@ class ChannelMirror:
     pending: list[PendingAction] = field(default_factory=list)
     #: Envelopes that arrived before the snapshot did.
     buffered: list[JsonObject] = field(default_factory=list)
+    #: Bumped by every write path that can change what ``optimistic`` returns.
+    #: The cache key, not a wire sequence number.
+    version: int = 0
+    _optimistic_cache: Any = field(default=None, repr=False)
+    _optimistic_version: int = field(default=-1, repr=False)
 
     @property
     def optimistic(self) -> Any:
-        """``confirmed`` with ``pending`` replayed. Computed every time.
+        """``confirmed`` with ``pending`` replayed. Recomputed per write, not
+        per read.
 
-        Recomputing is what makes a foreign action rebase the queue for free:
-        there is no stored optimistic state to invalidate.
+        Two guards ported from VS Code's ``_recomputeOptimistic``
+        (agentSubscription.ts:509-526). Before the snapshot there is nothing to
+        replay onto -- the reducers spread ``{**state}`` and raise ``TypeError``
+        on ``None``, where the reference keeps its value ``undefined`` -- so a
+        dispatch that raced the subscribe round trip stays pending without
+        being reduced. And the replay is cached against :attr:`version`
+        because the chat reducer stamps ``modifiedAt`` from the clock on every
+        run: recomputed per read, two consecutive reads never compare equal
+        and drift with the wall clock while nothing arrives, defeating the
+        equality-based change detection the reference's compute-on-event model
+        supports. A foreign action still rebases the queue for free -- it bumps
+        the version, and the next read replays.
         """
-        state = self.confirmed
-        for entry in self.pending:
-            state = self.reducer(state, entry.action)
-        return state
+        if self.confirmed is None:
+            return None
+        if not self.pending:
+            return self.confirmed
+        if self._optimistic_version != self.version:
+            state = self.confirmed
+            for entry in self.pending:
+                state = self.reducer(state, entry.action)
+            self._optimistic_cache = state
+            self._optimistic_version = self.version
+        return self._optimistic_cache
 
 
 class StateMirror:
@@ -162,6 +187,7 @@ class StateMirror:
         self._stale: set[str] = set()
         self._last_server_seq = 0
         self._thread: int | None = None
+        self._loop_thread: int | None = None
 
     # ── registration ─────────────────────────────────────────────────────────
 
@@ -173,6 +199,7 @@ class StateMirror:
         describe, and a scheme-routed lookup silently binds nothing, which
         freezes state while actions keep arriving.
         """
+        uri = _canonical_channel(uri)
         reducer = REDUCERS.get(reducer_name)
         if reducer is None:
             raise KeyError(f"no reducer named {reducer_name!r}; have {sorted(REDUCERS)}")
@@ -184,6 +211,7 @@ class StateMirror:
         return channel
 
     def drop(self, uri: str) -> None:
+        uri = _canonical_channel(uri)
         self._channels.pop(uri, None)
         self._stale.discard(uri)
 
@@ -212,8 +240,15 @@ class StateMirror:
         return frozenset(self._stale)
 
     def state(self, uri: str) -> Any:
-        """Optimistic state -- what a UI renders."""
-        channel = self._channels.get(uri)
+        """Optimistic state -- what a UI renders.
+
+        Asserted like the write paths: this read *reduces* whenever the
+        pending queue is non-empty and dirty, and reduction reads the
+        module-global clock, so ``asyncio.to_thread(render, mirror.state(u))``
+        is exactly the silent off-loop hazard invariant 13 exists to make loud.
+        """
+        self._assert_single_threaded()
+        channel = self._channels.get(_canonical_channel(uri))
         return None if channel is None else channel.optimistic
 
     def confirmed(self, uri: str) -> Any:
@@ -224,11 +259,11 @@ class StateMirror:
         action produces a *different* stamp than the host's echo will; rendering
         the optimistic one guarantees a visible diff at the end of every turn.
         """
-        channel = self._channels.get(uri)
+        channel = self._channels.get(_canonical_channel(uri))
         return None if channel is None else channel.confirmed
 
     def pending(self, uri: str) -> Sequence[PendingAction]:
-        channel = self._channels.get(uri)
+        channel = self._channels.get(_canonical_channel(uri))
         return () if channel is None else tuple(channel.pending)
 
     # ── writing ──────────────────────────────────────────────────────────────
@@ -244,7 +279,7 @@ class StateMirror:
         entry and the arrays do not line up.
         """
         self._assert_single_threaded()
-        uri = str(snapshot.get("resource", ""))
+        uri = _canonical_channel(str(snapshot.get("resource", "")))
         state = snapshot.get("state")
         raw_from = snapshot.get("fromSeq")
         from_seq = raw_from if isinstance(raw_from, int) and not isinstance(raw_from, bool) else 0
@@ -262,6 +297,7 @@ class StateMirror:
         channel.from_seq = from_seq
         channel.last_seq = max(channel.last_seq, from_seq)
         channel.has_snapshot = True
+        channel.version += 1
         # `fromSeq` is a reading of the host-GLOBAL counter, so it also tells us
         # how far that counter has run. Without this a channel subscribed to
         # late -- baseline 50 while we have only seen 10 -- makes its own first
@@ -286,10 +322,31 @@ class StateMirror:
         reduction happens off the event loop, and
         ``asyncio.to_thread(mirror.apply, envelope)`` breaks it *silently*,
         producing wrong ``modifiedAt`` stamps under a concurrent
-        ``frozen_clock``. One integer compare on the hot path buys a loud
-        failure instead.
+        ``frozen_clock``. One cheap check on the hot path buys a loud failure
+        instead.
+
+        Invariant 13 names the *running loop's* thread as the authority, not
+        whichever thread happened to call first: a pre-loop reader that won
+        the pin would otherwise make the client's own read loop the "wrong"
+        thread and take the connection down with the complaint. So a caller
+        with a running loop adopts the pin, and the eventual ``RuntimeError``
+        lands on the off-loop reader. Loop-less use (synchronous tests) keeps
+        the plain first-caller pin.
         """
         current = threading.get_ident()
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            pass
+        else:
+            if self._loop_thread is None:
+                self._loop_thread = current
+                self._thread = current
+            elif self._loop_thread != current:
+                raise RuntimeError(
+                    "StateMirror was used from two event loops' threads; the "
+                    "reducers read a module-global clock and must stay on one loop"
+                )
         if self._thread is None:
             self._thread = current
         elif self._thread != current:
@@ -301,16 +358,21 @@ class StateMirror:
     def record_pending(self, uri: str, action: Mapping[str, Any], client_seq: int) -> None:
         """Apply one of our own dispatches optimistically."""
         self._assert_single_threaded()
-        channel = self._channels.get(uri)
+        channel = self._channels.get(_canonical_channel(uri))
         if channel is None:
             return
         channel.pending.append(PendingAction(client_seq, dict(action)))
+        channel.version += 1
 
     def apply(self, envelope: Mapping[str, Any]) -> ApplyOutcome:
         """Fold one ``ActionEnvelope`` in. Never raises on protocol data."""
         self._assert_single_threaded()
-        uri = str(envelope.get("channel", ""))
-        channel = self._channels.get(uri)
+        # Canonicalised exactly as `apply_snapshot` is: the reference's
+        # `_isRelevantEnvelope` matches the root channel through
+        # `isAhpRootChannel` (agentSubscription.ts:232-234), so an envelope
+        # spelling it `ahp-root:` must not fall out as `UNKNOWN_CHANNEL`.
+        uri = _canonical_channel(str(envelope.get("channel", "")))
+        channel = self._channels.get(_canonical_channel(uri))
         server_seq = _server_seq(envelope)
         # Snapshot the global mark before advancing it: it is what the gap check
         # measures against, and every envelope we see advances it -- including
@@ -363,6 +425,7 @@ class StateMirror:
             # `SequenceGap` on a stream that exists to be trusted.
             if server_seq:
                 channel.last_seq = server_seq
+            channel.version += 1
             return ApplyOutcome.REJECTED
 
         if own:
@@ -370,10 +433,13 @@ class StateMirror:
             # clientSeq -- and still applies when nothing matches, which is the
             # arm every reimplementation of this leaves out.
             self._retire(channel, client_seq)
+        else:
+            self._promote_pending_turn_start(channel, action)
 
         channel.confirmed = channel.reducer(channel.confirmed, action)
         if server_seq:
             channel.last_seq = server_seq
+        channel.version += 1
         return ApplyOutcome.APPLIED
 
     def on_reconnect(
@@ -408,8 +474,10 @@ class StateMirror:
                 # Predicated on pre-disconnect state. Re-sending after a fresh
                 # snapshot risks a duplicate `chat/turnStarted`.
                 channel.pending.clear()
+                channel.version += 1
                 continue
             channel.pending = [p for p in channel.pending if p.client_seq not in acked]
+            channel.version += 1
             resend.extend((channel.uri, entry) for entry in channel.pending)
         resend.sort(key=lambda item: item[1].client_seq)
         return resend
@@ -451,8 +519,14 @@ class StateMirror:
         *channel* is the one whose envelope revealed the hole, reported so a
         consumer has somewhere to look -- not a claim about which channel lost
         anything.
+
+        A *previous* of zero is a real baseline, not the absence of one: this
+        is only reachable after ``apply_snapshot`` set ``has_snapshot``, and a
+        fresh host's snapshot legitimately reports ``fromSeq: 0``. Treating
+        zero as "no baseline" made a hole in the very first envelopes -- seq 5
+        arriving first -- the one gap this check could never see.
         """
-        if self._gap_policy is GapPolicy.IGNORE or not server_seq or not previous:
+        if self._gap_policy is GapPolicy.IGNORE or not server_seq:
             return
         expected = previous + 1
         if server_seq <= expected:
@@ -465,6 +539,37 @@ class StateMirror:
             # that revealed it would leave the actual victim silently wrong.
             self._stale.update(self._channels)
 
+    def _promote_pending_turn_start(
+        self, channel: ChannelMirror, action: Mapping[str, Any]
+    ) -> None:
+        """Retire the pending ``chat/turnStarted`` a foreign terminal action closes.
+
+        A port of ``_promotePendingTurnStartIfTerminal``
+        (agentSubscription.ts:483-501): a backend-originated
+        ``chat/turnComplete``, ``chat/turnCancelled`` or ``chat/error`` can
+        arrive without ever echoing the ``turnStarted`` we dispatched -- no
+        ``clientSeq``, so `_retire` never matches. Without the promotion the
+        reducer's ``_end_turn`` no-ops (confirmed has no matching
+        ``activeTurn``), the pending entry survives with nothing that can ever
+        retire it, ``optimistic`` renders a stuck active turn forever, and the
+        turn never reaches confirmed history. The start is applied to
+        confirmed first so the terminal action closes a turn that exists.
+        """
+        if action.get("type") not in _TERMINAL_TURN_ACTIONS:
+            return
+        turn_id = action.get("turnId")
+        for index, entry in enumerate(channel.pending):
+            pending = entry.action
+            if pending.get("type") != "chat/turnStarted" or pending.get("turnId") != turn_id:
+                continue
+            del channel.pending[index]
+            confirmed = channel.confirmed
+            active = confirmed.get("activeTurn") if isinstance(confirmed, Mapping) else None
+            active_id = active.get("id") if isinstance(active, Mapping) else None
+            if confirmed is not None and active_id != turn_id:
+                channel.confirmed = channel.reducer(confirmed, pending)
+            return
+
     def _diagnose(self, diagnostic: Diagnostic) -> None:
         if self._on_diagnostic is not None:
             self._on_diagnostic(diagnostic)
@@ -473,6 +578,27 @@ class StateMirror:
 def _server_seq(envelope: Mapping[str, Any]) -> int:
     raw = envelope.get("serverSeq")
     return raw if isinstance(raw, int) and not isinstance(raw, bool) else 0
+
+
+def _canonical_channel(uri: str) -> str:
+    """``ahp-root:`` and ``ahp-root://`` are one channel.
+
+    VS Code matches the root channel by *scheme* -- ``isAhpRootChannel``
+    (sessionState.ts:478-487), whose doc says to always prefer it over a direct
+    ``=== ROOT_STATE_URI`` comparison -- because the authority-less form
+    round-trips out of URI normalisation. An exact-string lookup drops that
+    variant as ``UNKNOWN_CHANNEL`` and silently freezes root state against a
+    host that normalises URIs. Scoped to the root scheme only: no other scheme
+    is routed here (invariant 1).
+    """
+    return ROOT_URI if uri.startswith("ahp-root:") else uri
+
+
+#: The chat actions that close a turn -- the trigger set of
+#: ``_promotePendingTurnStartIfTerminal`` (agentSubscription.ts:490).
+_TERMINAL_TURN_ACTIONS: Final[frozenset[str]] = frozenset(
+    {"chat/turnComplete", "chat/turnCancelled", "chat/error"}
+)
 
 
 #: Re-exported so a caller binding channels does not need a second import.

@@ -143,14 +143,30 @@ class AhpClient(CommandsMixin):
     failures onto the connection state.
     """
 
-    def __init__(self, transport: Transport, config: ClientConfig | None = None) -> None:
+    def __init__(
+        self,
+        transport: Transport,
+        config: ClientConfig | None = None,
+        *,
+        first_request_id: int = 1,
+        first_client_seq: int = 1,
+    ) -> None:
+        """*first_request_id* and *first_client_seq* seed the counters.
+
+        One client is one transport, so "ids never reset across transport
+        swaps" is a promise only the supervisor above can keep: it constructs a
+        fresh client per reconnect and seeds it from where the predecessor
+        stopped (:attr:`next_request_id`, :attr:`next_client_seq`). VS Code's
+        first frame on a fresh socket carried id 66 -- a peer must not assume
+        per-connection numbering.
+        """
         self._transport = transport
         self._config = config or ClientConfig()
         self._state = ConnectionState("idle")
 
         self._pending: dict[int, asyncio.Future[Any]] = {}
-        self._next_request_id = 1
-        self._next_client_seq = 1
+        self._next_request_id = first_request_id
+        self._next_client_seq = first_client_seq
 
         self._subscriptions: dict[str, BroadcastQueue[SubscriptionEvent]] = {}
         self._events: BroadcastQueue[ClientEvent] = BroadcastQueue(
@@ -166,7 +182,6 @@ class AhpClient(CommandsMixin):
         self._malformed = 0
         self._last_seen_server_seq = 0
         self._mirror: StateMirror | None = None
-        self._offered: tuple[str, ...] = ()
 
     # ── observation ──────────────────────────────────────────────────────────
 
@@ -178,6 +193,16 @@ class AhpClient(CommandsMixin):
     def last_seen_server_seq(self) -> int:
         """Highest ``serverSeq`` observed. What ``reconnect`` resumes from."""
         return self._last_seen_server_seq
+
+    @property
+    def next_request_id(self) -> int:
+        """Where the id counter stands. Seeds a successor's ``first_request_id``."""
+        return self._next_request_id
+
+    @property
+    def next_client_seq(self) -> int:
+        """Where the seq counter stands. Seeds a successor's ``first_client_seq``."""
+        return self._next_client_seq
 
     def state_changes(self) -> BroadcastReader[ConnectionState]:
         return self._states.reader()
@@ -287,7 +312,6 @@ class AhpClient(CommandsMixin):
         load-bearing.
         """
         offered = tuple(protocol_versions or self._config.protocol_versions)
-        self._offered = offered
         params: JsonObject = {
             "channel": ROOT_URI,
             "clientId": client_id,
@@ -477,9 +501,10 @@ class AhpClient(CommandsMixin):
         self._assert_open()
         deadline = self._config.request_timeout if isinstance(timeout, EllipsisType) else timeout
         request_id = self._next_request_id
-        # Never reset across transport swaps: VS Code's first frame on a fresh
-        # socket carried id 66, so a peer must not assume per-connection
-        # numbering, and neither do we.
+        # Monotonic for this client's whole life; continuity across transport
+        # swaps is the supervisor's, via the `first_request_id` seed. VS Code's
+        # first frame on a fresh socket carried id 66, so a peer must not
+        # assume per-connection numbering.
         self._next_request_id += 1
 
         future: asyncio.Future[Any] = asyncio.get_running_loop().create_future()
@@ -489,7 +514,16 @@ class AhpClient(CommandsMixin):
         )
         try:
             if deadline is not None and deadline > 0:
-                return await asyncio.wait_for(asyncio.shield(future), deadline)
+                try:
+                    return await asyncio.wait_for(asyncio.shield(future), deadline)
+                except asyncio.CancelledError:
+                    # A caller's cancellation stops at the shield: the inner
+                    # future stays pending, the finally's guard sees neither
+                    # `cancelled()` nor `done()`, and the entry would leak until
+                    # tear-down. Propagate the cancellation through the shield
+                    # so the one cleanup path below owns every exit.
+                    future.cancel()
+                    raise
             return await future
         except TimeoutError:
             # Whoever pops owns the settle, so a late response cannot also fire.
@@ -517,7 +551,24 @@ class AhpClient(CommandsMixin):
     def _spawn(self, coro: Coroutine[Any, Any, None], name: str) -> None:
         task = asyncio.get_running_loop().create_task(coro, name=name)
         self._tasks.add(task)
-        task.add_done_callback(self._tasks.discard)
+        task.add_done_callback(self._reap)
+
+    def _reap(self, task: asyncio.Task[None]) -> None:
+        """Surface a dead task's failure onto the connection state.
+
+        A discard-only callback here is the silent-hang generator: the reader
+        dies, its exception sits unretrieved, `_state` stays "connected", and
+        every request waits out its full timeout against a connection nobody is
+        reading. Cancellation is the one expected way for these tasks to end.
+        """
+        self._tasks.discard(task)
+        if task.cancelled():
+            return
+        failure = task.exception()
+        if failure is not None:
+            self._tear_down(
+                TransportError("protocol", f"task {task.get_name()!r} failed: {failure!r}")
+            )
 
     def _set_state(self, state: ConnectionState) -> None:
         self._state = state
@@ -560,21 +611,34 @@ class AhpClient(CommandsMixin):
     async def _read_loop(self) -> None:
         try:
             while self._state.status == "connected":
-                message = await self._transport.receive()
+                try:
+                    message = await self._transport.receive()
+                except json.JSONDecodeError as exc:
+                    # A transport that parses eagerly raises here per bad frame;
+                    # treat it exactly as an inline malformed frame (invariant
+                    # 8: log and continue). Caught *inside* the loop, because
+                    # letting it end the coroutine would leave the state
+                    # "connected" with nobody reading -- a silent hang.
+                    self._on_malformed(str(exc))
+                    continue
                 if message is None:
                     self._tear_down(TransportError("closed", "transport closed"))
                     return
-                self._on_message(message)
+                try:
+                    self._on_message(message)
+                except Exception as exc:  # one bad frame, not the whole loop
+                    # Nothing below is *supposed* to raise, but "supposed to"
+                    # held the reader's life on reducer totality and the mirror's
+                    # thread assert. One bad envelope becomes a counted
+                    # diagnostic under the malformed-frame policy instead of
+                    # ending the loop with the state stuck "connected".
+                    self._on_malformed(f"unhandled error processing frame: {exc!r}")
         except asyncio.CancelledError:
             raise
         except TransportError as exc:
             self._tear_down(exc)
         except (TransportClosed, OSError) as exc:
             self._tear_down(TransportError("io", f"receive failed: {exc}"))
-        except json.JSONDecodeError as exc:
-            # A transport that parses eagerly can raise here; treat it exactly
-            # as an inline malformed frame rather than killing the connection.
-            self._on_malformed(str(exc))
 
     def _on_malformed(self, detail: str) -> None:
         """One bad frame must not kill unrelated in-flight requests.
@@ -588,6 +652,15 @@ class AhpClient(CommandsMixin):
             self._tear_down(
                 TransportError("protocol", f"{self._malformed} malformed frames; giving up")
             )
+            # Tear-down settles futures but does not touch the socket, and a
+            # bare AhpClient user has no supervisor to close it -- the peer
+            # would be held open, streaming garbage, until GC. VS Code closes
+            # here with 4002 "malformed-frames".
+            self._spawn(self._close_transport(), "ahp-client-close")
+
+    async def _close_transport(self) -> None:
+        with contextlib.suppress(Exception, asyncio.CancelledError):
+            await self._transport.close()
 
     def _on_message(self, message: Mapping[str, Any]) -> None:
         """Demux structurally, not on a type tag -- JSON-RPC has none."""
@@ -612,7 +685,11 @@ class AhpClient(CommandsMixin):
             self._on_malformed(f"neither a request, a response nor a notification: {message!r}")
 
     def _settle(self, request_id: Any, result: Any, error: RpcError | None) -> None:
-        future = self._pending.pop(request_id, None) if isinstance(request_id, int) else None
+        # `bool` is an `int` and `True == 1` as a dict key, so without the
+        # exclusion a frame with `"id": true` settles request 1 with the wrong
+        # payload. Same discipline as `_absorb_server_seq` and `rpc_error_from`.
+        is_valid_id = isinstance(request_id, int) and not isinstance(request_id, bool)
+        future = self._pending.pop(request_id, None) if is_valid_id else None
         if future is None:
             self._diagnose(UnknownResponse(request_id))
             return

@@ -24,13 +24,22 @@ host — [`agent-host-server-py`][server] — and the two are meant to meet.
         agent-host-server   agent-host-client ← this repo
 ```
 
-**Current state: M1–M8 of `docs/plan.md` §12 are done; M9 (release) is not.**
-202 tests, `mypy --strict`, `ruff`, `ruff format` and three import-linter
-contracts green. A full turn runs against the sibling Python host. The shared
-layer ([`agent-host-protocol-py`][protocol]) is green on 247 reducer fixtures,
+**Current state: M1–M8 of `docs/plan.md` §12 are done, with the two
+exceptions below; M9 (release) is not.** The suite (count it from
+`pytest --collect-only`, never from prose — a number here went stale twice),
+`mypy --strict`, `ruff`, `ruff format` and three import-linter contracts
+green. A full turn runs against the sibling Python host. The shared layer
+([`agent-host-protocol-py`][protocol]) is green on 247 reducer fixtures,
 39 round-trips and the JS-semantics oracle.
 
-What is deliberately **not** built: the `mcp://` side-channel and `ahp-otlp:`
+The two exceptions, so nobody re-discovers them: **`MultiHostStateMirror`
+(§6.3) was never built** — `hosts/` supervises one host per runtime, and an
+embedder with several holds one `HostRuntime` each — and **`ResourceWatchServer`
+(§8) is deliberately absent** — §1.3 argues a watch server buys nothing the
+command does not already say, so `createResourceWatch` is routed and declined
+with `-32601` rather than implemented.
+
+Also deliberately **not** built: the `mcp://` side-channel and `ahp-otlp:`
 telemetry (ADR 0007 — and therefore `mcpApps` is never advertised), a CLI
 entry point, a TUI, and a sync facade. The last three are ergonomics the plan
 scopes and M9 has not reached.
@@ -55,17 +64,21 @@ Not "the TypeScript client, in Python." `docs/plan.md` §1.1 has the table; the
 short version is that the reference clients leave real ground uncovered and
 matching them exactly would inherit their gaps. We exceed them on: all seven
 reducers in the mirror, reducer binding that is not scheme-based, real
-write-ahead reconciliation, all 10 server→client requests, `clientInfo` and
+write-ahead reconciliation, all 10 server→client requests routed with 9 served
+(`createResourceWatch` is declined on purpose — §1.3), `clientInfo` and
 `capabilities` on the handshake, verified version negotiation, all 9 server
 notifications, and sequence-gap detection.
 
 That table is about the *protocol* layer and every row of it holds. **§1.3 is the
-other axis and is less flattering:** three of the seven channels — terminals,
-changesets and resource watches — still have no typed API, and the interop run
-found that essentially every client defect lived on a surface that *does* have
-one. Read it before adding a wrapper: an unwrapped surface is a gap in
-ergonomics, a wrapper is a place to be wrong, and §1.3 argues one of the three
-should stay absent.
+other axis and is less flattering:** it found four of the seven channels with no
+typed API at all, and that essentially every client defect lived on a surface
+that *does* have one. Multi-chat (§7.3), changesets (§7.4) and terminals (§7.5)
+have since been built; resource watches have not. Read §1.3 before adding a
+wrapper: an unwrapped surface is a gap in ergonomics, a wrapper is a place to be
+wrong, and §1.3 argues resource watches should stay absent. **A gate needs a
+reason as much as an omission does** — [ADR 0008][adr8] is the four-part test a
+local refusal has to pass before a typed surface may raise on a call the host
+would have accepted.
 
 **Every divergence from a reference client is an ADR.** Divergence is a
 decision, not an accident. `docs/plan.md` §13 lists the ADRs to write before the
@@ -123,9 +136,13 @@ rather than a test failure.
    `lastSeenServerSeq`. A late `subscribe` snapshot otherwise re-applies
    already-counted actions. This is the one place a client can silently
    double-apply.
-4. **Buffer envelopes for an unregistered channel**, replaying them on snapshot
-   filtered to `serverSeq > fromSeq`. The TS mirror drops them; that is a bug we
-   do not reproduce.
+4. **Buffer envelopes for a registered channel whose snapshot has not yet
+   arrived**, replaying them on snapshot filtered to `serverSeq > fromSeq`. The
+   TS mirror drops them; that is a bug we do not reproduce. The scope matters:
+   a channel with no `bind()` entry at all is `UNKNOWN_CHANNEL` and dropped —
+   which is why the mirror must be bound *before* `subscribe` goes out, as
+   `hosts/runtime.py` does. A direct `AhpClient` user who subscribes first
+   loses whatever arrived during the round trip.
 5. **Reconciliation matches on exact `clientSeq`**, following VS Code
    (`agentSubscription.ts:321`), not Swift's cumulative ack — and reproduces VS
    Code's second arm: an own echo with no matching pending entry and no
@@ -190,11 +207,16 @@ documented nowhere.
 
 A change is not finished until:
 
-- **The README's claims still hold.** Its fenced `python` blocks are executed by
-  `tests/docs/`, so an example that stops working is a failing test rather than
-  stale prose. This is not theoretical: the first draft of the shared package's
-  README dispatched an action that does not exist, and the reducer's
-  forward-compatibility fallthrough made it silently do nothing.
+- **The README's claims still hold.** Unlike the shared package's README, its
+  fenced `python` blocks are **not** executed by `tests/docs/` — they need a
+  live host and name types without imports, so they are illustrative and have
+  to be re-read by hand when the API moves. The cautionary tale still applies:
+  the first draft of the shared package's README dispatched an action that does
+  not exist, and the reducer's forward-compatibility fallthrough made it
+  silently do nothing. What `tests/docs/` *does* assert are the facts the
+  README's claims rest on — the parity counts, the served reverse methods, the
+  upstream pin and the offered-version subset — so prose that contradicts them
+  contradicts a failing test.
 - **`docs/parity.md` regenerates clean**, and any new command, notification or
   reverse method has a row.
 - **`docs/plan.md` still describes what is being built.** It is a living
@@ -219,9 +241,11 @@ A change is not finished until:
   sourced from the interop suite. A wrapper that exists but has never been
   exercised against a real host shows green otherwise.
 
-`ahp doctor <url>` is the one mechanism that converts adoption into conformance
-evidence, and `agent_host_client.testing` ships as **public API** — the fastest
-way to lose an adopter is for them to be unable to test their app.
+`agent_host_client.doctor.diagnose()` — a library call, not a CLI; the `ahp
+doctor <url>` command is M9 ergonomics that does not exist yet — is the one
+mechanism that converts adoption into conformance evidence, and
+`agent_host_client.testing` ships as **public API** — the fastest way to lose
+an adopter is for them to be unable to test their app.
 
 ## Requests from an embedder
 
@@ -247,3 +271,4 @@ Its "deliberately not requested" section is as load-bearing as the requests.
 [server]: https://github.com/jackhumbert/agent-host-server-py
 [protocol]: https://github.com/jackhumbert/agent-host-protocol-py
 [adr2]: https://github.com/jackhumbert/agent-host-protocol-py/blob/main/docs/decisions/0002-extraction.md
+[adr8]: docs/decisions/0008-refusing-what-the-host-would-accept.md

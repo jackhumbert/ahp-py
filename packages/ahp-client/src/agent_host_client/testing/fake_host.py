@@ -61,8 +61,15 @@ class FakeHost:
         agents: list[JsonObject] | None = None,
         protocol_version: str = "0.7.0",
         server_seq: int = 0,
+        terminal_command_prefix: str | None = None,
     ) -> None:
         self.protocol_version = protocol_version
+        #: ``InitializeResult.terminalCommandPrefix``. ``None`` means the host
+        #: supports no shorthand and the key is **omitted** -- which is the
+        #: answer an app must be able to test against, because absence is what
+        #: tells a client not to offer the affordance at all. A fake that always
+        #: advertised ``"!"`` would let a hardcoded prefix pass.
+        self.terminal_command_prefix = terminal_command_prefix
         self.root_state: JsonObject = {"agents": agents or [], "activeSessions": 0}
         self.received: list[JsonObject] = []
         self._handlers: dict[str, Handler] = {}
@@ -315,6 +322,10 @@ def _default_initialize(host: FakeHost, params: JsonObject) -> JsonObject:
         "serverInfo": {"name": "FakeHost", "version": "0"},
         "snapshots": [],
     }
+    if host.terminal_command_prefix:
+        # "Absence means the host does not support command prefixes", so this is
+        # omitted rather than sent as null or "".
+        result["terminalCommandPrefix"] = host.terminal_command_prefix
     requested = params.get("initialSubscriptions") or []
     for uri in requested:
         if uri == ROOT_URI:
@@ -350,17 +361,23 @@ def echo_host(**kwargs: Any) -> FakeHost:
     return host
 
 
-def tool_call_host(*, confirmed: bool = False, client_tool: str | None = None) -> FakeHost:
+def tool_call_host(
+    *, confirmed: bool = False, client_tool: str | None = None, client_id: str = ""
+) -> FakeHost:
     """An echo host whose scripted turn contains a tool call.
 
-    *client_tool* marks the call ``contributor: {"kind": "client"}``, so the
-    client is expected to execute it and report back.
+    *client_tool* marks the call ``contributor: {"kind": "client", "clientId":
+    client_id}``, so the client is expected to execute it and report back.
+    ``ToolCallClientContributor`` **requires** ``clientId`` -- a conformant host
+    never omits it, and a client correctly treats a kind=client contributor
+    without one as malformed rather than as its own -- so pass the client id
+    the connection actually negotiated.
     """
     host = echo_host()
     host.pending_tool = FakeToolCall(  # type: ignore[attr-defined]
         "tool-1",
         client_tool or "read_file",
         confirmed=confirmed,
-        contributor={"kind": "client"} if client_tool else None,
+        contributor={"kind": "client", "clientId": client_id} if client_tool else None,
     )
     return host

@@ -62,6 +62,12 @@ class BroadcastQueue(Generic[T]):
         """
         if self._closed:
             return
+        if not self._cursors:
+            # Nobody is attached and a late reader sees no replay, so buffering
+            # would only pin memory -- and, once a bounded queue filled, fire
+            # `on_drop` per publish, diagnosing a "reader fell behind" that no
+            # reader existed to experience.
+            return
         self._buffer.append(value)
         if self._maxsize and len(self._buffer) > self._maxsize:
             dropped = len(self._buffer) - self._maxsize

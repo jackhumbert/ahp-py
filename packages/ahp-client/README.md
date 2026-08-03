@@ -42,6 +42,66 @@ result = await session.prompt("Summarise README.md", approvals="reads")
 print(result.text)
 ```
 
+### Terminals
+
+A terminal is the one channel whose state is *contested*: the claim decides who
+may type, and the host can refuse to hand it over. The object says who holds it,
+and refuses input it knows would be dropped rather than letting keystrokes
+vanish into a notification nobody reads.
+
+```python
+async with await client.create_terminal(name="build", cwd="file:///work") as term:
+    term.write("make -j4\n")  # TerminalNotHeld if we lost the claim
+    async for event in term.events():
+        match event:
+            case TerminalOutput(data=chunk):
+                print(chunk, end="")
+            case TerminalCommandFinished() as c:
+                print(f"exit {c.exit_code}")
+            case TerminalRefused(mine=True) as r:
+                print(f"refused: {r.reason}")
+            case TerminalExited():
+                break
+```
+
+`client.terminal_command("!ls")` answers the other half: whether the host will
+run a chat message as a shell command instead of sending it to the agent. It
+follows the prefix the *host* advertised — absence means no shorthand, so a
+client that hardcodes `!` offers it to hosts that never claimed it. It is a
+heuristic calibrated against the reference host, not a protocol guarantee; the
+prefix itself is on `client.terminal_command_prefix`.
+
+### Changesets
+
+What the agent changed, and what you may do about it. Read-mostly: one of the
+eight `changeset/*` actions is client-dispatchable and the rest is server push.
+The bytes are **not** on disk — they live behind a `ContentRef` in a store the
+host owns, which is why a changeset renders on a host that exposes no filesystem
+and why a diff's `before` is readable at all.
+
+```python
+entry = session.changesets()[0]  # the catalogue, no subscription needed
+changeset = await session.open_changeset(entry)
+await changeset.wait_until_ready()  # an empty `files` while computing is not "no changes"
+
+for file in changeset.files():
+    print(f"{file.change:9} +{file.added}/-{file.removed}  {file.id}")
+    print(await changeset.read_text(file.after))  # the ContentRef, not the file URI
+
+if entry.reviewable:  # capabilities.review, re-read every call
+    changeset.mark_reviewed([f.id for f in changeset.files()])
+
+for op in changeset.operations():
+    if op.destructive:  # a `confirmation` is a client MUST
+        print(f"{op.label}: {op.confirmation_text}")
+        await changeset.invoke(op.id, resource=file.id, confirmed=user_said_yes)
+```
+
+`invoke()` checks `operationId` and `target.kind` against what *this* changeset
+declared right now — the list is recomputed by the host and "Commit" is simply
+absent while nothing is staged — and refuses an operation carrying a
+`confirmation` until you pass `confirmed=True`.
+
 ## Why
 
 Upstream publishes AHP clients for Rust, TypeScript, Kotlin, Swift and Go. There
@@ -71,7 +131,7 @@ uncovered, and matching them exactly would inherit their gaps:
 | Reducers in the state mirror | TS covers 4 of 7 and **silently ignores every `ahp-chat:` snapshot** | all 7 |
 | Channel → reducer binding | TS routes on URI **scheme**; VS Code session URIs are `<provider>:/<uuid>`, so nothing binds | bound at registration |
 | Write-ahead reconciliation | specified upstream; **implemented by no reference client** | implemented |
-| Server→client requests | TS ships a typed registry with zero implementations; `ahpx` does 2 of 10, read-only | 10 of 10 |
+| Server→client requests | TS ships a typed registry with zero implementations; `ahpx` does 2 of 10, read-only | 10 of 10 routed, 9 served — `createResourceWatch` is declined on purpose ([parity](docs/parity.md)) |
 | `initialize` payload | TS helper cannot send `clientInfo` or `capabilities` | both |
 | Version negotiation | client accepts a version it never offered | verified |
 | Server notifications | TS handles 5 of 9; the rest reach neither subscriptions nor `events()` | 9 of 9 |
@@ -92,9 +152,11 @@ python -m venv .venv
 .venv/bin/python -m pytest
 ```
 
-The whole suite runs offline: no model, no credentials, no network. Install the
-sibling host as well (`pip install -e ../agent-host-server-py`) to include the
-interop test.
+The suite runs offline: no model, no credentials, no network. Modules that
+drive the sibling host guard themselves with `pytest.importorskip`, and the
+skip is module-wide — without the host installed, `test_m8.py` and
+`test_changesets.py` sit out entirely, their pure unit tests included. Install
+it (`pip install -e ../agent-host-server-py`) to run everything.
 
 ## On conformance evidence, honestly
 

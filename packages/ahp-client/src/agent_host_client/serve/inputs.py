@@ -13,6 +13,7 @@ a session list can resolve a prompt without opening the conversation.
 
 from __future__ import annotations
 
+import base64
 from collections.abc import Mapping, Sequence
 from typing import Any
 
@@ -146,7 +147,7 @@ class InputResponder:
         *,
         approved: bool,
         option_id: str | None = None,
-        edited_tool_input: Any = None,
+        edited_tool_input: str | None = None,
         reason: actions.DenialReason = "denied",
         confirmed: actions.ConfirmationReason = "user-action",
     ) -> None:
@@ -280,12 +281,19 @@ class ClientToolHost:
         return [definition for definition, _ in self._tools.values()]
 
     def owns(self, action: Mapping[str, Any]) -> bool:
+        """Whether this client is the one expected to execute the call.
+
+        ``ToolCallClientContributor`` requires **both** ``kind`` and
+        ``clientId`` ("the identified client is responsible for executing the
+        tool"), so a kind=client contributor without one is malformed data,
+        not a broadcast -- treating it as "whichever client is active, which is
+        us" made every active client execute or deny the same call, and the
+        host must then reject all the losers.
+        """
         contributor = action.get("contributor")
         if not isinstance(contributor, Mapping) or contributor.get("kind") != "client":
             return False
-        owner = contributor.get("clientId")
-        # An absent clientId means "whichever client is active", which is us.
-        return owner is None or owner == self._client_id
+        return contributor.get("clientId") == self._client_id
 
     async def execute(self, chat: str, action: Mapping[str, Any], *, tool_name: str = "") -> None:
         """Run one tool call and report the result.
@@ -315,12 +323,37 @@ class ClientToolHost:
             self._client.dispatch(chat, actions.tool_call_denied(turn_id, tool_call_id))
             return
         try:
-            result: Mapping[str, Any] = await executor(action)
+            result: Mapping[str, Any] = await executor(await self._with_resolved_input(action))
         except Exception as exc:  # a failing tool is a result, not a crash
             result = actions.tool_failure_result(str(exc))
         self._client.dispatch(
             chat, actions.tool_call_complete(turn_id, tool_call_id, result=result)
         )
+
+    async def _with_resolved_input(self, action: Mapping[str, Any]) -> Mapping[str, Any]:
+        """Resolve a referenced ``toolInput`` before the executor sees it.
+
+        ``ToolInput`` is ``string | ContentRef``: the referenced form is a
+        ``{uri, ...}`` the host stores the real payload behind, and an executor
+        handed it raw receives an address where it expects arguments. Fetched
+        with the forward ``resourceRead`` **fresh per invocation and never
+        cached across confirmation** (plan §8) -- for referenced input the host
+        replaces the resource contents on an edited approval, so a cached copy
+        is precisely the pre-edit input the user rejected.
+
+        A read that fails raises, and :meth:`execute` reports it as the tool's
+        failure result: the input could not be obtained, so the call cannot
+        have run.
+        """
+        tool_input = action.get("toolInput")
+        if not isinstance(tool_input, Mapping) or not isinstance(tool_input.get("uri"), str):
+            return action
+        result = await self._client.resource_read(str(tool_input["uri"]))
+        data = result.get("data")
+        text = data if isinstance(data, str) else ""
+        if result.get("encoding") == "base64":
+            text = base64.b64decode(text, validate=True).decode("utf-8")
+        return {**action, "toolInput": text}
 
     def attach_action(self, tools: Sequence[Mapping[str, Any]] | None = None) -> JsonObject:
         """``session/activeClientSet``.

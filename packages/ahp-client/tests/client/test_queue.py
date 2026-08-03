@@ -108,6 +108,21 @@ async def test_the_buffer_is_reclaimed_once_every_cursor_has_passed() -> None:
     assert len(queue) == 0
 
 
+async def test_a_reader_less_bounded_queue_stays_empty_and_reports_no_drops() -> None:
+    """Buffering with nobody attached pins memory forever -- a late reader sees
+    no replay -- and once a bounded queue filled, every publish fired `on_drop`,
+    diagnosing a "reader fell behind" for a reader that never existed."""
+    dropped: list[int] = []
+    queue: BroadcastQueue[int] = BroadcastQueue(3, on_drop=dropped.append)
+    for i in range(10):
+        queue.publish(i)
+    assert len(queue) == 0
+    assert dropped == []
+    reader = queue.reader()
+    queue.publish(10)
+    assert await reader.__anext__() == 10
+
+
 async def test_detaching_the_last_reader_frees_the_whole_buffer() -> None:
     queue: BroadcastQueue[int] = BroadcastQueue()
     reader = queue.reader()

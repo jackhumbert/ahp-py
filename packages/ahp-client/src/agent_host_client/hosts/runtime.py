@@ -26,13 +26,14 @@ from agent_host_protocol.types import JsonObject
 
 from agent_host_client.client.client import AhpClient, ClientConfig, ServerRequestHandler
 from agent_host_client.client.errors import AhpClientError, RpcError
-from agent_host_client.client.events import ClientEvent, Diagnostic
+from agent_host_client.client.events import ClientEvent, Diagnostic, DroppedEvents
 from agent_host_client.client.mirror import ApplyOutcome, GapPolicy, PendingPolicy, StateMirror
 from agent_host_client.client.queue import BroadcastQueue, BroadcastReader
 from agent_host_client.hosts.client_id_store import ClientIdStore, InMemoryClientIdStore
 from agent_host_client.hosts.policy import ReconnectPolicy, exponential_policy
 
 __all__ = [
+    "AuthCheck",
     "HostConfig",
     "HostNotConnected",
     "HostRuntime",
@@ -47,6 +48,11 @@ __all__ = [
 HostStatus = Literal["disconnected", "connecting", "connected", "reconnecting", "failed"]
 
 TransportFactory = Callable[[], Awaitable[Transport]]
+
+#: Re-run against the fresh client after **every** successful handshake --
+#: reconnects included -- before the state flips to ``connected``. See
+#: :attr:`HostConfig.auth_check`.
+AuthCheck = Callable[[AhpClient], Awaitable[None]]
 
 
 class ShutdownSignal:
@@ -129,8 +135,13 @@ class HostConfig:
     label: str = "host"
     client_id: str | None = None
     #: Always includes the root channel: a client that does not mirror root
-    #: cannot see agents, sessions or terminals appear.
-    initial_subscriptions: tuple[str, ...] = (ROOT_URI,)
+    #: cannot see agents, sessions or terminals appear. An entry is either a
+    #: bare URI or ``(uri, reducer_name)`` -- the caller stating the channel
+    #: kind it already knows, which is invariant 1's preferred source. A bare
+    #: non-root URI states no kind; its snapshot falls back to
+    #: ``reducer_for_state`` shape-sniffing at apply time, which declines an
+    #: ambiguous snapshot rather than guessing.
+    initial_subscriptions: tuple[str | tuple[str, str], ...] = (ROOT_URI,)
     client_config: ClientConfig = field(default_factory=ClientConfig)
     reconnect_policy: ReconnectPolicy = field(default_factory=exponential_policy)
     pending_policy: PendingPolicy = PendingPolicy.VSCODE
@@ -139,6 +150,16 @@ class HostConfig:
     #: what makes the reverse direction survive a reconnect.
     server_request_handler: ServerRequestHandler | None = None
     client_id_store: ClientIdStore | None = None
+    #: Plan section 6.3: "Reconnect must re-check authentication."
+    #: ``auth/required`` is ephemeral and never replayed (spec
+    #: ``authentication.md``, Auth Expiry), so a reconnect silently loses every
+    #: outstanding challenge -- and only the supervisor knows a reconnect
+    #: happened. Awaited against the fresh client after every successful
+    #: handshake, before the state flips to ``connected``, so a caller released
+    #: by ``start(wait=True)`` is never handed a connection nobody re-verified.
+    #: A failure here fails the attempt and is classified by the reconnect
+    #: policy like any other refusal.
+    auth_check: AuthCheck | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -159,13 +180,27 @@ class HostRuntime:
         self._client: AhpClient | None = None
         self._generation = 0
         self._server_seq = 0
-        self._subscriptions: dict[str, str] = {}
+        #: ``None`` -- never ``""`` -- marks a kind the caller did not state:
+        #: ``StateMirror.apply_snapshot`` treats only ``None`` as "infer from
+        #: the state's shape", while ``""`` reads as a reducer name and fails
+        #: ``bind()`` with a ``KeyError`` on every reconnect that takes a
+        #: snapshot path, until the policy exhausts into ``failed``.
+        self._subscriptions: dict[str, str | None] = {}
+        #: How many callers asked for each channel. See :meth:`subscribe`.
+        self._holders: dict[str, int] = {}
         self._mirror = StateMirror(
             client_id="",
             gap_policy=config.gap_policy,
             on_diagnostic=lambda d: self._diagnostics.publish(d),
         )
-        self._events: BroadcastQueue[ClientEvent] = BroadcastQueue(4096)
+        # Bounded, and therefore lossy -- which is right for a tap (ADR 0002) and
+        # only tolerable if the loss is *reported*. `AhpClient` wires the same
+        # queue this way; this one did not, so a reader slower than a flooding
+        # pty was fast-forwarded past its own `TerminalRefused` with nothing
+        # anywhere saying so.
+        self._events: BroadcastQueue[ClientEvent] = BroadcastQueue(
+            4096, on_drop=lambda n: self._diagnostics.publish(DroppedEvents("host-events", n))
+        )
         self._states: BroadcastQueue[HostState] = BroadcastQueue(256)
         self._diagnostics: BroadcastQueue[Diagnostic] = BroadcastQueue(1024)
         self._shutdown = ShutdownSignal("shutdown")
@@ -233,7 +268,7 @@ class HostRuntime:
     async def start(self, *, wait: bool = True) -> None:
         if self._supervisor is not None:
             return
-        self._client_id = self._config.client_id or await self._resolve_client_id()
+        self._client_id = await self._resolve_client_id()
         self._mirror._client_id = self._client_id
         self._supervisor = asyncio.get_running_loop().create_task(
             self._supervise(), name=f"ahp-host-{self._config.label}"
@@ -286,6 +321,17 @@ class HostRuntime:
 
     # ── subscriptions ────────────────────────────────────────────────────────
 
+    def subscribed(self, uri: str) -> bool:
+        """Whether this runtime still holds a subscription to *uri*.
+
+        The one honest answer to "is this handle still connected to anything".
+        A dropped channel keeps answering every read with an empty state, so a
+        `Terminal` or `Changeset` built over it reports a settled, empty,
+        non-failed resource -- which reads as *nothing happened* rather than as
+        *nobody is listening*.
+        """
+        return uri in self._subscriptions
+
     async def subscribe(self, uri: str, reducer_name: str) -> None:
         """Subscribe and remember, so a reconnect brings it back.
 
@@ -301,9 +347,18 @@ class HostRuntime:
         can only decline it again. Only an ``RpcError`` rolls back -- the host
         answered, and the answer was no. A transport failure is not an answer,
         and the reconnect must still bring the subscription back.
+
+        **Held by count, released by count.** Two handles on one channel is the
+        ordinary case -- `Session.open_chat`, `Session.open_changeset` and
+        `Client.open_terminal` all mint a fresh object per call and none of them
+        memoises -- and an unrefcounted `unsubscribe` from either one blinds the
+        other with no error anywhere: the survivor's state goes empty, its waits
+        return instantly, and its dispatches vanish into a channel this client
+        no longer receives.
         """
         existed = uri in self._subscriptions
         self._subscriptions[uri] = reducer_name
+        self._holders[uri] = self._holders.get(uri, 0) + 1
         self._mirror.bind(uri, reducer_name)
         client = self.client()
         try:
@@ -311,19 +366,30 @@ class HostRuntime:
         except RpcError:
             # Only what this call added: tearing down a channel another caller
             # was already subscribed to would blind them over our refusal.
-            if not existed:
-                self._subscriptions.pop(uri, None)
-                self._mirror.drop(uri)
+            self._release(uri, drop=not existed)
             raise
         snapshot = result.get("snapshot")
         if isinstance(snapshot, Mapping):
             self._mirror.apply_snapshot(snapshot, reducer_name=reducer_name)
 
     async def unsubscribe(self, uri: str) -> None:
-        self._subscriptions.pop(uri, None)
-        self._mirror.drop(uri)
+        """Release one hold. The channel goes when the last one does."""
+        if self._release(uri, drop=True):
+            return
         if self._client is not None:
             await self._client.unsubscribe(uri)
+
+    def _release(self, uri: str, *, drop: bool) -> bool:
+        """Drop one hold on *uri*; report whether others remain."""
+        remaining = max(0, self._holders.get(uri, 0) - 1)
+        if remaining:
+            self._holders[uri] = remaining
+            return True
+        self._holders.pop(uri, None)
+        if drop:
+            self._subscriptions.pop(uri, None)
+            self._mirror.drop(uri)
+        return False
 
     # ── the loop ─────────────────────────────────────────────────────────────
 
@@ -369,19 +435,43 @@ class HostRuntime:
             self._manual.reset()
 
     async def _connect_once(self) -> BroadcastReader[ClientEvent]:
-        transport = await self._config.transport_factory()
+        """One attempt, linked and abortable end to end.
+
+        The link comes FIRST -- plan section 6.3's opening step -- and every
+        await in the attempt races it. Without that, ``reconnect_now()``
+        against a hung dial or handshake only took effect once the attempt
+        resolved on its own, which against a black-holed host is never.
+        """
+        try:
+            async with link(self._shutdown, self._manual) as waiters:
+                return await self._attempt(waiters)
+        except asyncio.CancelledError:
+            # Only the manual arm is ours to translate: an aborted attempt is
+            # data for the retry loop, which resets the trigger and dials again
+            # immediately. A shutdown -- or a genuine cancellation of the
+            # supervisor -- must keep unwinding as cancellation.
+            if self._manual.triggered and not self._shutdown.triggered:
+                raise HostNotConnected(
+                    f"{self._config.label} attempt aborted by reconnect_now()"
+                ) from None
+            raise
+
+    async def _attempt(
+        self, waiters: Sequence[asyncio.Future[Any]]
+    ) -> BroadcastReader[ClientEvent]:
+        transport = await race(self._config.transport_factory(), waiters)
         client = AhpClient(transport, self._config.client_config)
         if self._config.server_request_handler is not None:
             client.set_server_request_handler(self._config.server_request_handler)
         client.set_state_mirror(self._mirror)
-        await client.connect()
-        # Attach BEFORE the handshake: anything the host pushes between its
-        # response and the drain loop starting would otherwise be lost, because
-        # a late reader sees no replay.
-        events = client.events()
 
         succeeded = False
         try:
+            await race(client.connect(), waiters)
+            # Attach BEFORE the handshake: anything the host pushes between its
+            # response and the drain loop starting would otherwise be lost,
+            # because a late reader sees no replay.
+            events = client.events()
             prior = tuple(self._subscriptions)
             can_reconnect = self._server_seq > 0 and bool(prior)
             arm = "snapshot"
@@ -389,20 +479,31 @@ class HostRuntime:
 
             if can_reconnect:
                 try:
-                    result = await client.reconnect(
-                        client_id=self._client_id,
-                        last_seen_server_seq=self._server_seq,
-                        subscriptions=list(prior),
+                    result = await race(
+                        client.reconnect(
+                            client_id=self._client_id,
+                            last_seen_server_seq=self._server_seq,
+                            subscriptions=list(prior),
+                        ),
+                        waiters,
                     )
-                    arm, acknowledged = await self._absorb_reconnect(result)
+                    arm, acknowledged = await self._absorb_reconnect(result, prior=frozenset(prior))
                 except RpcError:
                     # An RPC-level refusal means the host cannot resume us --
                     # too much elapsed, or it forgot the id. Fall back. A
                     # transport error is a different thing entirely and must
                     # propagate to the retry loop.
-                    await self._absorb_initialize(client, prior)
+                    await race(self._absorb_initialize(client, prior), waiters)
             else:
-                await self._absorb_initialize(client, prior)
+                await race(self._absorb_initialize(client, prior), waiters)
+
+            # Plan section 6.3: "Reconnect must re-check authentication."
+            # `auth/required` is never replayed, so this hook is the one place
+            # an outstanding challenge can be re-checked -- run before
+            # `connected` flips, and before `listSessions`, which against an
+            # auth-guarded host is the first request that would need it.
+            if self._config.auth_check is not None:
+                await race(self._config.auth_check(client), waiters)
 
             resend = self._mirror.on_reconnect(
                 policy=self._config.pending_policy, arm=arm, acknowledged=acknowledged
@@ -419,7 +520,7 @@ class HostRuntime:
 
             # Best-effort: a host that cannot list sessions is still usable.
             with contextlib.suppress(Exception):
-                listing = await client.list_sessions()
+                listing = await race(client.list_sessions(), waiters)
                 items = listing.get("items")
                 if isinstance(items, list):
                     self.session_summaries = {
@@ -441,9 +542,10 @@ class HostRuntime:
                     await client.shutdown()
 
     async def _absorb_initialize(self, client: AhpClient, prior: Sequence[str]) -> None:
+        kinds = _subscription_kinds(self._config.initial_subscriptions)
         result = await client.initialize(
             client_id=self._client_id,
-            initial_subscriptions=list(prior) or list(self._config.initial_subscriptions),
+            initial_subscriptions=list(prior) or list(kinds),
         )
         version = result.get("protocolVersion")
         self.protocol_version = version if isinstance(version, str) else None
@@ -463,14 +565,19 @@ class HostRuntime:
         seq = result.get("serverSeq")
         if isinstance(seq, int) and not isinstance(seq, bool):
             self._server_seq = max(self._server_seq, seq)
+        # Recorded BEFORE the snapshots loop, so a kind the caller stated in
+        # `initial_subscriptions` is what binds -- and `setdefault`, so a name
+        # `subscribe()` already stored is never clobbered by config intent.
+        for uri, kind in kinds.items():
+            self._subscriptions.setdefault(uri, kind)
         for snapshot in result.get("snapshots") or []:
             if isinstance(snapshot, Mapping):
                 uri = str(snapshot.get("resource", ""))
                 self._mirror.apply_snapshot(snapshot, reducer_name=self._subscriptions.get(uri))
-        for uri in self._config.initial_subscriptions:
-            self._subscriptions.setdefault(uri, "root" if uri == ROOT_URI else "")
 
-    async def _absorb_reconnect(self, result: Mapping[str, Any]) -> tuple[str, list[int]]:
+    async def _absorb_reconnect(
+        self, result: Mapping[str, Any], *, prior: frozenset[str]
+    ) -> tuple[str, list[int]]:
         kind = result.get("type")
         acknowledged: list[int] = []
         if kind == "replay":
@@ -507,11 +614,13 @@ class HostRuntime:
 
         snapshots = result.get("snapshots") or []
         surviving = {str(s.get("resource", "")) for s in snapshots if isinstance(s, Mapping)}
-        # Keep a URI if it survived, or if it was added while the request was in
-        # flight -- dropping the latter would silently lose a subscription the
-        # caller just made.
+        # Keep a URI iff surviving *or not prior* (plan section 6.3): one
+        # subscribed while the request was in flight cannot be in the host's
+        # answer, and pruning it would silently discard the recorded intent
+        # `subscribe()` promises the next handshake will carry. Only what the
+        # host was actually asked about -- `prior` -- is the host's to decline.
         for uri in list(self._subscriptions):
-            if uri not in surviving:
+            if uri not in surviving and uri in prior:
                 self._subscriptions.pop(uri, None)
                 self._mirror.drop(uri)
         for snapshot in snapshots:
@@ -644,12 +753,39 @@ class HostRuntime:
         self._states.publish(state)
 
     async def _resolve_client_id(self) -> str:
+        """Explicit -> stored -> fresh ``uuid4()``, per plan section 6.3.
+
+        The resolved value is ALWAYS written back -- an explicitly-supplied id
+        included, which is why the explicit case routes through here rather
+        than short-circuiting past the store: a process that passes the id
+        once and later relies on the store must not come back as a different
+        client and silently lose its reconnect identity.
+        """
         stored = await self._store.load(self._config.label)
-        client_id = stored or str(uuid.uuid4())
-        # Always written back, so an explicitly-supplied id is persisted too and
-        # the next launch reuses it without the caller having to.
+        client_id = self._config.client_id or stored or str(uuid.uuid4())
         await self._store.store(self._config.label, client_id)
         return client_id
+
+
+def _subscription_kinds(
+    entries: Sequence[str | tuple[str, str]],
+) -> dict[str, str | None]:
+    """``HostConfig.initial_subscriptions`` as ``uri -> reducer name or None``.
+
+    ``None`` -- never ``""`` -- is what makes the bare-URI form survive a second
+    connection: only ``None`` engages ``apply_snapshot``'s shape-sniffing
+    fallback, which is exactly what the plan says the fallback is *for* -- a
+    snapshot whose kind the caller could not state. The root URI is the one
+    bare form that does state its kind.
+    """
+    kinds: dict[str, str | None] = {}
+    for entry in entries:
+        if isinstance(entry, str):
+            kinds[entry] = "root" if entry == ROOT_URI else None
+        else:
+            uri, kind = entry
+            kinds[uri] = kind
+    return kinds
 
 
 def _action_event(envelope: Mapping[str, Any]) -> Any:

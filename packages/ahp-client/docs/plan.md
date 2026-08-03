@@ -85,9 +85,23 @@ the schema will not tell them*, which is the only thing a wrapper adds.
 | Surface | Actions (client-dispatchable) | What a wrapper actually buys | Cost |
 |---|---|---|---|
 | **Multi-chat** | 29 chat (15), plus `SessionState.chats` | Three MUST-NOT capability gates, a client-minted URI, `{}`-is-falsy | ~1 day — **built** |
-| **Terminals** | 11 (5) | Claim arbitration, three URI forms, the `!` prefix, UTF-16 in `terminal/input` | ~2–3 days |
-| **Changesets** | 8 (1) | Expanded-URI subscription, `operationId`/`scopes` validation, review state | ~2 days |
-| **Resource watches** | 1 (0) | Nothing the command does not already say | ~half a day, and not worth it |
+| **Terminals** | 11 (5) | Claim arbitration, three URI forms, the `!` prefix | ~2–3 days — **built** (§7.5) |
+| **Changesets** | 8 (1) | Expanded-URI subscription, `operationId`/`scopes` validation, review state, the content ref, a `confirmation` MUST | ~2 days — **built** |
+| **Resource watches** | 1 (0) | Nothing the command does not already say | ~half a day, and not worth it — **still absent** |
+
+All three built surfaces were then reviewed from three angles each, and the
+review is the part of this section worth keeping. Both new wrappers passed the
+wire layer — no malformed frame, no missing required field, no misspelled key —
+and both failed on *values that are schema-legal and wrong*, in the same two
+shapes: **a closed enum nobody validates** (`target.side`, unchecked here and
+unread by the host) and **a JSON `number` narrowed to a Python `int`** (`cols`,
+`exitCode`, `sizeHint` — one declared wire type, three different guards across
+two files). Then one defect above all the others: `TerminalStream` filtered a
+refused `terminal/input` out one line before the decoder that would have named
+it, so the surface justified by "typing does nothing" reported nothing when
+typing did nothing. §7.4 and §7.5 record what each became; ADR 0008 records the
+rule the remaining gates follow, because "a wrapper is a place to be wrong" cuts
+both ways and a gate needs a reason as much as an omission does.
 
 **Multi-chat was built, and it is the right one.** Its command was already
 broken, so that surface had a blocker rather than a gap; the chat reducer and the
@@ -105,7 +119,10 @@ subscriber. A `Terminal` object has to make the claim's lifetime explicit, and
 the sibling host mints three different `agenthost-terminal:` URI forms, so
 nothing may route on the scheme (invariant 1). Now that `terminalCommandPrefix`
 survives the handshake, the `!` shorthand is implementable for the first time —
-which is the affordance the surface is actually for.
+which is the affordance the surface is actually for. **Built; §7.5 is what it
+became**, including the two things this paragraph got wrong: it is not the
+sibling host that mints three `agenthost-terminal:` forms but VS Code, and
+`terminal/input` carries no UTF-16 offsets.
 
 **Changesets come second because they are read-mostly.** One client-dispatchable
 action out of eight; the rest is server push into a reducer that already runs.
@@ -180,12 +197,17 @@ Six ordered steps. 1–3 in the new repo, 4–6 as one reviewable PR in the serv
 3. **Fix the corpus-in-wheel defect.** `conformance/corpus.py:26` resolves
    `CORPUS_ROOT` as `Path(__file__).resolve().parents[3] / "vendor" / "upstream"`
    while `pyproject.toml` packages only `src/agent_host_server` — an installed
-   wheel ships the loader and none of the data. Ship the corpus as package data
-   and resolve it through `importlib.resources`. **Note the API consequence the
-   design pass got wrong:** `importlib.resources.files()` returns a `Traversable`,
-   not a `Path` — no `.glob()`, `.resolve()` or `.parents`. The correct shape is
-   `as_file()` inside an `ExitStack`, i.e. a context manager, not a function
-   returning `Path`. Budget for that.
+   wheel ships the loader and none of the data. Ship the corpus as package data.
+   *Mechanism superseded by the protocol repo's ADR 0002, requirement kept:*
+   this step originally prescribed `importlib.resources`, whose `files()`
+   returns a `Traversable` — no `.glob()`, `.resolve()` or `.parents` — so
+   reaching a real path means `as_file()` inside an `ExitStack`, turning module
+   constants into context managers for no gain. What shipped instead is hatch's
+   `force-include` mapping `vendor/upstream/` into the wheel at
+   `agent_host_protocol/conformance/_upstream/`, with `corpus.py` preferring
+   the packaged tree over the checkout, and
+   `tests/unit/test_packaging.py` building a real wheel to prove the corpus is
+   inside — the gate a source checkout structurally cannot provide.
 4. **Server PR** `feat!: depend on agent-host-protocol`. Delete the extracted
    subpackages, add the dependency, rewrite imports. `core/errors.py`,
    `core/channels.py` and `core/seq.py` are *partially* extracted and get hand
@@ -216,9 +238,9 @@ The spec breaks in MINOR bumps, so loose pins are a trap.
   sibling's ADR 0002), but its MINOR moves whenever the vendored spec tag's
   MINOR moves.
 - Both consumers pin `agent-host-protocol ~= 0.1.0`.
-- `UPSTREAM_PROTOCOL_VERSION` is asserted in each consumer's
-  `tests/docs/test_readme_is_true.py`, so a README claiming "speaks 0.7.0" fails
-  when the dependency moves under it.
+- `UPSTREAM_PROTOCOL_VERSION` is asserted in each consumer's `tests/docs/`
+  suite (here, `test_upstream_pin_is_true.py`), so a docs claim of "speaks
+  0.7.0" fails when the dependency moves under it.
 - Each consumer gets a **non-blocking** `protocol-main` CI job installing from
   git `@main`, so drift is visible the day it lands.
 
@@ -246,12 +268,16 @@ extraction, not inherited:
 - **`ws/transport.py:33-35`** collapses every `recv()` exception into `None`, so
   a consumer cannot distinguish clean EOF from abnormal close — information the
   hosts supervisor needs to choose shutdown-vs-reconnect. Do **not** widen the
-  shared `Transport` contract (the host depends on its current shape). Add an
-  optional, duck-typed `DiagnosticTransport` alongside it. Note: a
-  `@runtime_checkable` Protocol with non-method members returns `False` from
-  `isinstance` when the attributes are absent and **raises `TypeError` on
-  `issubclass`** — so the client must branch and synthesise a default, not
-  "report by absence."
+  shared `Transport` contract (the host depends on its current shape).
+  *Built differently than sketched:* the sketch here was an optional duck-typed
+  `DiagnosticTransport` (with a warning about `@runtime_checkable` attribute
+  protocols), and no such type exists. What shipped covers the intent twice
+  over: the client's `WebSocketClientTransport.receive()` raises
+  `TransportError` with a `kind` of `"rejected"`/`"closed"`/`"io"`, and
+  `hosts/policy.py` branches on that kind to stop retrying a refusal — which is
+  the shutdown-vs-reconnect decision this bullet wanted. The transport also
+  records `WebSocketCloseInfo` on a `close_info` property, an affordance for
+  embedders that want the raw close code; the supervisor itself never reads it.
 
 `without_none()` stays deliberately **shallow**, with the reason documented at
 the definition: a nested explicit `null` is load-bearing (a JS unconditional
@@ -361,12 +387,15 @@ pair.
   docstring: if `dispatch` were `async def`, two coroutines could interleave
   between `clientSeq` allocation and enqueue, putting `clientSeq` 5 on the wire
   before 4. TypeScript gets this free from single-threaded JS; asyncio does not.
-- **Use `asyncio.TaskGroup`** for the reader/writer pair rather than
-  `create_task` + a `finally` that cancels. It is the 3.11+ answer: sibling
-  cancellation on failure, `ExceptionGroup` aggregation, and no
-  "bare `create_task` can be garbage-collected mid-flight" hazard — a comment
-  that appears twice in the sibling's `core/host.py`. No proposal evaluated
-  this; it should be the default and departures justified.
+- **`asyncio.TaskGroup` was evaluated for the reader/writer pair and rejected**
+  — the departure this bullet demanded be justified, justified. A `TaskGroup`
+  body blocks until its children finish, and `connect()` must return while
+  they keep running; driving one through bare `__aenter__`/`__aexit__` to span
+  that gap gives up the exception propagation that is the reason to want it.
+  So `AhpClient` uses explicit `create_task`, held in a set against the
+  "garbage-collected mid-flight" hazard — the reason this bullet originally
+  said TaskGroup should be the default — with the argument recorded in the
+  class docstring where the tasks are spawned.
 - **Inbound server requests dispatch on their own task, never inline.** A
   handler may re-enter the client and would deadlock the read loop. All three
   reference clients call this out.
@@ -438,12 +467,19 @@ dead, so recovery means a new transport and therefore a new client.
 @dataclass(frozen=True)
 class ClientConfig:
     request_timeout: float | None = 30.0
-    subscription_buffer: int = 0  # 0 = unbounded, per ADR 0003
+    subscription_buffer: int = 0  # 0 = unbounded, per ADR 0002
     event_buffer: int = 4096
     protocol_versions: tuple[str, ...] = DEFAULT_SUPPORTED_VERSIONS
     verify_negotiated_version: bool = True
-    wire_log: WireLog | None = None
+    client_info: JsonObject | None = None
+    capabilities: JsonObject | None = None
+    locale: str | None = None
 ```
+
+The sketch originally carried `wire_log: WireLog | None`; no such field
+shipped. Wire logging is a transport decorator instead —
+`wirelog.logged(transport, log)` wraps any `Transport` — so the client core
+never learns logging exists and the redaction lives in one place.
 
 Ported invariants, each with its evidence in the docstring: idempotent
 `connect()`; `shutdown()` tears down *before* closing the transport so in-flight
@@ -593,12 +629,16 @@ UTF-8, atomic temp+rename, `0o600`/`0o700` — the Rust/Swift format, the one tw
 SDKs agree on. Load does **not** strip whitespace. Resolution: explicit →
 `load` → `uuid4()`, and the resolved value is **always** written back.
 
-`MultiHostStateMirror` keys by **`tuple[str, str]`**, not the length-prefixed
-`f"{len(host)}\x00{host}{uri}"` string. That encoding exists only because a JS
-`Map` cannot take a tuple key. `aggregated_sessions()` parses `modifiedAt` into
-a real `datetime` before sorting — TS and Rust compare ISO strings
-lexicographically, which is only correct if every host normalises to `Z` with
-identical fractional precision.
+**`MultiHostStateMirror` was never built**, and M6 shipped without it: `hosts/`
+holds the supervisor, the policy and the client-id store, and an embedder with
+several hosts holds one `HostRuntime` each. The design notes stay because they
+are the spec for whoever builds it: key by **`tuple[str, str]`**, not the
+length-prefixed `f"{len(host)}\x00{host}{uri}"` string — that encoding exists
+only because a JS `Map` cannot take a tuple key — and have
+`aggregated_sessions()` parse `modifiedAt` into a real `datetime` before
+sorting, because TS and Rust compare ISO strings lexicographically, which is
+only correct if every host normalises to `Z` with identical fractional
+precision.
 
 **Reconnect must re-check authentication.** `auth/required` is ephemeral and
 never replayed, so a reconnect silently loses every outstanding challenge. All
@@ -710,10 +750,14 @@ say otherwise. Default is `manual`: the event surfaces, the stream waits, and
 after `approval_timeout` it raises `UnansweredToolCall(tool_call_id, tool_name)`.
 Silently approving or denying are both worse than a loud, specific error.
 
-`SessionStatusFlags` is an `IntFlag` with `_missing_` returning a pseudo-member,
-so a status with bit 31 set (fixture 005 carries `2147483720`) round-trips and
-`status & IN_PROGRESS` still works. Bitwise always — `INPUT_NEEDED == 24` shares
-a bit with `IN_PROGRESS == 8`.
+Session status is **plain ints, not the `IntFlag` this paragraph once
+specified**: the shared package ships `SessionStatus` (named `Final` bit
+constants) and `session_status_flags()`, which masks to unsigned 32-bit. The
+`IntFlag`-with-`_missing_` design was never built — the int approach meets the
+same requirement with nothing to construct: a status with bit 31 set (fixture
+005 carries `2147483720`) is just an int, so it round-trips untouched, and
+`status & SessionStatus.IN_PROGRESS` still works. Bitwise always —
+`INPUT_NEEDED == 24` shares a bit with `IN_PROGRESS == 8`.
 
 **`sync.py`** — a thin loop-thread facade with the same signatures. No reference
 client has one, and "no reference client has one" is not a reason: TypeScript,
@@ -793,6 +837,266 @@ flag**: `{}` advertises multi-chat and `{}` is falsy in Python, so the test is
 `is not None`. `fork` and `sideChat` inside it are plain booleans, and are the
 one place truthiness is correct.
 
+### 7.4 Changesets
+
+`Session.changesets()`, `Session.open_changeset()`, and a `Changeset` with
+`files()`, `operations()`, `read()`, `mark_reviewed()`, `invoke()`, `changes()`
+and `wait_until_ready()`. §1.3 scoped this as read-mostly and it is: one of the
+eight `changeset/*` actions is client-dispatchable, the rest is server push into
+a reducer that already runs, and nothing on this surface can hang a turn. So the
+wrapper earns its place on four things a caller cannot get from the params.
+
+**The bytes are not where the file is.** `ChangesetFile.edit.after.uri` names
+the file; the content lives behind `edit.after.content`, a `ContentRef` the host
+resolves out of its own store before any resource provider is consulted — which
+is why "a changeset renders on a host that exposes no filesystem at all", and
+why a diff's `before` is readable at all when the working tree no longer holds
+it. `Changeset.read()` therefore takes the `FileSide`, never a URI, so the file
+URI cannot be passed by mistake, and it decodes `base64` — the encoding
+`resourceRead` MUST use for binary and a caller assuming text gets wrong the
+first time a changeset touches a PNG. `ResourceReadParams` declares
+`channel: 'ahp-root://'`, so that is the channel used; the scoping that matters
+is the URI, not the channel.
+
+**`capabilities.review` is on the catalogue entry, and it moves.** Not in
+`ChangesetState` — the changeset's own state has no capabilities — so review is
+gated on `SessionState.changesets[].capabilities.review`, re-read on every call
+because the host validates against the *current* entry and re-emits it whenever
+it changes. A presence flag again: `{}` advertises support and is falsy in
+Python.
+
+**`operationId` and `target.kind` are checked against what this changeset
+declared**, which is the check §1.3 asked for. The declaration is per-changeset
+and recomputed — the sibling host derives its operation list from `git status`
+on every publish, so "Commit" is simply absent while nothing is staged — so the
+check is against live state, never a remembered list. A `range` target needs its
+range, and the range is validated before it goes out.
+
+**A `confirmation` is a client MUST**, and is the one gate here that goes beyond
+§1.3's brief. "When present, the client MUST display this message to the user …
+and only invoke the operation after the user accepts. The presence of this field
+also signals that the operation is destructive." `invoke()` refuses until
+`confirmed=True`; a library that sent it anyway would make every caller quietly
+violate a MUST, and the sibling host's `Revert` really does discard the agent's
+edits.
+
+`target.side` is checked too, and it is the sharper of the two: it is a closed
+`before`/`after` enum on **both** target branches, and nothing else in the stack
+validates it — the sibling host checks `kind`, `resource` and both range
+positions and never reads `side` at all, so an arbitrary string reaches a handler
+that branches on it and is read as neither side.
+
+Two things deliberately **not** gated. Operation `status` is surfaced
+(`running`, `failed`, `disabled`, plus `error`) but never blocks an invocation.
+The reason is *staleness*, not permissiveness: an earlier draft of this section
+said the host does not reject on status and that was wrong — `core/host.py`
+raises `InvalidParams` for an operation "disabled while a turn is active", and
+sets `status: "disabled"` from the identical predicate. But the status is
+host-pushed and can be stale by the time it is read, so refusing on it would
+block a legitimate retry, and `invoke()` therefore surfaces it rather than
+enforcing it. And a `resource` target is not checked for membership in the file
+list: `ChangesetFile.id` is "typically `after.uri`", a target may legitimately
+name `before.uri` — that is what `side` is for — so the check would produce false
+refusals on exactly the renames it looks like it would help with. `mark_reviewed`
+*is* checked against the file list, because its parameter is literally
+`ChangesetFile.id` and the same rename argument does not reach it.
+
+`invoke()` spares a caller three JSON-RPC errors, not all of them: the host also
+refuses an operation with no registered handler and one the policy declines, and
+both arrive as `-32602`/`-32009` from the wire.
+
+`uriTemplate` expansion is RFC 6570 *simple string expansion* over the three
+shapes the protocol defines (none, `{turnId}`, and the `{originalTurnId}` /
+`{modifiedTurnId}` pair, which the schema requires together). Values are
+percent-encoded to the unreserved set, because a turn id carrying a `/` would
+otherwise produce a channel the host never registered. A template containing
+anything else is `openable == False` rather than expanded: "any other variable
+name MUST be ignored by clients (there is no protocol-defined way to obtain
+values for unknown variables)".
+
+**"Anything else" means every brace group, not every recognised name**, and that
+distinction is the one defect this section shipped with. Scanning for
+`{[A-Za-z0-9_]+}` made an operator (`{+turnId}`, `{?turnId}`, `{/turnId}`), a
+dotted name (`{turn.id}`) and a comma list (`{originalTurnId,modifiedTurnId}` —
+a legal spelling of the pair the schema calls a MUST) all match *nothing*: the
+entry reported no variables, `openable` was `True`, and `expand` returned the
+template with its braces intact. Subscribing that succeeds, because a host
+accepts any channel string, and produces a bound, permanently empty channel with
+no error anywhere. That is the silent freeze invariant 1 exists to prevent,
+arriving through the derived-URI door rather than the scheme door. A supplied
+value the template has no slot for is refused too, rather than dropped: silently
+opening the session-wide changeset for a caller who asked for one turn's is a
+wrong answer where every other branch is a refusal.
+
+**A changeset opened by its expanded URI still finds its catalogue entry.** The
+entry's identity is its `uriTemplate`, but `open_changeset(uri)` is the escape
+hatch the spec's "subscribe to what comes back" advice relies on, and matching on
+the template alone made it second-class — review was refused with an error
+telling the caller to open it from `Session.changesets()`, which is what they had
+done. `ChangesetInfo.matches()` closes it.
+
+**A dead channel is not a settled one.** `wait_until_ready` waits for a status
+the protocol defines (`ready` or `error`), never merely "not `computing`": the
+empty string is what a dropped, disposed or never-registered channel reads as,
+and returning instantly for it blessed exactly the empty file list this method
+exists to stop a caller believing. `Changeset.live` is the predicate, and
+`aclose()` is refcounted in the runtime — two handles on one changeset is the
+ordinary case, and an unrefcounted unsubscribe blinded the survivor. `changes()`
+ends when the changeset is closed, and wakes on `session/changesetsChanged` as
+well as on its own channel: `info` is deliberately live, and the case it is live
+for — a changeset that stops being reviewable mid-session — moves nothing on the
+changeset channel at all.
+
+`ChangesetFile.change` is a **heuristic and says so**. `FileEdit.before` is
+"absent for file creations *or for in-place file edits*", so a missing `before`
+is not a discriminator; `diff.removed` is the only corroboration the protocol
+offers and it is used, and an edit carrying neither side answers `unknown` rather
+than guessing a fifth time. The sibling host always sends both sides, which is
+exactly why nothing driving it would notice.
+
+### 7.5 Terminals
+
+`Client.create_terminal()`, `Client.open_terminal()`, `Client.terminals()`,
+`Client.terminal_command()`, and a `Terminal` with `write()`, `resize()`,
+`rename()`, `clear()`, `hand_to()`, `take()`, `output()`, `commands()`,
+`events()`, `wait_for_exit()` and `dispose()`. §1.3 called this the expensive one
+because the state is *contested*, and everything below follows from that.
+
+**The claim is read from confirmed state, never optimistic.** This is the whole
+surface in one line. `terminal/claimed` is client-dispatchable and refusable, so
+replaying our own un-echoed claim answers "yes, you hold this" to an arbitration
+that has not happened — and the keystrokes it authorises are precisely the ones
+the host then drops. *Render optimistic, trust confirmed* is the mirror's rule;
+the claim is where the difference is the entire question. Measured against the
+sibling host with a real pty: a client that hands its terminal to a session
+**cannot take it back**, and the host says so.
+
+**A refusal is somebody's news, not everybody's state.** The host fans a rejected
+envelope out to every subscriber with its own state untouched, which is the
+interop defect this surface was named after. The mirror already declines to
+reduce it; `TerminalRefused` carries it to a stream reader, and a rejected
+envelope is checked **before** the action type is looked up, so a refused
+`terminal/claimed` can never decode as a `TerminalClaimed`.
+
+That ordering has to hold in the *stream* and not only in the decoder, and in the
+first cut it did not. `TerminalStream` filtered by action type first, and the one
+action type it filters out is `terminal/input` — which is also one of the two the
+host gates on the claim, and the only one whose refusal has no other channel,
+because `dispatchAction` is a notification with no reply. So the surface named
+after "typing does nothing" delivered nothing when typing did nothing. `TurnStream`
+had the correct order and a comment naming this exact case; this module
+re-derived the filter and inverted it. It is now one predicate: a refusal is
+never an echo.
+
+`mine` asks **one** question on every arm of the union — did this client dispatch
+it — because a single field name that means "I originated it" on a refusal and "I
+am the new holder" on a claim changes meaning under `case ...(mine=True)`.
+`TerminalClaimed.held_by_us` is the second question, under its own name.
+
+**Only `write()` is gated locally, and it is the one that matters.**
+`dispatchAction` is a notification, so a refused keystroke returns a
+`rejectionReason` on a stream nobody is obliged to read: the reported symptom is
+"typing does nothing". `TerminalNotHeld` names the holder instead. The rule is
+the sibling host's default `CLAIM_GATED_ACTIONS` rather than an upstream MUST —
+upstream states the SHOULD only for `terminal/claimed` — so `force=True` exists.
+`hand_to()`, `resize()`, `rename()` and `clear()` are deliberately **not** gated:
+the guide's detach flow has a client narrowing a *session's* claim and resizing a
+terminal it does not hold, and a local gate would refuse a documented interaction
+to enforce a rule the host is the one entitled to apply.
+
+**Disposal is not gated either**, and the sibling's `core/terminals.py` says why:
+a session claim is held by no client, so gating it would make every handed-over
+terminal immortal. Documented on `Terminal.dispose()` rather than argued with.
+Three lifetime consequences follow, and all three were wrong in the first cut.
+`create_terminal` **disposes what it cannot subscribe** — the URI is minted
+inside the method, so a caller who passed none cannot even name the shell it just
+started, and leaving it behind is the immortal terminal by another route.
+`__aexit__` **raises** a disposal the host refused, unless an exception is
+already in flight; suppressing every exception unconditionally meant the `with`
+block promised to end the shell, the host declined, and nothing said so.
+And `dispose()` releases the subscription in a `finally`, so a refused disposal
+does not also leave a channel the runtime re-requests on every reconnect.
+
+**A dropped channel answers, and every answer is plausible.** `Terminal.alive`
+is the honest predicate: after a disposal the title is `""`, the scrollback is
+`""` on a terminal that had 40 KiB of it, and the holder used to read "an
+unreadable claim" — a protocol-corruption message for the most ordinary
+lifecycle event there is. `TerminalState.claim` is *required*, so a state with no
+claim is never a malformed claim; it is a channel this client is not receiving,
+and `holder` now separates the three. The dispatchers check the channel before
+the claim, because a diagnosis about ownership is the wrong answer to a question
+about lifetime. `Terminal.exists` is the other half — a *peer's* disposal shows
+up only in `RootState.terminals` — and `wait_for_exit` watches both, because a
+disposal publishes no `terminal/exited` and the old `timeout=None` default then
+waited forever for an event that could no longer arrive.
+
+**JSON `number` is not Python `int`.** `cols`, `rows`, `exitCode`, `durationMs`
+and `timestamp` are all declared the same wire type, and reading three of them
+with `isinstance(raw, int)` made a conformant `cols: 100.0` read as `0` and a
+clean `exit 7` read as "killed without a code" — inverting the very distinction
+`exit_reported` is named for. The client is a *producer* of two of them as well:
+`960 / 12` is a float, the sibling host takes `cols if isinstance(cols, int) else
+None`, and the pty silently ran at the backend default. Integral floats are
+accepted and coerced; a fractional column is refused.
+
+**The `!` shorthand is a synchronous query, not a turn event.**
+`Client.terminal_command(text)` returns the command the host will run instead of
+the agent, resolved against the *negotiated* prefix — `None` when the host
+advertises none, because "absence means the host does not support command
+prefixes" and a hardcoded `"!"` offers the affordance to hosts that never claimed
+it. A query rather than something `TurnStream` reports, because the decision it
+informs is made while the user is still typing: an input box deciding whether to
+badge the line, before any turn exists. The turn itself needs no second code
+path — the sibling host runs the command and reports it back as a tool call
+named `terminal`, which arrives through the chat surface that already exists.
+Measured: `!echo bang-works` yields `TurnStarted → ToolCallStarted(terminal) →
+ToolCallRunning → ToolCallCompleted → TurnCompleted`.
+
+Two omissions worth stating. There is **no `run()` helper** that writes a command
+and waits for its result: `commandId` is minted by the host at the shell's
+`OSC 633;C`, any peer's keystrokes can produce one, and nothing in the protocol
+correlates a `terminal/input` with the `terminal/commandExecuted` that follows
+it — a helper would be guessing, and guessing at which command's exit code you
+just read is worse than not offering the shortcut. And `exit_reported` is not
+spelled `exited`, because a process killed without a code publishes
+`terminal/exited` with the field omitted, `undefined` deletes the key through the
+reducer's unconditional spread, and the resulting `TerminalState` is identical to
+a running terminal's. The action is unambiguous; the state is not, so
+`wait_for_exit()` watches the stream and the property reports only what is there.
+
+**§1.3's table lists "UTF-16 in `terminal/input`" and that is wrong.**
+`TerminalInputAction.data` is a plain string with no offsets. The UTF-16
+code-unit rule belongs to `completions` (`CompletionsParams.offset`,
+`CompletionItem.rangeStart`/`rangeEnd`) and to nothing on the terminal channel.
+
+**`terminal_command()` is a heuristic, and its docstring says so.** The spec
+gives only "shorthand for executing the remainder as a terminal command"; the
+`.strip()` and the blank-remainder rule are calibrated against the reference
+host's `_terminal_command`, and a host that trims nothing is mispredicted at the
+edges. It is kept for the ergonomics, not presented as protocol —
+`terminal_command_prefix` is what the protocol actually guarantees.
+
+**Both catalogues are typed, and `commands()` with them.**
+`Client.terminals()` yields `TerminalInfo` rather than raw dicts precisely
+because of `claim`: it is "what a client reads to decide whether to offer an
+input box at all", and deciding it off a dict means hand-writing
+`info["claim"]["clientId"] == client_id` over peer-authored JSON — the comparison
+`claim_from_wire` exists to guard, on the payload it exists to guard. Same for
+`commands()`: a widget rendering scrollback reads the durable half, and the raw
+part hands back `part.get("durationMs", 0)`, reintroducing there the `?? 0`
+defect this section argues about for the transient half. (`Session.chats()` is
+still raw. It predates the house style §7 states, retrofitting it is an API
+break, and it is an open item rather than a decision.)
+
+**`terminal_uris()` bridges the one receiver-assigned terminal channel.**
+`CreateTerminalParams.channel` is client-chosen, so nothing about `create_terminal`
+hides a channel — but `ToolResultTerminalContent.resource` arrives from the host
+inside `ToolCallContentChanged.content`, and "clients can subscribe to the
+terminal's URI to stream its output in real time". Watching the agent's own shell
+command is the marquee use of this surface and the only place the spec's
+*subscribe to what comes back* advice applies to a terminal, so digging it out of
+the content parts by hand should not be the caller's job.
+
 ---
 
 ## 8. The reverse direction — `serve/`
@@ -828,11 +1132,16 @@ separates "a nice turn API" from a client a host can actually work with.
   `resourceRequest` answers `{}` or `-32009` (a successful `{"granted": false}`
   is the deny/retry/deny loop it exists to end), `resourceMkdir` creates `uri`
   rather than its parent, and `failIfExists` is honoured on copy/move.
-- **`ResourceWatchServer`** — the client as a watch *server*. Allocates
-  `ahp-resource-watch:/<uuid>`, serves `subscribe` with the frozen state, pushes
-  `resourceWatch/changed`. There is no dispose command: release when the last
-  subscriber unsubscribes or the connection drops. Polling backend by default;
-  `watchdog` is an optional extra, never a core dependency.
+- **`ResourceWatchServer` — deliberately not shipped.** §1.3's table prices a
+  watch server at "nothing the command does not already say" and argues it
+  should stay absent; `createResourceWatch` is therefore routed by
+  `ResourceRouter` and declined with `-32601` by every shipped server, which is
+  how a peer says no in a protocol with no capability object. The design, kept
+  for whoever decides the trade differently: allocate
+  `ahp-resource-watch:/<uuid>`, serve `subscribe` with the frozen state, push
+  `resourceWatch/changed`; there is no dispose command, so release when the
+  last subscriber unsubscribes or the connection drops; polling backend by
+  default, `watchdog` an optional extra, never a core dependency.
 - **`ClientToolHost`** — client-owned tools. `attach()` dispatches
   `session/activeClientSet` (a full-entry upsert; there is no tools-only
   action); `detach()` dispatches `session/activeClientRemoved`, **which is
@@ -1056,15 +1365,17 @@ Each step is a reviewable PR with its gate green before the next starts.
 - **M5 — The front door.** `api/`, `sync.py`, `testing/` as public API. Gate:
   the ten-line README example runs as a test.
 - **M6 — Hosts layer.** `cancel`/`ShutdownSignal` **first** — everything depends
-  on it — then policy, client-id stores, runtime, handle, multi. Gate: kill the
+  on it — then policy, client-id stores, runtime, handle. Gate: kill the
   host mid-turn, the turn resumes; the linked-signal leak regression test.
-- **M7 — Reverse direction.** `serve/*`, auth subsystem. Gate: `FakeHost`
-  issues all ten reverse methods; a client-owned tool executes end to end; a
-  `virtual://` plugin is published and fetched back; symlink-escape and etag
-  tests pass.
+  ("multi" was in this list and was not built — §6.3 records the cut.)
+- **M7 — Reverse direction.** `serve/*`, auth subsystem. Gate: the nine served
+  reverse methods are exercised, with the tenth (`createResourceWatch`) pinned
+  as deliberately unserved by `tests/docs/` — §1.3 scoped the watch server
+  out; a client-owned tool executes end to end; a `virtual://` plugin is
+  published and fetched back; symlink-escape and etag tests pass.
 - **M8 — Interop, doctor, replay.** Sibling host over WS; `ahp-server` marked
-  and green; frame parity vs the VS Code fixture. Gate: `ahp doctor` finds real
-  deviations in a real host.
+  and green; frame parity vs the VS Code fixture. Gate: `doctor.diagnose()`
+  finds real deviations in a real host.
 - **M9 — Release.** Guide pages executing, parity matrix complete, CHANGELOG,
   `0.1.0`.
 
@@ -1084,7 +1395,7 @@ what adoption means.
 
 Written before the code they justify. The wire-representation decision moved
 upstream into the shared package during M0 (it is that package's ADR 0001), and
-the extraction ADR lives there too, so this repository's series is seven rather
+the extraction ADR lives there too, so this repository's series is eight rather
 than the nine originally scoped:
 
 | ADR | Decision |
@@ -1096,6 +1407,7 @@ than the nine originally scoped:
 | [0005](decisions/0005-verify-versions-observe-gaps.md) | Verify the negotiated version; observe gaps, never raise |
 | [0006](decisions/0006-reverse-direction-and-pending-policy.md) | The reverse direction is first-class; reconnect `PendingPolicy` defaults to `VSCODE` |
 | [0007](decisions/0007-out-of-scope-for-0-1-0.md) | `mcpApps` and `ahp-otlp:` are out of 0.1.0, and the capability is not advertised |
+| [0008](decisions/0008-refusing-what-the-host-would-accept.md) | When a typed surface may refuse a call the host would accept — the four-part test, and the gates that fail it |
 
 ---
 

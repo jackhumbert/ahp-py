@@ -1,8 +1,10 @@
-"""Typed wrappers for all 27 client→server commands.
+"""Typed wrappers for the client→server commands.
 
-Generated from one table rather than hand-written, so the parity matrix is
-*derived* from the code and cannot drift from it. The TypeScript client ships
-wrappers for twelve; the rest it leaves to `request()`.
+23 of the 27 live here; `initialize`, `ping`, `reconnect` and `subscribe` are
+connection machinery and live on `AhpClient` itself. Generated from one table
+rather than hand-written, so the parity matrix is *derived* from the code and
+cannot drift from it. The TypeScript client ships wrappers for twelve; the rest
+it leaves to `request()`.
 
 **Channel scoping is the thing to get right.** Seventeen commands are declared
 ``channel: 'ahp-root://'`` in the protocol's own types and are forced to it here
@@ -83,10 +85,12 @@ def _omit_none(params: Mapping[str, Any]) -> JsonObject:
 
 
 class CommandsMixin:
-    """The 27 wrappers, mixed into :class:`~agent_host_client.client.AhpClient`.
+    """23 wrappers, mixed into :class:`~agent_host_client.client.AhpClient`.
 
+    The other four of the 27 commands -- `initialize`, `ping`, `reconnect`,
+    `subscribe` -- are connection machinery and live on `AhpClient` itself.
     Kept in its own module so the command surface can be read, counted and
-    tested without wading through connection machinery.
+    tested without wading through that machinery.
     """
 
     async def request(  # pragma: no cover - provided by AhpClient
@@ -126,18 +130,23 @@ class CommandsMixin:
         self,
         session: str,
         *,
-        provider: str,
+        provider: str | None = None,
         working_directories: Sequence[str] | None = None,
         config: Mapping[str, Any] | None = None,
         active_client: Mapping[str, Any] | None = None,
         progress_token: str | None = None,
+        fork: Mapping[str, Any] | None = None,
         **extra: Any,
     ) -> JsonObject:
         """Create a session on a client-minted URI.
 
-        ``workingDirectories`` is **plural** since 0.7.0. ``progressToken`` is
-        what makes `root/progress` fire at all -- a client that never sends one
-        has a progress surface that can never receive anything.
+        ``provider`` is optional because `CreateSessionParams.provider` is
+        (`provider?: string`): a *fork* inherits it from the source session, so
+        requiring it here made the fork flow unexpressible without lying to the
+        annotation. ``workingDirectories`` is **plural** since 0.7.0.
+        ``progressToken`` is what makes `root/progress` fire at all -- a client
+        that never sends one has a progress surface that can never receive
+        anything.
         """
         return await self._scoped(
             "createSession",
@@ -150,23 +159,13 @@ class CommandsMixin:
                 "config": dict(config) if config is not None else None,
                 "activeClient": dict(active_client) if active_client is not None else None,
                 "progressToken": progress_token,
+                "fork": dict(fork) if fork is not None else None,
                 **extra,
             },
         )
 
     async def dispose_session(self, session: str) -> JsonObject:
         return await self._scoped("disposeSession", session, {})
-
-    async def fetch_turns(self, session: str, **extra: Any) -> JsonObject:
-        """Load older turns.
-
-        **The result is empty**, and that is not a stub. The host MUST dispatch
-        `chat/turnsLoaded` *before* responding, so the turns arrive through the
-        action stream and the mirror -- a caller that awaits this and reads the
-        result gets nothing, and one whose mirror is not wired before the call
-        loses them entirely.
-        """
-        return await self._scoped("fetchTurns", session, extra)
 
     async def resolve_session_config(self, **extra: Any) -> JsonObject:
         return await self._root("resolveSessionConfig", extra)
@@ -203,6 +202,26 @@ class CommandsMixin:
         """
         return await self._scoped("disposeChat", chat, {})
 
+    async def fetch_turns(
+        self, chat: str, *, cursor: str | None = None, **extra: Any
+    ) -> JsonObject:
+        """Load older turns into a chat.
+
+        *chat* is the **chat channel** -- `FetchTurnsParams.channel` is
+        documented "Chat URI", the URI from `ChatState` / the session's
+        `defaultChat`, never the session URI. The reference host rejects a
+        session URI with InvalidParams ("… is not a chat channel"), so a
+        signature that named this `session` taught every caller the argument
+        that cannot work.
+
+        **The result is empty**, and that is not a stub. The host MUST dispatch
+        `chat/turnsLoaded` *before* responding, so the turns arrive through the
+        action stream and the mirror -- a caller that awaits this and reads the
+        result gets nothing, and one whose mirror is not wired before the call
+        loses them entirely.
+        """
+        return await self._scoped("fetchTurns", chat, {"cursor": cursor, **extra})
+
     async def completions(self, channel: str, **extra: Any) -> JsonObject:
         """Completion items for a partially-typed input.
 
@@ -215,16 +234,52 @@ class CommandsMixin:
 
     # ── terminals ────────────────────────────────────────────────────────────
 
-    async def create_terminal(self, terminal: str, **extra: Any) -> JsonObject:
-        return await self._scoped("createTerminal", terminal, extra)
+    async def create_terminal(
+        self, terminal: str, *, claim: Mapping[str, Any], **extra: Any
+    ) -> JsonObject:
+        """Create a terminal on a client-minted URI.
+
+        ``claim`` is keyword-**required** because `CreateTerminalParams` requires
+        it and because omitting it is not a recoverable mistake: it is the
+        terminal's initial owner, and the only claim that lets this client type
+        is its own ``{kind: 'client', clientId}``. A host that receives no claim
+        answers `InvalidParams`, so the alternative to this signature is learning
+        the field name from a -32602.
+
+        Refusal is `PermissionDenied` (-32009), never `MethodNotFound`: a host
+        with no terminal backend has the method and declined the request, and
+        -32601 would tell a client to stop asking for terminals at all.
+        """
+        return await self._scoped("createTerminal", terminal, {"claim": dict(claim), **extra})
 
     async def dispose_terminal(self, terminal: str) -> JsonObject:
+        """Dispose a terminal and kill its process.
+
+        `DisposeTerminalParams` carries a channel and nothing else -- there is no
+        ownership rule attached to it anywhere upstream, and the sibling host
+        deliberately does not gate it on the claim: a session-claimed terminal is
+        held by no client, so a gate would make it immortal.
+        """
         return await self._scoped("disposeTerminal", terminal, {})
 
     # ── changesets ───────────────────────────────────────────────────────────
 
-    async def invoke_changeset_operation(self, changeset: str, **extra: Any) -> JsonObject:
-        return await self._scoped("invokeChangesetOperation", changeset, extra)
+    async def invoke_changeset_operation(
+        self, changeset: str, *, operation_id: str, **extra: Any
+    ) -> JsonObject:
+        """Run a server-declared changeset operation.
+
+        ``operation_id`` is keyword-**required**, for the reason `actions.py`'s
+        docstring gives about `turnId`: it is required by
+        `InvokeChangesetOperationParams`, the host answers -32602 without it,
+        and a `**extra`-only signature type-checks clean under `mypy --strict`
+        while omitting it. Every other command carrying a required field --
+        `create_session`, `create_chat`, `create_terminal` -- names it. This one
+        did not, and it is the sixth call site that pattern exists to stop.
+        """
+        return await self._scoped(
+            "invokeChangesetOperation", changeset, {"operationId": operation_id, **extra}
+        )
 
     # ── resources (forward direction) ────────────────────────────────────────
     #

@@ -24,7 +24,7 @@ import asyncio
 import contextlib
 import os
 import uuid
-from collections.abc import AsyncIterator, Mapping, Sequence
+from collections.abc import AsyncIterator, Iterator, Mapping, Sequence
 from ssl import SSLContext
 from types import TracebackType
 from typing import Any, Self
@@ -33,7 +33,17 @@ from agent_host_protocol.channels import ROOT_URI
 from agent_host_protocol.transport import Transport
 from agent_host_protocol.types import JsonObject
 
-from agent_host_client.api.approvals import ApprovalPolicy, resolve_policy
+from agent_host_client.api.approvals import (
+    ApprovalPolicy,
+    ManualPolicy,
+    UnansweredToolCallError,
+    resolve_policy,
+)
+from agent_host_client.api.changesets import (
+    Changeset,
+    ChangesetInfo,
+    changeset_catalogue,
+)
 from agent_host_client.api.events import (
     ToolCallReady,
     ToolCallResultReview,
@@ -46,9 +56,18 @@ from agent_host_client.api.events import (
     event_for,
     is_modelled,
 )
+from agent_host_client.api.terminals import (
+    ClientClaim,
+    Terminal,
+    TerminalClaim,
+    TerminalInfo,
+    new_terminal_uri,
+    split_terminal_command,
+    terminal_dimension,
+)
 from agent_host_client.client import actions
 from agent_host_client.client.client import AhpClient
-from agent_host_client.client.errors import AhpClientError
+from agent_host_client.client.errors import AhpClientError, RpcError
 from agent_host_client.client.events import ActionEvent, ClientEvent, SessionRemoved
 from agent_host_client.client.mirror import StateMirror
 from agent_host_client.hosts.runtime import HostConfig, HostRuntime, TransportFactory
@@ -88,7 +107,10 @@ class ClientContext:
     async def __aexit__(
         self, exc_type: type[BaseException] | None, exc: BaseException | None, tb: Any
     ) -> None:
-        if self._client is not None:
+        # `dispose_on_exit=False` really is honoured: a caller opting out is
+        # keeping the runtime alive past the `with`, and closing it anyway
+        # shuts the connection down under whatever they kept it for.
+        if self._dispose and self._client is not None:
             await self._client.aclose()
 
 
@@ -223,6 +245,26 @@ class Client:
         """
         return self._runtime.terminal_command_prefix
 
+    def terminal_command(self, text: str) -> str | None:
+        """The command the host will run instead of the agent, or ``None``.
+
+        The ``!`` shorthand, resolved against the *negotiated* prefix. This is a
+        **synchronous query on the connection** rather than something a
+        :class:`TurnStream` reports, because the decision it informs is made
+        while the user is still typing -- an input box deciding whether to show a
+        "runs as a command" badge, a script deciding whether it is about to talk
+        to a model or to a shell. By the time a turn exists the answer has
+        already been acted on, and a host that supports no prefix must produce
+        no badge at all rather than one that lies.
+
+        The turn itself is an ordinary one: send it with
+        :meth:`Session.prompt` as usual. The sibling host runs the command and
+        reports it back as a tool call named ``terminal``, so the events arrive
+        through the chat surface that already exists -- there is nothing extra to
+        subscribe to, which is why this is a query and not a second code path.
+        """
+        return split_terminal_command(text, self.terminal_command_prefix)
+
     @property
     def completion_trigger_characters(self) -> Sequence[str]:
         """Characters that SHOULD make an input issue a `completions` request."""
@@ -292,9 +334,24 @@ class Client:
             if working_directories is not None
             else ([file_uri(cwd)] if cwd is not None else None)
         )
+        # The same in-advance MUST NOT as `multipleChats`: "When absent, clients
+        # ... MUST NOT set more than one entry in
+        # `CreateSessionParams.workingDirectories`." Presence-flag, so
+        # `is not None` -- `{}` advertises support.
+        if (
+            directories is not None
+            and len(directories) > 1
+            and self._capabilities_for(provider).get("multipleWorkingDirectories") is None
+        ):
+            raise AhpClientError(
+                f"agent {provider!r} does not advertise "
+                "capabilities.multipleWorkingDirectories; clients MUST NOT set more "
+                "than one workingDirectories entry"
+            )
         # `progressToken` is what makes root/progress fire at all. A client that
         # never sends one has a progress surface that can never receive anything.
         token = str(uuid.uuid4()) if progress else None
+        config = await self._resolved_config(provider, directories, config)
         tool_host = self._tool_host(tools)
         active_client: JsonObject | None = None
         if tool_host is not None:
@@ -317,6 +374,47 @@ class Client:
         await session._await_ready(ready_timeout)
         return session
 
+    async def _resolved_config(
+        self,
+        provider: str,
+        directories: Sequence[str] | None,
+        config: Mapping[str, Any] | None,
+    ) -> Mapping[str, Any] | None:
+        """Plan §7.1 step 1: `resolveSessionConfig`, best-effort.
+
+        The result's ``values`` are "server-resolved defaults to pass to
+        `createSession`", so they are folded **under** the caller's own
+        *config* -- the caller wins on any key both name. ``-32601``/``-32603``
+        means unimplemented: continue with what the caller supplied, which is
+        why every fake-host test passes without registering the method.
+        """
+        try:
+            resolved = await self.protocol.resolve_session_config(
+                provider=provider,
+                workingDirectory=directories[0] if directories else None,
+                config=dict(config) if config is not None else None,
+            )
+        except RpcError as error:
+            if error.code in {-32601, -32603}:
+                return config
+            raise
+        values = resolved.get("values")
+        if not isinstance(values, dict) or not values:
+            return config
+        return {**values, **(config or {})}
+
+    def _capabilities_for(self, provider: str) -> JsonObject:
+        """``AgentCapabilities`` for *provider*, from ``RootState.agents``.
+
+        The same lookup :attr:`Session.capabilities` performs, needed before
+        the session exists -- `createSession` itself is gated on one of them.
+        """
+        for agent in self.agents():
+            if agent.get("provider") == provider:
+                raw = agent.get("capabilities")
+                return raw if isinstance(raw, dict) else {}
+        return {}
+
     def _tool_host(
         self, tools: ClientToolHost | Sequence[Mapping[str, Any]] | None
     ) -> ClientToolHost | None:
@@ -333,6 +431,98 @@ class Client:
         host = ClientToolHost(self.protocol, client_id=self.client_id)
         host.advertise(tools)
         return host
+
+    # ── terminals ────────────────────────────────────────────────────────────
+
+    def terminals(self) -> Sequence[TerminalInfo]:
+        """``RootState.terminals`` -- one :class:`TerminalInfo` per live terminal.
+
+        The catalogue, not the terminals: ``resource``, ``title``, ``claim`` and
+        ``exitCode`` without the scrollback, so a tab strip renders without
+        subscribing to every one of them. ``claim`` is here because it is what a
+        client reads to decide whether to offer an input box at all -- which is
+        why these are typed views and not raw dicts. Making that decision off a
+        dict means hand-writing ``info["claim"]["clientId"] == client_id`` over
+        peer-authored JSON, which is the comparison
+        :func:`~agent_host_client.api.terminals.claim_from_wire` exists to guard.
+        """
+        raw = self.root.get("terminals")
+        if not isinstance(raw, list):
+            return []
+        return [TerminalInfo(t, self.client_id) for t in raw if isinstance(t, dict)]
+
+    async def create_terminal(
+        self,
+        *,
+        name: str | None = None,
+        cwd: str | None = None,
+        cols: int | float | None = None,
+        rows: int | float | None = None,
+        claim: TerminalClaim | None = None,
+        uri: str | None = None,
+    ) -> Terminal:
+        """Open a terminal and subscribe to it.
+
+        The claim defaults to **this client**, which is the only claim that lets
+        the caller type: `CreateTerminalParams.claim` is required, and a session
+        claim is held by no client at all. Pass a
+        :class:`~agent_host_client.api.terminals.SessionClaim` to create a
+        terminal that belongs to an agent's turn rather than to a person.
+
+        *cwd* is a **URI**, as `CreateTerminalParams.cwd` and `TerminalState.cwd`
+        both are -- the terminal channel is URIs throughout, and a bare path is
+        the one refusal a user sees rendered verbatim.
+
+        A host with no terminal backend refuses with ``PermissionDenied``
+        (-32009) carrying a human-readable reason, **not** ``MethodNotFound``:
+        the method exists, and this request was declined. Let the
+        :class:`~agent_host_client.client.errors.RpcError` out -- its message is
+        written to be shown.
+
+        Subscribed after creation rather than before, because there is nothing
+        to subscribe to first. Nothing is lost by the ordering: a shell that has
+        already drawn its prompt has that output in the subscribe snapshot's
+        ``content``, the same way a host folds a turn's opening characters into
+        a chat snapshot.
+
+        A failed subscribe **disposes what was just created**. The URI is minted
+        in here, so a caller who did not pass one cannot even name the shell it
+        started; leaving it behind would run it until the host stopped, which is
+        the immortal-terminal failure `dispose` is deliberately ungated to avoid.
+        """
+        terminal_uri = uri or new_terminal_uri()
+        held = claim or ClientClaim(self.client_id)
+        await self.protocol.create_terminal(
+            terminal_uri,
+            claim=held.to_wire(),
+            name=name,
+            cwd=cwd,
+            cols=None if cols is None else terminal_dimension("cols", cols),
+            rows=None if rows is None else terminal_dimension("rows", rows),
+        )
+        try:
+            # Bound by name, from the kind we already know. Never inferred from
+            # the scheme: VS Code mints three `agenthost-terminal:` forms and the
+            # spec's examples a fourth, and a scheme lookup binds no reducer at
+            # all -- after which state freezes silently while output arrives.
+            await self._runtime.subscribe(terminal_uri, "terminal")
+        except BaseException:
+            with contextlib.suppress(Exception):
+                await self.protocol.dispose_terminal(terminal_uri)
+            raise
+        return Terminal(self, terminal_uri, owned=True)
+
+    async def open_terminal(self, uri: str) -> Terminal:
+        """Attach to a terminal someone else created.
+
+        Never disposed on ``__aexit__``, and never claimed on entry: attaching to
+        a terminal is not the same as taking it, and silently taking one would
+        cut off whoever was typing. Call
+        :meth:`~agent_host_client.api.terminals.Terminal.take` to ask for it,
+        which the host may refuse.
+        """
+        await self._runtime.subscribe(uri, "terminal")
+        return Terminal(self, uri, owned=False)
 
     async def open_session(self, uri: str) -> Session:
         """Attach to a session someone else created.
@@ -357,6 +547,13 @@ class Session:
         self._responder: InputResponder | None = None
         self._tools: ClientToolHost | None = None
         self._tool_pump: asyncio.Task[None] | None = None
+        #: Executor tasks in flight -- each call runs off the pump's loop so a
+        #: slow tool never blocks the reader. See :meth:`_spawn_executor`.
+        self._tool_tasks: set[asyncio.Task[None]] = set()
+        #: Bounds concurrent executors. 32 is arbitrary but finite: the point
+        #: is that a flood of calls cannot spawn tasks without limit, not that
+        #: the number is tuned.
+        self._tool_gate = asyncio.Semaphore(32)
 
     @property
     def state(self) -> JsonObject:
@@ -446,8 +643,28 @@ class Session:
             )
         if source is not None:
             self._check_source(source, multiple if isinstance(multiple, Mapping) else {})
+        if working_directories is not None and (
+            capabilities.get("multipleWorkingDirectories") is None
+        ):
+            # "A client MUST NOT supply this field unless the agent advertises
+            # `AgentCapabilities.multipleWorkingDirectories`" -- the same
+            # told-in-advance rule as `multipleChats`, gated the same way.
+            raise AhpClientError(
+                f"agent {self.provider or self.state.get('provider', '')!r} does not advertise "
+                "capabilities.multipleWorkingDirectories; clients MUST NOT supply "
+                "workingDirectories on createChat"
+            )
         chat_uri = uri or f"ahp-chat:/{uuid.uuid4()}"
-        message = {"text": initial_message} if isinstance(initial_message, str) else initial_message
+        # The convenience form carries the required `origin` too: `Message`
+        # requires `[text, origin]`, and "a client is only allowed to send
+        # `MessageKind.User` messages" -- an origin-less Message is republished
+        # verbatim inside the host's `chat/turnStarted` and frozen into every
+        # peer's transcript, where `message.origin.kind` readers break on it.
+        message = (
+            {"text": initial_message, "origin": {"kind": "user"}}
+            if isinstance(initial_message, str)
+            else initial_message
+        )
         await self._client.protocol.create_chat(
             self.uri,
             chat_uri,
@@ -483,6 +700,54 @@ class Session:
         """
         await self._client._runtime.subscribe(uri, "chat")
         return Chat(self._client, self, uri)
+
+    # ── what the agent changed ───────────────────────────────────────────────
+
+    def changesets(self) -> Sequence[ChangesetInfo]:
+        """``SessionState.changesets`` -- the catalogue, not the diffs.
+
+        "Just enough to render a chip or list row without subscribing", which
+        is the point: a session list shows what changesets exist and what they
+        are called without opening one. Empty until the agent publishes
+        something, and full-replacement thereafter --
+        ``session/changesetsChanged`` replaces the list entirely.
+        """
+        return list(changeset_catalogue(self.state))
+
+    async def open_changeset(
+        self,
+        changeset: ChangesetInfo | str,
+        *,
+        turn_id: str | None = None,
+        original_turn_id: str | None = None,
+        modified_turn_id: str | None = None,
+    ) -> Changeset:
+        """Subscribe to one changeset and read its files, statuses and operations.
+
+        *changeset* is an entry from :meth:`changesets` or a URI. An entry's
+        ``uriTemplate`` is **expanded here** -- variable-free for the
+        session-wide case, ``{turnId}`` for a per-turn slice, or the
+        ``{originalTurnId}``/``{modifiedTurnId}`` pair for a comparison -- and
+        that expanded URI is what the host registered, so it is what is
+        subscribed. Passing a URI directly skips the expansion and looks the
+        entry up by exact match, which is what a variable-free template gives.
+
+        The reducer is bound here, from the kind we already know. Nothing
+        anywhere infers it from the URI: hosts mint changeset channels under
+        schemes of their own choosing and a scheme test would bind no reducer at
+        all, freezing the state silently while actions kept arriving.
+        """
+        if isinstance(changeset, str):
+            template, uri = changeset, changeset
+        else:
+            template = changeset.uri_template
+            uri = changeset.expand(
+                turn_id=turn_id,
+                original_turn_id=original_turn_id,
+                modified_turn_id=modified_turn_id,
+            )
+        await self._client._runtime.subscribe(uri, "changeset")
+        return Changeset(self._client, self, uri, template=template)
 
     def prompt(self, text: str, **kwargs: Any) -> TurnStream:
         return _LazyTurnStream(self, text, kwargs)  # type: ignore[return-value]
@@ -588,9 +853,12 @@ class Session:
 
         Driven off ``client.events()`` rather than off a `TurnStream`, because
         the turn carrying the call need not be one we started -- and because
-        `TurnStream._drain` cannot answer one anyway: a client-provided call
-        arrives already `running`, so there is no approval to give, only a
-        result to produce.
+        `TurnStream._drain` cannot answer one anyway: a client-provided call is
+        *typically* auto-confirmed (`confirmed: "not-needed"`), so there is no
+        approval to give, only a result to produce. Typically, not always: a
+        host may gate a client tool, and that call goes through the standard
+        confirmation flow first -- the pump only runs calls the mirror shows
+        handed over (`status == "running"`).
         """
         if tools is None:
             return
@@ -599,38 +867,70 @@ class Session:
             self._run_client_tools(tools), name=f"ahp-client-tools-{self.uri}"
         )
 
+    def _chat_uris(self) -> set[str]:
+        """The chat channels that belong to **this** session, live from the mirror.
+
+        `defaultChat` plus every `SessionState.chats[].resource`. Read per use
+        rather than cached, so a chat created mid-session is covered. This is
+        what keeps two sessions' pumps on one connection from double-running
+        one call: `owns()` matches on `clientId`, which is identical for every
+        session this `Client` created.
+        """
+        uris = {str(self.state.get("defaultChat") or "")}
+        for chat in self.chats():
+            uris.add(str(chat.get("resource") or ""))
+        uris.discard("")
+        return uris
+
     async def _run_client_tools(self, tools: ClientToolHost) -> None:
-        reader = self._client._runtime.events()
+        """The pump. **The envelope is the clock and the mirror is the source.**
+
+        Every wake -- an event on this session's channels, a reconnect, the
+        initial attach -- level-scans confirmed state for owned, handed-over,
+        unexecuted calls rather than acting on the woken event itself. That one
+        shape covers four failure modes an edge-triggered pump has:
+
+        * a **gated** call: a `chat/toolCallReady` without `confirmed` leaves
+          the call `pending-confirmation` -- not handed over, and running it
+          would execute a tool nobody approved. The scan only sees `running`.
+        * the **approval** that later hands it over arrives as
+          `chat/toolCallConfirmed` (there is no second ready), which carries
+          neither `toolName` nor `toolInput` -- the mirror has both.
+        * a call whose ready was **evicted** from the bounded fan-in tap, or
+          dispatched while we were disconnected: the mirror (or the reconnect
+          snapshot's `SessionState.inputNeeded`) still shows it running, and
+          the next wake finds it. `state_changes()` supplies the wake a
+          snapshot-arm resume otherwise would not.
+        """
+        events = self._client._runtime.events()
+        states = self._client._runtime.state_changes()
         #: `(channel, toolCallId)` already dispatched to an executor. A second
         #: `chat/toolCallReady` is the one action that reaches an already-running
         #: call -- hosts republish it to revise the invocation message -- and
         #: without this the tool runs again and the second result overwrites the
-        #: first.
+        #: first. It also keeps the level scan from re-running a call our own
+        #: (still optimistic) `chat/toolCallComplete` has not yet retired from
+        #: confirmed state.
         started: set[tuple[str, str]] = set()
+        watcher = asyncio.get_running_loop().create_task(
+            self._rescan_on_reconnect(states, tools, started),
+            name=f"ahp-client-tools-rescan-{self.uri}",
+        )
         try:
-            async for tagged in reader:
+            # The attach-time scan: a call handed over before the pump existed
+            # -- a queued `initialMessage`'s turn, or an `open_session` onto a
+            # session mid-call -- produces no further event to wake on.
+            self._scan_client_tools(tools, started)
+            async for tagged in events:
                 event = tagged.event
                 if not isinstance(event, ActionEvent) or event.rejection_reason is not None:
                     continue
-                action = event.action
-                if action.get("type") != "chat/toolCallReady":
+                # Scoped to this session's channels: the fan-in tap carries
+                # every session on the connection, and an unscoped pump is the
+                # other half of the double-run defect `_chat_uris` describes.
+                if tagged.channel != self.uri and tagged.channel not in self._chat_uris():
                     continue
-                call = _tool_call_in(
-                    self._client.mirror.state(tagged.channel), str(action.get("toolCallId", ""))
-                )
-                # Ownership is read from the call's *state*: `contributor` is
-                # required on `chat/toolCallStart` and only repeated on the ready
-                # by hosts that choose to, so deciding from the action alone
-                # silently declines to run anything against a host that does not.
-                if not tools.owns(call or action):
-                    continue
-                key = (tagged.channel, str(action.get("toolCallId", "")))
-                if key in started:
-                    continue
-                started.add(key)
-                await tools.execute(
-                    tagged.channel, action, tool_name=str((call or {}).get("toolName", ""))
-                )
+                self._scan_client_tools(tools, started)
         except Exception:
             # Ends the pump, quietly. Reporting the result means dispatching, so
             # anything reaching here is the connection going away underneath us
@@ -639,15 +939,133 @@ class Session:
             # useful, which is exactly the shape this file avoids elsewhere.
             return
         finally:
-            await reader.aclose()
+            watcher.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await watcher
+            await events.aclose()
+            await states.aclose()
+
+    async def _rescan_on_reconnect(
+        self, states: Any, tools: ClientToolHost, started: set[tuple[str, str]]
+    ) -> None:
+        """Wake the level scan when a connection comes (back) up.
+
+        A snapshot-arm resume replays **no actions**, so a call handed over
+        during the gap never reaches the event loop above -- but the fresh
+        snapshots do carry it, as a running call and as a
+        `SessionState.inputNeeded` entry. `state_changes()` broadcasting
+        ``connected`` is the one observable signal that those snapshots just
+        landed.
+        """
+        async for state in states:
+            if getattr(state, "status", "") == "connected":
+                with contextlib.suppress(Exception):
+                    self._scan_client_tools(tools, started)
+
+    def _scan_client_tools(self, tools: ClientToolHost, started: set[tuple[str, str]]) -> None:
+        """One level scan: start every owned, handed-over, unexecuted call."""
+        for chat_uri, turn_id, call in self._handed_over_calls(tools):
+            key = (chat_uri, str(call.get("toolCallId", "")))
+            if key in started:
+                continue
+            started.add(key)
+            # Action-shaped, from state: `chat/toolCallConfirmed` carries no
+            # input and a scan has no action at all, so the mirror's `toolInput`
+            # -- which the reducer keeps current through edits -- is what the
+            # executor gets.
+            action: JsonObject = {"turnId": turn_id, "toolCallId": key[1]}
+            if "toolInput" in call:
+                action["toolInput"] = call.get("toolInput")
+            self._spawn_executor(tools, chat_uri, action, str(call.get("toolName", "")))
+
+    def _handed_over_calls(
+        self, tools: ClientToolHost
+    ) -> Iterator[tuple[str, str, Mapping[str, Any]]]:
+        """Every ``(chat, turnId, call)`` this client is expected to run, now.
+
+        Two sources, deliberately both. The chat states cover every chat this
+        client is subscribed to. ``SessionState.inputNeeded`` -- whose
+        `toolClientExecution` entries exist precisely "so a client that
+        provides the tool can pick up the work without subscribing to the
+        owning chat" -- covers the ones it is not, and is all a reconnect
+        snapshot needs to carry for recovery to work.
+
+        **Confirmed** state on both arms: `status == "running"` is the
+        handover marker (the reducer only enters `running` via a `confirmed`
+        ready or an approval), and our own optimistic actions must not feed
+        the scan that decides whether to run a tool.
+        """
+        for chat_uri in self._chat_uris():
+            state = self._client.mirror.confirmed(chat_uri)
+            if not isinstance(state, Mapping):
+                continue
+            turns = state.get("turns")
+            candidates: list[Any] = [state.get("activeTurn")]
+            candidates.extend(turns if isinstance(turns, list) else ())
+            for turn in candidates:
+                if not isinstance(turn, Mapping):
+                    continue
+                turn_id = str(turn.get("id", ""))
+                parts = turn.get("responseParts")
+                for part in parts if isinstance(parts, list) else ():
+                    call = part.get("toolCall") if isinstance(part, Mapping) else None
+                    if not isinstance(call, Mapping) or call.get("status") != "running":
+                        continue
+                    if tools.owns(call):
+                        yield chat_uri, turn_id, call
+        session_state = self._client.mirror.confirmed(self.uri)
+        entries = session_state.get("inputNeeded") if isinstance(session_state, Mapping) else None
+        for entry in entries if isinstance(entries, list) else ():
+            if not isinstance(entry, Mapping) or entry.get("kind") != "toolClientExecution":
+                continue
+            call = entry.get("toolCall")
+            if isinstance(call, Mapping) and tools.owns(call):
+                yield str(entry.get("chat", "")), str(entry.get("turnId", "")), call
+
+    def _spawn_executor(
+        self, tools: ClientToolHost, chat: str, action: JsonObject, tool_name: str
+    ) -> None:
+        """Run one call on its own task, so the pump never blocks on a tool.
+
+        Awaiting the executor inline is how one slow tool stalled the reader:
+        the fan-in tap kept filling behind it (drop-oldest, 4096), later calls
+        -- including the auto-denials `ClientToolHost` guarantees -- waited on
+        an unrelated tool, and past the bound the pump was fast-forwarded over
+        events it never saw. Tracked in ``_tool_tasks`` and cancelled with the
+        pump; bounded by ``_tool_gate`` so a flood of calls cannot spawn
+        without limit.
+        """
+
+        async def run() -> None:
+            try:
+                async with self._tool_gate:
+                    await tools.execute(chat, action, tool_name=tool_name)
+            except Exception:
+                # Reporting the result means dispatching; anything reaching
+                # here is the connection going away underneath us.
+                return
+
+        task = asyncio.get_running_loop().create_task(
+            run(), name=f"ahp-client-tool-{chat}-{action.get('toolCallId', '')}"
+        )
+        self._tool_tasks.add(task)
+        task.add_done_callback(self._tool_tasks.discard)
 
     async def _stop_tools(self) -> None:
-        if self._tool_pump is None:
-            return
-        pump, self._tool_pump = self._tool_pump, None
-        pump.cancel()
-        with contextlib.suppress(asyncio.CancelledError, Exception):
-            await pump
+        if self._tool_pump is not None:
+            pump, self._tool_pump = self._tool_pump, None
+            pump.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await pump
+        # The executors are ours too: a tool still running against a session
+        # the caller has finished with holds this object -- and its connection
+        # -- alive from a task nobody can reach.
+        for task in list(self._tool_tasks):
+            task.cancel()
+        for task in list(self._tool_tasks):
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await task
+        self._tool_tasks.clear()
 
     async def dispose(self) -> None:
         await self._stop_tools()
@@ -659,17 +1077,33 @@ class Session:
         A host that reports ``lifecycle == "creating"`` is telling us the session
         exists and is still warming up. Waiting unconditionally deadlocks for the
         full timeout against exactly that host.
+
+        The failure value is ``"creationFailed"`` -- `SessionLifecycle` is
+        exactly ``creating | ready | creationFailed``, and testing ``"failed"``
+        (the unrelated connection-level `HostStatus` value) made the raise
+        unreachable. And a deadline that expires **raises**: returning silently
+        hands the caller a dead `Session` reported as success, and makes
+        `ready_timeout` a parameter that can never do anything.
         """
-        if str(self.state.get("lifecycle", "")) in {"ready", "creating"}:
-            return
         deadline = asyncio.get_running_loop().time() + timeout
-        while asyncio.get_running_loop().time() < deadline:
-            await asyncio.sleep(0.01)
+        while True:
             lifecycle = str(self.state.get("lifecycle", ""))
             if lifecycle in {"ready", "creating"}:
                 return
-            if lifecycle == "failed":
-                raise AhpClientError(f"session {self.uri} failed to start")
+            if lifecycle == "creationFailed":
+                # `creationError` is the reducer-recorded `ErrorInfo` for
+                # exactly this lifecycle; without it the caller gets "failed"
+                # with the reason left on the host.
+                raise AhpClientError(
+                    f"session {self.uri} failed to start: "
+                    f"{self.state.get('creationError') or 'no creationError published'}"
+                )
+            if asyncio.get_running_loop().time() >= deadline:
+                raise AhpClientError(
+                    f"session {self.uri} published no lifecycle within {timeout}s; "
+                    "the host never reported ready, creating or creationFailed"
+                )
+            await asyncio.sleep(0.01)
 
     async def __aenter__(self) -> Self:
         return self
@@ -841,6 +1275,20 @@ class ChatWatch:
             envelope = tagged.event.envelope
             if envelope.get("channel") != self._chat.uri:
                 continue
+            reason = tagged.event.rejection_reason
+            if reason is not None:
+                # A rejected envelope describes an action that was NOT applied
+                # (invariant 5: the host fans a refused action to every
+                # subscriber, and no peer may apply it). Decoded as its action
+                # type it lies -- a refused `chat/turnStarted` reads as a turn
+                # beginning, and two clients racing to start turns is exactly
+                # this class's scenario. That one surfaces as the failure it
+                # is; every other refusal is the originator's optimistic
+                # effect being reverted, which is not this watcher's business.
+                action = envelope.get("action")
+                if isinstance(action, Mapping) and action.get("type") == "chat/turnStarted":
+                    return TurnFailed(dict(envelope), reason)
+                continue
             if not is_modelled(envelope):
                 # Deliberately not surfaced -- mostly this caller's own writes
                 # coming back. Skipped rather than delivered as `UnknownEvent`,
@@ -985,7 +1433,8 @@ class TurnStream:
         approvals: ApprovalPolicy | str | None = None,
         turn_id: str | None = None,
         idle_timeout: float | None = 300.0,
-        model: str | None = None,
+        approval_timeout: float = 300.0,
+        model: str | Mapping[str, Any] | None = None,
     ) -> None:
         self._client = client
         self._chat = chat
@@ -993,6 +1442,10 @@ class TurnStream:
         self._policy = resolve_policy(approvals)
         self._turn_id = turn_id or str(uuid.uuid4())
         self._idle_timeout = idle_timeout
+        #: How long a drained stream under the manual default waits for an
+        #: *external* answer to a surfaced tool call before raising
+        #: `UnansweredToolCallError` (plan §7).
+        self._approval_timeout = approval_timeout
         self._model = model
         self._started = False
         self._reader: Any = None
@@ -1006,20 +1459,57 @@ class TurnStream:
         return self._drain().__await__()
 
     async def _drain(self) -> TurnCompleted | TurnFailed | TurnCancelled:
-        last: Any = None
-        async for event in self:
-            if isinstance(event, ToolCallReady):
-                decision = await self._policy(event)
-                if decision:
-                    event.approve()
-                else:
-                    event.deny()
-            elif isinstance(event, ToolCallResultReview):
-                event.confirm()
-            last = event
-        if isinstance(last, TurnCompleted | TurnFailed | TurnCancelled):
-            return last
-        return TurnFailed({}, "stream ended without a terminal event")
+        try:
+            last: Any = None
+            async for event in self:
+                if isinstance(event, ToolCallReady):
+                    if isinstance(self._policy, ManualPolicy):
+                        # The manual default: the event has surfaced (on the
+                        # mirror, on `Session.inputs()`, on every other
+                        # subscriber), so wait for someone to answer it rather
+                        # than answering either way ourselves.
+                        await self._await_external_answer(event)
+                        continue
+                    decision = await self._policy(event)
+                    if decision:
+                        event.approve()
+                    else:
+                        event.deny()
+                elif isinstance(event, ToolCallResultReview):
+                    event.confirm()
+                last = event
+            if isinstance(last, TurnCompleted | TurnFailed | TurnCancelled):
+                return last
+            return TurnFailed({}, "stream ended without a terminal event")
+        finally:
+            # `_drain` can leave the iteration early -- `UnansweredToolCallError`
+            # is the designed exit -- and an abandoned iteration is exactly the
+            # cursor leak `aclose` exists for.
+            await self.aclose()
+
+    async def _await_external_answer(self, event: ToolCallReady) -> None:
+        """Wait out the manual default: somebody else answers, or we raise.
+
+        The answer is observed on the **mirror**, not on this stream's events:
+        a `chat/toolCallConfirmed` -- ours or another client's -- moves the call
+        off `pending-confirmation`, and the reducer is the one place that
+        outcome is already computed. Waiting on the raw events would mean
+        re-deriving first-answer-wins arbitration here.
+
+        After `approval_timeout` this raises `UnansweredToolCallError` -- the
+        plan §7 default. Silently approving runs a tool the user never saw;
+        silently denying ends the turn without the user ever learning why; a
+        loud, specific error is better than both.
+        """
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self._approval_timeout
+        while loop.time() < deadline:
+            call = _tool_call_in(self._client.mirror.confirmed(self._chat.uri), event.tool_call_id)
+            status = str(call.get("status", "")) if call is not None else ""
+            if status and status != "pending-confirmation":
+                return
+            await asyncio.sleep(0.05)
+        raise UnansweredToolCallError(event.tool_call_id, event.tool_name)
 
     def __aiter__(self) -> TurnStream:
         return self
@@ -1055,7 +1545,7 @@ class TurnStream:
             raise StopAsyncIteration
         if self._terminal is not None:
             terminal, self._terminal = self._terminal, None
-            self._finished = True
+            await self._finish()
             return terminal
         await self._start()
         loop = asyncio.get_running_loop()
@@ -1065,6 +1555,7 @@ class TurnStream:
             try:
                 tagged = await asyncio.wait_for(self._next_tagged(), timeout)
             except TimeoutError as exc:
+                await self._finish()
                 raise TimeoutError(
                     f"turn {self._turn_id} produced nothing for {self._idle_timeout}s"
                 ) from exc
@@ -1072,11 +1563,11 @@ class TurnStream:
                 # The connection ended under us. The spec says an in-progress
                 # turn SHOULD be considered failed after an unexpected
                 # termination, so say so rather than ending silently.
-                self._finished = True
+                await self._finish()
                 raise StopAsyncIteration
             disposed = self._disposal(tagged)
             if disposed is not None:
-                self._finished = True
+                await self._finish()
                 return disposed
             if not isinstance(tagged.event, ActionEvent):
                 continue
@@ -1091,26 +1582,60 @@ class TurnStream:
                 continue
             refused = self._refusal(tagged.event, action)
             if refused is not None:
-                self._finished = True
+                await self._finish()
                 return refused
+            if tagged.event.rejection_reason is not None:
+                # Any OTHER rejected envelope describes an action that was NOT
+                # applied, so decoding it by type lies: a rejected
+                # `chat/turnCancelled` would read as this turn genuinely
+                # cancelled -- terminal -- and a rejected `chat/toolCallComplete`
+                # as real progress. A rejected `chat/toolCallConfirmed` is
+                # another client having answered first ("not an error"); the
+                # mirror reverts the optimistic effect and the turn carries on.
+                continue
 
             if not is_modelled(envelope):
-                # AFTER the refusal check: a rejected echo of our own write is
-                # exactly what the caller needs to hear about, even though the
-                # accepted one is noise.
+                # Everything rejected was handled above, so what remains here
+                # really is noise -- mostly this caller's own accepted writes
+                # echoing back.
                 continue
 
             event = event_for(envelope, self._dispatch, self._tools)
             if isinstance(event, TurnCompleted):
-                self._finished = True
+                await self._finish()
                 return self._finalise(event)
             if isinstance(event, TurnFailed | TurnCancelled):
-                self._finished = True
+                await self._finish()
                 return event
             return event
 
     async def _next_tagged(self) -> Any:
         return await _next_or_none(self._reader)
+
+    async def _finish(self) -> None:
+        """End the stream and detach its cursor, in that order, exactly once.
+
+        The detach is the half that was missing: a `BroadcastQueue` trims only
+        past its **lowest** cursor, so a reader nobody closes pins the
+        connection-wide tap forever -- one dead cursor per completed `prompt()`,
+        an events buffer parked at its 4096-entry bound, and a permanent
+        `DroppedEvents` diagnostic stream on every long-lived connection.
+        `Session.inputs`, `ChatWatch` and the tool pump all already detach;
+        this is the same convention on the one surface that leaked.
+        """
+        self._finished = True
+        reader, self._reader = self._reader, None
+        if reader is not None:
+            await reader.aclose()
+
+    async def aclose(self) -> None:
+        """Release the stream's cursor without waiting for a terminal event.
+
+        For the caller that abandons iteration -- `async for` never calls this
+        on `break`, and a `TurnStream` held past its usefulness would otherwise
+        keep its cursor attached for the life of the connection.
+        """
+        await self._finish()
 
     def _refusal(self, event: ActionEvent, action: Mapping[str, Any]) -> TurnFailed | None:
         """The host refused the `chat/turnStarted` that opened this stream.
@@ -1242,3 +1767,8 @@ class _LazyTurnStream:
     async def __anext__(self) -> TurnEvent:
         stream = await self._resolve()
         return await stream.__anext__()
+
+    async def aclose(self) -> None:
+        """Delegate the cursor release; a stream never resolved holds none."""
+        if self._inner is not None:
+            await self._inner.aclose()

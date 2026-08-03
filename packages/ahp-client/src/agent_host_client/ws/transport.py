@@ -14,6 +14,8 @@ widening a contract the sibling host also implements.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -50,6 +52,12 @@ class WebSocketCloseInfo:
     @property
     def clean(self) -> bool:
         return self.code in _CLEAN_CLOSE_CODES
+
+
+#: How long a closing handshake may take before the socket is simply dropped.
+#: `websockets` defaults to 10s, which is the right budget for a peer that is
+#: still there and far too long for one that is not.
+_CLOSE_TIMEOUT: Final = 2.0
 
 
 class WebSocketClientTransport:
@@ -133,52 +141,65 @@ class WebSocketClientTransport:
     async def receive(self) -> dict[str, Any] | None:
         """Next message, or ``None`` at a clean end of stream.
 
-        A frame that will not parse is skipped, not fatal, and not recursed on:
-        the sibling host's transport re-entered itself here, so a peer streaming
-        garbage exhausted the stack. The client counts these and gives up at a
-        threshold; the transport's job is only to keep going.
+        A frame that will not decode to a JSON object **raises**
+        ``json.JSONDecodeError``, one raise per frame. The client's read loop
+        counts these into ``MalformedFrame`` diagnostics and closes past a
+        threshold, the way the reference forces a 4002 close -- a transport
+        that skipped them silently made both unreachable, so a peer streaming
+        garbage was held open forever. Raising instead of retrying also cannot
+        recurse: the sibling host's transport re-entered itself here, so that
+        same peer exhausted the stack.
         """
-        while True:
-            try:
-                frame = await self._socket.recv()
-            except websockets.ConnectionClosed as exc:
-                # `rcvd` is None when the peer vanished without a close frame;
-                # 1006 is the code that condition is defined to report, and it
-                # is not clean.
-                received = exc.rcvd
-                self._close_info = (
-                    WebSocketCloseInfo(received.code, received.reason)
-                    if received is not None
-                    else WebSocketCloseInfo(1006, "")
-                )
-                if self._close_info.clean:
-                    return None
-                code = self._close_info.code
-                # 1008 is "policy violation" -- the peer is refusing us, not
-                # failing. Retrying it is the same doomed loop as an HTTP 401.
-                kind: TransportErrorKind = "rejected" if code == _POLICY_VIOLATION else "closed"
-                raise TransportError(
-                    kind,
-                    f"connection closed abnormally: {code} {self._close_info.reason}".rstrip(),
-                    close_code=code,
-                ) from exc
-            except OSError as exc:
-                raise TransportError("io", f"receive failed: {exc}") from exc
+        try:
+            frame = await self._socket.recv()
+        except websockets.ConnectionClosed as exc:
+            # `rcvd` is None when the peer vanished without a close frame;
+            # 1006 is the code that condition is defined to report, and it
+            # is not clean.
+            received = exc.rcvd
+            self._close_info = (
+                WebSocketCloseInfo(received.code, received.reason)
+                if received is not None
+                else WebSocketCloseInfo(1006, "")
+            )
+            if self._close_info.clean:
+                return None
+            code = self._close_info.code
+            # 1008 is "policy violation" -- the peer is refusing us, not
+            # failing. Retrying it is the same doomed loop as an HTTP 401.
+            kind: TransportErrorKind = "rejected" if code == _POLICY_VIOLATION else "closed"
+            raise TransportError(
+                kind,
+                f"connection closed abnormally: {code} {self._close_info.reason}".rstrip(),
+                close_code=code,
+            ) from exc
+        except OSError as exc:
+            raise TransportError("io", f"receive failed: {exc}") from exc
 
-            text = frame.decode("utf-8", errors="replace") if isinstance(frame, bytes) else frame
-            try:
-                decoded = json.loads(text)
-            except json.JSONDecodeError:
-                # Not our call whether this is fatal; skip and let the client
-                # decide from how often it happens.
-                continue
-            if isinstance(decoded, dict):
-                return decoded
-            # A valid JSON scalar or array is not a JSON-RPC message.
-            continue
+        text = frame.decode("utf-8", errors="replace") if isinstance(frame, bytes) else frame
+        decoded = json.loads(text)  # undecodable raises; the client counts it
+        if isinstance(decoded, dict):
+            return decoded
+        # A valid JSON scalar or array is not a JSON-RPC message either, and
+        # must hit the same accounting as undecodable text.
+        raise json.JSONDecodeError(f"expected an object, got {type(decoded).__name__}", text, 0)
 
     async def close(self) -> None:
-        await self._socket.close()
+        """Best-effort, and BOUNDED.
+
+        `websockets` runs a closing handshake with a default 10s timeout, and
+        against a peer that is already gone -- which is every abnormal
+        teardown -- it waits the whole thing out. `AhpClient.shutdown()` awaits
+        this, so an embedder calling it in a `finally` after a dropped
+        connection paid ten seconds per client, and `HostRuntime` paid it again
+        on every reconnect. Measured at 9.99s before this bound.
+
+        Past the deadline the socket is dropped rather than negotiated: the
+        peer is not answering, and a polite close it will never read is worth
+        nothing to either side.
+        """
+        with contextlib.suppress(TimeoutError):
+            await asyncio.wait_for(self._socket.close(), _CLOSE_TIMEOUT)
 
 
 def _with_token(url: str, token: str | None) -> str:
