@@ -59,9 +59,19 @@ async def _collect(command: list[str]) -> tuple[str, int | None]:
 class TestItIsARealTerminal:
     async def test_the_child_gets_a_controlling_terminal(self) -> None:
         """Without `setsid` there is no controlling tty: job control breaks and
-        Ctrl-C reaches nothing."""
-        text, _ = await _collect(["/bin/sh", "-c", "tty"])
-        assert "/dev/tty" in text
+        Ctrl-C reaches nothing.
+
+        `tty` prints the *device* it is attached to -- `/dev/pts/N` on Linux,
+        `/dev/ttysNNN` on macOS -- and prints "not a tty" with a non-zero exit
+        when there is none. It never prints the literal string `/dev/tty`, so
+        asserting that substring could only ever fail, on every POSIX host.
+        Check the two things that actually distinguish a controlling terminal
+        from none: the exit status, and that the device named is a real one.
+        """
+        text, code = await _collect(["/bin/sh", "-c", "tty"])
+        assert code == 0, text
+        assert "not a tty" not in text, text
+        assert re.search(r"/dev/(pts/\d+|ttys?\d+)", text), text
 
     async def test_the_requested_size_reaches_the_child(self) -> None:
         """TIOCSWINSZ takes ROWS first. Transposing is silent -- the shell just

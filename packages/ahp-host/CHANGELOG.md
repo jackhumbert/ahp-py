@@ -148,6 +148,17 @@ sources, the spec prose and VS Code's client. Each fix is pinned by a test.
   `-32005` emitter workaround was retired in favour of the shared package's
   now-correct `supportedVersions` field.
 
+### Fixed — tests
+
+- **The pty backend's controlling-terminal test could only ever fail**, so a
+  clean `pytest` on any POSIX host reported one failure. It asserted the literal
+  string `/dev/tty` in the output of `tty`, which prints the *device* it is
+  attached to (`/dev/pts/N` on Linux, `/dev/ttysNNN` on macOS) and never that
+  string. It now checks the two things that actually separate a controlling
+  terminal from none — a zero exit status and a real device name — and was
+  verified to fail all three assertions against a child spawned without a pty.
+  Test-only; the backend itself was correct.
+
 ### Changed
 
 - **The protocol layer is now a separate package.** Wire types, the seven
