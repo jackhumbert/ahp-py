@@ -37,6 +37,28 @@ CHAT = "ahp-chat://c/s"
 SESSION = "copilot:/s"
 
 
+# ── file_uri ─────────────────────────────────────────────────────────────────
+
+
+def test_file_uri_refuses_something_that_is_already_a_uri() -> None:
+    """It mangled instead of refusing, and the result was a plausible wrong path.
+
+    `Path.resolve()` treats "file:///" as a relative path, so this returned
+    `file:///<cwd>/file%3A` -- which reaches a host as a real working directory
+    and makes a policy allow or refuse a directory nobody named.
+    """
+    for text in ("file:///", "file:///opt", "vscode-agent-host://h/x", "https://example.com"):
+        with pytest.raises(ValueError, match="not a URI"):
+            file_uri(text)
+
+
+def test_file_uri_still_accepts_a_windows_drive_letter(tmp_path: Path) -> None:
+    """A one-character scheme is a drive letter, not a scheme -- do not over-reject."""
+    assert file_uri(tmp_path / "x.txt").startswith("file:///")
+    # `C:\work` parses with scheme "c"; it must not trip the URI guard.
+    assert "file://" in file_uri("C:\\work")
+
+
 # ── routing ──────────────────────────────────────────────────────────────────
 
 

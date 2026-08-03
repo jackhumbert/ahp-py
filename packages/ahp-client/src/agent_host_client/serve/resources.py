@@ -36,7 +36,25 @@ __all__ = ["FileResourceServer", "VirtualResourceServer", "file_uri", "path_from
 
 
 def file_uri(path: str | os.PathLike[str]) -> str:
-    """RFC 8089 ``file://`` URI for a local path."""
+    """RFC 8089 ``file://`` URI for a local **path**, not for a URI.
+
+    Handed something that is already a URI, ``Path.resolve()`` treats it as a
+    relative path and silently produces nonsense anchored at the process's cwd --
+    ``file_uri("file:///")`` returned ``file:///<cwd>/file%3A``. That reaches a
+    host as a real, wrong working directory, so a policy allows or refuses a
+    directory nobody named. ``AhpClient.create_session`` passes ``cwd`` through
+    here and a caller holding a URI from elsewhere is the obvious way in, so
+    refuse rather than mangle.
+    """
+    text = str(path)
+    scheme = urlparse(text).scheme
+    # A bare Windows drive letter parses as a one-character scheme, so length is
+    # what separates `C:\work` from a real URI.
+    if len(scheme) > 1:
+        raise ValueError(
+            f"file_uri() takes a filesystem path, not a URI: {text!r} "
+            f"(already has scheme {scheme!r}). Pass working_directories=[...] instead."
+        )
     resolved = Path(path).resolve()
     return "file://" + quote(str(resolved))
 
