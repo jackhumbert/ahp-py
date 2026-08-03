@@ -24,6 +24,17 @@ versions each release speaks.
   `docs/deferred-upstream.md` U1), it just stops the message lying about whose
   fault it is.
 
+- **`connection_token` on the WebSocket server also accepts a validator callable**,
+  `(str | None) -> bool`, so a host with **per-user tokens** can refuse an unknown one
+  at the handshake with 403. The alternative — admit every peer and refuse in
+  `Policy.authorize_connection` — works, but leaves an unauthenticated peer holding
+  an open socket and turns a 403 at the upgrade into a connection that dies a moment
+  later. The callable owns its comparison, so it must use `secrets.compare_digest`
+  or a hash lookup; said in the docstring because a validator written the obvious way
+  is timing-attackable where the string branch is not. `WebSocketServer.url` returns
+  the bare base for a validator, since printing one peer's token would be worse than
+  printing none.
+
 - **`runs_commands` on a terminal backend** (feature-detected, defaults True) now
   gates whether the host advertises the `!command` prefix. The class check alone was
   not enough: a host may install a backend that deliberately executes nothing — to

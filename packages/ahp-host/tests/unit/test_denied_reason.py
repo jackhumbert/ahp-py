@@ -79,3 +79,42 @@ def test_a_backend_that_runs_nothing_does_not_advertise_the_command_prefix() -> 
     # Absent attribute defaults to True, so every pre-existing backend is unaffected.
     real = Host(EchoProvider(), LoopbackSingleUserPolicy(), terminals=Executes())  # type: ignore[arg-type]
     assert real._advertised_prefix() == "!"
+
+
+# ── per-user tokens: a validator at the handshake ────────────────────────────
+
+
+def test_connection_token_accepts_a_validator_for_per_user_tokens() -> None:
+    """A host with more than one valid token needs to refuse at the HANDSHAKE.
+
+    The alternative -- admit everyone and refuse in `authorize_connection` -- leaves
+    an unauthenticated peer holding an open socket.
+    """
+    import secrets as _secrets
+
+    from agent_host_server import Host, LoopbackSingleUserPolicy
+    from agent_host_server.provider import EchoProvider
+    from agent_host_server.ws.server import WebSocketServer
+
+    known = {"tok-a", "tok-b"}
+
+    def validate(supplied: str | None) -> bool:
+        # compare_digest, not `in`: a set lookup on a secret leaks by timing.
+        return any(supplied and _secrets.compare_digest(supplied, k) for k in known)
+
+    host = Host(EchoProvider(), LoopbackSingleUserPolicy())
+    server = WebSocketServer(host, connection_token=validate)
+
+    assert server._authorize("/?tkn=tok-a")
+    assert server._authorize("/?tkn=tok-b")
+    assert not server._authorize("/?tkn=nope")
+    assert not server._authorize("/")
+
+    # A string still behaves exactly as before.
+    single = WebSocketServer(host, connection_token="only-one")
+    assert single._authorize("/?tkn=only-one")
+    assert not single._authorize("/?tkn=tok-a")
+
+    # And None still admits everything, which is the loopback default.
+    open_server = WebSocketServer(host, connection_token=None)
+    assert open_server._authorize("/")

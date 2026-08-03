@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import logging
 import secrets
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Callable, Mapping
 from contextlib import asynccontextmanager
 from http import HTTPStatus
 from typing import Any
@@ -65,7 +65,7 @@ class WebSocketServer:
         *,
         bind: str = "127.0.0.1",
         port: int = 0,
-        connection_token: str | None = None,
+        connection_token: str | Callable[[str | None], bool] | None = None,
         allow_remote: bool = False,
     ) -> None:
         if bind not in _LOOPBACK and not allow_remote:
@@ -100,12 +100,32 @@ class WebSocketServer:
         `connectionTokenQueryName` in `vs/base/common/network.ts`).
         """
         base = f"ws://{self.bind}:{self.bound_port}"
-        return f"{base}/?tkn={self.connection_token}" if self.connection_token else base
+        # A validator has no single token to put in a URL, so the bare base is the
+        # honest answer -- printing one peer's token would be worse than printing none.
+        if not isinstance(self.connection_token, str):
+            return base
+        return f"{base}/?tkn={self.connection_token}"
 
     def _authorize(self, path: str) -> bool:
+        """Admit or refuse at the HANDSHAKE, before a socket exists.
+
+        `connection_token` may be a **callable** as well as a string. A host with
+        per-user tokens has more than one valid value, and the alternative is
+        admitting every peer and refusing in `Policy.authorize_connection` -- which
+        works, but leaves an unauthenticated peer holding an open socket and turns a
+        403 at the upgrade into a connection that dies a moment later. A validator
+        keeps the refusal where it belongs.
+
+        The callable owns its own comparison, so it is the caller's job to use
+        `secrets.compare_digest` (or a hash lookup) rather than `==`. Said here
+        because a validator written the obvious way is timing-attackable and the
+        string branch below is not.
+        """
         if self.connection_token is None:
             return True
         supplied = _token_of(path)
+        if callable(self.connection_token):
+            return bool(self.connection_token(supplied))
         return supplied is not None and secrets.compare_digest(supplied, self.connection_token)
 
     async def _handler(self, socket: Any) -> None:
@@ -161,7 +181,7 @@ async def serve_websocket(
     *,
     bind: str = "127.0.0.1",
     port: int = 0,
-    connection_token: str | None = None,
+    connection_token: str | Callable[[str | None], bool] | None = None,
     allow_remote: bool = False,
 ) -> AsyncIterator[WebSocketServer]:
     server = WebSocketServer(
