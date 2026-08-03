@@ -26,11 +26,14 @@ negotiation, the error taxonomy, the transport abstraction, and the vendored
 conformance corpora.
 
 Extracted from [`agent-host-server-py`][server], which is where all of this code
-was written and where its git history lives. **The server has not yet been
-migrated onto this package** — it still carries its own copy. That migration is
-deliberately deferred and is tracked in [`docs/decisions/0002-extraction.md`](docs/decisions/0002-extraction.md).
-Until it happens the two trees can drift, and the first job of anyone touching a
-reducer here is to check whether the sibling changed too.
+was written and where its git history lives. **The migration has landed:** the
+server depends on `agent-host-protocol ~= 0.1.0` and imports it throughout
+(its commit `0874225`, "feat!: depend on agent-host-protocol"), and the client
+was built on this package from its first commit. There is exactly one copy of
+the extracted tree — this one — so "check whether the sibling's copy drifted"
+stopped being a job anyone has;
+[`docs/decisions/0002-extraction.md`](docs/decisions/0002-extraction.md)
+records the extraction and carries a dated postscript on the migration.
 
 Current state: **all 247 upstream reducer fixtures, all 39 round-trip fixtures
 and the 43-case JS-semantics oracle pass.** `mypy --strict`, `ruff`,

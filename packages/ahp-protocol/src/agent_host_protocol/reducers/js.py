@@ -54,9 +54,11 @@ __all__ = [
     "assign",
     "get",
     "index_of",
+    "index_of_value",
     "key_of",
     "strict_equal",
     "to_string",
+    "truthy",
 ]
 
 
@@ -182,6 +184,25 @@ def to_string(value: Any) -> str:
     return "[object Object]"
 
 
+def truthy(value: Any) -> bool:
+    """JavaScript ``ToBoolean`` -- what ``if (x)`` and ``x ? a : b`` test.
+
+    The divergence from Python's ``bool()`` is entirely about containers: ``{}``
+    and ``[]`` are **truthy** in JavaScript (they are objects) and falsy in
+    Python, so ``if action.get("approved"):`` silently inverts an upstream
+    ``if (action.approved)`` for a peer that sends one. The falsy set is closed:
+    ``false``, ``0``/``-0``, ``NaN``, ``""``, ``null``, ``undefined``.
+    """
+    if value is UNDEFINED or value is None or value is False:
+        return False
+    if isinstance(value, str):
+        return len(value) > 0
+    if isinstance(value, bool | int | float):
+        # `NaN` is falsy; a float compares unequal to itself only when NaN.
+        return value == value and value != 0
+    return True
+
+
 def index_of(items: Any, key: str, needle: Any) -> int:
     """``items.findIndex(item => item[key] === needle)``; ``-1`` when absent.
 
@@ -196,5 +217,23 @@ def index_of(items: Any, key: str, needle: Any) -> int:
         if item is None:
             continue
         if strict_equal(get(item, key), needle):
+            return index
+    return -1
+
+
+def index_of_value(items: Any, needle: Any) -> int:
+    """``items.indexOf(needle)``; ``-1`` when absent.
+
+    ``indexOf`` compares elements with ``===``, so ``[1].indexOf(true)`` is
+    ``-1`` where Python's ``list.index`` (and ``in``) would match ``True``
+    against ``1`` -- and an :data:`UNDEFINED` needle matches nothing, because a
+    parsed JSON array cannot contain ``undefined``. Also covers ``includes``,
+    which differs from ``indexOf`` only on ``NaN`` -- a value ``JSON.parse``
+    never produces.
+    """
+    if not isinstance(items, list | tuple):
+        return -1
+    for index, item in enumerate(items):
+        if strict_equal(item, needle):
             return index
     return -1

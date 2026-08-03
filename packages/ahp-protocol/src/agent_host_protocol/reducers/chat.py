@@ -30,6 +30,17 @@ from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
 from agent_host_protocol.reducers.clock import now_iso
+from agent_host_protocol.reducers.js import (
+    UNDEFINED,
+    assign,
+    get,
+    index_of,
+    index_of_value,
+    key_of,
+    strict_equal,
+    to_string,
+    truthy,
+)
 from agent_host_protocol.types.protocol import SessionStatus, session_status_flags
 from agent_host_protocol.types.wire import coalesce
 
@@ -106,71 +117,20 @@ def _has_key(value: Any, key: str) -> bool:
     return isinstance(value, Mapping) and key in value
 
 
-class _RefKey:
-    """Identity key for a wire value Python refuses to hash.
-
-    A JS ``Map``/``Set`` accepts anything: primitives compare by SameValueZero,
-    objects and arrays by reference. Python raises ``TypeError`` on a dict or a
-    list, and every id here is peer-supplied (``chat/pendingMessageSet`` stores
-    ``id`` verbatim), so those are wrapped and compared by identity -- which is
-    exactly what upstream does for them.
-    """
-
-    __slots__ = ("value",)
-
-    def __init__(self, value: Any) -> None:
-        self.value = value
-
-    def __hash__(self) -> int:
-        return id(self.value)
-
-    def __eq__(self, other: object) -> bool:
-        return isinstance(other, _RefKey) and other.value is self.value
-
-
-def _map_key(value: Any) -> Any:
-    """A hashable stand-in for a wire value used as a ``Map``/``Set`` key upstream."""
-    if value is None or isinstance(value, str | bool | int | float):
-        # Tagging bools apart restores SameValueZero, where `true` and `1` are
-        # distinct keys but Python collides them. `1` and `1.0` stay collided --
-        # they are the same JS number anyway.
-        return (isinstance(value, bool), value)
-    return _RefKey(value)
-
-
-def _object_key(value: Any) -> str:
-    """`String(value)` -- how a plain JS object coerces any key.
-
-    Distinct from :func:`_map_key`: a `Map` keeps object keys by reference, but
-    an ordinary object stringifies them. Python would raise `TypeError` on an
-    unhashable key instead, and every site using this is reachable from a
-    client-dispatchable action.
-    """
-    if isinstance(value, str):
-        return value
-    if value is None:
-        return "null"
-    if isinstance(value, bool):
-        return "true" if value else "false"
-    if isinstance(value, int):
-        return str(value)
-    if isinstance(value, float):
-        return str(int(value)) if value.is_integer() else str(value)
-    if isinstance(value, Sequence) and not isinstance(value, str | bytes):
-        return ",".join(_object_key(item) for item in value)
-    return "[object Object]"
-
-
 def _spread_object(value: Any) -> dict[str, Any]:
     """`{ ...value }` for a wire value that should be an object.
 
-    A JS spread of an array yields index keys, and of a non-object yields `{}`.
+    A JS spread copies own enumerable properties: an array **or a string**
+    yields index keys -- `{...'ab'}` is `{'0': 'a', '1': 'b'}` -- and any other
+    primitive (numbers, booleans, null, undefined) yields `{}`.
     `dict(["ab", "cd"])` would instead produce `{'a': 'b', 'c': 'd'}` -- silent
     corruption -- or raise on `["p", "q"]`.
     """
     if isinstance(value, Mapping):
         return dict(value)
-    if isinstance(value, Sequence) and not isinstance(value, str | bytes):
+    if isinstance(value, str):
+        return {str(index): char for index, char in enumerate(value)}
+    if isinstance(value, Sequence) and not isinstance(value, bytes):
         return {str(index): item for index, item in enumerate(value)}
     return {}
 
@@ -211,27 +171,61 @@ def _as_text(value: Any) -> str:
 # ─── Tool call helpers ───────────────────────────────────────────────────────
 
 
+def _nullish(*values: Any) -> Any:
+    """``a ?? b ?? …`` over :func:`js.get` reads: the first non-nullish operand,
+    else the **last** operand verbatim -- so a trailing explicit null stays
+    null and a trailing absence stays :data:`UNDEFINED`.
+
+    ``types.wire.coalesce`` conflates the two flavours because its call sites
+    read with ``.get()``; the tool-call literals must not, because a member that
+    ends up ``undefined`` is DROPPED from the reference's JSON output where an
+    explicit null survives (the js-semantics oracle compares verbatim).
+    """
+    for value in values[:-1]:
+        if value is not UNDEFINED and value is not None:
+            return value
+    return values[-1]
+
+
+def _literal(members: dict[str, Any]) -> dict[str, Any]:
+    """A JS object literal as ``JSON.stringify`` emits it: ``undefined``-valued
+    members do not exist, explicit nulls do.
+
+    Feed members from :func:`js.get`/:func:`_nullish` so absent and null stay
+    distinct on the way in -- a ``.get()`` read collapses both to ``None`` and
+    would either keep a key the reference drops or drop a null it keeps.
+    Dropping at build time rather than at serialisation keeps the reducers'
+    no-``UNDEFINED``-in-output invariant, and is observationally identical:
+    every later read goes through :func:`js.get`, for which a key that holds
+    ``undefined`` and a key that is missing are the same thing.
+    """
+    return {key: value for key, value in members.items() if value is not UNDEFINED}
+
+
 def _tc_base(tc: Mapping[str, Any]) -> dict[str, Any]:
     """The common base fields shared by all tool call lifecycle states.
 
-    Every key is emitted even when absent: upstream builds this object with
-    explicit ``undefined`` members, and the corpus compares ``null`` and absent
-    as the same thing.
+    Upstream builds this object with plain member reads, so a field the source
+    state never had is ``undefined`` and vanishes at ``JSON.stringify`` --
+    :func:`_literal` reproduces exactly that, while an explicit null in the
+    source state survives.
     """
-    return {
-        "toolCallId": tc.get("toolCallId"),
-        "toolName": tc.get("toolName"),
-        "displayName": tc.get("displayName"),
-        "intention": tc.get("intention"),
-        "contributor": tc.get("contributor"),
-        "_meta": tc.get("_meta"),
-    }
+    return _literal(
+        {
+            "toolCallId": get(tc, "toolCallId"),
+            "toolName": get(tc, "toolName"),
+            "displayName": get(tc, "displayName"),
+            "intention": get(tc, "intention"),
+            "contributor": get(tc, "contributor"),
+            "_meta": get(tc, "_meta"),
+        }
+    )
 
 
 def _tc_base_with_meta(tc: Mapping[str, Any], meta: Any) -> dict[str, Any]:
-    base = _tc_base(tc)
-    base["_meta"] = coalesce(meta, tc.get("_meta"))
-    return base
+    """*meta* is a :func:`js.get` read: ``meta ?? tc._meta`` is JS ``??``, which
+    falls through on null AND undefined, and the surviving flavour matters."""
+    return assign(_tc_base(tc), "_meta", _nullish(meta, get(tc, "_meta")))
 
 
 def _refine_contributor(current: Any, next_: Any) -> Any:
@@ -240,11 +234,14 @@ def _refine_contributor(current: Any, next_: Any) -> Any:
     Upstream logs on both rejection paths; the reducer signature here carries no
     logger, so the rejection is silent (behaviourally identical).
     """
-    if next_ is None:
+    # `if (!next)` -- JS truthiness, wider than null/undefined: an `''`/`0`/
+    # `false` contributor is also ignored rather than replacing a real one.
+    if not truthy(next_):
         return current
     if _mget(current, "kind") == _CONTRIBUTOR_CLIENT:
-        if _mget(next_, "kind") == _CONTRIBUTOR_CLIENT and _mget(next_, "clientId") == _mget(
-            current, "clientId"
+        # `next.clientId === current.clientId` -- strict, both peer-supplied.
+        if _mget(next_, "kind") == _CONTRIBUTOR_CLIENT and strict_equal(
+            get(next_, "clientId"), get(current, "clientId")
         ):
             return next_
         # Ignoring a contributor change for a client tool call.
@@ -260,7 +257,9 @@ def _resolve_selected_option(options: Any, option_id: Any) -> Any:
     if not option_id or options is None:
         return None
     for option in _seq(options):
-        if _mget(option, "id") == option_id:
+        # `o.id === id` -- strict, so `1` never resolves the option a bool
+        # points at and an object id resolves only by reference.
+        if strict_equal(get(option, "id"), option_id):
             return option
     return None
 
@@ -302,7 +301,8 @@ def _find_open_input_request_part(
             and part.get("kind") == _INPUT_REQUEST
             # `part.response === undefined` again: presence, not nullness.
             and "response" not in part
-            and _mget(part.get("request"), "id") == request_id
+            # `part.request.id === requestId` -- strict, both peer-supplied.
+            and strict_equal(get(part.get("request"), "id"), request_id)
         ):
             return index, part
     return None
@@ -356,7 +356,9 @@ def _end_turn(
     Non-terminal tool calls are force-cancelled with reason ``skipped``.
     """
     active = state.get("activeTurn")
-    if active is None or _mget(active, "id") != turn_id:
+    # `state.activeTurn.id !== turnId` -- strict: `1` must not end the turn a
+    # bool names, and vice versa. `get` keeps absent distinct from null.
+    if active is None or not strict_equal(get(active, "id"), turn_id):
         return state
 
     response_parts: list[Any] = []
@@ -418,7 +420,7 @@ def _upsert_input_request_part(state: Mapping[str, Any], request: Any) -> Any:
     if active is None:
         return state
     response_parts = _parts(active)
-    existing = _find_open_input_request_part(response_parts, _mget(request, "id"))
+    existing = _find_open_input_request_part(response_parts, get(request, "id"))
     if existing is not None:
         index, part = existing
         # Answer drafts survive a re-request unless the request carries its own.
@@ -451,7 +453,7 @@ def _update_tool_call_in_parts(
     (upstream detects that by identity, so this does too).
     """
     active = state.get("activeTurn")
-    if active is None or _mget(active, "id") != turn_id:
+    if active is None or not strict_equal(get(active, "id"), turn_id):
         return state
 
     found = False
@@ -461,7 +463,9 @@ def _update_tool_call_in_parts(
         if (
             _mget(part, "kind") == _TOOL_CALL
             and isinstance(tc, Mapping)
-            and tc.get("toolCallId") == tool_call_id
+            # `part.toolCall.toolCallId === toolCallId` -- strict, so a bool
+            # never selects the call a number owns on peer-controlled ids.
+            and strict_equal(get(tc, "toolCallId"), tool_call_id)
         ):
             updated = updater(tc)
             if updated is tc:
@@ -490,7 +494,7 @@ def _update_response_part(
     is skipped rather than treated as an error (fixture 103).
     """
     active = state.get("activeTurn")
-    if active is None or _mget(active, "id") != turn_id:
+    if active is None or not strict_equal(get(active, "id"), turn_id):
         return state
 
     found = False
@@ -498,10 +502,13 @@ def _update_response_part(
     for part in _parts(active):
         if not found and isinstance(part, Mapping):
             if part.get("kind") == _TOOL_CALL:
-                identifier = _mget(part.get("toolCall"), "toolCallId")
+                identifier = get(part.get("toolCall"), "toolCallId")
             else:
-                identifier = part.get("id")
-            if identifier == part_id:
+                # `'id' in part ? part.id : undefined` -- presence-aware, so a
+                # part without an id only matches an absent `partId`.
+                identifier = get(part, "id")
+            # `id === partId` -- strict.
+            if strict_equal(identifier, part_id):
                 found = True
                 response_parts.append(updater(part))
                 continue
@@ -513,7 +520,14 @@ def _update_response_part(
 
 
 def _append_text(kind: str, content: Any) -> Callable[[Mapping[str, Any]], Any]:
-    """Updater for ``chat/delta`` and ``chat/reasoning``: append to a matching part."""
+    """Updater for ``chat/delta`` and ``chat/reasoning``: append to a matching part.
+
+    DELIBERATE DIVERGENCE, do not "fix": upstream concatenates with JS ``+``
+    (``part.content + action.content``), so a null or numeric ``content``
+    appends the literal ``"null"`` / ``"5"``. Ours appends nothing for any
+    non-string -- the same stance the ``chat/toolCallDelta`` branch documents
+    for ``partialInput``: a null is not text.
+    """
 
     def updater(part: Mapping[str, Any]) -> Any:
         if part.get("kind") == kind:
@@ -535,13 +549,17 @@ def chat_reducer(state: Any, action: Mapping[str, Any]) -> Any:
     if action_type == "chat/turnStarted":
         next_state = {
             **state,
-            "activeTurn": {
-                "id": action.get("turnId"),
-                "startedAt": action.get("startedAt"),
-                "message": action.get("message"),
-                "responseParts": [],
-                "usage": None,
-            },
+            # `usage: undefined` upstream -- a member `JSON.stringify` drops, so
+            # the key must not exist here; the other three keep an explicit
+            # null distinct from absence.
+            "activeTurn": _literal(
+                {
+                    "id": get(action, "turnId"),
+                    "startedAt": get(action, "startedAt"),
+                    "message": get(action, "message"),
+                    "responseParts": [],
+                }
+            ),
         }
         next_state = {
             **next_state,
@@ -553,14 +571,17 @@ def chat_reducer(state: Any, action: Mapping[str, Any]) -> Any:
         queued_message_id = action.get("queuedMessageId")
         if queued_message_id:  # A string in both languages: "" and absent both skip.
             steering = next_state.get("steeringMessage")
-            if _mget(steering, "id") == queued_message_id:
+            # `next.steeringMessage?.id === action.queuedMessageId` -- strict.
+            if strict_equal(get(steering, "id"), queued_message_id):
                 next_state = {**next_state, "steeringMessage": None}
             queued = next_state.get("queuedMessages")
             # `if (next.queuedMessages)`: AN EMPTY ARRAY IS TRUTHY in JavaScript,
             # so this must test presence, not Python truthiness. With `[]` the
             # upstream branch runs and rewrites the field to undefined.
             if queued is not None:
-                filtered = [m for m in _seq(queued) if _mget(m, "id") != queued_message_id]
+                filtered = [
+                    m for m in _seq(queued) if not strict_equal(get(m, "id"), queued_message_id)
+                ]
                 next_state = {
                     **next_state,
                     "queuedMessages": filtered if len(filtered) > 0 else None,
@@ -570,22 +591,22 @@ def chat_reducer(state: Any, action: Mapping[str, Any]) -> Any:
     if action_type == "chat/delta":
         return _update_response_part(
             state,
-            action.get("turnId"),
-            action.get("partId"),
+            get(action, "turnId"),
+            get(action, "partId"),
             _append_text(_MARKDOWN, action.get("content")),
         )
 
     if action_type == "chat/reasoning":
         return _update_response_part(
             state,
-            action.get("turnId"),
-            action.get("partId"),
+            get(action, "turnId"),
+            get(action, "partId"),
             _append_text(_REASONING, action.get("content")),
         )
 
     if action_type == "chat/responsePart":
         active = state.get("activeTurn")
-        if active is None or _mget(active, "id") != action.get("turnId"):
+        if active is None or not strict_equal(get(active, "id"), get(action, "turnId")):
             return state
         return {
             **state,
@@ -596,15 +617,15 @@ def chat_reducer(state: Any, action: Mapping[str, Any]) -> Any:
         }
 
     if action_type == "chat/turnComplete":
-        return _end_turn(state, action.get("turnId"), _TURN_COMPLETE, action.get("duration"))
+        return _end_turn(state, get(action, "turnId"), _TURN_COMPLETE, action.get("duration"))
 
     if action_type == "chat/turnCancelled":
-        return _end_turn(state, action.get("turnId"), _TURN_CANCELLED, action.get("duration"))
+        return _end_turn(state, get(action, "turnId"), _TURN_CANCELLED, action.get("duration"))
 
     if action_type == "chat/error":
         return _end_turn(
             state,
-            action.get("turnId"),
+            get(action, "turnId"),
             _TURN_ERROR,
             action.get("duration"),
             _STATUS_ERROR,
@@ -616,18 +637,33 @@ def chat_reducer(state: Any, action: Mapping[str, Any]) -> Any:
 
     if action_type == "chat/usage":
         active = state.get("activeTurn")
-        if active is None or _mget(active, "id") != action.get("turnId"):
+        if active is None or not strict_equal(get(active, "id"), get(action, "turnId")):
             return state
-        return {**state, "activeTurn": {**active, "usage": action.get("usage")}}
+        # `usage: action.usage` is a literal member over the spread: absent
+        # overrides with `undefined` and stringify drops the key.
+        return {**state, "activeTurn": assign({**active}, "usage", get(action, "usage"))}
 
     # ── Working directories ──────────────────────────────────────────────────
 
     if action_type == "chat/workingDirectorySet":
-        directory = action.get("directory")
+        # `list.includes(action.directory)` -- strict (SameValueZero): `true` is
+        # not `1`, and an absent directory is `undefined`, which no parsed array
+        # contains -- so upstream appends even past an explicit null entry.
+        directory = get(action, "directory")
         listing = _seq(coalesce(state.get("workingDirectories"), []))
-        if directory in listing:
+        if index_of_value(listing, directory) >= 0:
             return state
-        return {**state, "workingDirectories": [*listing, directory]}
+        # `JSON.stringify` writes an `undefined` ARRAY ELEMENT as `null` --
+        # unlike an object member, which it drops. DOCUMENTED DIVERGENCE: we
+        # store that null image eagerly, so a SECOND absent-directory append in
+        # the same process appends another null where upstream's `includes`
+        # finds the in-memory `undefined` and no-ops. Keeping the sentinel in
+        # state instead would leak it to every consumer's `json.dumps`; the
+        # divergence is confined to a malformed action (`directory` is
+        # required) repeated within one process lifetime, and is pinned by
+        # `tests/unit/test_reducer_hazards.py`.
+        appended = None if directory is UNDEFINED else directory
+        return {**state, "workingDirectories": [*listing, appended]}
 
     if action_type == "chat/workingDirectoryRemoved":
         listing = state.get("workingDirectories")
@@ -635,18 +671,18 @@ def chat_reducer(state: Any, action: Mapping[str, Any]) -> Any:
         # test. It falls through to `indexOf === -1` and no-ops either way.
         if listing is None:
             return state
-        directory = action.get("directory")
+        # `list.indexOf(action.directory)` -- strict, as above.
         items = _seq(listing)
-        if directory not in items:
+        index = index_of_value(items, get(action, "directory"))
+        if index < 0:
             return state
-        index = items.index(directory)
         return {**state, "workingDirectories": [*items[:index], *items[index + 1 :]]}
 
     # ── Tool call state machine ──────────────────────────────────────────────
 
     if action_type == "chat/toolCallStart":
         active = state.get("activeTurn")
-        if active is None or _mget(active, "id") != action.get("turnId"):
+        if active is None or not strict_equal(get(active, "id"), get(action, "turnId")):
             return state
         return {
             **state,
@@ -656,15 +692,17 @@ def chat_reducer(state: Any, action: Mapping[str, Any]) -> Any:
                     *_parts(active),
                     {
                         "kind": _TOOL_CALL,
-                        "toolCall": {
-                            "toolCallId": action.get("toolCallId"),
-                            "toolName": action.get("toolName"),
-                            "displayName": action.get("displayName"),
-                            "intention": action.get("intention"),
-                            "contributor": action.get("contributor"),
-                            "_meta": action.get("_meta"),
-                            "status": _STREAMING,
-                        },
+                        "toolCall": _literal(
+                            {
+                                "toolCallId": get(action, "toolCallId"),
+                                "toolName": get(action, "toolName"),
+                                "displayName": get(action, "displayName"),
+                                "intention": get(action, "intention"),
+                                "contributor": get(action, "contributor"),
+                                "_meta": get(action, "_meta"),
+                                "status": _STREAMING,
+                            }
+                        ),
                     },
                 ],
             },
@@ -689,13 +727,17 @@ def chat_reducer(state: Any, action: Mapping[str, Any]) -> Any:
                 updated["partialInput"] = _as_text(coalesce(tc.get("partialInput"), "")) + _as_text(
                     content
                 )
-            updated["invocationMessage"] = coalesce(
-                action.get("invocationMessage"), tc.get("invocationMessage")
+            # A literal member overrides the spread even with `undefined`, and
+            # `JSON.stringify` then drops the key -- so when both sides are
+            # absent the key must not exist, which is `assign`'s delete arm.
+            return assign(
+                updated,
+                "invocationMessage",
+                _nullish(get(action, "invocationMessage"), get(tc, "invocationMessage")),
             )
-            return updated
 
         return _update_tool_call_in_parts(
-            state, action.get("turnId"), action.get("toolCallId"), delta_updater
+            state, get(action, "turnId"), get(action, "toolCallId"), delta_updater
         )
 
     if action_type == "chat/toolCallReady":
@@ -704,49 +746,58 @@ def chat_reducer(state: Any, action: Mapping[str, Any]) -> Any:
             status = tc.get("status")
             if not _status_in(status, _READY_SOURCE_STATES):
                 return tc
-            base = _tc_base_with_meta(tc, action.get("_meta"))
-            base["contributor"] = _refine_contributor(
-                tc.get("contributor"), action.get("contributor")
+            base = assign(
+                _tc_base_with_meta(tc, get(action, "_meta")),
+                "contributor",
+                _refine_contributor(get(tc, "contributor"), get(action, "contributor")),
             )
-            base["intention"] = coalesce(action.get("intention"), tc.get("intention"))
-            tool_input = coalesce(
-                action.get("toolInput"),
-                None if status == _STREAMING else tc.get("toolInput"),
+            base = assign(
+                base, "intention", _nullish(get(action, "intention"), get(tc, "intention"))
             )
-            confirmed = action.get("confirmed")
-            if confirmed:  # A string enum: falsy only when absent or "".
-                return {
-                    "status": _RUNNING,
-                    **base,
-                    "invocationMessage": action.get("invocationMessage"),
-                    "toolInput": tool_input,
-                    "confirmed": confirmed,
-                }
+            tool_input = _nullish(
+                get(action, "toolInput"),
+                UNDEFINED if status == _STREAMING else get(tc, "toolInput"),
+            )
+            confirmed = get(action, "confirmed")
+            # `if (action.confirmed)` -- JS truthiness: declared a string enum,
+            # but a peer-sent `{}` or `[]` is truthy there and falsy here.
+            if truthy(confirmed):
+                return _literal(
+                    {
+                        "status": _RUNNING,
+                        **base,
+                        "invocationMessage": get(action, "invocationMessage"),
+                        "toolInput": tool_input,
+                        "confirmed": confirmed,
+                    }
+                )
             pending = tc if status == _PENDING_CONFIRMATION else None
-            options = coalesce(action.get("options"), _mget(pending, "options"))
-            ready = {
-                "status": _PENDING_CONFIRMATION,
-                **base,
-                "invocationMessage": action.get("invocationMessage"),
-                "toolInput": tool_input,
-                "confirmationTitle": coalesce(
-                    action.get("confirmationTitle"), _mget(pending, "confirmationTitle")
-                ),
-                "riskAssessment": coalesce(
-                    action.get("riskAssessment"), _mget(pending, "riskAssessment")
-                ),
-                "edits": coalesce(action.get("edits"), _mget(pending, "edits")),
-                "editable": coalesce(action.get("editable"), _mget(pending, "editable")),
-            }
-            # `...(options ? { options } : {})` -- options is an ARRAY, and an
-            # empty array is truthy in JavaScript. Presence, not truthiness.
-            if options is not None:
+            options = _nullish(get(action, "options"), get(pending, "options"))
+            ready = _literal(
+                {
+                    "status": _PENDING_CONFIRMATION,
+                    **base,
+                    "invocationMessage": get(action, "invocationMessage"),
+                    "toolInput": tool_input,
+                    "confirmationTitle": _nullish(
+                        get(action, "confirmationTitle"), get(pending, "confirmationTitle")
+                    ),
+                    "riskAssessment": _nullish(
+                        get(action, "riskAssessment"), get(pending, "riskAssessment")
+                    ),
+                    "edits": _nullish(get(action, "edits"), get(pending, "edits")),
+                    "editable": _nullish(get(action, "editable"), get(pending, "editable")),
+                }
+            )
+            # `...(options ? { options } : {})` -- ToBoolean, and an empty array
+            # is truthy in JavaScript (an empty string is not).
+            if truthy(options):
                 ready["options"] = options
             return ready
 
         return _refresh_summary_status(
             _update_tool_call_in_parts(
-                state, action.get("turnId"), action.get("toolCallId"), ready_updater
+                state, get(action, "turnId"), get(action, "toolCallId"), ready_updater
             )
         )
 
@@ -755,9 +806,11 @@ def chat_reducer(state: Any, action: Mapping[str, Any]) -> Any:
         def confirmed_updater(tc: Mapping[str, Any]) -> Any:
             if tc.get("status") != _PENDING_CONFIRMATION:
                 return tc
-            base = _tc_base_with_meta(tc, action.get("_meta"))
+            base = _tc_base_with_meta(tc, get(action, "_meta"))
             selected = _resolve_selected_option(tc.get("options"), action.get("selectedOptionId"))
-            if action.get("approved"):
+            # `if (action.approved)` -- JS truthiness: `{}`/`[]` approve there
+            # and would cancel here under Python's `bool`.
+            if truthy(action.get("approved")):
                 # Only inline (string) input is replaceable; referenced input is
                 # swapped by the host at the resource, not here.
                 # `action.editedToolInput !== undefined`: an explicit null is an
@@ -765,33 +818,38 @@ def chat_reducer(state: Any, action: Mapping[str, Any]) -> Any:
                 tool_input = (
                     action.get("editedToolInput")
                     if "editedToolInput" in action and isinstance(tc.get("toolInput"), str)
-                    else tc.get("toolInput")
+                    else get(tc, "toolInput")
                 )
-                resolved = {
-                    "status": _RUNNING,
-                    **base,
-                    "invocationMessage": tc.get("invocationMessage"),
-                    "toolInput": tool_input,
-                    "confirmed": action.get("confirmed"),
-                }
+                resolved = _literal(
+                    {
+                        "status": _RUNNING,
+                        **base,
+                        "invocationMessage": get(tc, "invocationMessage"),
+                        "toolInput": tool_input,
+                        "confirmed": get(action, "confirmed"),
+                    }
+                )
             else:
-                resolved = {
-                    "status": _CANCELLED,
-                    **base,
-                    "invocationMessage": tc.get("invocationMessage"),
-                    "toolInput": tc.get("toolInput"),
-                    "reason": action.get("reason"),
-                    "reasonMessage": action.get("reasonMessage"),
-                    "userSuggestion": action.get("userSuggestion"),
-                }
-            # An object; `{}` is truthy in JavaScript, so presence is the test.
-            if selected is not None:
+                resolved = _literal(
+                    {
+                        "status": _CANCELLED,
+                        **base,
+                        "invocationMessage": get(tc, "invocationMessage"),
+                        "toolInput": get(tc, "toolInput"),
+                        "reason": get(action, "reason"),
+                        "reasonMessage": get(action, "reasonMessage"),
+                        "userSuggestion": get(action, "userSuggestion"),
+                    }
+                )
+            # `...(selectedOption ? { selectedOption } : {})` -- ToBoolean; a
+            # resolved option is an object and objects are always truthy.
+            if truthy(selected):
                 resolved["selectedOption"] = selected
             return resolved
 
         return _refresh_summary_status(
             _update_tool_call_in_parts(
-                state, action.get("turnId"), action.get("toolCallId"), confirmed_updater
+                state, get(action, "turnId"), get(action, "toolCallId"), confirmed_updater
             )
         )
 
@@ -804,42 +862,48 @@ def chat_reducer(state: Any, action: Mapping[str, Any]) -> Any:
             result = action.get("result")
             # A *successful* completion from `auth-required` is invalid:
             # execution never resumed after the challenge. Ignored as a no-op.
-            if status == _AUTH_REQUIRED and _mget(result, "success"):
+            # `action.result.success` -- JS truthiness, so `{}`/`[]` count as
+            # success there where Python's `bool` would let them through.
+            if status == _AUTH_REQUIRED and truthy(_mget(result, "success")):
                 return tc
-            base = _tc_base_with_meta(tc, action.get("_meta"))
+            base = _tc_base_with_meta(tc, get(action, "_meta"))
             post_confirmation = status in (_RUNNING, _AUTH_REQUIRED)
-            confirmed = tc.get("confirmed") if post_confirmation else _CONFIRM_NOT_NEEDED
-            selected = tc.get("selectedOption") if post_confirmation else None
+            confirmed = get(tc, "confirmed") if post_confirmation else _CONFIRM_NOT_NEEDED
+            selected = get(tc, "selectedOption") if post_confirmation else UNDEFINED
             # Content produced before the call paused for auth is the only
             # content the tool ever produced, unless `result` overrides it.
-            pre_auth_content = tc.get("content") if status == _AUTH_REQUIRED else None
+            pre_auth_content = get(tc, "content") if status == _AUTH_REQUIRED else UNDEFINED
             # Cancelling from `auth-required` always completes terminally: the
             # pending challenge is not a "pending result" a client can review,
             # so `requiresResultConfirmation` is ignored on that path.
+            # `if (action.requiresResultConfirmation && ...)` -- JS truthiness.
             pending_result = (
-                bool(action.get("requiresResultConfirmation")) and status != _AUTH_REQUIRED
+                truthy(action.get("requiresResultConfirmation")) and status != _AUTH_REQUIRED
             )
-            finished = {
-                "status": _PENDING_RESULT_CONFIRMATION if pending_result else _COMPLETED,
-                **base,
-                "invocationMessage": tc.get("invocationMessage"),
-                "toolInput": tc.get("toolInput"),
-                "confirmed": confirmed,
-            }
-            if selected is not None:
+            finished = _literal(
+                {
+                    "status": _PENDING_RESULT_CONFIRMATION if pending_result else _COMPLETED,
+                    **base,
+                    "invocationMessage": get(tc, "invocationMessage"),
+                    "toolInput": get(tc, "toolInput"),
+                    "confirmed": confirmed,
+                }
+            )
+            # Both spreads are `...(x ? { x } : {})` -- ToBoolean. `[]` and `{}`
+            # are truthy in JavaScript; `""`, `0` and `false` are not.
+            if truthy(selected):
                 finished["selectedOption"] = selected
-            # An ARRAY: `[]` is truthy in JavaScript, so presence is the test.
-            if pre_auth_content is not None:
+            if truthy(pre_auth_content):
                 finished["content"] = pre_auth_content
-            # `...action.result` -- the result fields are FLATTENED onto the tool
-            # call, not nested. Spreading `undefined` is a no-op upstream.
-            if isinstance(result, Mapping):
-                finished.update(result)
+            # `...action.result` -- the result fields are FLATTENED onto the
+            # tool call, not nested, with real JS spread semantics: a string
+            # contributes index keys, any other primitive nothing.
+            finished.update(_spread_object(result))
             return finished
 
         return _refresh_summary_status(
             _update_tool_call_in_parts(
-                state, action.get("turnId"), action.get("toolCallId"), complete_updater
+                state, get(action, "turnId"), get(action, "toolCallId"), complete_updater
             )
         )
 
@@ -848,39 +912,45 @@ def chat_reducer(state: Any, action: Mapping[str, Any]) -> Any:
         def result_confirmed_updater(tc: Mapping[str, Any]) -> Any:
             if tc.get("status") != _PENDING_RESULT_CONFIRMATION:
                 return tc
-            base = _tc_base_with_meta(tc, action.get("_meta"))
-            selected = tc.get("selectedOption")
-            if action.get("approved"):
-                reviewed = {
-                    "status": _COMPLETED,
-                    **base,
-                    "invocationMessage": tc.get("invocationMessage"),
-                    "toolInput": tc.get("toolInput"),
-                    "confirmed": tc.get("confirmed"),
-                    "success": tc.get("success"),
-                    "pastTenseMessage": tc.get("pastTenseMessage"),
-                    "content": tc.get("content"),
-                    "structuredContent": tc.get("structuredContent"),
-                    "error": tc.get("error"),
-                }
+            base = _tc_base_with_meta(tc, get(action, "_meta"))
+            selected = get(tc, "selectedOption")
+            # `if (action.approved)` -- JS truthiness, as in toolCallConfirmed.
+            if truthy(action.get("approved")):
+                reviewed = _literal(
+                    {
+                        "status": _COMPLETED,
+                        **base,
+                        "invocationMessage": get(tc, "invocationMessage"),
+                        "toolInput": get(tc, "toolInput"),
+                        "confirmed": get(tc, "confirmed"),
+                        "success": get(tc, "success"),
+                        "pastTenseMessage": get(tc, "pastTenseMessage"),
+                        "content": get(tc, "content"),
+                        "structuredContent": get(tc, "structuredContent"),
+                        "error": get(tc, "error"),
+                    }
+                )
             else:
                 # The result is discarded: a denied result never becomes state.
-                reviewed = {
-                    "status": _CANCELLED,
-                    **base,
-                    "invocationMessage": tc.get("invocationMessage"),
-                    "toolInput": tc.get("toolInput"),
-                    "reason": _CANCEL_RESULT_DENIED,
-                }
-            if selected is not None:
+                reviewed = _literal(
+                    {
+                        "status": _CANCELLED,
+                        **base,
+                        "invocationMessage": get(tc, "invocationMessage"),
+                        "toolInput": get(tc, "toolInput"),
+                        "reason": _CANCEL_RESULT_DENIED,
+                    }
+                )
+            # `...(tc.selectedOption ? { selectedOption } : {})` -- ToBoolean.
+            if truthy(selected):
                 reviewed["selectedOption"] = selected
             return reviewed
 
         return _refresh_summary_status(
             _update_tool_call_in_parts(
                 state,
-                action.get("turnId"),
-                action.get("toolCallId"),
+                get(action, "turnId"),
+                get(action, "toolCallId"),
                 result_confirmed_updater,
             )
         )
@@ -894,11 +964,13 @@ def chat_reducer(state: Any, action: Mapping[str, Any]) -> Any:
             # `action._meta !== undefined`: an explicit null CLEARS `_meta`.
             if "_meta" in action:
                 updated["_meta"] = action.get("_meta")
-            updated["content"] = action.get("content")
-            return updated
+            # `content: action.content` is a literal member over the spread: an
+            # absent action.content overrides with `undefined`, and stringify
+            # then drops the key -- deleting whatever content the call had.
+            return assign(updated, "content", get(action, "content"))
 
         return _update_tool_call_in_parts(
-            state, action.get("turnId"), action.get("toolCallId"), content_updater
+            state, get(action, "turnId"), get(action, "toolCallId"), content_updater
         )
 
     if action_type == "chat/toolCallAuthRequired":
@@ -910,29 +982,30 @@ def chat_reducer(state: Any, action: Mapping[str, Any]) -> Any:
             # Invariant: auth-required only applies to MCP-contributed calls.
             if contributor is None or _mget(contributor, "kind") != _CONTRIBUTOR_MCP:
                 return tc
-            paused = {
-                "status": _AUTH_REQUIRED,
-                **_tc_base_with_meta(tc, action.get("_meta")),
-                "contributor": contributor,
-                "invocationMessage": tc.get("invocationMessage"),
-                "toolInput": tc.get("toolInput"),
-                "confirmed": tc.get("confirmed"),
-            }
-            selected = tc.get("selectedOption")
-            if selected is not None:
+            paused = _literal(
+                {
+                    "status": _AUTH_REQUIRED,
+                    **_tc_base_with_meta(tc, get(action, "_meta")),
+                    "contributor": contributor,
+                    "invocationMessage": get(tc, "invocationMessage"),
+                    "toolInput": get(tc, "toolInput"),
+                    "confirmed": get(tc, "confirmed"),
+                }
+            )
+            selected = get(tc, "selectedOption")
+            # Both are `...(x ? { x } : {})` -- ToBoolean; `[]`/`{}` are truthy.
+            if truthy(selected):
                 paused["selectedOption"] = selected
-            content = tc.get("content")
-            # An ARRAY: presence, not truthiness.
-            if content is not None:
+            content = get(tc, "content")
+            if truthy(content):
                 paused["content"] = content
-            paused["auth"] = action.get("auth")
-            return paused
+            return assign(paused, "auth", get(action, "auth"))
 
         return _refresh_summary_status(
             _update_tool_call_in_parts(
                 state,
-                action.get("turnId"),
-                action.get("toolCallId"),
+                get(action, "turnId"),
+                get(action, "toolCallId"),
                 auth_required_updater,
             )
         )
@@ -943,26 +1016,29 @@ def chat_reducer(state: Any, action: Mapping[str, Any]) -> Any:
             if tc.get("status") != _AUTH_REQUIRED:
                 return tc
             # `auth` is intentionally not carried over: the challenge is gone.
-            resumed = {
-                "status": _RUNNING,
-                **_tc_base_with_meta(tc, action.get("_meta")),
-                "invocationMessage": tc.get("invocationMessage"),
-                "toolInput": tc.get("toolInput"),
-                "confirmed": tc.get("confirmed"),
-            }
-            selected = tc.get("selectedOption")
-            if selected is not None:
+            resumed = _literal(
+                {
+                    "status": _RUNNING,
+                    **_tc_base_with_meta(tc, get(action, "_meta")),
+                    "invocationMessage": get(tc, "invocationMessage"),
+                    "toolInput": get(tc, "toolInput"),
+                    "confirmed": get(tc, "confirmed"),
+                }
+            )
+            selected = get(tc, "selectedOption")
+            # Both are `...(x ? { x } : {})` -- ToBoolean; `[]`/`{}` are truthy.
+            if truthy(selected):
                 resumed["selectedOption"] = selected
-            content = tc.get("content")
-            if content is not None:
+            content = get(tc, "content")
+            if truthy(content):
                 resumed["content"] = content
             return resumed
 
         return _refresh_summary_status(
             _update_tool_call_in_parts(
                 state,
-                action.get("turnId"),
-                action.get("toolCallId"),
+                get(action, "turnId"),
+                get(action, "toolCallId"),
                 auth_resolved_updater,
             )
         )
@@ -981,10 +1057,9 @@ def chat_reducer(state: Any, action: Mapping[str, Any]) -> Any:
         if clear_all:
             turns: list[Any] = []
         else:
-            index = next(
-                (i for i, t in enumerate(existing_turns) if _mget(t, "id") == turn_id),
-                -1,
-            )
+            # `t.id === action.turnId` -- strict: `true` must not truncate at
+            # the turn whose id is `1`, on a client-dispatchable action.
+            index = index_of(existing_turns, "id", turn_id)
             if index < 0:
                 return state
             turns = existing_turns[: index + 1]
@@ -1003,12 +1078,12 @@ def chat_reducer(state: Any, action: Mapping[str, Any]) -> Any:
     if action_type == "chat/turnsLoaded":
         existing_turns = _seq(state.get("turns"))
         # `new Set(...)` takes any id; a Python set raises on a dict or a list,
-        # and a replayed turn id is whatever the peer sent. `_map_key` keeps the
-        # unhashable ones out of the set without changing which turns match.
-        existing_ids = {_map_key(_mget(t, "id")) for t in existing_turns}
-        older = [
-            t for t in _seq(action.get("turns")) if _map_key(_mget(t, "id")) not in existing_ids
-        ]
+        # and a replayed turn id is whatever the peer sent. `key_of` keeps the
+        # unhashable ones out of the set without changing which turns match, and
+        # `get` keeps an absent id (`undefined` upstream) a distinct key from an
+        # explicit null.
+        existing_ids = {key_of(get(t, "id")) for t in existing_turns}
+        older = [t for t in _seq(action.get("turns")) if key_of(get(t, "id")) not in existing_ids]
         return {
             **state,
             "turns": [*older, *existing_turns],
@@ -1025,7 +1100,7 @@ def chat_reducer(state: Any, action: Mapping[str, Any]) -> Any:
         if active is None:
             return state
         response_parts = _parts(active)
-        existing = _find_open_input_request_part(response_parts, action.get("requestId"))
+        existing = _find_open_input_request_part(response_parts, get(action, "requestId"))
         if existing is None:
             return state
         index, part = existing
@@ -1034,20 +1109,27 @@ def chat_reducer(state: Any, action: Mapping[str, Any]) -> Any:
         # `String(key)` semantics: `answers` is a plain JS object, so any key is
         # coerced to a string rather than raising. A dict or list key would be
         # `TypeError: unhashable` here otherwise, and the action is
-        # client-dispatchable.
-        question_id = _object_key(action.get("questionId"))
+        # client-dispatchable. `get` so an ABSENT questionId coerces to
+        # `"undefined"`, as upstream, not `"null"`.
+        question_id = to_string(get(action, "questionId"))
         # `action.answer === undefined` -- an explicit null is a real answer
         # value upstream and is STORED, not treated as a deletion.
         if "answer" not in action:
             answers.pop(question_id, None)
         else:
             answers[question_id] = action["answer"]
+        # `answers: Object.keys(answers).length > 0 ? answers : undefined` --
+        # the explicit `undefined` member OVERWRITES the spread copy and is then
+        # dropped by `JSON.stringify`, so deleting the last answer removes the
+        # key. Writing None instead would serialize `"answers": null`, which is
+        # schema-invalid and `!== undefined` in a reference peer.
         response_parts[index] = {
             **part,
-            "request": {
-                **(request if isinstance(request, Mapping) else {}),
-                "answers": answers if len(answers) > 0 else None,
-            },
+            "request": assign(
+                dict(request) if isinstance(request, Mapping) else {},
+                "answers",
+                answers if len(answers) > 0 else UNDEFINED,
+            ),
         }
         return {
             **state,
@@ -1060,21 +1142,29 @@ def chat_reducer(state: Any, action: Mapping[str, Any]) -> Any:
         if active is None:
             return state
         response_parts = _parts(active)
-        existing = _find_open_input_request_part(response_parts, action.get("requestId"))
+        existing = _find_open_input_request_part(response_parts, get(action, "requestId"))
         if existing is None:
             return state
         index, part = existing
         request = part.get("request")
+        # `{ ...(part.request.answers ?? {}), ...(action.answers ?? {}) }` is
+        # total over ANY JSON value: a string spreads to index keys, a number to
+        # `{}`. Both operands are peer-controlled, so this goes through
+        # `_spread_object` -- exactly as `chat/inputAnswerChanged` does -- where
+        # a bare `{**...}` would raise on a truthy non-mapping.
         final_answers = {
-            **(coalesce(_mget(request, "answers"), {}) or {}),
-            **(coalesce(action.get("answers"), {}) or {}),
+            **_spread_object(_mget(request, "answers")),
+            **_spread_object(action.get("answers")),
         }
+        # Same `... : undefined` overwrite-then-drop as `chat/inputAnswerChanged`
+        # above: no surviving answers means NO key, never `"answers": null`.
         completed = {
             **part,
-            "request": {
-                **(request if isinstance(request, Mapping) else {}),
-                "answers": final_answers if len(final_answers) > 0 else None,
-            },
+            "request": assign(
+                dict(request) if isinstance(request, Mapping) else {},
+                "answers",
+                final_answers if len(final_answers) > 0 else UNDEFINED,
+            ),
         }
         # `response: action.response` upstream sets the property to `undefined`
         # when the action omits it, which never reaches the wire. Writing None
@@ -1098,10 +1188,9 @@ def chat_reducer(state: Any, action: Mapping[str, Any]) -> Any:
         if action.get("kind") == _PENDING_MESSAGE_STEERING:
             return {**state, "steeringMessage": entry}
         existing_queue = _seq(coalesce(state.get("queuedMessages"), []))
-        index = next(
-            (i for i, m in enumerate(existing_queue) if _mget(m, "id") == action.get("id")),
-            -1,
-        )
+        # `m.id === action.id` -- strict, and `get` keeps an absent action id
+        # (`undefined`) matching only a message whose own id is absent.
+        index = index_of(existing_queue, "id", get(action, "id"))
         if index >= 0:
             updated_queue = list(existing_queue)
             updated_queue[index] = entry
@@ -1109,16 +1198,19 @@ def chat_reducer(state: Any, action: Mapping[str, Any]) -> Any:
         return {**state, "queuedMessages": [*existing_queue, entry]}
 
     if action_type == "chat/pendingMessageRemoved":
+        # `... .id !== action.id` (both branches) -- strict: `1` never removes
+        # the message `true` names, and an object id removes only by reference.
+        target = get(action, "id")
         if action.get("kind") == _PENDING_MESSAGE_STEERING:
             steering = state.get("steeringMessage")
-            if steering is None or _mget(steering, "id") != action.get("id"):
+            if steering is None or not strict_equal(get(steering, "id"), target):
                 return state
             return {**state, "steeringMessage": None}
         queued = state.get("queuedMessages")
         if queued is None:
             return state
         items = _seq(queued)
-        filtered = [m for m in items if _mget(m, "id") != action.get("id")]
+        filtered = [m for m in items if not strict_equal(get(m, "id"), target)]
         if len(filtered) == len(items):
             return state
         return {**state, "queuedMessages": filtered if len(filtered) > 0 else None}
@@ -1132,21 +1224,21 @@ def chat_reducer(state: Any, action: Mapping[str, Any]) -> Any:
         items = _seq(queued)
         # `chat/pendingMessageSet` stores `id` verbatim, so a queued id can be a
         # dict or a list -- fine as a JS Map/Set key, fatal as a Python one.
-        # `_map_key` wraps those; the ordering below is otherwise untouched.
+        # `key_of` wraps those; the ordering below is otherwise untouched.
         by_id: dict[Any, Any] = {}
         for message in items:
-            by_id[_map_key(_mget(message, "id"))] = message  # A JS Map: last write wins.
+            by_id[key_of(get(message, "id"))] = message  # A JS Map: last write wins.
         ordered: set[Any] = set()
         reordered: list[Any] = []
         for identifier in _seq(action.get("order")):
-            key = _map_key(identifier)
+            key = key_of(identifier)
             if key in by_id and key not in ordered:
                 ordered.add(key)
                 reordered.append(by_id[key])
         # Append anything not mentioned in `order`, preserving the original
         # order, so a client with a stale view never silently drops a message.
         for message in items:
-            if _map_key(_mget(message, "id")) not in ordered:
+            if key_of(get(message, "id")) not in ordered:
                 reordered.append(message)
         return {**state, "queuedMessages": reordered}
 

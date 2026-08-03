@@ -26,7 +26,15 @@ class Transport(Protocol):
         ...
 
     async def receive(self) -> dict[str, Any] | None:
-        """Next inbound message, or ``None`` once the stream has ended."""
+        """Next inbound message, or ``None`` once the stream has ended.
+
+        A frame that does not decode to a JSON object MAY raise
+        ``json.JSONDecodeError`` -- one raise per frame, never a retry loop
+        inside the transport. The consumer owns the malformed-frame policy
+        (count, log, continue, close past a threshold); a transport that
+        skips or retries internally makes that accounting unreachable, and a
+        recursive retry lets a garbage-streaming peer exhaust the stack.
+        """
         ...
 
     async def close(self) -> None:

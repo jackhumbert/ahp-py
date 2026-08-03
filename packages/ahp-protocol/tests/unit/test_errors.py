@@ -11,7 +11,12 @@ from typing import Any
 
 import pytest
 
-from agent_host_protocol.errors import AhpError, from_json, method_not_found
+from agent_host_protocol.errors import (
+    AhpError,
+    from_json,
+    method_not_found,
+    unsupported_protocol_version,
+)
 from agent_host_protocol.types import AHP_ERROR_CODES, JSON_RPC_ERROR_CODES
 
 
@@ -77,3 +82,23 @@ def test_missing_message_does_not_produce_the_string_none() -> None:
 
 def test_method_not_found_uses_the_json_rpc_code() -> None:
     assert method_not_found("resourceRead").code == -32601
+
+
+def test_unsupported_protocol_version_data_uses_the_declared_field_name() -> None:
+    """The -32005 data field is `supportedVersions` -- the single member of
+    `UnsupportedProtocolVersionErrorData` (`ts/errors.ts`, required by
+    `errors.schema.json`). The first cut emitted `supportedProtocolVersions`,
+    which a conformant client reads as absent, so it could not tell the user
+    which host versions would have worked."""
+    err = unsupported_protocol_version(("0.7.0", "0.6.0"))
+    assert err.code == AHP_ERROR_CODES["UnsupportedProtocolVersion"]
+    assert err.data == {"supportedVersions": ["0.7.0", "0.6.0"]}
+
+
+def test_unsupported_protocol_version_data_validates_against_the_pinned_schema() -> None:
+    """Field-name drift from the vendored schema must fail here, not in a peer."""
+    pytest.importorskip("jsonschema")
+    from agent_host_protocol.conformance.schemas import validate_against
+
+    err = unsupported_protocol_version(("0.7.0",))
+    assert validate_against("errors", "UnsupportedProtocolVersionErrorData", err.data) == []

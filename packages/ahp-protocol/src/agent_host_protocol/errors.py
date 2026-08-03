@@ -116,6 +116,11 @@ def internal_error(detail: str) -> AhpError:
 def unsupported_protocol_version(supported: tuple[str, ...]) -> AhpError:
     """-32005. The `data` payload lets a client explain the mismatch to the user.
 
+    The field is ``supportedVersions`` -- the single member of
+    ``UnsupportedProtocolVersionErrorData`` (``types/common/errors.ts:157``,
+    required by ``errors.schema.json``) -- not ``supportedProtocolVersions``,
+    which a conformant client would read as absent.
+
     We deliberately omit `_meta.vscodeUpgradeMethod`: that is for hosts spawned
     by the VS Code CLI, and upstream states servers without a managing CLI omit
     it.
@@ -123,7 +128,7 @@ def unsupported_protocol_version(supported: tuple[str, ...]) -> AhpError:
     return AhpError(
         AHP_ERROR_CODES["UnsupportedProtocolVersion"],
         "No mutually supported protocol version",
-        {"supportedProtocolVersions": list(supported)},
+        {"supportedVersions": list(supported)},
     )
 
 

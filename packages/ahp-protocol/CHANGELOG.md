@@ -45,6 +45,61 @@ the spec revision it targets.
   version. It was declared in two places, which is how the sibling host shipped
   `0.0.0` twice.
 
+### Fixed — a three-repo conformance review against the pin
+
+An adversarially-verified review against the vendored `spec/v0.7.0` sources,
+with the js-semantics oracle regenerated from the real pinned TypeScript
+reducers as the acceptance gate. Each fix is pinned by a test.
+
+- **The `-32005` error data emitted `supportedProtocolVersions`.** The pinned
+  `UnsupportedProtocolVersionErrorData` declares exactly one field,
+  `supportedVersions` (`errors.ts:157`; required by `errors.schema.json`) — a
+  conformant client read the one frame that explains a handshake failure as
+  empty. The sibling host's local workaround is retired.
+- **The chat reducer matches the reference on peer-controlled data**:
+  strict-equality (`===`/`indexOf`) id lookups (`True` is not `1`, a
+  structurally-equal object id matches nothing), JS-truthiness gates (`{}`
+  approves, `''` contributor is ignored), and JS object-spread of non-mapping
+  `chat/inputCompleted` answers (a string spreads to index keys, a number to
+  nothing) where the port raised `TypeError` on peer JSON.
+- **Tool-call state literals now carry JS member semantics**: a member the
+  reference computes as `undefined` is absent from the produced state — as
+  `JSON.stringify` emits it — where the port wrote explicit `null` for
+  `toolName`, `displayName`, `intention`, `contributor`, `_meta`,
+  `invocationMessage`, `toolInput` and `usage` across the whole tool-call
+  machine, and `chat/usage`/`chat/toolCallContentChanged` overrides delete the
+  key exactly where the reference's literal-over-spread does. The oracle
+  distinguishes the two spellings verbatim; the null-normalising corpus never
+  could.
+- **Session and root reducer omit-vs-null fixes**:
+  `session/mcpServerStateChanged` omit-to-clear for `channel`/`state`,
+  `session/changesetsChanged` null clears the catalogue (pinned fixture 146)
+  while `[]` sets an empty one, `creationFailed`/`customizationToggled` and
+  the id reads follow `js.get`; the root reducer no longer raises `KeyError`
+  on actions with missing properties and clears omitted full-replacement keys
+  as the reference does.
+- **`MemoryTransport.receive()` returns `None` persistently after
+  end-of-stream** — previously the side whose peer closed hung forever on the
+  second call.
+- The schema gate covers `resourceWatch` snapshots (was `KeyError`) and
+  validates `authenticate` results instead of skipping them; `now_iso` joined
+  the clock module's `__all__`; the shared `Transport.receive()` contract
+  documents the one-raise-per-malformed-frame rule both peers rely on.
+
+### Added — from the same review
+
+- **`NOTIFICATION_INTRODUCED_IN`** — the pinned `registry.ts` 8-method
+  notification→version table, vendored through the generator so a pin bump
+  that adds a notification cannot land without its version. Inert at this pin
+  (every method predates the oldest negotiable version) and pinned as such.
+- **The js-semantics oracle grew from 43 to 51 cases**, adding the chat
+  reducer to its coverage — including the case that caught the tool-call
+  member-spelling divergence above. One documented divergence is pinned where
+  the oracle cannot be matched without leaking a sentinel into consumer state:
+  a *repeated* absent-`directory` `chat/workingDirectorySet` appends a second
+  null image where the reference's in-memory `undefined` dedupes; the
+  reducer's comment records the trade.
+
 Extracted from [`agent-host-server-py`](https://github.com/jackhumbert/agent-host-server-py),
 where all of this code was written. See [ADR 0002](docs/decisions/0002-extraction.md).
 
@@ -92,5 +147,6 @@ where all of this code was written. See [ADR 0002](docs/decisions/0002-extractio
 
 - Targets spec `spec/v0.7.0` (`ea6fae670c4012721fdc02d587b3a46ecdc871c0`).
   `DEFAULT_SUPPORTED_VERSIONS` is `0.7.0, 0.6.0`.
-- `agent-host-server-py` has **not** been migrated onto this package yet; it
-  still carries its own copy. That migration is deliberately deferred.
+- `agent-host-server-py` has since been migrated onto this package (the
+  `check_sibling_drift.py` removal above records the moment the premise
+  changed); both consumers now import the one copy.

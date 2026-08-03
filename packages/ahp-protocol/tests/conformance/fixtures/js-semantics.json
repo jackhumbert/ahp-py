@@ -1445,6 +1445,396 @@
      }
     ]
    }
+  },
+  {
+   "name": "chat/truncated-true-vs-1",
+   "reducer": "chat",
+   "initial": {
+    "turns": [
+     {
+      "id": 1,
+      "startedAt": "1970-01-01T00:00:00.000Z"
+     }
+    ],
+    "status": 1,
+    "modifiedAt": "1970-01-01T00:00:00.000Z"
+   },
+   "actions": [
+    {
+     "type": "chat/truncated",
+     "turnId": true
+    }
+   ],
+   "expected": {
+    "turns": [
+     {
+      "id": 1,
+      "startedAt": "1970-01-01T00:00:00.000Z"
+     }
+    ],
+    "status": 1,
+    "modifiedAt": "1970-01-01T00:00:00.000Z"
+   }
+  },
+  {
+   "name": "chat/pendingMessageRemoved-object-id",
+   "reducer": "chat",
+   "initial": {
+    "turns": [],
+    "status": 1,
+    "modifiedAt": "1970-01-01T00:00:00.000Z",
+    "queuedMessages": [
+     {
+      "id": {
+       "a": 1
+      },
+      "message": {
+       "text": "m",
+       "origin": {
+        "kind": "user"
+       }
+      }
+     }
+    ]
+   },
+   "actions": [
+    {
+     "type": "chat/pendingMessageRemoved",
+     "id": {
+      "a": 1
+     }
+    }
+   ],
+   "expected": {
+    "turns": [],
+    "status": 1,
+    "modifiedAt": "1970-01-01T00:00:00.000Z",
+    "queuedMessages": [
+     {
+      "id": {
+       "a": 1
+      },
+      "message": {
+       "text": "m",
+       "origin": {
+        "kind": "user"
+       }
+      }
+     }
+    ]
+   }
+  },
+  {
+   "name": "chat/workingDirectorySet-absent-appends-null-image",
+   "reducer": "chat",
+   "initial": {
+    "turns": [],
+    "status": 1,
+    "modifiedAt": "1970-01-01T00:00:00.000Z"
+   },
+   "actions": [
+    {
+     "type": "chat/workingDirectorySet"
+    }
+   ],
+   "expected": {
+    "turns": [],
+    "status": 1,
+    "modifiedAt": "1970-01-01T00:00:00.000Z",
+    "workingDirectories": [
+     null
+    ]
+   }
+  },
+  {
+   "name": "chat/workingDirectorySet-null-dedupes-against-parsed-null",
+   "reducer": "chat",
+   "initial": {
+    "turns": [],
+    "status": 1,
+    "modifiedAt": "1970-01-01T00:00:00.000Z",
+    "workingDirectories": [
+     null
+    ]
+   },
+   "actions": [
+    {
+     "type": "chat/workingDirectorySet",
+     "directory": null
+    }
+   ],
+   "expected": {
+    "turns": [],
+    "status": 1,
+    "modifiedAt": "1970-01-01T00:00:00.000Z",
+    "workingDirectories": [
+     null
+    ]
+   }
+  },
+  {
+   "name": "chat/inputCompleted-string-answers",
+   "reducer": "chat",
+   "initial": {
+    "turns": [],
+    "status": 1,
+    "modifiedAt": "1970-01-01T00:00:00.000Z",
+    "activeTurn": {
+     "id": "t1",
+     "startedAt": "1970-01-01T00:00:00.000Z",
+     "message": {
+      "text": "hi",
+      "origin": {
+       "kind": "user"
+      }
+     },
+     "responseParts": [
+      {
+       "kind": "inputRequest",
+       "request": {
+        "id": "r1",
+        "questions": []
+       }
+      }
+     ]
+    }
+   },
+   "actions": [
+    {
+     "type": "chat/inputCompleted",
+     "requestId": "r1",
+     "response": "accept",
+     "answers": "ab"
+    }
+   ],
+   "expected": {
+    "turns": [],
+    "status": 8,
+    "modifiedAt": "1970-01-01T00:00:09.999Z",
+    "activeTurn": {
+     "id": "t1",
+     "startedAt": "1970-01-01T00:00:00.000Z",
+     "message": {
+      "text": "hi",
+      "origin": {
+       "kind": "user"
+      }
+     },
+     "responseParts": [
+      {
+       "kind": "inputRequest",
+       "request": {
+        "id": "r1",
+        "questions": [],
+        "answers": {
+         "0": "a",
+         "1": "b"
+        }
+       },
+       "response": "accept"
+      }
+     ]
+    }
+   }
+  },
+  {
+   "name": "chat/inputCompleted-number-answers",
+   "reducer": "chat",
+   "initial": {
+    "turns": [],
+    "status": 1,
+    "modifiedAt": "1970-01-01T00:00:00.000Z",
+    "activeTurn": {
+     "id": "t1",
+     "startedAt": "1970-01-01T00:00:00.000Z",
+     "message": {
+      "text": "hi",
+      "origin": {
+       "kind": "user"
+      }
+     },
+     "responseParts": [
+      {
+       "kind": "inputRequest",
+       "request": {
+        "id": "r1",
+        "questions": []
+       }
+      }
+     ]
+    }
+   },
+   "actions": [
+    {
+     "type": "chat/inputCompleted",
+     "requestId": "r1",
+     "response": "accept",
+     "answers": 42
+    }
+   ],
+   "expected": {
+    "turns": [],
+    "status": 8,
+    "modifiedAt": "1970-01-01T00:00:09.999Z",
+    "activeTurn": {
+     "id": "t1",
+     "startedAt": "1970-01-01T00:00:00.000Z",
+     "message": {
+      "text": "hi",
+      "origin": {
+       "kind": "user"
+      }
+     },
+     "responseParts": [
+      {
+       "kind": "inputRequest",
+       "request": {
+        "id": "r1",
+        "questions": []
+       },
+       "response": "accept"
+      }
+     ]
+    }
+   }
+  },
+  {
+   "name": "chat/toolCallConfirmed-approved-empty-object",
+   "reducer": "chat",
+   "initial": {
+    "activeTurn": {
+     "id": "t1",
+     "startedAt": "1970-01-01T00:00:00.000Z",
+     "message": {
+      "text": "hi",
+      "origin": {
+       "kind": "user"
+      }
+     },
+     "responseParts": [
+      {
+       "kind": "toolCall",
+       "toolCall": {
+        "toolCallId": "c1",
+        "status": "pending-confirmation",
+        "invocationMessage": "running",
+        "toolInput": "{\"arg\": 1}"
+       }
+      }
+     ]
+    },
+    "turns": [],
+    "status": 1,
+    "modifiedAt": "1970-01-01T00:00:00.000Z"
+   },
+   "actions": [
+    {
+     "type": "chat/toolCallConfirmed",
+     "turnId": "t1",
+     "toolCallId": "c1",
+     "approved": {},
+     "confirmed": "user"
+    }
+   ],
+   "expected": {
+    "activeTurn": {
+     "id": "t1",
+     "startedAt": "1970-01-01T00:00:00.000Z",
+     "message": {
+      "text": "hi",
+      "origin": {
+       "kind": "user"
+      }
+     },
+     "responseParts": [
+      {
+       "kind": "toolCall",
+       "toolCall": {
+        "status": "running",
+        "toolCallId": "c1",
+        "invocationMessage": "running",
+        "toolInput": "{\"arg\": 1}",
+        "confirmed": "user"
+       }
+      }
+     ]
+    },
+    "turns": [],
+    "status": 8,
+    "modifiedAt": "1970-01-01T00:00:00.000Z"
+   }
+  },
+  {
+   "name": "chat/toolCallReady-empty-contributor",
+   "reducer": "chat",
+   "initial": {
+    "activeTurn": {
+     "id": "t1",
+     "startedAt": "1970-01-01T00:00:00.000Z",
+     "message": {
+      "text": "hi",
+      "origin": {
+       "kind": "user"
+      }
+     },
+     "responseParts": [
+      {
+       "kind": "toolCall",
+       "toolCall": {
+        "toolCallId": "c1",
+        "status": "streaming",
+        "invocationMessage": "running",
+        "toolInput": "{\"arg\": 1}",
+        "contributor": {
+         "kind": "mcpServer",
+         "serverName": "srv"
+        }
+       }
+      }
+     ]
+    },
+    "turns": [],
+    "status": 1,
+    "modifiedAt": "1970-01-01T00:00:00.000Z"
+   },
+   "actions": [
+    {
+     "type": "chat/toolCallReady",
+     "turnId": "t1",
+     "toolCallId": "c1",
+     "contributor": "",
+     "confirmed": "not-needed"
+    }
+   ],
+   "expected": {
+    "activeTurn": {
+     "id": "t1",
+     "startedAt": "1970-01-01T00:00:00.000Z",
+     "message": {
+      "text": "hi",
+      "origin": {
+       "kind": "user"
+      }
+     },
+     "responseParts": [
+      {
+       "kind": "toolCall",
+       "toolCall": {
+        "status": "running",
+        "toolCallId": "c1",
+        "contributor": {
+         "kind": "mcpServer",
+         "serverName": "srv"
+        },
+        "confirmed": "not-needed"
+       }
+      }
+     ]
+    },
+    "turns": [],
+    "status": 8,
+    "modifiedAt": "1970-01-01T00:00:00.000Z"
+   }
   }
  ]
 }

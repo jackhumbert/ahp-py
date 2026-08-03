@@ -287,6 +287,24 @@ ACTION_INTRODUCED_IN: Final[dict[str, str]] = {
     'resourceWatch/changed': '0.2.0',
 }
 
+#: Server->client notification method -> the protocol version that introduced
+#: it (`ServerNotificationMap` minus `action`, which ACTION_INTRODUCED_IN
+#: versions per action type). Upstream's `isNotificationKnownToVersion` is a
+#: `<=` compare against the negotiated version; every method here predates the
+#: oldest negotiable version at this pin, so the filter only bites after a pin
+#: bump lands a newer notification -- vendored now so that bump cannot land
+#: without the table.
+NOTIFICATION_INTRODUCED_IN: Final[dict[str, str]] = {
+    'root/sessionAdded': '0.1.0',
+    'root/sessionRemoved': '0.1.0',
+    'root/sessionSummaryChanged': '0.1.0',
+    'root/progress': '0.5.0',
+    'auth/required': '0.1.0',
+    'otlp/exportLogs': '0.2.0',
+    'otlp/exportTraces': '0.2.0',
+    'otlp/exportMetrics': '0.2.0',
+}
+
 #: Standard JSON-RPC 2.0 error codes.
 JSON_RPC_ERROR_CODES: Final[dict[str, int]] = {
     'ParseError': -32700,

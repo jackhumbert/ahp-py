@@ -15,7 +15,7 @@ from __future__ import annotations
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 
-__all__ = ["MOCK_NOW_MS", "frozen_clock", "now_ms", "set_clock", "to_iso"]
+__all__ = ["MOCK_NOW_MS", "frozen_clock", "now_iso", "now_ms", "set_clock", "to_iso"]
 
 #: What the fixture corpus is authored against: `Date.now() === 9999`, which
 #: stamps as "1970-01-01T00:00:09.999Z". 28 fixtures assert that literal.

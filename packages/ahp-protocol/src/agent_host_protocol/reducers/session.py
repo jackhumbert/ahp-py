@@ -28,7 +28,15 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
-from agent_host_protocol.reducers.js import UNDEFINED, assign, get, index_of
+from agent_host_protocol.reducers.js import (
+    UNDEFINED,
+    assign,
+    get,
+    index_of,
+    index_of_value,
+    strict_equal,
+    truthy,
+)
 from agent_host_protocol.types.protocol import SessionStatus, session_status_flags
 from agent_host_protocol.types.wire import coalesce
 
@@ -95,19 +103,6 @@ def _with_input_needed_status(status: int, input_needed: Sequence[Any]) -> int:
     if len(input_needed) > 0:
         return session_status_flags((status & ~_STATUS_ACTIVITY_MASK) | _INPUT_NEEDED)
     return session_status_flags(status & ~(_INPUT_NEEDED & ~_IN_PROGRESS))
-
-
-def _index_of_value(items: Sequence[Any], value: Any) -> int:
-    """``items.indexOf(value)``; -1 when absent.
-
-    Only ever used for the working-directory URI set, so ``==`` is safe here --
-    it is string-to-string. It is written out rather than using ``in`` so the
-    membership test and the removal share one scan and one equality rule.
-    """
-    for index, item in enumerate(items):
-        if item == value:
-            return index
-    return -1
 
 
 def _without(items: Sequence[Any], index: int) -> list[Any]:
@@ -191,9 +186,10 @@ def session_reducer(state: Any, action: Mapping[str, Any]) -> Any:
 
     if action_type == "session/creationFailed":
         # `creationError: action.error` -- an omitted error is `undefined`
-        # upstream, which is an absent key here, not a raise.
+        # upstream, so the key stays ABSENT. `action.get` would hand `assign`
+        # a `None` it writes through as `"creationError": null`.
         return assign(
-            {**state, "lifecycle": "creationFailed"}, "creationError", action.get("error")
+            {**state, "lifecycle": "creationFailed"}, "creationError", get(action, "error")
         )
 
     # ── Chat catalog ─────────────────────────────────────────────────────────
@@ -209,13 +205,19 @@ def session_reducer(state: Any, action: Mapping[str, Any]) -> Any:
         return {**state, "chats": updated}
 
     if action_type == "session/chatRemoved":
-        chat = action.get("chat")
+        # `c.resource === action.chat`: an absent `chat` is `undefined`, which
+        # matches an entry whose own `resource` is absent and never matches an
+        # explicit null -- `action.get` (None for both) inverts that pairing.
+        chat = get(action, "chat")
         chats = coalesce(state.get("chats"), [])
         index = index_of(chats, "resource", chat)
         if index < 0:
             return state
         next_state = {**state, "chats": _without(chats, index)}
-        if state.get("defaultChat") == chat:
+        # `state.defaultChat === action.chat` -- strict: a null defaultChat must
+        # survive an absent `chat`, and an object-valued one compares by
+        # reference, not structure.
+        if strict_equal(get(state, "defaultChat"), chat):
             # Upstream `delete next.defaultChat` -- the routing hint cannot point
             # at a chat that no longer exists.
             next_state.pop("defaultChat", None)
@@ -262,10 +264,17 @@ def session_reducer(state: Any, action: Mapping[str, Any]) -> Any:
         return assign({**state}, "activity", get(action, "activity"))
 
     if action_type == "session/changesetsChanged":
-        # Upstream `action.changesets ? ... : ...`. An empty array is TRUTHY in
-        # JS, so an explicit `[]` sets an empty catalogue rather than clearing
-        # it; only null/undefined clears. `is not None`, never truthiness.
-        return assign({**state}, "changesets", get(action, "changesets"))
+        # Upstream destructures the key out and re-adds it only when
+        # `action.changesets` is truthy, so an explicit null CLEARS the key
+        # (fixture 146 pins that: `"changesets": null` in, no key out) --
+        # `assign` would write the null through. JS truthiness, not Python's:
+        # an empty array is truthy there and sets an empty catalogue.
+        changesets = get(action, "changesets")
+        next_state = {**state}
+        next_state.pop("changesets", None)
+        if truthy(changesets):
+            next_state["changesets"] = changesets
+        return next_state
 
     if action_type == "session/configChanged":
         config = state.get("config")
@@ -313,18 +322,24 @@ def session_reducer(state: Any, action: Mapping[str, Any]) -> Any:
     # ── Working directories ──────────────────────────────────────────────────
 
     if action_type == "session/workingDirectorySet":
-        # Membership, not truthiness: an existing empty set still appends.
-        directory = action.get("directory")
+        # `list.indexOf(action.directory)` -- strict: an absent `directory` is
+        # `undefined`, which matches nothing (a parsed array cannot hold one),
+        # so upstream appends even when the list already holds an explicit null.
+        directory = get(action, "directory")
         directories = coalesce(state.get("workingDirectories"), [])
-        if _index_of_value(directories, directory) >= 0:
+        if index_of_value(directories, directory) >= 0:
             return state
-        return {**state, "workingDirectories": [*directories, directory]}
+        # `JSON.stringify` writes an `undefined` ARRAY ELEMENT as `null` --
+        # unlike an object member, which it drops -- so the appended image of an
+        # absent directory is null.
+        appended = None if directory is UNDEFINED else directory
+        return {**state, "workingDirectories": [*directories, appended]}
 
     if action_type == "session/workingDirectoryRemoved":
         directories = state.get("workingDirectories")
         if directories is None:
             return state
-        index = _index_of_value(directories, get(action, "directory"))
+        index = index_of_value(directories, get(action, "directory"))
         if index < 0:
             return state
         return {**state, "workingDirectories": _without(directories, index)}
@@ -375,11 +390,14 @@ def session_reducer(state: Any, action: Mapping[str, Any]) -> Any:
         customizations = state.get("customizations")
         if customizations is None:
             return state
-        target_id = action.get("id")
+        # `c.id === action.id`: an absent id is `undefined`, which matches an
+        # entry with no `id` key and never one carrying an explicit null.
+        target_id = get(action, "id")
         # `enabled: action.enabled` -- an omitted flag is `undefined` upstream,
-        # i.e. the key goes away, and only once an id has matched. Both reads are
+        # i.e. the key goes away, and only once an id has matched. `action.get`
+        # would write `"enabled": null` instead. Both reads are
         # client-dispatchable.
-        enabled = action.get("enabled")
+        enabled = get(action, "enabled")
         top_index = index_of(customizations, "id", target_id)
         if top_index >= 0:
             updated = list(customizations)
@@ -417,7 +435,8 @@ def session_reducer(state: Any, action: Mapping[str, Any]) -> Any:
         customizations = state.get("customizations")
         if customizations is None:
             return state
-        target_id = action.get("id")
+        # `c.id === action.id` again: absent is `undefined`, not None.
+        target_id = get(action, "id")
         top_index = index_of(customizations, "id", target_id)
         if top_index >= 0:
             # Removing a container removes its children with it.
@@ -445,8 +464,13 @@ def session_reducer(state: Any, action: Mapping[str, Any]) -> Any:
     # ── MCP servers ──────────────────────────────────────────────────────────
 
     if action_type == "session/mcpServerStateChanged":
-        state_value = action.get("state")
-        channel = action.get("channel")
+        # The actions doc calls `channel` "full-replacement: omit to clear an
+        # existing channel (typical when leaving Ready)", so the omit path runs
+        # on every well-formed shutdown. `action.get` would turn it into
+        # `"channel": null` -- schema-invalid, and `!== undefined` in a
+        # reference client -- where `get` lets `assign` drop the key.
+        state_value = get(action, "state")
+        channel = get(action, "channel")
         return _update_mcp_server(
             state,
             get(action, "id"),

@@ -9,8 +9,8 @@ This repository owns the pin for the whole Python AHP ecosystem. A peer that
 depends on `agent-host-protocol` does not vendor anything, does not run
 `vendor_upstream.sh`, and does not maintain its own copy of this document — it
 pins a version of this distribution and asserts
-`agent_host_protocol.UPSTREAM_PROTOCOL_VERSION` in its own README test, so a
-dependency bump that moves the spec under it fails loudly.
+`agent_host_protocol.UPSTREAM_PROTOCOL_VERSION` in its own `tests/docs/`
+suite, so a dependency bump that moves the spec under it fails loudly.
 
 ## Current pin
 
@@ -49,6 +49,7 @@ mapped into the wheel at `agent_host_protocol/conformance/_upstream/` by hatch's
 | `types/test-cases/round-trips/**` (39 fixtures) | git tag only | same |
 | `schema/*.schema.json` (5 files) | release asset **or** git tag | asset exists, but must match the pinned tag |
 | `ts/` — `registry.ts`, `action-origin.generated.ts`, `actions.ts`, `errors.ts`, `session-state.ts` | git tag only | the codegen inputs for `_generated.py` |
+| `ts/` — `messages.ts`, `commands.ts`, and `commands-{root,session,chat,terminal,changeset,resource-watch}.ts` | git tag only | the command/notification maps and per-channel params the peers' parity and scoping gates read |
 
 The conformance corpora exist **only in the git repository**, never as release
 assets. Vendored files are committed and never fetched during a test run; the
@@ -91,7 +92,7 @@ Tracked so they can be removed when fixed upstream.
 |---|---|
 | Published `spec/v0.6.0` schemas mark `T \| undefined` properties as `required` (`ActionEnvelope.origin`, `Turn.usage`, `ActiveTurn.usage`, …). Fixed at 0.7.0. | Do not generate types from the 0.6.0 schemas. |
 | `errors.schema.json` omits `-32011 Conflict` — the generator hardcodes the enum. | Error codes are taken from `types/common/errors.ts`, not the schema. `errors.from_json` accepts any integer code for the same reason. |
-| `actions.schema.json` ships a malformed `{"$ref": "#/$defs/"}` as `StateAction.oneOf[0]` — present in **every** tag from `spec/v0.5.0` to `v0.7.0`. Causes `RecursionError` in `datamodel-code-generator` and `PointerToNowhere` in Python's `jsonschema`. | No schema-validation gate; no generation from schema. `tests/unit/test_generated_tables.py` pins the defect so a fix upstream is noticed. |
+| `actions.schema.json` ships a malformed `{"$ref": "#/$defs/"}` as `StateAction.oneOf[0]` — present in **every** tag from `spec/v0.5.0` to `v0.7.0`. Causes `RecursionError` in `datamodel-code-generator` and `PointerToNowhere` in Python's `jsonschema`. | Validation is **per-definition** (`conformance/schemas.py` resolves one `#/$defs/<name>` at a time), which never touches the broken ref — but `validate_against('actions', 'StateAction', …)` or `'ActionEnvelope'` still hits `PointerToNowhere`, so those two definitions stay unvalidatable. No generation from schema. `tests/unit/test_generated_tables.py` pins the defect so a fix upstream is noticed. |
 | `SessionStatus` is a bitset emitted as a closed `enum: [1,2,8,24,32,64]`, which rejects `33, 40, 56, 65, 72, 2147483720` — values present in upstream's own conformance corpora. | Same. Pinned by a test. |
 | `chatReducer` reads the wall clock in six places, so reducers are not pure. | Reducers take an injectable clock; the conformance harness pins it to `9999`. |
 | No unknown-action fixture exists for the `chat` reducer. | Covered by a local unit test instead. |

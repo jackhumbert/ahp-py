@@ -105,3 +105,13 @@ but its MINOR moves whenever the vendored spec tag's MINOR moves. Both peers pin
 while a spec-shaped change is a deliberate upgrade. Each peer asserts
 `UPSTREAM_PROTOCOL_VERSION` in its own README test, so a dependency bump that
 moves the spec under it fails loudly.
+
+## Postscript (2026-08-02)
+
+The migration described above as "not yet" landed the same day: the server's
+commit `0874225` ("feat!: depend on agent-host-protocol") deleted its copy of
+the extracted tree, added the `~= 0.1.0` dependency, and met the acceptance
+criterion — its suite passed with zero test-assertion edits. The temporary
+two-trees-can-drift liability this ADR accepted no longer exists, and the
+sibling-drift check that guarded it has been removed. The pin assertion each
+peer carries lives in its `tests/docs/` suite.

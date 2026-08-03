@@ -71,6 +71,16 @@ def parse_introduced_in(src: str, members: dict[str, str]) -> dict[str, str]:
     return out
 
 
+def parse_notification_introduced_in(src: str) -> dict[str, str]:
+    """`NOTIFICATION_INTRODUCED_IN` keys are wire method strings, not
+    `ActionType.` members -- the map covers `ServerNotificationMap` minus
+    `action`, whose versioning ACTION_INTRODUCED_IN already carries."""
+    body = re.search(r"export const NOTIFICATION_INTRODUCED_IN[^=]*=\s*\{(.*?)\n\};", src, re.S)
+    if not body:
+        sys.exit("could not locate `NOTIFICATION_INTRODUCED_IN`")
+    return dict(re.findall(r"'([\w/]+)'\s*:\s*'([\d.]+)'", body.group(1)))
+
+
 def parse_versions(src: str) -> tuple[str, list[str]]:
     current = re.search(r"export const PROTOCOL_VERSION = '([\d.]+)'", src)
     supported = re.search(
@@ -113,6 +123,7 @@ def main() -> None:
     wire_types = sorted(members.values())
     dispatchable = parse_client_dispatchable(origin_src, members)
     introduced = parse_introduced_in(registry_src, members)
+    notification_introduced = parse_notification_introduced_in(registry_src)
     current, supported = parse_versions(registry_src)
     jsonrpc_codes = parse_error_codes(errors_src, "JsonRpcErrorCodes")
     ahp_codes = parse_error_codes(errors_src, "AhpErrorCodes")
@@ -162,6 +173,15 @@ IS_CLIENT_DISPATCHABLE: Final[dict[str, bool]] = {pyrepr(dispatchable)}
 #: version" (docs/specification/versioning.md).
 ACTION_INTRODUCED_IN: Final[dict[str, str]] = {pyrepr(introduced)}
 
+#: Server->client notification method -> the protocol version that introduced
+#: it (`ServerNotificationMap` minus `action`, which ACTION_INTRODUCED_IN
+#: versions per action type). Upstream's `isNotificationKnownToVersion` is a
+#: `<=` compare against the negotiated version; every method here predates the
+#: oldest negotiable version at this pin, so the filter only bites after a pin
+#: bump lands a newer notification -- vendored now so that bump cannot land
+#: without the table.
+NOTIFICATION_INTRODUCED_IN: Final[dict[str, str]] = {pyrepr(notification_introduced)}
+
 #: Standard JSON-RPC 2.0 error codes.
 JSON_RPC_ERROR_CODES: Final[dict[str, int]] = {pyrepr(jsonrpc_codes)}
 
@@ -174,6 +194,7 @@ AHP_ERROR_CODES: Final[dict[str, int]] = {pyrepr(ahp_codes)}
 
     print(f"wrote {OUT.relative_to(ROOT)}")
     print(f"  actions:            {len(wire_types)}")
+    print(f"  notifications:       {len(notification_introduced)} versioned")
     print(f"  client-dispatchable: {sum(dispatchable.values())}")
     print(f"  upstream version:    {current} (supports {', '.join(supported)})")
     print(f"  error codes:         {len(jsonrpc_codes)} json-rpc + {len(ahp_codes)} ahp")

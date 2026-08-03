@@ -284,6 +284,138 @@ case(
     [{"type": "session/inputNeededRemoved", "id": True}],
 )
 
+# ── chat: strict ids, spread-of-anything answers, truthiness gates ───────────
+#
+# Each case pins one hazard the review found ported wrong once: `===` on
+# peer-controlled ids (bool-vs-int, structurally-equal objects), the JS
+# object-spread of a non-object (`{...'ab'}` has index keys, `{...42}` is
+# empty), the null image of an `undefined` array element under
+# JSON.stringify, and `if (action.approved)` being ToBoolean, not `is None`.
+
+_CHAT = {"turns": [], "status": 1, "modifiedAt": "1970-01-01T00:00:00.000Z"}
+
+
+def _chat_tool_call(status: str, **extra: Any) -> dict[str, Any]:
+    return {
+        "activeTurn": {
+            "id": "t1",
+            "startedAt": "1970-01-01T00:00:00.000Z",
+            "message": {"text": "hi", "origin": {"kind": "user"}},
+            "responseParts": [
+                {
+                    "kind": "toolCall",
+                    "toolCall": {
+                        "toolCallId": "c1",
+                        "status": status,
+                        "invocationMessage": "running",
+                        "toolInput": '{"arg": 1}',
+                        **extra,
+                    },
+                }
+            ],
+        },
+        **_CHAT,
+    }
+
+
+# turns.findIndex(t => t.id === action.turnId): true === 1 is false in JS,
+# True == 1 is True in Python -- the no-op must survive the port.
+case(
+    "chat/truncated-true-vs-1",
+    "chat",
+    {**_CHAT, "turns": [{"id": 1, "startedAt": "1970-01-01T00:00:00.000Z"}]},
+    [{"type": "chat/truncated", "turnId": True}],
+)
+# filter(m => m.id !== action.id): object identity, so a structurally-equal
+# id parsed from a different frame removes nothing.
+case(
+    "chat/pendingMessageRemoved-object-id",
+    "chat",
+    {
+        **_CHAT,
+        "queuedMessages": [{"id": {"a": 1}, "message": {"text": "m", "origin": {"kind": "user"}}}],
+    },
+    [{"type": "chat/pendingMessageRemoved", "id": {"a": 1}}],
+)
+# One absent append pins the null image; a second in the SAME process would
+# no-op upstream (`includes` finds the in-memory `undefined`) but append again
+# here, because our state never holds the sentinel -- a documented divergence,
+# pinned by a unit test rather than by this oracle. The explicit-null case has
+# no such split: both sides store null and dedupe on it.
+case(
+    "chat/workingDirectorySet-absent-appends-null-image",
+    "chat",
+    _CHAT,
+    [{"type": "chat/workingDirectorySet"}],
+)
+case(
+    "chat/workingDirectorySet-null-dedupes-against-parsed-null",
+    "chat",
+    {**_CHAT, "workingDirectories": [None]},
+    [{"type": "chat/workingDirectorySet", "directory": None}],
+)
+# {...(part.request.answers ?? {}), ...(action.answers ?? {})} over a string
+# yields index keys; over a number it yields {} and the answers key drops.
+case(
+    "chat/inputCompleted-string-answers",
+    "chat",
+    {
+        **_CHAT,
+        "activeTurn": {
+            "id": "t1",
+            "startedAt": "1970-01-01T00:00:00.000Z",
+            "message": {"text": "hi", "origin": {"kind": "user"}},
+            "responseParts": [{"kind": "inputRequest", "request": {"id": "r1", "questions": []}}],
+        },
+    },
+    [{"type": "chat/inputCompleted", "requestId": "r1", "response": "accept", "answers": "ab"}],
+)
+case(
+    "chat/inputCompleted-number-answers",
+    "chat",
+    {
+        **_CHAT,
+        "activeTurn": {
+            "id": "t1",
+            "startedAt": "1970-01-01T00:00:00.000Z",
+            "message": {"text": "hi", "origin": {"kind": "user"}},
+            "responseParts": [{"kind": "inputRequest", "request": {"id": "r1", "questions": []}}],
+        },
+    },
+    [{"type": "chat/inputCompleted", "requestId": "r1", "response": "accept", "answers": 42}],
+)
+# `if (action.approved)` is ToBoolean: {} approves, and the call runs.
+case(
+    "chat/toolCallConfirmed-approved-empty-object",
+    "chat",
+    _chat_tool_call("pending-confirmation"),
+    [
+        {
+            "type": "chat/toolCallConfirmed",
+            "turnId": "t1",
+            "toolCallId": "c1",
+            "approved": {},
+            "confirmed": "user",
+        }
+    ],
+)
+# refineToolCallContributor: `if (!next)` keeps the existing contributor for
+# every falsy replacement, '' included -- not only for null/absent.
+case(
+    "chat/toolCallReady-empty-contributor",
+    "chat",
+    _chat_tool_call("streaming", contributor={"kind": "mcpServer", "serverName": "srv"}),
+    [
+        {
+            "type": "chat/toolCallReady",
+            "turnId": "t1",
+            "toolCallId": "c1",
+            "contributor": "",
+            "confirmed": "not-needed",
+        }
+    ],
+)
+
 if __name__ == "__main__":
     for entry in CASES:
         sys.stdout.write(json.dumps(entry) + "\n")

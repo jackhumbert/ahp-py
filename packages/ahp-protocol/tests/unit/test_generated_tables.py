@@ -15,6 +15,7 @@ from agent_host_protocol.types import (
     AHP_ERROR_CODES,
     IS_CLIENT_DISPATCHABLE,
     JSON_RPC_ERROR_CODES,
+    NOTIFICATION_INTRODUCED_IN,
     UPSTREAM_PROTOCOL_VERSION,
     UPSTREAM_SUPPORTED_PROTOCOL_VERSIONS,
 )
@@ -39,6 +40,30 @@ def test_client_dispatchable_count() -> None:
 def test_unknown_actions_are_not_client_dispatchable() -> None:
     """The gate must default to closed for anything it does not recognise."""
     assert IS_CLIENT_DISPATCHABLE.get("future/madeUpAction", False) is False
+
+
+def test_notification_versions_match_the_pinned_registry() -> None:
+    """The 8-method table from `registry.ts` (`ServerNotificationMap` minus
+    `action`), pinned verbatim so a pin bump that adds a notification cannot
+    land without its version -- upstream's `isNotificationKnownToVersion`
+    filter is unimplementable otherwise. Every current method predates the
+    oldest negotiable version, so the filter is inert at this pin."""
+    assert NOTIFICATION_INTRODUCED_IN == {
+        "root/sessionAdded": "0.1.0",
+        "root/sessionRemoved": "0.1.0",
+        "root/sessionSummaryChanged": "0.1.0",
+        "root/progress": "0.5.0",
+        "auth/required": "0.1.0",
+        "otlp/exportLogs": "0.2.0",
+        "otlp/exportTraces": "0.2.0",
+        "otlp/exportMetrics": "0.2.0",
+    }
+
+    def parts(version: str) -> tuple[int, ...]:
+        return tuple(int(p) for p in version.split("."))
+
+    oldest_negotiable = parts(UPSTREAM_SUPPORTED_PROTOCOL_VERSIONS[-1])
+    assert all(parts(v) <= oldest_negotiable for v in NOTIFICATION_INTRODUCED_IN.values())
 
 
 def test_error_codes_match_the_spec() -> None:

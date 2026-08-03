@@ -24,6 +24,13 @@ class MemoryTransport:
         self._inbox: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue()
         self._peer: MemoryTransport | None = None
         self._closed = False
+        # Latched once the end-of-stream sentinel is dequeued. The peer's
+        # `close()` enqueues exactly ONE sentinel, which the first `receive()`
+        # consumes; without the latch a second `receive()` on the side that did
+        # NOT close (`_closed` still False) would await an empty queue with no
+        # writer left -- an asyncio hang, where `Transport.receive`'s contract
+        # is "None once the stream has ended", persistently.
+        self._drained = False
 
     def _link(self, peer: MemoryTransport) -> None:
         self._peer = peer
@@ -36,9 +43,12 @@ class MemoryTransport:
         self._peer._inbox.put_nowait(json.loads(json.dumps(message)))
 
     async def receive(self) -> dict[str, Any] | None:
-        if self._closed and self._inbox.empty():
+        if self._drained or (self._closed and self._inbox.empty()):
             return None
-        return await self._inbox.get()
+        message = await self._inbox.get()
+        if message is None:
+            self._drained = True
+        return message
 
     async def close(self) -> None:
         if self._closed:
