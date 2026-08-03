@@ -314,6 +314,14 @@ class EchoSession:
                 invocation_message=f"Running the client's {name!r} tool",
             )
         )
+        if not result.accepted:
+            # The whole point of `ToolResult.response`. Rendering a refusal as
+            # `said: None` is how a demo teaches an adapter author to report the
+            # editor's "no" as an empty success.
+            await sink.text_delta(
+                f"The client refused to run {name!r}: {result.reason or 'no reason given'}"
+            )
+            return
         await sink.text_delta(f"The client's {name!r} tool said: {result.value}")
 
     async def customization_toggled(self, customization_id: str, enabled: bool) -> None:

@@ -17,7 +17,10 @@ import json
 import time
 import uuid
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from typing import Any
+from dataclasses import dataclass
+from typing import Any, Final
+
+from agent_host_protocol.types import IS_CLIENT_DISPATCHABLE
 
 from agent_host_server.core.pending import PendingRequest, PendingRequests
 from agent_host_server.core.sequencer import Sequencer
@@ -34,7 +37,7 @@ from agent_host_server.provider.base import (
     UserMessage,
 )
 
-__all__ = ["ActionTurnSink", "TurnRunner", "turn_scope"]
+__all__ = ["ActionTurnSink", "TurnRunner", "tool_call_dispatch_rejection", "turn_scope"]
 
 #: Called after the sink changes something the *session summary* projects, so
 #: the host can re-mirror it. A turn's ordinary output is deliberately not
@@ -42,6 +45,96 @@ __all__ = ["ActionTurnSink", "TurnRunner", "turn_scope"]
 #: activity changes at most once per tool call, and the session list is the only
 #: place it renders.
 SessionChanged = Callable[[], Awaitable[None]]
+
+
+#: The tool-call actions a client may originate. DERIVED from the generated
+#: table rather than listed, so a tool-call action a future spec makes
+#: client-dispatchable is validated the day it appears instead of the day
+#: somebody remembers this constant. The rest of the family is server-only and
+#: never arrives through `dispatchAction` at all.
+_TOOL_CALL_ACTIONS: Final = frozenset(
+    action
+    for action, dispatchable in IS_CLIENT_DISPATCHABLE.items()
+    if dispatchable and action.startswith("chat/toolCall")
+)
+
+
+def tool_call_dispatch_rejection(action: Mapping[str, Any]) -> str | None:
+    """A `rejectionReason` for a malformed tool-call action, or ``None``.
+
+    The client-dispatchable tool-call actions are the ones where a missing
+    REQUIRED field does damage instead of nothing: every reducer keys on
+    `turnId`, so a confirmation without one is fanned out to every subscriber
+    and then applied by nobody -- while the host, which resolves the parked
+    request by `toolCallId` alone, runs the tool anyway. State says the call was
+    never confirmed; the tool has already run. An approval missing `confirmed`
+    lands as `confirmed: null` ("nobody was asked"), and a denial missing
+    `reason` cancels a call with no reason to show for it.
+
+    Presence and JSON type only, never enum membership: a peer may speak a newer
+    spec than we do, and refusing an unknown `confirmed` reason would break
+    against exactly the client we most want to keep working (invariant 4).
+
+    Required lists quoted verbatim from the vendored `actions.schema.json`.
+    """
+    action_type = action.get("type")
+    if action_type not in _TOOL_CALL_ACTIONS:
+        return None
+    # `ToolCallActionBase.required: ["turnId", "toolCallId"]`, both `string`.
+    for name in ("turnId", "toolCallId"):
+        if not isinstance(action.get(name), str):
+            return f"{action_type} needs a string {name!r}"
+
+    if action_type == "chat/toolCallComplete":
+        # `ChatToolCallCompleteAction.required: [..., "result"]`.
+        if not isinstance(action.get("result"), Mapping):
+            return f"{action_type} needs a result object"
+        return None
+
+    if action_type == "chat/toolCallContentChanged":
+        # `ChatToolCallContentChangedAction.required: [..., "content"]`.
+        if not isinstance(action.get("content"), list):
+            return f"{action_type} needs a content array"
+        return None
+
+    # Both remaining actions are keyed on `approved`, and its ABSENCE is not a
+    # denial: the reducer reads it with JS truthiness, so a missing key silently
+    # becomes "denied" for one peer and "approved" for the host that asked.
+    if "approved" not in action:
+        return f"{action_type} needs an 'approved'"
+    if action_type == "chat/toolCallResultConfirmed":
+        return None
+
+    # `ChatToolCallApprovedAction.required: [..., "approved", "confirmed"]`;
+    # `ChatToolCallDeniedAction.required: [..., "approved", "reason"]`. Which of
+    # the two a frame is gets decided by `approved`'s truthiness, because that
+    # is how the reducer decides it.
+    required = "confirmed" if action.get("approved") else "reason"
+    if not isinstance(action.get(required), str):
+        return f"{action_type} needs a string {required!r}"
+    return None
+
+
+@dataclass
+class _StreamingCall:
+    """What the sink has said about a call that is still in `streaming`.
+
+    Kept because `chat/toolCallReady` is where a call's *final* input and its
+    invocation message live, and the reducer takes both FROM THAT ACTION when a
+    `streaming` call moves on: `invocationMessage: action.invocationMessage` and
+    `toolInput: action.toolInput ?? null`. A ready that omits them therefore
+    stores nulls over everything the provider streamed, rather than leaving it
+    alone -- so the ready has to restate it, which means remembering it.
+    """
+
+    display_name: str
+    intention: str | None = None
+    tool_input: Any = None
+    invocation_message: str | None = None
+    #: Parameters streamed through `chat/toolCallDelta`. The reducer accumulates
+    #: these into `partialInput` and then DROPS that key at ready, so this is the
+    #: final input for a provider that only ever streamed one.
+    partial_input: str = ""
 
 
 def turn_scope(channel: str, turn_id: str) -> str:
@@ -79,8 +172,9 @@ class ActionTurnSink:
         self._activity: str | None = None
         self._segment: str | None = None
         #: Calls still in `streaming`, i.e. announced but never moved on by a
-        #: `chat/toolCallReady`. See `_ensure_runnable`.
-        self._streaming: set[str] = set()
+        #: `chat/toolCallReady`, and what was published about each of them. See
+        #: `_ensure_runnable`.
+        self._streaming: dict[str, _StreamingCall] = {}
 
     def _open_segment(self, kind: str) -> None:
         """Start a new response part when the kind of output changes.
@@ -181,10 +275,17 @@ class ActionTurnSink:
             action["intention"] = intention
         if meta:
             action["_meta"] = dict(meta)
-        if tool_input is not None:
-            action["toolInput"] = _encoded_tool_input(tool_input)
+        # NOT `toolInput`. `ChatToolCallStartAction` declares `toolName`,
+        # `displayName`, `intention` and `contributor` and nothing else -- the
+        # input belongs on `chat/toolCallReady` ("Final tool input"), and the
+        # reducer builds the streaming state from the declared fields only. So
+        # every input published here was dropped on the floor, and no
+        # non-confirming tool -- including the host's own `!command` -- ever
+        # showed one. Held until the ready instead.
         await self._sequencer.publish(self._channel, action)
-        self._streaming.add(call_id)
+        self._streaming[call_id] = _StreamingCall(
+            display_name=action["displayName"], intention=intention, tool_input=tool_input
+        )
         await self.set_activity(action["displayName"])
 
     async def _ensure_runnable(self, call_id: str) -> None:
@@ -202,18 +303,32 @@ class ActionTurnSink:
         `confirmed: "not-needed"` is the spec's own wording for a call that
         needs no approval: it "transitions directly to `running`".
         """
-        if call_id not in self._streaming:
+        draft = self._streaming.pop(call_id, None)
+        if draft is None:
             return
-        self._streaming.discard(call_id)
-        await self._sequencer.publish(
-            self._channel,
-            {
-                "type": "chat/toolCallReady",
-                "turnId": self._turn_id,
-                "toolCallId": call_id,
-                "confirmed": "not-needed",
-            },
-        )
+        action: dict[str, Any] = {
+            "type": "chat/toolCallReady",
+            "turnId": self._turn_id,
+            "toolCallId": call_id,
+            # REQUIRED by `ChatToolCallReadyAction`, and this frame published
+            # neither it nor `toolInput` -- so a call that was auto-confirmed had
+            # both nulled by the reducer at the moment it started running, and
+            # everything the provider had streamed about it went with them.
+            # `intention` is the honest second choice: it is the provider's own
+            # sentence about what this invocation is for.
+            "invocationMessage": draft.invocation_message
+            or draft.intention
+            or f"Running {draft.display_name}",
+            "confirmed": "not-needed",
+        }
+        # `is None`, never truthiness: `{}` and `[]` are inputs a provider can
+        # legitimately have proposed, and both are falsy in Python (invariant 5).
+        final_input = draft.tool_input
+        if final_input is None and draft.partial_input != "":
+            final_input = draft.partial_input
+        if final_input is not None:
+            action["toolInput"] = _encoded_tool_input(final_input)
+        await self._sequencer.publish(self._channel, action)
 
     async def tool_call_delta(
         self,
@@ -230,7 +345,20 @@ class ActionTurnSink:
         model produces them; `invocation_message` replaces the line under the
         tool's name, which is where progress belongs -- it is a *message*, not
         an appended log.
+
+        `chat/toolCallDelta` only reaches a call that is still `streaming` --
+        the reducer's updater returns the call untouched from any other status,
+        and fixture 095 pins that. Parameters can only stream before the call is
+        ready, so `content` after that point is dropped exactly as upstream
+        drops it; a *progress message* still has somewhere to go, and goes
+        there. Publishing the delta regardless is what made every progress line
+        the shipped `EchoProvider(confirm_tools=True)` emits disappear.
         """
+        draft = self._streaming.get(call_id)
+        if draft is None:
+            if invocation_message is not None:
+                await self._update_running_invocation(call_id, invocation_message, meta)
+            return
         action: dict[str, Any] = {
             "type": "chat/toolCallDelta",
             "turnId": self._turn_id,
@@ -238,11 +366,80 @@ class ActionTurnSink:
         }
         if content is not None:
             action["content"] = content
+            draft.partial_input += content
         if invocation_message is not None:
             action["invocationMessage"] = invocation_message
+            draft.invocation_message = invocation_message
         if meta:
             action["_meta"] = dict(meta)
         await self._sequencer.publish(self._channel, action)
+
+    async def _update_running_invocation(
+        self, call_id: str, invocation_message: str, meta: Mapping[str, Any] | None
+    ) -> None:
+        """Move the progress line of a call that is already `running`.
+
+        A second `chat/toolCallReady` is the only action that reaches a running
+        call's `invocationMessage`, and it keeps the call running only when it
+        carries `confirmed` -- without it the reducer sends the call back to
+        `pendingConfirmation`, i.e. asks the user to approve a tool that is
+        already executing.
+        """
+        tool_call = self._tool_call_state(call_id)
+        if tool_call is None or tool_call.get("status") != "running":
+            # Nothing the reducer would accept, so nothing is published: a frame
+            # it drops still costs a `serverSeq` and a fan-out to every client.
+            return
+        # RESTATED from state, not invented: writing `not-needed` over a call the
+        # user explicitly approved would record that nobody was asked, which is
+        # the one thing this field is read for. The test is truthiness because
+        # the reducer's is (`if confirmed:`) -- an empty string there would send
+        # a running call back for approval -- and for a string enum truthiness
+        # means the same thing in both languages.
+        confirmed = tool_call.get("confirmed")
+        ready: dict[str, Any] = {
+            "type": "chat/toolCallReady",
+            "turnId": self._turn_id,
+            "toolCallId": call_id,
+            "invocationMessage": invocation_message,
+            "confirmed": confirmed if confirmed else "not-needed",
+        }
+        if meta:
+            ready["_meta"] = dict(meta)
+        await self._sequencer.publish(self._channel, ready)
+        content = tool_call.get("content")
+        if content is not None:
+            # The ready transition REBUILDS the call from its base fields, and
+            # `content` is not one of them -- so a progress update silently
+            # erases everything `tool_call_output` has streamed so far. Put it
+            # back rather than leaving live output to vanish mid-run.
+            await self._sequencer.publish(
+                self._channel,
+                {
+                    "type": "chat/toolCallContentChanged",
+                    "turnId": self._turn_id,
+                    "toolCallId": call_id,
+                    "content": content,
+                },
+            )
+
+    def _tool_call_state(self, call_id: str) -> Mapping[str, Any] | None:
+        """The reduced tool call, i.e. what every client's mirror holds for it.
+
+        Read rather than remembered: the fields this is consulted for --
+        `status` and `confirmed` -- are the ones a *client* writes, so the
+        sink's own bookkeeping cannot know them.
+        """
+        state = self._sequencer.state_of(self._channel)
+        active = state.get("activeTurn") if isinstance(state, Mapping) else None
+        if not isinstance(active, Mapping) or active.get("id") != self._turn_id:
+            return None
+        parts = active.get("responseParts")
+        for part in parts if isinstance(parts, list) else []:
+            tool_call = part.get("toolCall") if isinstance(part, Mapping) else None
+            if isinstance(tool_call, Mapping) and tool_call.get("toolCallId") == call_id:
+                return tool_call
+        return None
 
     async def tool_call_output(
         self,
@@ -262,6 +459,12 @@ class ActionTurnSink:
         on a terminal", which is what makes a client render the terminal widget
         instead of a plain row.
         """
+        # A tool that produces output IS running, and `contentChanged` reaches
+        # only a `running` call. Without this the plain path -- announce, stream,
+        # complete -- stayed in `streaming` until completion, so every partial
+        # this method exists to publish was dropped by the reducer and the live
+        # feedback appeared for the first time as the finished result.
+        await self._ensure_runnable(call_id)
         action: dict[str, Any] = {
             "type": "chat/toolCallContentChanged",
             "turnId": self._turn_id,
@@ -437,7 +640,7 @@ class ActionTurnSink:
             # partial fix is worse than none, because the surface that still
             # works hides the one that does not.
             action["toolInput"] = _encoded_tool_input(call.tool_input)
-        self._streaming.discard(call.call_id)
+        self._streaming.pop(call.call_id, None)
         if call.confirmation_title is not None:
             action["confirmationTitle"] = call.confirmation_title
         if call.editable:
@@ -541,6 +744,9 @@ class ActionTurnSink:
             "clienttool",
             key=call.call_id,
             channel=self._channel,
+            # Only this client may answer: it is the one being asked to run the
+            # tool, and it is the one whose departure has to end the call.
+            owner=call.client_id,
         )
 
         action: dict[str, Any] = {
@@ -551,8 +757,9 @@ class ActionTurnSink:
             "displayName": call.display_name or call.name,
             "contributor": {"kind": "client", "clientId": call.client_id},
         }
-        if call.tool_input is not None:
-            action["toolInput"] = _encoded_tool_input(call.tool_input)
+        # No `toolInput` here either: the action does not declare one, the
+        # reducer drops it, and the ready below carries it -- which is where the
+        # executing client reads it from.
         await self._sequencer.publish(self._channel, action)
 
         # WITHOUT THIS THE TOOL NEVER RUNS. The client's executor reads
@@ -575,7 +782,7 @@ class ActionTurnSink:
         }
         if call.tool_input is not None:
             ready["toolInput"] = _encoded_tool_input(call.tool_input)
-        self._streaming.discard(call.call_id)
+        self._streaming.pop(call.call_id, None)
         await self._sequencer.publish(self._channel, ready)
 
         await self._mirror_input_needed(
@@ -594,6 +801,15 @@ class ActionTurnSink:
         )
 
         outcome = await parked.future
+        if outcome.response != "accept":
+            # `outcome.response` used to be dropped on the floor here, so the
+            # two ways this can end WITHOUT a result -- the owning client
+            # refusing the call, and the host cancelling it because that client
+            # left -- both reached the provider as `ToolResult(value={})`. A
+            # refusal that reads as an empty success is the worst possible
+            # rendering of it: the agent believes it ran the editor's tool.
+            reason = outcome.payload if isinstance(outcome.payload, str) else None
+            return ToolResult(response=outcome.response, reason=reason)
         return ToolResult(value=outcome.payload)
 
     def _is_active_client(self, client_id: str) -> bool:

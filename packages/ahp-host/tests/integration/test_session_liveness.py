@@ -282,6 +282,7 @@ class TestActivity:
                     "turnId": "t1",
                     "toolCallId": call_id,
                     "approved": True,
+                    "confirmed": "user-action",
                 },
             },
         )

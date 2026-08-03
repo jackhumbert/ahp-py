@@ -74,6 +74,43 @@ weakening: a client's directory picker stats the *parent* of a typed path, and a
 jail that refuses everything above its root makes every path look nonexistent.
 Reads, writes and watches on ancestors stay refused.
 
+Symlinks are followed for *reading* — the walk resolves each one itself and
+re-checks the result against the root — but a **write whose final component is a
+symlink is refused** with `PermissionDenied`, not followed. `resourceWrite` is
+the one command whose policy check runs against the name the peer sent (a file
+that does not exist yet has nothing to canonicalise), so following the link
+would land the write on a path `may_access_resource` never saw.
+
+### Reads are bounded
+
+`resourceRead` has no offset or length in the protocol, so a file that is too
+big to send cannot be sent in pieces — it can only be refused. The bound is a
+constructor argument, because an embedder serving large assets has to be able to
+lift it:
+
+```python
+from agent_host_server import Host, LoopbackSingleUserPolicy
+from agent_host_server.core.host import DEFAULT_MAX_READ_BYTES
+from agent_host_server.provider import EchoProvider
+
+assert DEFAULT_MAX_READ_BYTES == 16 * 1024 * 1024
+assert Host(EchoProvider(), LoopbackSingleUserPolicy()).max_read_bytes == DEFAULT_MAX_READ_BYTES
+
+# Raise it for a host that serves video or model weights…
+big = Host(EchoProvider(), LoopbackSingleUserPolicy(), max_read_bytes=512 * 1024 * 1024)
+assert big.max_read_bytes == 512 * 1024 * 1024
+
+# …or remove it entirely, which is what the host did before anyone measured it:
+# one unprivileged read of a 64 MiB file took resident memory from 29 MB to
+# 970 MB, because base64 and JSON multiply the file several times over.
+unbounded = Host(EchoProvider(), LoopbackSingleUserPolicy(), max_read_bytes=None)
+assert unbounded.max_read_bytes is None
+```
+
+A read above the bound answers `PermissionDenied` (-32009); the file still
+resolves and still lists, because the bound is on the bytes rather than on the
+existence of the thing.
+
 ## The Policy is the part only you can write
 
 `Policy` has eleven decision points, not one, so implement it by narrowing a
@@ -222,6 +259,13 @@ critical section, so one slow peer would stall every other client.
 `counters()["outboxOverflows"]` counts them. A climbing value means a client or
 a proxy is not draining, and explains disconnects that otherwise look
 mysterious.
+
+The reply to `reconnect` is bounded by the same reasoning. Its `subscriptions`
+list is peer-supplied and the schema does not forbid repeats, so a request
+naming one URI a thousand times used to be answered with a thousand copies of
+every missed envelope — a 50 KB frame in, 62 MB out, from a peer that has only
+completed `initialize`. The list is de-duplicated, so the answer is bounded by
+the replay budget rather than by the length of the request.
 
 ## What is logged
 

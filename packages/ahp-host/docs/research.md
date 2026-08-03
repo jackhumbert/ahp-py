@@ -508,6 +508,17 @@ Get these wrong and the client retries forever instead of reporting an error:
    `pending-confirmation` **MUST** be rejected; `chat/turnCancelled` with no
    active turn **MUST** be rejected.
 
+   Shape is part of validity, and for the tool-call family it is the part that
+   does damage. Every reducer keys on `turnId`, so a confirmation without one is
+   sequenced and fanned out and then applied by nobody — while a host that
+   resolves its parked request by `toolCallId` alone runs the tool regardless.
+   State says the call was never answered; the tool has already run. The host
+   therefore checks the `required` list of `actions.schema.json` for the four
+   client-dispatchable tool-call actions before anything else looks at them.
+   Presence and JSON type only: refusing an unknown `confirmed` reason would
+   break against a peer speaking a newer spec, which is the client we most want
+   to keep working.
+
 ### The sequencing model (the main phase-2 input)
 
 - **`serverSeq` is a single host-global monotonic counter.** Not per-channel,
@@ -1041,6 +1052,8 @@ upstream issues — **none have been filed**; filing is a separate decision.
 | 8 | **`actions.schema.json` has shipped a malformed `{"$ref": "#/$defs/"}` as `StateAction.oneOf[0]` in every tag since `spec/v0.5.0`.** Straightforward bug; a one-line generator fix. | Verified. Report upstream with the reproduction. |
 | 9 | **`SessionStatus` is a bitset published as `enum: [1,2,8,24,32,64]`**, which rejects six of the eight status values in upstream's own fixtures. Should it be `integer`? | Verified. Report upstream. |
 | 10 | Would upstream accept a `scripts/generate-python.ts` peer of `generate-go.ts`, making Python a first-class generated client? | Ask before building. Would eliminate our drift permanently. |
+| 11 | **`root/sessionSummaryChanged` cannot retract a field.** "Only fields present in `changes` have new values; omitted fields are unchanged", and every property of `changes` is typed as its own non-null type (`"activity": {"type": "string"}`) — so an omitted key means "unchanged" and `null` is a schema violation. A session's `activity` can therefore be set and never un-set on any client rendering from the incremental cache. Two candidate encodings: allow `null` in `changes`, or document `root/sessionAdded` as an upsert the way `session/chatAdded` already is. | Verified against the vendored schemas; pinned by `tests/integration/test_sessions_and_summary.py::TestTheSummaryCacheCannotBeToldAFieldIsGone`. Report upstream. |
+| 12 | `session/chatUpdated` has the same hole, but the catalogue escapes it: `session/chatAdded` documents "Upsert semantics: if a chat with the same `summary.resource` already exists, the existing entry is replaced". Is republishing the whole entry the retraction upstream intends, or is a client expected to treat it as a new chat? | This host uses the upsert (`Host._republish_chat`). Confirm with upstream before other implementations diverge. |
 
 ---
 

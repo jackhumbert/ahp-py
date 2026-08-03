@@ -282,11 +282,7 @@ class Sequencer:
         Returns ``None`` for a stateless or unknown channel.
         """
         async with self._lock:
-            subscribers = self._subscribers.setdefault(channel, set())
-            first = not subscribers
-            subscribers.add(subscriber)
-            if first:
-                self._notify_observer(channel, observed=True)
+            self._register(subscriber, channel)
             if channel not in self._states:
                 return None
             return {
@@ -295,6 +291,14 @@ class Sequencer:
                 "fromSeq": self._seq,
             }
 
+    def _register(self, subscriber: Subscriber, channel: str) -> None:
+        """Add a subscriber. MUST be called with the lock held."""
+        subscribers = self._subscribers.setdefault(channel, set())
+        first = not subscribers
+        subscribers.add(subscriber)
+        if first:
+            self._notify_observer(channel, observed=True)
+
     async def unsubscribe(self, subscriber: Subscriber, channel: str) -> None:
         async with self._lock:
             subscribers = self._subscribers.get(channel)
@@ -302,15 +306,22 @@ class Sequencer:
                 return
             subscribers.discard(subscriber)
             if not subscribers:
+                # The key goes too. A channel's entry outlives its last
+                # subscriber otherwise, and every URI a peer has ever named --
+                # including ones this host never registered -- is a permanent
+                # dict entry a peer chooses the size of.
+                del self._subscribers[channel]
                 self._notify_observer(channel, observed=False)
 
     async def unsubscribe_all(self, subscriber: Subscriber) -> None:
         async with self._lock:
-            for channel, subscribers in self._subscribers.items():
-                if subscriber not in subscribers:
-                    continue
+            # Materialised first: emptied channels are deleted below, and
+            # deleting from the dict being iterated raises.
+            for channel in [uri for uri, subs in self._subscribers.items() if subscriber in subs]:
+                subscribers = self._subscribers[channel]
                 subscribers.discard(subscriber)
                 if not subscribers:
+                    del self._subscribers[channel]
                     self._notify_observer(channel, observed=False)
 
     def _notify_observer(self, channel: str, *, observed: bool) -> None:
@@ -339,17 +350,44 @@ class Sequencer:
         self,
         last_seen_server_seq: int,
         subscriptions: Iterable[str],
+        *,
+        subscriber: Subscriber | None = None,
     ) -> dict[str, Any]:
         """Answer ``reconnect``: replay the gap, or fall back to snapshots.
 
         The result discriminates on ``type``. ``missing`` lists subscriptions
         that cannot be resumed -- disposed sessions, or resources the client may
         no longer observe -- which clients drop from their local set.
+
+        *subscriber*, when given, is registered here for the channels this
+        answer resumes and **only** those. Two reasons it happens inside this
+        critical section rather than in the caller:
+
+        * A channel this reply calls ``missing`` must not be left registered.
+          The host would be telling the client "drop this" while still
+          delivering it -- and since the URI may be registered later by
+          somebody else, the stale subscriber then receives a *different*
+          client's traffic on a channel it was told did not exist.
+        * Registering before the log is read closes the ordering hole between
+          the two. Registering after loses any envelope published in between;
+          registering in a separate critical section delivers it twice, once by
+          fan-out and once in ``actions``. Here, an envelope is either below the
+          cursor and in the reply, or above it and enqueued -- never both.
         """
         async with self._lock:
-            requested = list(subscriptions)
+            # Order-preservingly de-duplicated. `subscriptions` comes straight
+            # off the wire and the schema does not forbid repeats: N copies of
+            # one URI otherwise returned N copies of every missed envelope,
+            # each with the same `serverSeq`. A conformant mirror folds each
+            # one, so a chat's text came back multiplied -- and a 50 KB request
+            # answered with 62 MB.
+            requested = list(dict.fromkeys(subscriptions))
             known = [uri for uri in requested if uri in self._states]
             missing = [uri for uri in requested if uri not in self._states]
+
+            if subscriber is not None:
+                for uri in known:
+                    self._register(subscriber, uri)
 
             # A sequence number ahead of ours cannot have come from this
             # process. With an in-memory allocator `serverSeq` restarts at 0

@@ -126,6 +126,7 @@ class TestResponsePartOrdering:
                     "turnId": "t1",
                     "toolCallId": ready["toolCallId"],
                     "approved": True,
+                    "confirmed": "user-action",
                 },
             },
         )
@@ -232,6 +233,7 @@ class TestQueuedMessages:
                     "turnId": "t1",
                     "toolCallId": ready["toolCallId"],
                     "approved": True,
+                    "confirmed": "user-action",
                 },
             },
         )
@@ -344,22 +346,46 @@ class TestProgressiveToolOutput:
                     "turnId": "t1",
                     "toolCallId": ready["toolCallId"],
                     "approved": True,
+                    "confirmed": "user-action",
                 },
             },
         )
         await client.collect(seconds=0.8)
 
         actions = _actions(client, chat)
-        deltas = [a for a in actions if a["type"] == "chat/toolCallDelta"]
-        content = [a for a in actions if a["type"] == "chat/toolCallContentChanged"]
-        assert len(deltas) == 3, "one per word"
-        assert [a["invocationMessage"] for a in deltas] == [
+        content = [
+            a["content"][0]["text"] for a in actions if a["type"] == "chat/toolCallContentChanged"
+        ]
+        # REPLACES rather than appends, so each carries everything so far. The
+        # consecutive repeats are the progress updates below putting the content
+        # back: a second `chat/toolCallReady` rebuilds the tool call from its
+        # base fields, which do not include `content`, so live output would
+        # otherwise blink out every time the progress line moved.
+        assert [text for i, text in enumerate(content) if i == 0 or text != content[i - 1]] == [
+            "one",
+            "one two",
+            "one two three",
+        ]
+
+        # Progress on a call that is already RUNNING, which is the only mode
+        # this provider has. `chat/toolCallDelta` reaches a `streaming` call and
+        # nothing else -- the reducer's updater returns a running call untouched
+        # -- so this used to publish three deltas that every mirror discarded,
+        # and the demo's own progress line never moved. The frame that lands is
+        # a second `chat/toolCallReady` carrying the confirmation forward.
+        progress = [
+            a
+            for a in actions
+            if a["type"] == "chat/toolCallReady" and a.get("confirmed") == "user-action"
+        ]
+        assert [a["invocationMessage"] for a in progress] == [
             "Echoing word 1",
             "Echoing word 2",
             "Echoing word 3",
         ]
-        # REPLACES rather than appends, so each carries everything so far.
-        assert [a["content"][0]["text"] for a in content] == ["one", "one two", "one two three"]
+        assert not [a for a in actions if a["type"] == "chat/toolCallDelta"], (
+            "a delta on a running call is a frame the reducer drops"
+        )
 
     async def test_the_meta_key_reaches_the_wire(self, host: Host) -> None:
         """ "a `ptyTerminal` key with `{input, output}` indicates the tool
@@ -396,6 +422,8 @@ class TestToolInputEncoding:
         await client.collect(seconds=0.5)
 
         carrying = [a for a in _actions(client, chat) if "toolInput" in a]
-        assert {a["type"] for a in carrying} >= {"chat/toolCallStart", "chat/toolCallReady"}
+        assert {a["type"] for a in carrying} == {"chat/toolCallReady"}, (
+            "`chat/toolCallStart` declares no `toolInput`; the reducer drops one"
+        )
         for action in carrying:
             assert isinstance(action["toolInput"], str), action["type"]

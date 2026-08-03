@@ -132,8 +132,8 @@ So a host that wants to be usable must:
 | `text_delta(text)` | Append to the visible answer. Call repeatedly. |
 | `reasoning_delta(text)` | Append to the reasoning/thinking part. |
 | `tool_call_started(id, name, input, *, display_name=, intention=, meta=)` | Announce a call. `display_name` is what the user reads. |
-| `tool_call_delta(id, content=, *, invocation_message=)` | Stream the parameters, or move the progress line under the tool's name. |
-| `tool_call_output(id, content, *, meta=)` | What a still-running call has produced. **Replaces**, so pass everything so far. |
+| `tool_call_delta(id, content=, *, invocation_message=)` | Stream the parameters, or move the progress line under the tool's name. Call it at any point in the call's life; the host picks the action that state accepts. |
+| `tool_call_output(id, content, *, meta=)` | What a still-running call has produced. **Replaces**, so pass everything so far. Moves the call to `running` if it is not there yet. |
 | `tool_call_completed(id, result, *, success=, past_tense_message=)` | Finish it. Both keyword fields are **required by the protocol**. |
 | `turn_failed(message, error_type=, duration_ms=)` | End in error. `error_type` is required — omitting it renders `Error: (undefined) …`. |
 | `usage(*, input_tokens=, output_tokens=, cache_read_tokens=, model=)` | Report the turn's tokens. No usage, no context gauge — the client renders nothing rather than a zero. |
@@ -177,9 +177,17 @@ you:
   reports it as a tool call. Without a backend the prefix is not advertised and
   the message is ordinary text, so you still see it.
 - **The `chat/toolCallReady` transition.** A call you announce and then complete
-  is moved out of `streaming` for you — the validation table refuses a
-  completion from that state, so without it your call would be silently dropped
-  and cancelled at the end of the turn.
+  — or that produces output — is moved out of `streaming` for you: the
+  validation table refuses a completion or a `contentChanged` from that state,
+  so without it your call would be silently dropped and cancelled at the end of
+  the turn. That frame carries the input you passed to `tool_call_started` and
+  the last progress message you streamed, because the reducer reads both **from
+  it** and stores nulls for anything it omits.
+- **Progress on a call that is already running.** `chat/toolCallDelta` only
+  reaches a `streaming` call, so once yours is confirmed the host publishes your
+  `invocation_message` as a second `chat/toolCallReady` instead — carrying the
+  existing confirmation forward, so the call stays running rather than asking
+  the user to approve a tool that is already executing.
 
 - **The chat catalogue.** `SessionState.chats[]` is kept in step with each
   chat channel, so a client's chat tabs show real titles, statuses and

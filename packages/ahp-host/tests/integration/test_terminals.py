@@ -15,12 +15,14 @@ from __future__ import annotations
 
 import asyncio
 import os
+import subprocess
 from collections.abc import AsyncIterator
 from typing import Any
 
 import pytest
 from agent_host_protocol.channels import ROOT_URI
 from agent_host_protocol.transport import memory_pair
+from agent_host_protocol.types import AHP_ERROR_CODES
 
 from agent_host_server.core import Host, LoopbackSingleUserPolicy
 from agent_host_server.core.terminals import OutputSink, TerminalRequest
@@ -379,10 +381,16 @@ class TestTheExitIsAnnounced:
     """
 
     @pytest.fixture
-    def pty_host(self) -> Host:
+    async def pty_host(self) -> AsyncIterator[Host]:
         from agent_host_server.core.pty_backend import PtyTerminalBackend
 
-        return Host(EchoProvider(), LoopbackSingleUserPolicy(), terminals=PtyTerminalBackend())
+        host = Host(EchoProvider(), LoopbackSingleUserPolicy(), terminals=PtyTerminalBackend())
+        try:
+            yield host
+        finally:
+            # Not decoration: a terminal these tests leave open is a real shell,
+            # and without `aclose` it outlives pytest itself.
+            await host.aclose()
 
     async def test_exiting_publishes_terminal_exited_with_the_code(self, pty_host: Host) -> None:
         client = await _client(pty_host)
@@ -451,3 +459,276 @@ class TestTheExitIsAnnounced:
         assert entry["resource"] == "ahp-terminal:/cat-1"
         assert entry["title"] == "named"
         assert entry["claim"] == {"kind": "client", "clientId": "c1"}
+
+
+class TestTheCatalogueKeepsUp:
+    """`RootState.terminals` was republished on create, exit and dispose only.
+
+    `TerminalInfo` carries `title` and `claim`, and both of them change through
+    ordinary client actions -- so the root list went on reporting the previous
+    owner. That is the field a client reads to decide whether to offer an input
+    box, so after a handover the terminal looked typeable in the window that had
+    just given it away.
+    """
+
+    async def test_a_rename_reaches_the_root_list(self, wired: tuple[Host, FakeBackend]) -> None:
+        host, _ = wired
+        client = await _client(host)
+        channel = await _open(client)
+        await client.notify(
+            "dispatchAction",
+            {
+                "channel": channel,
+                "clientSeq": 1,
+                "action": {"type": "terminal/titleChanged", "title": "renamed"},
+            },
+        )
+        await client.collect(seconds=0.3)
+
+        root = (await client.request("subscribe", {"channel": ROOT_URI}))["result"]["snapshot"][
+            "state"
+        ]
+        assert [t["title"] for t in root["terminals"]] == ["renamed"]
+
+    async def test_a_handover_reaches_the_root_list(self, wired: tuple[Host, FakeBackend]) -> None:
+        host, _ = wired
+        client = await _client(host)
+        channel = await _open(client)
+        handed = {"kind": "session", "session": "echo:/s"}
+        await client.notify(
+            "dispatchAction",
+            {
+                "channel": channel,
+                "clientSeq": 1,
+                "action": {"type": "terminal/claimed", "claim": handed},
+            },
+        )
+        await client.collect(seconds=0.3)
+
+        root = (await client.request("subscribe", {"channel": ROOT_URI}))["result"]["snapshot"][
+            "state"
+        ]
+        assert [t["claim"] for t in root["terminals"]] == [handed]
+        # And the two states agree: the catalogue entry is projected from the
+        # channel's own state rather than remembered separately.
+        assert host.sequencer.state_of(channel)["claim"] == handed
+
+    async def test_the_same_action_at_a_chat_does_not_touch_the_catalogue(
+        self, wired: tuple[Host, FakeBackend]
+    ) -> None:
+        """Both actions are client-dispatchable at any channel. Aimed at a chat
+        they no-op in its reducer, and must not drag the root channel along."""
+        host, _ = wired
+        client = await _client(host)
+        channel = await _open(client)
+        await client.request("createSession", {"channel": "echo:/cat-noise"})
+        await client.collect(seconds=0.3)
+        chat = (await client.request("subscribe", {"channel": "echo:/cat-noise"}))["result"][
+            "snapshot"
+        ]["state"]["chats"][0]["resource"]
+
+        before = host.sequencer.server_seq
+        await client.notify(
+            "dispatchAction",
+            {
+                "channel": chat,
+                "clientSeq": 1,
+                "action": {"type": "terminal/titleChanged", "title": "nowhere"},
+            },
+        )
+        await client.collect(seconds=0.3)
+        # One envelope, the echo of the action itself -- not two.
+        assert host.sequencer.server_seq == before + 1
+        assert host.sequencer.state_of(channel)["title"] == "Test Terminal"
+
+
+class TestAnUnnamedTerminalStillHasATitle:
+    """`title` is REQUIRED on `TerminalState` and `name` is optional on
+    `CreateTerminalParams`, so omitting it published a state that fails the
+    whole `Snapshot.state` union -- while the root catalogue substituted
+    "Terminal", leaving one terminal with two different titles."""
+
+    async def test_the_channel_and_the_catalogue_agree(
+        self, wired: tuple[Host, FakeBackend]
+    ) -> None:
+        host, _ = wired
+        client = await _client(host)
+        channel = "agenthost-terminal:/unnamed"
+        await client.request(
+            "createTerminal",
+            {"channel": channel, "claim": {"kind": "client", "clientId": "c1"}},
+        )
+        state = (await client.request("subscribe", {"channel": channel}))["result"]["snapshot"][
+            "state"
+        ]
+        assert state["title"] == "Terminal"
+
+        root = (await client.request("subscribe", {"channel": ROOT_URI}))["result"]["snapshot"][
+            "state"
+        ]
+        assert [t["title"] for t in root["terminals"]] == [state["title"]]
+
+    async def test_an_empty_name_is_not_an_empty_tab(self, wired: tuple[Host, FakeBackend]) -> None:
+        """`name: ""` is schema-valid and renders as a blank tab, which is the
+        same unusable row by another route."""
+        host, _ = wired
+        client = await _client(host)
+        channel = "agenthost-terminal:/blank"
+        await client.request(
+            "createTerminal",
+            {"channel": channel, "claim": {"kind": "client", "clientId": "c1"}, "name": ""},
+        )
+        state = (await client.request("subscribe", {"channel": channel}))["result"]["snapshot"][
+            "state"
+        ]
+        assert state["title"] == "Terminal"
+
+
+class TestADuplicateChannelIsNotASession:
+    """-32003 is defined as "a session with the given URI already exists", and
+    the shared helper's message says "Session" -- so a client re-creating a
+    terminal was told a session collided, on a URI naming no session."""
+
+    async def test_the_code_and_the_message_name_a_channel(
+        self, wired: tuple[Host, FakeBackend]
+    ) -> None:
+        host, _ = wired
+        client = await _client(host)
+        channel = await _open(client)
+        again = await client.request(
+            "createTerminal",
+            {"channel": channel, "claim": {"kind": "client", "clientId": "c1"}},
+        )
+        assert again["error"]["code"] == AHP_ERROR_CODES["AlreadyExists"]
+        assert "Session" not in again["error"]["message"]
+        assert channel in again["error"]["message"]
+
+
+class TestDisposalIsNotClaimGated:
+    """Deliberate, and pinned so nobody "fixes" it into an immortal terminal.
+
+    A peer refused `terminal/input` can still dispose the terminal. The spec
+    attaches no ownership rule to the command -- `DisposeTerminalParams` carries
+    a channel and nothing else -- and gating it on the claim would mean that a
+    terminal handed to a SESSION could never be disposed by anybody, because a
+    session claim is held by no client. The shell would then run until the host
+    stopped. Disposal is a command, so it is gated where commands are: `Policy`.
+    """
+
+    async def test_a_session_claimed_terminal_can_still_be_disposed(
+        self, wired: tuple[Host, FakeBackend]
+    ) -> None:
+        host, backend = wired
+        client = await _client(host)
+        channel = "agenthost-terminal:/handed"
+        await client.request(
+            "createTerminal",
+            {"channel": channel, "claim": {"kind": "session", "session": "echo:/s"}, "name": "t"},
+        )
+        # Nobody holds a session claim, so this is the case a claim gate would
+        # make unkillable.
+        response = await client.request("disposeTerminal", {"channel": channel})
+        assert "error" not in response, response
+        assert backend.process.killed
+        assert not host.sequencer.has_channel(channel)
+
+    async def test_the_policy_is_where_disposal_is_refused(self) -> None:
+        """The gate that does exist, exercised -- so "gated at the policy layer"
+        is a claim with a test behind it rather than a docstring."""
+
+        class NoDisposal(LoopbackSingleUserPolicy):
+            def may_see_channel(self, info: Any, channel: str) -> bool:
+                return not channel.startswith("agenthost-terminal:")
+
+        backend = FakeBackend()
+        host = Host(EchoProvider(), NoDisposal(), terminals=backend)
+        try:
+            client = await _client(host)
+            channel = "agenthost-terminal:/protected"
+            await client.request(
+                "createTerminal",
+                {"channel": channel, "claim": {"kind": "client", "clientId": "c1"}, "name": "t"},
+            )
+            response = await client.request("disposeTerminal", {"channel": channel})
+            assert response["error"]["code"] == -32009
+            assert not backend.process.killed
+        finally:
+            await host.aclose()
+
+
+class TestTheBangCommandShellDiesWithItsTurn:
+    """Cancelling a `!command` turn leaked the child shell.
+
+    `_run_terminal_command` parks on `process.wait()`; `chat/turnCancelled`
+    cancels that task, and the kill was on the line *after* the await. The
+    one-shot has no channel and no `_Terminal`, so `aclose`'s sweep of
+    `_live_terminals` could not see it either: measured, the child outlived the
+    turn, the host, and the host's process.
+    """
+
+    @pytest.fixture
+    async def spied(self) -> AsyncIterator[tuple[Host, list[Any]]]:
+        from agent_host_server.core.pty_backend import PtyTerminalBackend
+
+        started: list[Any] = []
+
+        class SpyBackend(PtyTerminalBackend):
+            async def create(self, request: TerminalRequest, output: OutputSink) -> Any:
+                process = await super().create(request, output)
+                started.append(process)
+                return process
+
+        host = Host(EchoProvider(), LoopbackSingleUserPolicy(), terminals=SpyBackend())
+        try:
+            yield host, started
+        finally:
+            await host.aclose()
+
+    @staticmethod
+    def _alive(pid: int) -> bool:
+        return subprocess.run(["ps", "-p", str(pid)], capture_output=True).returncode == 0
+
+    async def test_cancelling_the_turn_takes_the_child_with_it(
+        self, spied: tuple[Host, list[Any]]
+    ) -> None:
+        host, started = spied
+        client = await _client(host)
+        await client.request("createSession", {"channel": "echo:/bang"})
+        await client.collect(seconds=0.3)
+        chat = (await client.request("subscribe", {"channel": "echo:/bang"}))["result"]["snapshot"][
+            "state"
+        ]["chats"][0]["resource"]
+        await client.request("subscribe", {"channel": chat})
+
+        await client.notify(
+            "dispatchAction",
+            {
+                "channel": chat,
+                "clientSeq": 1,
+                "action": {
+                    "type": "chat/turnStarted",
+                    "turnId": "t1",
+                    "startedAt": "1970-01-01T00:00:01.000Z",
+                    # Long enough that only the cancel can end it.
+                    "message": {"text": "!sleep 400", "origin": {"kind": "user"}},
+                },
+            },
+        )
+        await client.collect(seconds=1.0)
+        assert started, "the `!` prefix never reached the backend"
+        pid = started[0]._process.pid
+        assert self._alive(pid), "the shell never started"
+
+        await client.notify(
+            "dispatchAction",
+            {
+                "channel": chat,
+                "clientSeq": 2,
+                "action": {"type": "chat/turnCancelled", "turnId": "t1", "duration": 0},
+            },
+        )
+        deadline = asyncio.get_running_loop().time() + 5
+        while self._alive(pid) and asyncio.get_running_loop().time() < deadline:
+            await asyncio.sleep(0.1)
+        assert not self._alive(pid), "the shell outlived the turn that started it"
+        assert not host._oneshot_terminals, "the one-shot registry still holds a dead child"

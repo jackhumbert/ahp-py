@@ -75,6 +75,21 @@ version it can speak, or refuse.
 - **The real per-version cost is state shapes and command params**, which
   `actionIntroducedIn` does not cover. Any future floor change requires auditing
   those by hand.
+- **"Well-formed `-32005`" was not, for this host's whole life.** The `data`
+  payload carried `supportedProtocolVersions`; `UnsupportedProtocolVersionErrorData`
+  declares exactly one required key and it is `supportedVersions`
+  (`errors.schema.json:65,74`, `vendor/upstream/ts/errors.ts:157`). Both peers in
+  the Python interop run used the same wrong name, agreed with each other, and
+  would have dropped the list against anything conformant — which is the failure
+  mode this whole file is about, since a client that cannot read the list can
+  only say "the handshake failed". Built in `core/host.py` rather than taken
+  from `agent_host_protocol.errors`, whose emitter still writes the old name;
+  pinned by `tests/conformance/test_error_data_schema.py`, which validates the
+  payload against the vendored schema rather than against our own spelling.
+- **`protocolVersions` element types are checked before negotiation.** Every
+  entry reaches `re.match`, so one integer in a peer-controlled array answered
+  `-32603` with a raw Python `TypeError` — the host blaming itself for a
+  schema-invalid request, and naming a Python type while doing it.
 
 ## Not implemented
 

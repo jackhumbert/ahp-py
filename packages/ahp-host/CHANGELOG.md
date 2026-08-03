@@ -38,6 +38,72 @@ why a suite that had only ever run one of each was green through them:
   check, so a recursive watch on an ancestor (up to `file:///`) reported names,
   existence and change timing for files the same peer is refused a read of.
 
+Then the rest of the interop list. The pattern in nearly all of them: a frame
+that looks well-formed, which the *reducer* refuses, and which the host acted
+on anyway — so the provider and every client ended up disagreeing about what
+happened, silently.
+
+**Resources** (all behind `writable=True` or an installed watcher):
+
+- `resourceWatch/changed` emitted `created`/`changed` where the closed enum is
+  `added`/`updated`/`deleted`, so a validating client saw only deletions.
+- A watch rooted at a single *file* never reported anything, and a watch that
+  was created but never subscribed was never released.
+- A failed `ifMatch` write created the target before failing; an unrecognised
+  `mode` truncated the file instead of failing; a negative `position` either
+  NUL-padded past EOF or leaked a raw `OSError`.
+- `resourceRead` had no size cap — a 64 MiB file drove host RSS from 31 MB to
+  970 MB. Now bounded and configurable.
+- `resourceRequest(write=true)` was granted by a read-only host that then
+  denied every write.
+
+**Tool calls:**
+
+- The auto-confirming `chat/toolCallReady` omitted the required
+  `invocationMessage` and dropped `toolInput`, nulling everything the provider
+  had streamed at the moment the call was confirmed. `toolInput` was also
+  published on `chat/toolCallStart`, which has no such field — between them, no
+  non-confirming tool ever showed its input.
+- Both streaming sink methods were no-ops in the mode the host itself used
+  them: `tool_call_output` before confirmation and `tool_call_delta` after.
+- A client tool-call action missing a schema-required field was broadcast
+  instead of being echoed with a `rejectionReason`.
+
+**The server→client direction**, which upstream's own reference client ships
+with zero implementations, so nothing else exercises it:
+
+- A `chat/toolCallConfirmed` aimed at a park waiting for a *result* resolved it
+  anyway, so a refusal reached the provider as `ToolResult(value={})` — an
+  agent told "the editor will not do that" reported an empty success. Parks now
+  carry their kind and only the matching action answers them, and
+  `ToolResult.response` distinguishes a refusal from an empty result.
+- `chat/toolCallComplete` was accepted from a client that did not own the call.
+- A parked client tool was never failed when its owner disconnected **or
+  removed itself** — `session/activeClientRemoved` was not even routed — so the
+  session advertised a tool nobody could run, stayed pinned at `InputNeeded`,
+  and the park outlived `disposeSession`.
+
+**Sessions, changesets, terminals and the handshake:**
+
+- Changeset operations stayed `disabled` for the life of the session, and
+  `invokeChangesetOperation` never checked the operation was one the changeset
+  declared — which also disarmed every scope and target check.
+- Cancelling a `!command` turn leaked the child shell past `Host.aclose()`.
+- `RootState.terminals` went stale after a title change or a claim.
+- The `-32005` error data used `supportedProtocolVersions`; the schema says
+  `supportedVersions`. This is the one frame a client reads to tell a user
+  which versions to install.
+- A repeated URI in `reconnect.subscriptions` multiplied every replayed
+  envelope, corrupting chat text and amplifying a 50 KB request into 62 MB.
+- `chat/turnCancelled` was accepted with a `turnId` naming no active turn.
+- `disposeSession`/`disposeChat` during a turn published nothing terminal, so a
+  subscribed client's stream hung forever.
+
+**And one nothing found by interop at all**, in the WebSocket transport:
+`receive()` recursed on every malformed frame. Measured: 100 junk frames were
+fine and 5000 raised `RecursionError` inside the read task — a remote crash
+from unauthenticated input. Now a loop with a bounded run of unusable frames.
+
 ### Changed
 
 - **The protocol layer is now a separate package.** Wire types, the seven

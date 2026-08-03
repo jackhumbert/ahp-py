@@ -24,6 +24,20 @@ spec; it is a spec that assumes one trust domain. :data:`CONTESTED_ACTIONS` name
 them so a host can pass :data:`STRICT_CLAIM_GATED_ACTIONS` and close the hole
 deliberately, instead of the hole being invisible.
 
+**`disposeTerminal` is deliberately NOT claim-gated**, and that asymmetry --
+a peer refused `terminal/input` can still destroy the terminal and kill its
+shell -- is the answer, not an oversight. Three reasons, in order of weight.
+The spec attaches no ownership rule to the command at all: `DisposeTerminalParams`
+carries a channel and nothing else, and the only SHOULD about holding a claim is
+on the `terminal/claimed` *action*. Gating it would make a handed-over terminal
+immortal: a session claim is held by no client, so the moment a client hands its
+terminal to a session -- the guide's detach flow, and every tool-call terminal --
+*nobody* would be able to dispose it, and the shell would run until the host
+stopped. And disposal is a **command**, so it is gated where every other command
+is: :meth:`~agent_host_server.core.policy.Policy.may_see_channel`, which a host
+serving more than one trust domain narrows. :data:`CLAIM_GATED_ACTIONS` is about
+actions, and adding a command to it would be a category error.
+
 Upstream disagrees with itself about `terminal/claimed`:
 `types/channels-terminal/actions.ts:74` says the server SHOULD reject a claim
 from a peer that does not hold it, while the guide's "client detaches a terminal"

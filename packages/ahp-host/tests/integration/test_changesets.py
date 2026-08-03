@@ -106,6 +106,30 @@ class TestPublishing:
         item = (await client.request("listSessions", {"channel": ROOT_URI}))["result"]["items"][0]
         assert item["changes"] == {"files": 1, "additions": 1, "deletions": 0}
 
+    async def test_the_roll_up_never_enters_the_session_channel(self, host: Host) -> None:
+        """`SessionSummary` declares `changes`; `SessionState` does not.
+
+        It was written straight into the session channel's state with no action
+        behind it, so a client that subscribed afterwards was served a key the
+        schema does not define while every client already subscribed kept the
+        old number forever -- there being no envelope to carry the new one.
+        `root/sessionSummaryChanged` is where it belongs, and it goes there.
+        """
+        uri = "echo:/cs-3b"
+        client = await _session(host, uri)
+        await client.collect(seconds=0.2)
+        await host.publish_changeset(uri, Changeset(label="c"), [_EDIT])
+        await client.collect(seconds=0.3)
+
+        state = (await client.request("subscribe", {"channel": uri}))["result"]["snapshot"]["state"]
+        assert "changes" not in state, "an undeclared key is served in SessionState"
+        summaries = [
+            n["params"]["changes"]
+            for n in client.notifications
+            if n.get("method") == "root/sessionSummaryChanged"
+        ]
+        assert any("changes" in c for c in summaries), "the roll-up reached nobody"
+
     async def test_content_is_readable_without_any_filesystem(self, host: Host) -> None:
         """The point of the store. This host installs no resource provider at
         all, and the diff still resolves -- because `before` no longer exists on
@@ -250,6 +274,97 @@ class TestReview:
         await host.publish_changeset(uri, Changeset(label="c", reviewable=True), [_EDIT])
         state = (await client.request("subscribe", {"channel": uri}))["result"]["snapshot"]["state"]
         assert state["changesets"][0]["capabilities"] == {"review": {}}
+
+
+class TestTheCatalogueStaysCurrent:
+    """The catalogue entry was published once and never again.
+
+    It is the only copy a client has of the label, the description and
+    `capabilities.review`, and `_validate_review` reads the *updated* entry --
+    so a changeset that became reviewable rendered no checkboxes while the host
+    accepted review on it, and one that stopped being reviewable rendered
+    checkboxes the host then refused.
+    """
+
+    def _catalogue(self, client: FakeClient, uri: str) -> list[list[dict[str, Any]]]:
+        return [
+            a["action"]["changesets"]
+            for a in client.actions(uri)
+            if a["action"]["type"] == "session/changesetsChanged"
+        ]
+
+    async def test_a_changed_entry_is_re_emitted(self, host: Host) -> None:
+        uri = "echo:/cat-1"
+        client = await _session(host, uri)
+        channel = await host.publish_changeset(
+            uri, Changeset(label="Before", description="old", reviewable=False), [_EDIT]
+        )
+        await host.publish_changeset(
+            uri,
+            Changeset(uri=channel, label="After", description="new", reviewable=True),
+            [_EDIT],
+        )
+        await client.collect(seconds=0.3)
+
+        state = (await client.request("subscribe", {"channel": uri}))["result"]["snapshot"]["state"]
+        entry = state["changesets"][0]
+        assert entry["label"] == "After"
+        assert entry["description"] == "new"
+        assert entry["capabilities"] == {"review": {}}
+        # And it was carried by an action, not just healed in the snapshot: a
+        # client subscribed the whole time has no other way to learn of it.
+        assert self._catalogue(client, uri)[-1][0]["label"] == "After"
+
+    async def test_an_unchanged_entry_is_not_re_emitted(self, host: Host) -> None:
+        """Full-replacement semantics make a redundant catalogue frame a
+        re-render of every row in the picker, and a republish happens after
+        every operation."""
+        uri = "echo:/cat-2"
+        client = await _session(host, uri)
+        changeset = Changeset(label="c", reviewable=True)
+        await host.publish_changeset(uri, changeset, [_EDIT])
+        await client.collect(seconds=0.3)
+        once = len(self._catalogue(client, uri))
+
+        await host.publish_changeset(
+            uri, Changeset(uri=changeset.uri, label="c", reviewable=True), [_EDIT]
+        )
+        await client.collect(seconds=0.3)
+        assert len(self._catalogue(client, uri)) == once
+
+    async def test_the_review_gate_and_the_client_agree(self, host: Host) -> None:
+        """The gate reads the current entry, so the client must have it."""
+        uri = "echo:/cat-3"
+        client = await _session(host, uri)
+        channel = await host.publish_changeset(uri, Changeset(label="c", reviewable=True), [_EDIT])
+        await host.publish_changeset(
+            uri, Changeset(uri=channel, label="c", reviewable=False), [_EDIT]
+        )
+        await client.request("subscribe", {"channel": channel})
+        await client.collect(seconds=0.2)
+
+        state = (await client.request("subscribe", {"channel": uri}))["result"]["snapshot"]["state"]
+        assert "capabilities" not in state["changesets"][0]
+
+        await client.notify(
+            "dispatchAction",
+            {
+                "channel": channel,
+                "clientSeq": 1,
+                "action": {
+                    "type": "changeset/filesReviewChanged",
+                    "files": ["file:///work/main.py"],
+                    "reviewed": True,
+                },
+            },
+        )
+        await client.collect(seconds=0.3)
+        echoes = [
+            e
+            for e in client.actions(channel)
+            if e["action"]["type"] == "changeset/filesReviewChanged"
+        ]
+        assert "rejectionReason" in echoes[-1]
 
 
 class TestOperations:
@@ -538,6 +653,164 @@ class TestOperationTargets:
         await client.collect(seconds=0.3)
         assert seen == [None]
 
+    async def test_a_range_target_must_carry_its_range(self, host: Host) -> None:
+        """`ChangesetOperationTarget`'s range variant requires `range`, and
+        `TextRange` requires both ends.
+
+        Left unchecked the handler is the first thing to notice, and what it
+        raises comes back as -32603 -- "the host has a bug" for an unambiguous
+        caller mistake."""
+        uri = "echo:/cs-t5"
+        client = await _session(host, uri)
+
+        async def handler(changeset: str, operation: str, target: Mapping[str, Any] | None) -> None:
+            assert target is not None
+            target["range"]["start"]  # what an embedder writes, and may trust
+
+        host.register_operation("annotate", handler)
+        channel = await host.publish_changeset(
+            uri,
+            Changeset(
+                label="c",
+                operations=[ChangesetOperation(id="annotate", label="A", scopes=("range",))],
+            ),
+            [_EDIT],
+        )
+        for target in (
+            {"kind": "range", "resource": "file:///work/main.py"},
+            {"kind": "range", "resource": "file:///work/main.py", "range": {}},
+            {"kind": "range", "resource": "file:///work/main.py", "range": {"start": {"line": 1}}},
+        ):
+            response = await client.request(
+                "invokeChangesetOperation",
+                {"channel": channel, "operationId": "annotate", "target": target},
+            )
+            assert response["error"]["code"] == -32602, target
+
+        accepted = await client.request(
+            "invokeChangesetOperation",
+            {
+                "channel": channel,
+                "operationId": "annotate",
+                "target": {
+                    "kind": "range",
+                    "resource": "file:///work/main.py",
+                    "range": {"start": {"line": 1, "character": 0}, "end": {"line": 2}},
+                },
+            },
+        )
+        assert "error" not in accepted
+
+
+class TestOperationMembership:
+    """ "The server validates that `operationId` exists in the changeset's
+    current `operations` list."
+
+    It did not, and the miss compounded: the scope lookup answered "no declared
+    scopes" for an id the changeset never published, and every target guard was
+    written `if declared` -- so an undeclared id skipped scope and target
+    validation too. Reachable on the shipped demo, which gates `commit` out of
+    the published list while leaving its handler registered.
+    """
+
+    async def test_an_undeclared_operation_is_refused(self, host: Host) -> None:
+        uri = "echo:/mem-1"
+        client = await _session(host, uri)
+        ran: list[str] = []
+
+        async def handler(changeset: str, operation: str, target: Mapping[str, Any] | None) -> None:
+            ran.append(operation)
+
+        host.register_operation("gated-out", handler)
+        channel = await host.publish_changeset(
+            uri,
+            Changeset(label="c", operations=[ChangesetOperation(id="published", label="P")]),
+            [_EDIT],
+        )
+        response = await client.request(
+            "invokeChangesetOperation", {"channel": channel, "operationId": "gated-out"}
+        )
+        await client.collect(seconds=0.3)
+        assert response["error"]["code"] == -32602
+        assert not ran, "an operation the changeset does not offer ran anyway"
+
+    async def test_an_undeclared_id_does_not_disarm_target_validation(self, host: Host) -> None:
+        uri = "echo:/mem-2"
+        client = await _session(host, uri)
+        seen: list[Any] = []
+
+        async def handler(changeset: str, operation: str, target: Mapping[str, Any] | None) -> None:
+            seen.append(target)
+
+        host.register_operation("gated-out", handler)
+        channel = await host.publish_changeset(
+            uri,
+            Changeset(label="c", operations=[ChangesetOperation(id="published", label="P")]),
+            [_EDIT],
+        )
+        # A range target with no range, on an id nothing declares: refused for
+        # the membership alone, before the shape is ever in question.
+        response = await client.request(
+            "invokeChangesetOperation",
+            {
+                "channel": channel,
+                "operationId": "gated-out",
+                "target": {"kind": "range", "resource": "file:///nope"},
+            },
+        )
+        await client.collect(seconds=0.3)
+        assert response["error"]["code"] == -32602
+        assert not seen
+
+    async def test_a_changeset_with_no_operations_offers_none(self, host: Host) -> None:
+        """A registered handler is not an invitation. The catalogue is."""
+        uri = "echo:/mem-3"
+        client = await _session(host, uri)
+        ran: list[str] = []
+
+        async def handler(changeset: str, operation: str, target: Mapping[str, Any] | None) -> None:
+            ran.append(operation)
+
+        host.register_operation("revert", handler)
+        channel = await host.publish_changeset(uri, Changeset(label="c"), [_EDIT])
+        response = await client.request(
+            "invokeChangesetOperation", {"channel": channel, "operationId": "revert"}
+        )
+        await client.collect(seconds=0.3)
+        assert response["error"]["code"] == -32602
+        assert not ran
+
+    async def test_an_operation_dropped_by_a_republish_stops_working(self, host: Host) -> None:
+        """ "Current" is the word that matters -- this is exactly the demo's
+        shape, where the available operations are recomputed from git on every
+        publish."""
+        uri = "echo:/mem-4"
+        client = await _session(host, uri)
+        ran: list[str] = []
+
+        async def handler(changeset: str, operation: str, target: Mapping[str, Any] | None) -> None:
+            ran.append(operation)
+
+        host.register_operation("commit", handler)
+        changeset = Changeset(
+            label="c", operations=[ChangesetOperation(id="commit", label="Commit")]
+        )
+        channel = await host.publish_changeset(uri, changeset, [_EDIT])
+        first = await client.request(
+            "invokeChangesetOperation", {"channel": channel, "operationId": "commit"}
+        )
+        await client.collect(seconds=0.3)
+        assert "error" not in first
+        assert ran == ["commit"]
+
+        await host.publish_changeset(uri, Changeset(uri=channel, label="c", operations=[]), [_EDIT])
+        second = await client.request(
+            "invokeChangesetOperation", {"channel": channel, "operationId": "commit"}
+        )
+        await client.collect(seconds=0.3)
+        assert second["error"]["code"] == -32602
+        assert ran == ["commit"]
+
 
 class TestReviewSurvivesARepublish:
     """Ticking Viewed then pressing any button cleared every tick.
@@ -613,6 +886,58 @@ class TestReviewSurvivesARepublish:
             )
             await client.collect(seconds=0.2)
 
+        await host.publish_changeset(uri, changeset, [change])
+        after = (await client.request("subscribe", {"channel": channel}))["result"]["snapshot"][
+            "state"
+        ]
+        assert not after["files"][0].get("reviewed")
+
+    async def test_a_host_originated_tick_is_remembered_too(self, host: Host) -> None:
+        """ "The server MAY also originate it (e.g. an agent marking its own
+        output reviewed)."
+
+        Only the client-dispatch path was recorded, so the host's own tick was
+        wiped by the next republish -- and the demo's `Mark reviewed` button
+        republishes, so it erased itself on the way out.
+        """
+        uri = "echo:/rev-3"
+        client = await _session(host, uri)
+        changeset = Changeset(label="c", reviewable=True)
+        change = FileChange(uri="file:///work/c.txt", before=b"x\n", after=b"y\n")
+        channel = await host.publish_changeset(uri, changeset, [change])
+
+        await host.sequencer.publish(
+            channel,
+            {
+                "type": "changeset/filesReviewChanged",
+                "files": ["file:///work/c.txt"],
+                "reviewed": True,
+            },
+        )
+        await host.publish_changeset(uri, changeset, [change])
+        after = (await client.request("subscribe", {"channel": channel}))["result"]["snapshot"][
+            "state"
+        ]
+        assert after["files"][0]["reviewed"] is True, "the host's own tick was wiped"
+
+    async def test_a_host_originated_untick_is_remembered_too(self, host: Host) -> None:
+        """The server "resets review explicitly ... by dispatching this action
+        with `reviewed: false`". Memory that only ever grows is not memory."""
+        uri = "echo:/rev-4"
+        client = await _session(host, uri)
+        changeset = Changeset(label="c", reviewable=True)
+        change = FileChange(uri="file:///work/d.txt", before=b"x\n", after=b"y\n")
+        channel = await host.publish_changeset(uri, changeset, [change])
+
+        for flag in (True, False):
+            await host.sequencer.publish(
+                channel,
+                {
+                    "type": "changeset/filesReviewChanged",
+                    "files": ["file:///work/d.txt"],
+                    "reviewed": flag,
+                },
+            )
         await host.publish_changeset(uri, changeset, [change])
         after = (await client.request("subscribe", {"channel": channel}))["result"]["snapshot"][
             "state"
@@ -730,3 +1055,163 @@ class TestOperationsAreHonestAboutFailureAndTiming:
             assert busy["operations"][0]["status"] == "disabled"
         finally:
             session.turns["ahp-chat:/busy"].cancel()
+
+
+class TestTheDisabledGateIsReEvaluated:
+    """`disabled` was sampled once, at publish time, and never revisited.
+
+    A provider can only publish a changeset from inside the turn that produced
+    the changes, so the sample was always "busy" -- and with nothing to
+    re-evaluate it, every control on every changeset stayed greyed for the life
+    of the session. Refusing the invoke was still correct; the user simply had
+    no way to make it happen.
+    """
+
+    async def _busy_host(self) -> Host:
+        # Slow enough that the turn is genuinely in flight when the changeset
+        # is published, which is the shape being reproduced.
+        return Host(EchoProvider(delay=0.3), LoopbackSingleUserPolicy())
+
+    async def _start_turn(self, client: FakeClient, chat: str) -> None:
+        await client.notify(
+            "dispatchAction",
+            {
+                "channel": chat,
+                "clientSeq": 1,
+                "action": {
+                    "type": "chat/turnStarted",
+                    "turnId": "t1",
+                    "startedAt": "1970-01-01T00:00:01.000Z",
+                    "message": {"text": "work", "origin": {"kind": "user"}},
+                },
+            },
+        )
+
+    async def _settle(self, host: Host, uri: str) -> None:
+        for _ in range(60):
+            await asyncio.sleep(0.05)
+            if not host._sessions[uri].running():
+                # One more turn of the loop: the un-greying runs from the turn
+                # task's done callback, which fires after the task finishes.
+                await asyncio.sleep(0.1)
+                return
+        raise AssertionError("the turn never ended")
+
+    async def test_a_changeset_published_mid_turn_comes_back_when_it_ends(self) -> None:
+        host = await self._busy_host()
+        uri = "echo:/gate-1"
+        try:
+            client = await _session(host, uri)
+            state = (await client.request("subscribe", {"channel": uri}))["result"]["snapshot"][
+                "state"
+            ]
+            chat = state["chats"][0]["resource"]
+            await client.request("subscribe", {"channel": chat})
+
+            await self._start_turn(client, chat)
+            await asyncio.sleep(0.1)
+            changeset = Changeset(
+                label="c", operations=[ChangesetOperation(id="commit", label="Commit")]
+            )
+            channel = await host.publish_changeset(uri, changeset, [_EDIT])
+            assert host.sequencer.state_of(channel)["operations"][0]["status"] == "disabled"
+
+            await self._settle(host, uri)
+            assert host.sequencer.state_of(channel)["operations"][0]["status"] == "idle"
+        finally:
+            await host.aclose()
+
+    async def test_the_un_greying_is_an_action_not_just_a_snapshot(self) -> None:
+        """A client subscribed the whole time has no snapshot to heal from."""
+        host = await self._busy_host()
+        uri = "echo:/gate-2"
+        try:
+            client = await _session(host, uri)
+            state = (await client.request("subscribe", {"channel": uri}))["result"]["snapshot"][
+                "state"
+            ]
+            chat = state["chats"][0]["resource"]
+            await client.request("subscribe", {"channel": chat})
+            await self._start_turn(client, chat)
+            await asyncio.sleep(0.1)
+            changeset = Changeset(
+                label="c", operations=[ChangesetOperation(id="commit", label="Commit")]
+            )
+            channel = await host.publish_changeset(uri, changeset, [_EDIT])
+            await client.request("subscribe", {"channel": channel})
+            await self._settle(host, uri)
+            await client.collect(seconds=0.3)
+
+            statuses = [
+                a["action"]["status"]
+                for a in client.actions(channel)
+                if a["action"]["type"] == "changeset/operationStatusChanged"
+            ]
+            assert statuses[-1] == "idle", statuses
+        finally:
+            await host.aclose()
+
+    async def test_a_turn_greys_a_changeset_published_while_idle(self) -> None:
+        """The other end of the same gate: a changeset published between turns
+        must grey when the next one starts, not stay clickable."""
+        host = await self._busy_host()
+        uri = "echo:/gate-3"
+        try:
+            client = await _session(host, uri)
+            state = (await client.request("subscribe", {"channel": uri}))["result"]["snapshot"][
+                "state"
+            ]
+            chat = state["chats"][0]["resource"]
+            await client.request("subscribe", {"channel": chat})
+            changeset = Changeset(
+                label="c", operations=[ChangesetOperation(id="commit", label="Commit")]
+            )
+            channel = await host.publish_changeset(uri, changeset, [_EDIT])
+            assert host.sequencer.state_of(channel)["operations"][0]["status"] == "idle"
+
+            await self._start_turn(client, chat)
+            await asyncio.sleep(0.15)
+            assert host.sequencer.state_of(channel)["operations"][0]["status"] == "disabled"
+
+            await self._settle(host, uri)
+            assert host.sequencer.state_of(channel)["operations"][0]["status"] == "idle"
+        finally:
+            await host.aclose()
+
+    async def test_a_failed_operation_keeps_its_error_across_the_gate(self) -> None:
+        """`error` is the only trace a failed operation leaves on screen, and
+        the gate knows nothing about it. Only `idle` and `disabled` move."""
+        host = await self._busy_host()
+        uri = "echo:/gate-4"
+        try:
+            client = await _session(host, uri)
+            state = (await client.request("subscribe", {"channel": uri}))["result"]["snapshot"][
+                "state"
+            ]
+            chat = state["chats"][0]["resource"]
+            await client.request("subscribe", {"channel": chat})
+
+            async def handler(
+                changeset: str, operation: str, target: Mapping[str, Any] | None
+            ) -> None:
+                raise RuntimeError("upstream said no")
+
+            host.register_operation("risky", handler)
+            channel = await host.publish_changeset(
+                uri,
+                Changeset(label="c", operations=[ChangesetOperation(id="risky", label="Risky")]),
+                [_EDIT],
+            )
+            failed = await client.request(
+                "invokeChangesetOperation", {"channel": channel, "operationId": "risky"}
+            )
+            assert "error" in failed
+            assert host.sequencer.state_of(channel)["operations"][0]["status"] == "error"
+
+            await self._start_turn(client, chat)
+            await asyncio.sleep(0.15)
+            assert host.sequencer.state_of(channel)["operations"][0]["status"] == "error"
+            await self._settle(host, uri)
+            assert host.sequencer.state_of(channel)["operations"][0]["status"] == "error"
+        finally:
+            await host.aclose()

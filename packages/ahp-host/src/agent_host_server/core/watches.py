@@ -36,16 +36,18 @@ import fnmatch
 import logging
 import os
 import secrets
+import stat
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Literal, Protocol, runtime_checkable
 
 from agent_host_server.core.resources import path_from_file_uri, uri_from_path
 
 __all__ = [
     "PollingResourceWatcher",
     "ResourceChange",
+    "ResourceChangeType",
     "ResourceWatcher",
     "WatchRequest",
     "new_watch_channel",
@@ -63,10 +65,18 @@ DEFAULT_COALESCE_SECONDS = 0.2
 DEFAULT_MAX_ENTRIES = 20_000
 
 
+#: `ResourceChangeType` is a CLOSED enum -- `added | updated | deleted`
+#: (`actions.schema.json` `$defs.ResourceChangeType`). This emitted `created`
+#: and `changed`, which are neither: a conformant client saw only deletions and
+#: a validating one rejected two thirds of the stream. Spelled as a `Literal`
+#: rather than a comment so the next wrong value is a type error.
+ResourceChangeType = Literal["added", "updated", "deleted"]
+
+
 @dataclass(frozen=True)
 class ResourceChange:
     uri: str
-    type: str  # 'created' | 'changed' | 'deleted'
+    type: ResourceChangeType
 
     def to_wire(self) -> dict[str, str]:
         return {"uri": self.uri, "type": self.type}
@@ -202,9 +212,9 @@ class PollingResourceWatcher:
     ) -> Iterable[ResourceChange]:
         for uri, stamp in after.items():
             if uri not in before:
-                yield ResourceChange(uri, "created")
+                yield ResourceChange(uri, "added")
             elif before[uri] != stamp:
-                yield ResourceChange(uri, "changed")
+                yield ResourceChange(uri, "updated")
         for uri in before:
             if uri not in after:
                 yield ResourceChange(uri, "deleted")
@@ -217,6 +227,10 @@ class PollingResourceWatcher:
             # say. It reports nothing rather than failing the subscription; an
             # embedder with such URIs supplies its own watcher.
             return {}
+
+        single = self._scan_file(root)
+        if single is not None:
+            return single
 
         found: dict[str, tuple[int, int]] = {}
         truncated = False
@@ -252,6 +266,30 @@ class PollingResourceWatcher:
                 self.max_entries,
             )
         return found
+
+    @staticmethod
+    def _scan_file(root: Path) -> dict[str, tuple[int, int]] | None:
+        """The one entry of a watch rooted at a FILE, or ``None`` for a directory.
+
+        `os.walk` yields nothing at all for a file, so a watch rooted at one was
+        created, subscribed and polled forever without ever reporting anything --
+        a healthy-looking dead watch. The spec names the case explicitly:
+        `ResourceWatchState.root` is "for non-recursive watches ... the single
+        file or directory".
+
+        `includes`/`excludes` are not consulted: both are documented as "glob
+        patterns or paths **relative to** `root`", and a file has nothing
+        beneath it to filter. An absent root is reported as an empty scan rather
+        than an error, so a watch on a path that does not exist yet reports
+        `added` when it appears.
+        """
+        try:
+            stats = os.lstat(root)
+        except OSError:
+            return {}
+        if stat.S_ISDIR(stats.st_mode):
+            return None
+        return {uri_from_path(root): (stats.st_mtime_ns, stats.st_size)}
 
 
 def _join(relative_dir: str, name: str) -> str:

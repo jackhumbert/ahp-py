@@ -22,6 +22,7 @@ from agent_host_protocol.transport import memory_pair
 
 from agent_host_server.core import Host, LoopbackSingleUserPolicy
 from agent_host_server.provider import EchoProvider
+from agent_host_server.provider.base import TurnSink, UserMessage
 
 from .test_host_end_to_end import FakeClient
 
@@ -200,6 +201,7 @@ class TestToolConfirmation:
                     "turnId": "t1",
                     "toolCallId": ready["toolCallId"],
                     "approved": True,
+                    "confirmed": "user-action",
                 },
             },
         )
@@ -226,6 +228,7 @@ class TestToolConfirmation:
                     "turnId": "t1",
                     "toolCallId": ready["toolCallId"],
                     "approved": True,
+                    "confirmed": "user-action",
                     "editedToolInput": {"text": "edited by the client"},
                 },
             },
@@ -253,6 +256,7 @@ class TestToolConfirmation:
                     "turnId": "t1",
                     "toolCallId": ready["toolCallId"],
                     "approved": False,
+                    "reason": "denied",
                 },
             },
         )
@@ -275,6 +279,7 @@ class TestToolConfirmation:
                     "turnId": "t1",
                     "toolCallId": "not-a-real-call",
                     "approved": True,
+                    "confirmed": "user-action",
                 },
             },
         )
@@ -415,3 +420,246 @@ class TestClientTools:
         await client.collect(seconds=0.5)
         assert "(no active client to run a tool)" in _deltas(client, chat_uri)
         assert len(host.pending) == 0
+
+
+def _tool_call(host: Host, chat_uri: str) -> dict[str, Any]:
+    """The reduced tool call -- i.e. what every client's mirror holds for it.
+
+    Asserting on the published frames alone is what let three of the defects in
+    this file ship: each was a frame that looked right on the wire and that the
+    reducer then discarded, so the host and every client disagreed about a tool
+    call while every wire-level assertion stayed green.
+    """
+    state = host.sequencer.state_of(chat_uri)
+    turn = state.get("activeTurn") or (state.get("turns") or [{}])[-1]
+    for part in turn.get("responseParts", []):
+        if part.get("kind") == "toolCall":
+            call: dict[str, Any] = part["toolCall"]
+            return call
+    return {}
+
+
+class _Plain(EchoProvider):
+    """The simplest provider there is: announce a call, then finish it.
+
+    No confirmation, which is the mode every server-side tool runs in -- and the
+    mode in which the sink's own streaming methods were dropped on the floor.
+    """
+
+    def __init__(self, *, gate: asyncio.Event | None = None) -> None:
+        super().__init__()
+        self.gate = gate
+
+    async def create_session(self, context: Any) -> Any:
+        session = await super().create_session(context)
+        gate = self.gate
+
+        async def run(message: UserMessage, sink: TurnSink) -> None:
+            await sink.tool_call_started(
+                "call-1", "streamer", {"path": "/tmp/x"}, display_name="Streamer"
+            )
+            await sink.tool_call_output("call-1", [{"type": "text", "text": "PARTIAL"}])
+            if gate is not None:
+                await gate.wait()
+            await sink.tool_call_completed(
+                "call-1",
+                {"content": [{"type": "text", "text": "FINAL"}]},
+                past_tense_message="Streamed it",
+            )
+
+        session.send_user_message = run  # type: ignore[method-assign]
+        return session
+
+
+class TestPlainToolCalls:
+    """A tool call that needs no approval -- including the host's own `!command`."""
+
+    async def test_the_auto_confirming_ready_restates_the_calls_own_details(self) -> None:
+        """`invocationMessage` is REQUIRED on `chat/toolCallReady`, and for a
+        call leaving `streaming` the reducer takes both it and `toolInput` FROM
+        THAT ACTION. Omitting them stored nulls over everything the provider had
+        said about the call at the very moment it started running."""
+        host = Host(_Plain(), LoopbackSingleUserPolicy())
+        try:
+            client = await _attach(host, "solo")
+            _, chat_uri = await _session(client, "echo:/plain-1")
+            await _send(client, chat_uri)
+            await client.collect(seconds=0.5)
+
+            ready = _action(client, chat_uri, "chat/toolCallReady")
+            assert ready is not None
+            assert ready["invocationMessage"], "REQUIRED by ChatToolCallReadyAction"
+            assert ready["toolInput"] == '{"path": "/tmp/x"}'
+
+            call = _tool_call(host, chat_uri)
+            assert call["invocationMessage"] == "Running Streamer"
+            assert call["toolInput"] == '{"path": "/tmp/x"}'
+        finally:
+            await host.aclose()
+
+    async def test_the_start_action_carries_no_tool_input(self) -> None:
+        """`ChatToolCallStartAction` declares `toolName`, `displayName`,
+        `intention` and `contributor` -- there is no `toolInput` on it, so one
+        published there is dropped by the reducer and no non-confirming tool
+        ever showed its input."""
+        host = Host(_Plain(), LoopbackSingleUserPolicy())
+        try:
+            client = await _attach(host, "solo")
+            _, chat_uri = await _session(client, "echo:/plain-2")
+            await _send(client, chat_uri)
+            await client.collect(seconds=0.5)
+
+            start = _action(client, chat_uri, "chat/toolCallStart")
+            assert start is not None
+            assert "toolInput" not in start
+            # Moved, not lost: the input still reaches the client's state.
+            assert _tool_call(host, chat_uri)["toolInput"] == '{"path": "/tmp/x"}'
+        finally:
+            await host.aclose()
+
+    async def test_partial_output_lands_while_the_tool_is_still_running(self) -> None:
+        """`chat/toolCallContentChanged` reaches a `running` call and no other,
+        and the plain path only left `streaming` at completion -- so every
+        partial this method exists to publish was discarded, and live output
+        first appeared as the finished result."""
+        gate = asyncio.Event()
+        host = Host(_Plain(gate=gate), LoopbackSingleUserPolicy())
+        try:
+            client = await _attach(host, "solo")
+            _, chat_uri = await _session(client, "echo:/plain-3")
+            await _send(client, chat_uri)
+            await client.collect(seconds=0.4)
+
+            call = _tool_call(host, chat_uri)
+            assert call["status"] == "running"
+            assert call["content"] == [{"type": "text", "text": "PARTIAL"}]
+        finally:
+            gate.set()
+            await host.aclose()
+
+
+class TestProgressAfterConfirmation:
+    """The shipped `EchoProvider(confirm_tools=True)` streams its progress
+    through `tool_call_delta` after the call was approved, which is precisely
+    where `chat/toolCallDelta` is a no-op: the reducer's updater returns a
+    running call untouched. The demo's own progress line never moved."""
+
+    @pytest.fixture
+    async def host(self) -> AsyncIterator[Host]:
+        host = Host(EchoProvider(confirm_tools=True), LoopbackSingleUserPolicy())
+        try:
+            yield host
+        finally:
+            await host.aclose()
+
+    async def _approve(self, client: FakeClient, chat_uri: str) -> None:
+        ready = _action(client, chat_uri, "chat/toolCallReady")
+        assert ready is not None
+        await client.notify(
+            "dispatchAction",
+            {
+                "channel": chat_uri,
+                "clientSeq": 2,
+                "action": {
+                    "type": "chat/toolCallConfirmed",
+                    "turnId": "t1",
+                    "toolCallId": ready["toolCallId"],
+                    "approved": True,
+                    "confirmed": "user-action",
+                },
+            },
+        )
+
+    async def test_progress_reaches_the_mirror(self, host: Host) -> None:
+        client = await _attach(host, "solo")
+        _, chat_uri = await _session(client, "echo:/progress-1")
+        await _send(client, chat_uri)
+        await client.collect(seconds=0.4)
+        await self._approve(client, chat_uri)
+        await client.collect(seconds=0.6)
+
+        call = _tool_call(host, chat_uri)
+        assert call["invocationMessage"] == "Echoing word 1"
+        # The confirmation is carried forward rather than overwritten: a
+        # `not-needed` here would record that nobody was ever asked.
+        assert call["confirmed"] == "user-action"
+
+    async def test_progress_does_not_wipe_the_streamed_output(self, host: Host) -> None:
+        """A second `chat/toolCallReady` rebuilds the call from its base fields,
+        and `content` is not one of them."""
+        client = await _attach(host, "solo")
+        _, chat_uri = await _session(client, "echo:/progress-2")
+        await _send(client, chat_uri)
+        await client.collect(seconds=0.4)
+        await self._approve(client, chat_uri)
+        await client.collect(seconds=0.6)
+
+        assert _tool_call(host, chat_uri)["content"] == [{"type": "text", "text": "hello"}]
+
+
+class TestMalformedToolCallActions:
+    """A tool-call action missing a REQUIRED field is applied by no reducer --
+    but the host resolves the parked request by `toolCallId` alone, so the tool
+    ran anyway and every client was left with a call state said was never
+    answered. Rejected at the boundary, with the echo that lets a client revert
+    its optimistic prediction."""
+
+    @pytest.fixture
+    async def host(self) -> AsyncIterator[Host]:
+        host = Host(EchoProvider(confirm_tools=True), LoopbackSingleUserPolicy())
+        try:
+            yield host
+        finally:
+            await host.aclose()
+
+    async def _dispatch(
+        self, host: Host, client: FakeClient, chat_uri: str, action: dict[str, Any]
+    ) -> str | None:
+        await client.notify(
+            "dispatchAction", {"channel": chat_uri, "clientSeq": 2, "action": action}
+        )
+        await client.collect(seconds=0.4)
+        echoes = [
+            envelope
+            for envelope in client.actions(chat_uri)
+            if envelope["action"]["type"] == action["type"]
+            and envelope["action"] is not action
+            and envelope.get("origin", {}).get("clientId") == "solo"
+        ]
+        assert echoes, "a rejected action MUST still be echoed"
+        reason: str | None = echoes[-1].get("rejectionReason")
+        return reason
+
+    @pytest.mark.parametrize(
+        ("missing", "action"),
+        [
+            (
+                "turnId",
+                {"type": "chat/toolCallConfirmed", "approved": True, "confirmed": "user-action"},
+            ),
+            ("confirmed", {"type": "chat/toolCallConfirmed", "turnId": "t1", "approved": True}),
+            ("reason", {"type": "chat/toolCallConfirmed", "turnId": "t1", "approved": False}),
+            ("approved", {"type": "chat/toolCallConfirmed", "turnId": "t1"}),
+            ("result", {"type": "chat/toolCallComplete", "turnId": "t1"}),
+        ],
+    )
+    async def test_a_missing_required_field_is_rejected(
+        self, host: Host, missing: str, action: dict[str, Any]
+    ) -> None:
+        client = await _attach(host, "solo")
+        _, chat_uri = await _session(client, f"echo:/malformed-{missing}")
+        await _send(client, chat_uri)
+        await client.collect(seconds=0.4)
+        ready = _action(client, chat_uri, "chat/toolCallReady")
+        assert ready is not None
+
+        reason = await self._dispatch(
+            host, client, chat_uri, {**action, "toolCallId": ready["toolCallId"]}
+        )
+        assert reason is not None
+        assert missing in reason
+
+        # And the provider is still parked: the tool did NOT run behind state's
+        # back, which is the whole damage this check exists to prevent.
+        assert len(host.pending) == 1
+        assert _tool_call(host, chat_uri)["status"] == "pending-confirmation"

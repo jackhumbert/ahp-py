@@ -56,6 +56,7 @@ __all__ = [
     "ResourceProvider",
     "RootedFilesystemResourceProvider",
     "WritableResourceProvider",
+    "is_writable",
     "path_from_file_uri",
     "uri_from_path",
 ]
@@ -63,6 +64,11 @@ __all__ = [
 #: How many symlinks may be resolved before a path is called a loop. POSIX
 #: conventionally allows 40; a jail has no reason to be that generous.
 _MAX_SYMLINKS = 16
+
+#: The closed `ResourceWriteMode` enum, for the provider's own backstop. The
+#: wire edge rejects anything else first; this is what stops an embedder calling
+#: `write(mode="prepend")` from getting a silent full overwrite.
+_WRITE_MODES = frozenset({"truncate", "append", "insert"})
 
 ResourceAccess = Literal["resolve", "read", "list"]
 
@@ -162,6 +168,28 @@ class WritableResourceProvider(ResourceProvider, Protocol):
     async def copy(
         self, source: str, destination: str, *, fail_if_exists: bool = False
     ) -> None: ...
+
+
+def is_writable(provider: ResourceProvider) -> bool:
+    """Whether `provider` will actually accept a write.
+
+    `isinstance(x, WritableResourceProvider)` is **structural**: it is satisfied
+    by anything carrying the five mutating methods, including
+    :class:`RootedFilesystemResourceProvider` constructed `writable=False` --
+    which is the shipped `--serve-directory` default and refuses every one of
+    them. Asked that question alone, `resourceRequest(write=true)` was GRANTED
+    by a read-only host that then denied the very next `resourceWrite`, and the
+    spec makes the grant load-bearing: "After a successful `resourceRequest`,
+    the caller MAY use the corresponding `resource*` commands" -- a grant that
+    does not survive one call is worse than a refusal, because the client was
+    told asking again would help.
+
+    A provider that publishes no `writable` attribute is taken at its word, so
+    an embedder's own writable provider keeps working unchanged.
+    """
+    return isinstance(provider, WritableResourceProvider) and bool(
+        getattr(provider, "writable", True)
+    )
 
 
 class NullResourceProvider:
@@ -547,6 +575,13 @@ class RootedFilesystemResourceProvider:
         if_match: str | None = None,
     ) -> None:
         self._writable(uri)
+        # Validated BEFORE anything is opened, because `O_CREAT` runs first and
+        # a refusal after it leaves a 0-byte file the caller never asked for --
+        # the same shape of defect as the `ifMatch` one below.
+        if mode not in _WRITE_MODES:
+            raise errors.invalid_params(f"mode must be one of {sorted(_WRITE_MODES)}: {mode!r}")
+        if position < 0:
+            raise errors.invalid_params(f"position must not be negative: {position!r}")
         async with self._lock_for(uri):
             fd, name = self._parent_and_name(uri)
             try:
@@ -565,19 +600,44 @@ class RootedFilesystemResourceProvider:
         create_only: bool,
         if_match: str | None,
     ) -> None:
-        flags = os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK
-        if create_only:
-            flags |= os.O_EXCL
+        flags = os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK
+        # `ifMatch` names an etag the caller read off a file that must therefore
+        # already exist, and `O_CREAT` CREATED it before the comparison could
+        # fail: a conditional write to an absent path left a 0-byte file behind,
+        # answered Conflict, and permanently broke the `createOnly` retry that a
+        # Conflict is supposed to invite. `O_EXCL` goes with it -- without
+        # `O_CREAT` it is undefined behaviour.
+        if if_match is None:
+            flags |= os.O_CREAT
+            if create_only:
+                flags |= os.O_EXCL
         try:
             target = os.open(name, flags, 0o600, dir_fd=parent)
         except OSError as exc:
             if exc.errno == _errno.EEXIST:
                 raise errors.AhpError(-32010, f"Already exists: {uri}") from exc
+            if exc.errno in (errors.ELOOP, errors.EMLINK):
+                # `O_NOFOLLOW` reports "this is a symlink" as ELOOP, and mapping
+                # it to NotFound said a file that `resourceRead` and
+                # `resourceResolve` both serve does not exist. The link is NOT
+                # followed: the write would land on a path the policy never saw
+                # -- `_resource_write` asks about the name the peer sent, since
+                # a file that does not exist yet has nothing to canonicalise --
+                # so a link is an honest refusal instead.
+                raise errors.AhpError(
+                    -32009, f"Refusing to write through the symbolic link {uri}"
+                ) from exc
             raise self._not_found(exc) from exc
         try:
             stats = os.fstat(target)
             if not stat.S_ISREG(stats.st_mode):
                 raise errors.AhpError(-32009, "Not a regular file")
+            if create_only and if_match is not None:
+                # `ifMatch` suppressed `O_EXCL` above, so this is the only place
+                # the two together can be adjudicated -- and they cannot both be
+                # satisfied by any file. The open proved this one exists, so
+                # `createOnly`'s "MUST fail if the file already exists" decides.
+                raise errors.AhpError(-32010, f"Already exists: {uri}")
             if if_match is not None:
                 current = f'W/"{stats.st_size}-{stats.st_mtime_ns}"'
                 if current != if_match:

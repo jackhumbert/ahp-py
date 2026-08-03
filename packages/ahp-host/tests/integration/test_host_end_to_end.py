@@ -128,7 +128,9 @@ class TestHandshake:
         _, client = connected
         response = await _initialize(client, protocolVersions=["0.5.0"])
         assert response["error"]["code"] == -32005
-        assert "0.7.0" in response["error"]["data"]["supportedProtocolVersions"]
+        # `supportedVersions` is the schema's own name for this field, and this
+        # assertion pinned the wrong one for as long as it existed.
+        assert "0.7.0" in response["error"]["data"]["supportedVersions"]
 
     async def test_commands_before_initialize_are_refused(
         self, connected: tuple[Host, FakeClient]

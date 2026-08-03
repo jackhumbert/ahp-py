@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from typing import Any
 
 import pytest
 from agent_host_protocol.errors import AhpError
@@ -26,6 +27,8 @@ from agent_host_protocol.errors import AhpError
 from agent_host_server.core.resources import (
     NullResourceProvider,
     RootedFilesystemResourceProvider,
+    WritableResourceProvider,
+    is_writable,
 )
 
 pytestmark = pytest.mark.anyio
@@ -379,6 +382,87 @@ class TestWriting:
         await provider.move(_uri(root / "copy.txt"), _uri(root / "moved.txt"))
         assert (root / "moved.txt").read_text() == "hello"
         assert not (root / "copy.txt").exists()
+
+
+class TestTheWriteApiRefusesRatherThanGuesses:
+    """The provider's own backstops, reachable without going through the wire.
+
+    The dispatcher validates `mode` and `position` off the frame, but
+    `WritableResourceProvider` is a public API an embedder calls directly -- and
+    the destructive fallthrough lived down here, where an unrecognised mode
+    became a full overwrite.
+    """
+
+    @pytest.fixture
+    def writable(self, tmp_path: Path) -> tuple[RootedFilesystemResourceProvider, Path]:
+        root = tmp_path / "w3"
+        root.mkdir()
+        (root / "file.txt").write_text("hello")
+        return RootedFilesystemResourceProvider(root, writable=True), root
+
+    async def test_an_unrecognised_mode_does_not_overwrite(
+        self, writable: tuple[RootedFilesystemResourceProvider, Path]
+    ) -> None:
+        provider, root = writable
+        with pytest.raises(AhpError) as caught:
+            await provider.write(_uri(root / "file.txt"), b"x", mode="prepend")
+        assert caught.value.code == -32602
+        assert (root / "file.txt").read_text() == "hello"
+
+    async def test_a_bad_mode_does_not_create_the_target_first(
+        self, writable: tuple[RootedFilesystemResourceProvider, Path]
+    ) -> None:
+        """Validated before the open, not after: `O_CREAT` runs first, so a
+        refusal on the far side of it leaves a 0-byte file behind."""
+        provider, root = writable
+        with pytest.raises(AhpError):
+            await provider.write(_uri(root / "ghost.txt"), b"x", mode="prepend")
+        assert not (root / "ghost.txt").exists()
+
+    async def test_a_negative_position_is_refused(
+        self, writable: tuple[RootedFilesystemResourceProvider, Path]
+    ) -> None:
+        provider, root = writable
+        with pytest.raises(AhpError) as caught:
+            await provider.write(_uri(root / "file.txt"), b"x", mode="append", position=-5)
+        assert caught.value.code == -32602
+        assert (root / "file.txt").read_bytes() == b"hello"
+
+
+class TestIsWritable:
+    """`isinstance(x, WritableResourceProvider)` answers a different question.
+
+    It is structural, so a provider built `writable=False` satisfies it and then
+    refuses every mutation -- which is how `resourceRequest(write=true)` came to
+    be granted by a read-only host.
+    """
+
+    def test_a_read_only_rooted_provider_is_not_writable(self, tmp_path: Path) -> None:
+        provider = RootedFilesystemResourceProvider(tmp_path)
+        assert isinstance(provider, WritableResourceProvider), "the structural check still passes"
+        assert not is_writable(provider)
+
+    def test_a_writable_rooted_provider_is(self, tmp_path: Path) -> None:
+        assert is_writable(RootedFilesystemResourceProvider(tmp_path, writable=True))
+
+    def test_a_provider_that_exposes_nothing_is_not(self) -> None:
+        assert not is_writable(NullResourceProvider())
+
+    def test_an_embedders_provider_without_the_flag_is_taken_at_its_word(self) -> None:
+        """No `writable` attribute means the question was never asked, and an
+        embedder's own writable provider must keep working unchanged."""
+
+        class Embedders:
+            async def resolve(self, uri: str, *, follow_symlinks: bool = True) -> Any: ...
+            async def read(self, uri: str) -> Any: ...
+            async def list_dir(self, uri: str) -> Any: ...
+            async def write(self, uri: str, data: bytes, **kwargs: Any) -> None: ...
+            async def mkdir(self, uri: str) -> None: ...
+            async def delete(self, uri: str, *, recursive: bool = False) -> None: ...
+            async def move(self, source: str, destination: str, **kwargs: Any) -> None: ...
+            async def copy(self, source: str, destination: str, **kwargs: Any) -> None: ...
+
+        assert is_writable(Embedders())
 
 
 class TestAncestorChain:

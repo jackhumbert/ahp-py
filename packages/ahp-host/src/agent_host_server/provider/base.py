@@ -295,9 +295,29 @@ class ClientToolCall:
 
 @dataclass(frozen=True)
 class ToolResult:
-    """What a client reported back. ``value`` is the raw wire result."""
+    """What a client reported back, or why it did not.
+
+    ``response`` carries ADR 0003's neutral vocabulary, like
+    :class:`InputOutcome`: ``"accept"`` when the client ran the tool and
+    ``value`` holds its raw wire result, ``"decline"`` when the owning client
+    refused -- which the spec REQUIRES it to do "if it does not recognize the
+    tool or cannot execute it" (`ChatToolCallDeniedAction`) -- and ``"cancel"``
+    when the host gave up on the call because its owner left the session.
+
+    It exists because a refusal used to arrive as ``ToolResult(value={})``,
+    indistinguishable from a tool that ran and returned nothing: an agent told
+    "the editor will not do that" reported an empty success and carried on.
+    ``value`` is meaningful only when :attr:`accepted`; ``reason`` only when it
+    is not.
+    """
 
     value: Any = None
+    response: str = "accept"
+    reason: str | None = None
+
+    @property
+    def accepted(self) -> bool:
+        return self.response == "accept"
 
 
 @dataclass(frozen=True)
@@ -514,6 +534,11 @@ class TurnSink(Protocol):
         to *name* because the wire field is required and a blank row is worse
         than a technical one.
 
+        *tool_input* is held rather than published here: `chat/toolCallStart`
+        declares no input field, so the host carries it on the
+        `chat/toolCallReady` that ends the streaming phase, which is where the
+        protocol puts the final input.
+
         *meta* is the protocol's `_meta`, where the well-known keys live -- in
         particular `ptyTerminal: {"input": ..., "output": ...}`, which is what
         makes a client render a shell command as a terminal rather than a row.
@@ -533,6 +558,12 @@ class TurnSink(Protocol):
         Optional, and only interesting for a call that takes long enough to
         watch. Without it such a call is one static row and then everything at
         once.
+
+        Call it whenever you like: the host publishes whichever action the
+        call's current state accepts, because `chat/toolCallDelta` reaches a
+        call that is still `streaming` and nothing else. *content* is
+        parameters, so it only means anything before the call is ready;
+        *invocation_message* is progress, and keeps working afterwards.
         """
         ...
 
@@ -547,6 +578,10 @@ class TurnSink(Protocol):
 
         REPLACES the running call's content each time rather than appending, so
         pass everything so far. Optional, like `tool_call_delta`.
+
+        A call that produces output is running, so the host moves it there for
+        you if it has not moved already -- the state this content attaches to
+        exists only from `running` onwards.
         """
         ...
 

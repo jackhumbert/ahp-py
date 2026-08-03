@@ -16,6 +16,7 @@ import contextlib
 import copy
 import json
 import logging
+import math
 import time
 import uuid
 from collections.abc import Coroutine, Mapping, Sequence
@@ -25,9 +26,14 @@ from typing import Any, Final
 
 from agent_host_protocol import errors
 from agent_host_protocol.channels import ROOT_URI
+from agent_host_protocol.reducers import js
 from agent_host_protocol.reducers.clock import now_iso
 from agent_host_protocol.transport.base import Transport
-from agent_host_protocol.types import IS_CLIENT_DISPATCHABLE, JSON_RPC_ERROR_CODES
+from agent_host_protocol.types import (
+    AHP_ERROR_CODES,
+    IS_CLIENT_DISPATCHABLE,
+    JSON_RPC_ERROR_CODES,
+)
 from agent_host_protocol.types.protocol import SessionStatus, session_status_flags
 from agent_host_protocol.versions import DEFAULT_SUPPORTED_VERSIONS, negotiate
 
@@ -58,6 +64,7 @@ from agent_host_server.core.resources import (
     ResourceInfo,
     ResourceProvider,
     WritableResourceProvider,
+    is_writable,
     path_from_file_uri,
     uri_from_path,
 )
@@ -80,7 +87,7 @@ from agent_host_server.core.terminals import (
     terminal_dispatch_rejection,
     trim_scrollback,
 )
-from agent_host_server.core.turn import ActionTurnSink, TurnRunner
+from agent_host_server.core.turn import ActionTurnSink, TurnRunner, tool_call_dispatch_rejection
 from agent_host_server.core.watches import (
     DEFAULT_COALESCE_SECONDS,
     ResourceChange,
@@ -112,11 +119,18 @@ _log = logging.getLogger(__name__)
 #: SessionStatus.Idle -- what a freshly created session reports.
 _STATUS_IDLE = SessionStatus.IDLE
 
-#: The mutable half of `SessionSummary`. `SessionState` "inlines (denormalizes)
-#: every SessionMetadata field directly onto itself", so the catalogue summary is
-#: a straight projection of the session channel's own state -- which is how the
-#: host keeps the two in sync without enumerating action types. `resource`,
-#: `provider` and `createdAt` are identity and never appear in a change set.
+#: The mutable half of `SessionSummary` that `SessionState` also carries.
+#: `SessionState` "inlines (denormalizes) every SessionMetadata field directly
+#: onto itself", so the catalogue summary is a straight projection of the session
+#: channel's own state -- which is how the host keeps the two in sync without
+#: enumerating action types. `resource`, `provider` and `createdAt` are identity
+#: and never appear in a change set.
+#:
+#: `changes` is NOT here, and that is the point: `SessionSummary` declares it,
+#: `SessionState` does not. Projecting it meant writing it into the session
+#: channel's state -- an undeclared key served to every later subscriber, with no
+#: action to carry it to the ones already subscribed. It is held on `_Session`
+#: and injected by `_project_summary` instead.
 _SUMMARY_FIELDS: Final = (
     "title",
     "status",
@@ -124,7 +138,6 @@ _SUMMARY_FIELDS: Final = (
     "project",
     "workingDirectories",
     "annotations",
-    "changes",
     "_meta",
 )
 
@@ -141,6 +154,14 @@ _DEFAULT_SESSION_TITLE: Final = "New Session"
 #: and acted on in `_start_turn` -- from the same constant, so the host cannot
 #: promise a shortcut it does not honour.
 TERMINAL_COMMAND_PREFIX: Final = "!"
+
+#: What a terminal is called when `CreateTerminalParams` carried no `name`.
+#: `title` is REQUIRED on both `TerminalState` and `TerminalInfo`, so there is
+#: no "leave it out" option -- and the fallback is one constant because the two
+#: were seeded separately: the catalogue said "Terminal" while the channel's own
+#: state omitted the field entirely, so one terminal had two titles, one of them
+#: schema-invalid.
+_DEFAULT_TERMINAL_TITLE: Final = "Terminal"
 
 #: And what a chat is called. The DEFAULT chat used to be given the session's
 #: title instead, which is a different thing: a chat tab reading "New Session"
@@ -180,12 +201,29 @@ _MCP_LIFECYCLE_ACTIONS: Final = frozenset(
     {"session/mcpServerStartRequested", "session/mcpServerStopRequested"}
 )
 
+#: Terminal actions that change a field `TerminalInfo` also carries, so the root
+#: catalogue has to be republished after them. `terminal/exited` is not here
+#: because the reaper republishes on its own, and nothing else in the terminal
+#: channel touches `title`, `claim` or `exitCode`.
+_CATALOGUE_TERMINAL_ACTIONS: Final = frozenset({"terminal/titleChanged", "terminal/claimed"})
+
 #: Client-dispatchable, and each resolves a tool call the host is suspended on.
 #: The protocol's own validation table conditions `chat/toolCallConfirmed` on
 #: the call's STATUS and never on client identity -- so any subscriber may
-#: approve any other client's pending call. That is upstream's design; the host
-#: still has to check the call is actually pending, which no reducer does.
+#: approve any other client's pending SERVER-side call. That is upstream's
+#: design; the host still has to check the call is actually pending, which no
+#: reducer does. `chat/toolCallComplete` is the exception and says so: "The
+#: server SHOULD reject this action if the dispatching client does not match the
+#: contributor's `clientId`."
 _TOOL_RESOLVING_ACTIONS: Final = frozenset({"chat/toolCallConfirmed", "chat/toolCallComplete"})
+
+#: Both halves of the active-client lifecycle. `Set` expands the plugins a
+#: client just published; `Removed` ends the tool calls it can no longer answer.
+#: Only the first was routed, so a client that left a session politely stranded
+#: every call it owned -- the exact case the disconnect path already handled.
+_ACTIVE_CLIENT_ACTIONS: Final = frozenset(
+    {"session/activeClientSet", "session/activeClientRemoved"}
+)
 
 #: The read half of the `resource*` family, plus the grant request. The write
 #: half -- write, mkdir, copy, move, delete -- is a separate opt-in and is not
@@ -205,6 +243,18 @@ _RESOURCE_WRITE_METHODS: Final = frozenset(
 #: content MUST use `base64`; text content MAY use `utf-8`."
 _BASE64: Final = "base64"
 _UTF8: Final = "utf-8"
+
+#: The closed `ResourceWriteMode` enum. Anything else was coerced to the
+#: DEFAULT, which is the full overwrite -- the most destructive of the three
+#: picked as the fallback for a value the caller got wrong.
+_WRITE_MODES: Final = frozenset({"truncate", "append", "insert"})
+
+#: The largest file `resourceRead` will answer with, before base64 and JSON
+#: multiply it. There is no partial read in the protocol -- `ResourceReadParams`
+#: has no offset or length -- so this is a refusal, not a truncation, and an
+#: embedder serving large assets raises it. 16 MiB is roughly a 21 MiB base64
+#: frame; the unbounded version turned one 64 MiB file into ~970 MB of RSS.
+DEFAULT_MAX_READ_BYTES: Final = 16 * 1024 * 1024
 
 #: One server-to-client notification per OTel signal. The payload is OTLP/JSON
 #: verbatim -- "AHP only adds the routing envelope" -- so this host never parses
@@ -233,6 +283,57 @@ def _items(wrapped: Any) -> tuple[str, ...]:
     if not isinstance(items, list):
         return ()
     return tuple(i for i in items if isinstance(i, str))
+
+
+def _write_mode(params: Mapping[str, Any]) -> str:
+    """`ResourceWriteParams.mode`, or `InvalidParams`.
+
+    The enum is closed -- `truncate | append | insert` -- and this coerced
+    everything else, including `7`, `null` and a typo, to the DEFAULT. The
+    default is the full overwrite, so the most destructive of the three modes
+    was the fallback for a value the caller demonstrably got wrong, and it
+    reported success. `InvalidParams`, the same answer malformed `data` gets.
+
+    ABSENT is the only thing that means "default": invariant 18 -- an explicit
+    `null` is not a missing key, and it is not a member of the enum either.
+    Membership is tested behind an `isinstance` because `{} in frozenset(...)`
+    raises `TypeError`, which a peer would see as `InternalError`.
+    """
+    if "mode" not in params:
+        return "truncate"
+    mode = params["mode"]
+    if not isinstance(mode, str) or mode not in _WRITE_MODES:
+        raise errors.invalid_params(f"mode must be one of {sorted(_WRITE_MODES)}, not {mode!r}")
+    return mode
+
+
+def _write_position(params: Mapping[str, Any]) -> int:
+    """`ResourceWriteParams.position`, or `InvalidParams`.
+
+    A negative offset is meaningless in all three modes and the provider had no
+    reading for one: `append` computed an offset past EOF and silently NUL-padded
+    the file, while `insert` and `truncate` reached `os.ftruncate` and leaked
+    `[Errno 22] Invalid argument` as `InternalError` -- "the host has a bug"
+    for an unambiguous caller mistake.
+
+    The schema types it `number`, not `integer`, so `3.0` is a valid way to say
+    3 and is accepted; `3.5` is not a byte offset and is refused rather than
+    silently floored. `True` is rejected before either -- it is an `int` in
+    Python and JSON `true` is not an offset.
+    """
+    if "position" not in params:
+        return 0
+    position = params["position"]
+    if isinstance(position, bool) or not isinstance(position, int | float):
+        raise errors.invalid_params(f"position must be a number, not {position!r}")
+    if isinstance(position, float) and not math.isfinite(position):
+        # `json.loads` accepts `Infinity` and `NaN` by default and `int()` raises
+        # on both, so without this a peer picks which frames become
+        # `InternalError` with a Python exception name attached.
+        raise errors.invalid_params(f"position must be finite: {position!r}")
+    if position != int(position) or position < 0:
+        raise errors.invalid_params(f"position must be a non-negative whole number: {position!r}")
+    return int(position)
 
 
 def _read_result(content: Any, requested: Any) -> dict[str, Any]:
@@ -291,9 +392,11 @@ def _terminal_info(state: Any) -> dict[str, Any]:
     if not isinstance(state, Mapping):
         # Still valid: the caller supplies `resource`, and a title beats an
         # entry the client cannot render at all.
-        return {"title": "Terminal", "claim": {}}
+        return {"title": _DEFAULT_TERMINAL_TITLE, "claim": {}}
     info: dict[str, Any] = {
-        "title": state.get("title") if isinstance(state.get("title"), str) else "Terminal",
+        "title": state.get("title")
+        if isinstance(state.get("title"), str)
+        else _DEFAULT_TERMINAL_TITLE,
         "claim": state.get("claim") or {},
     }
     if "exitCode" in state:
@@ -446,6 +549,75 @@ def _answers_of(state: Any, request_id: str) -> Mapping[str, Any]:
     return {}
 
 
+def _side_chat_selection(selection: Any) -> dict[str, Any]:
+    """`SideChatSelection`, or -32602.
+
+    Two required-field rules and one prose MUST, all on a value the host
+    promises to preserve unchanged for the life of the chat: `text` is required
+    and typed `string`, and "MUST be non-empty" (`state.schema.json`
+    SideChatSelection). `responsePartId` is optional but typed.
+    """
+    if not isinstance(selection, Mapping):
+        raise errors.invalid_params("source.selection must be an object")
+    text = selection.get("text")
+    if not isinstance(text, str) or not text:
+        raise errors.invalid_params("source.selection.text must be a non-empty string")
+    snapshot: dict[str, Any] = {"text": text}
+    part_id = selection.get("responsePartId")
+    if part_id is not None:
+        if not isinstance(part_id, str):
+            raise errors.invalid_params("source.selection.responsePartId must be a string")
+        snapshot["responsePartId"] = part_id
+    return snapshot
+
+
+def _page_size(limit: Any) -> int:
+    """`PaginatedParams.limit` -> a page size, or -32602.
+
+    `limit` is schema-typed `number`, not `integer`, so the old
+    `isinstance(limit, int)` gate got both halves wrong on peer-controlled
+    input: `3.0` is a perfectly ordinary JSON number and was silently ignored
+    (an unbounded page for a client that asked for three), while `true` is not
+    a number at all and satisfied `isinstance(..., int)` -- so a JSON boolean
+    was honoured as a page size of one.
+
+    Out of range is a caller mistake and says so, rather than quietly meaning
+    something else: a negative size would slice entries off the END of the page.
+    An oversized one is capped instead, because the schema explicitly lets a
+    server "impose its own upper cap".
+    """
+    if limit is None:
+        return _MAX_PAGE
+    if isinstance(limit, bool) or not isinstance(limit, int | float):
+        raise errors.invalid_params("limit must be a number")
+    if limit < 1:
+        raise errors.invalid_params("limit must be at least 1")
+    # Floored, not rounded: `2.7` promises no more than 2.7 entries.
+    return min(int(limit), _MAX_PAGE)
+
+
+def _unsupported_protocol_version(supported: Sequence[str]) -> errors.AhpError:
+    """-32005, with the field name the schema actually declares.
+
+    `UnsupportedProtocolVersionErrorData` requires exactly one key,
+    `supportedVersions` (`errors.schema.json:65,74`; `vendor/upstream/ts/errors.ts:157`).
+    `agent_host_protocol.errors.unsupported_protocol_version` writes
+    `supportedProtocolVersions`, so every conformant client -- this is the one
+    frame that tells a user which host version to install -- reads `undefined`
+    and can say nothing beyond "the handshake failed". Built here until the
+    shared emitter is corrected; that package is a separate distribution.
+
+    `_meta.vscodeUpgradeMethod` is still deliberately omitted: it is for hosts
+    spawned by the VS Code CLI, and upstream states servers without a managing
+    CLI omit it.
+    """
+    return errors.AhpError(
+        AHP_ERROR_CODES["UnsupportedProtocolVersion"],
+        "No mutually supported protocol version",
+        {"supportedVersions": list(supported)},
+    )
+
+
 def _encode_cursor(summary: Mapping[str, Any]) -> str:
     """A keyset cursor: the sort key of the last entry on the page.
 
@@ -592,6 +764,12 @@ class _Session:
     #: rejected every later turn as "a turn is already active". Bricked, and
     #: silently. Found by driving the Python client against this host.
     turns: dict[str, asyncio.Task[None]] = field(default_factory=dict)
+    #: When each of those turns started, on the host's monotonic clock. Only
+    #: the turn task itself measures its own `duration`, and a turn ENDED FROM
+    #: OUTSIDE -- `disposeSession`, `disposeChat` -- has to state one too:
+    #: `duration` is required on every terminal chat action, and the hardcoded
+    #: zero it would otherwise carry renders as an instantaneous turn.
+    turn_started: dict[str, float] = field(default_factory=dict)
     meta: dict[str, Any] = field(default_factory=dict)
     #: The summary the root channel was last told about. `root/sessionSummaryChanged`
     #: carries only fields that changed, so the host has to remember what it sent.
@@ -609,10 +787,16 @@ class _Session:
     content: ContentStore = field(default_factory=ContentStore)
     #: Changeset URI -> catalogue entry, for the channels this session owns.
     changesets: dict[str, Changeset] = field(default_factory=dict)
-    #: Changeset URI -> the file ids a client has marked reviewed. Held here
+    #: Changeset URI -> the file ids currently marked reviewed. Held here
     #: because `changeset/contentChanged` replaces the file list wholesale, so
     #: a republish has to restate them or the ticks vanish.
     reviewed: dict[str, set[str]] = field(default_factory=dict)
+    #: `SessionSummary.changes` -- the roll-up a session list renders. On the
+    #: session object rather than in the session channel's state, because
+    #: `SessionState` declares no such key: writing it there served an
+    #: undeclared field to every later subscriber while the ones already
+    #: subscribed never converged, there being no action that carries it.
+    changes: dict[str, int] | None = None
     #: Opaque provider state a previous run persisted. Round-tripped, never
     #: interpreted: only the provider knows what it means.
     resume_state: Mapping[str, Any] | None = None
@@ -689,6 +873,19 @@ def _first_working_directory(state: Any) -> str | None:
     return next((d for d in directories if isinstance(d, str)), None)
 
 
+def _turn_id_of(state: Any) -> str:
+    """The chat's active turn id, or the empty string.
+
+    `chat/toolCallComplete` requires a `turnId` and the reducer matches on it,
+    so a synthesised completion has to name the turn the call belongs to.
+    """
+    if isinstance(state, Mapping):
+        active = state.get("activeTurn")
+        if isinstance(active, Mapping) and isinstance(active.get("id"), str):
+            return str(active["id"])
+    return ""
+
+
 def _promotion_rank(bits: int) -> int:
     """How strongly a chat's activity bits claim the session summary. 0 = not.
 
@@ -718,12 +915,18 @@ def _title_from(text: str) -> str | None:
         return None
     if len(collapsed) <= _TITLE_LIMIT:
         return collapsed
-    cut = collapsed[: _TITLE_LIMIT + 1]
+    # The ellipsis is a character of the title, so it comes out of the budget --
+    # on BOTH branches. Cutting at the limit and then appending overshot by one,
+    # and by two when the first word is longer than the limit: `rsplit` finds no
+    # space, hands back the whole cut, and the length guard waves it through. A
+    # pasted URL yielded 62 characters against a 60-character cap.
+    body = _TITLE_LIMIT - 1
+    cut = collapsed[: body + 1]
     # Break on the last space so a title never ends mid-word -- unless the
     # first word is itself longer than the limit, where there is no boundary
     # to find and a hard cut is the only option.
-    spaced = cut.rsplit(" ", 1)[0]
-    return f"{spaced if len(spaced) >= _TITLE_LIMIT // 2 else collapsed[:_TITLE_LIMIT]}…"
+    spaced = cut.rsplit(" ", 1)[0] if " " in cut else ""
+    return f"{spaced if len(spaced) >= _TITLE_LIMIT // 2 else collapsed[:body]}…"
 
 
 def _with_origin(summary: dict[str, Any], origin: Mapping[str, Any] | None) -> dict[str, Any]:
@@ -760,6 +963,7 @@ class Host:
         resources: ResourceProvider | None = None,
         watcher: ResourceWatcher | None = None,
         max_watches_per_connection: int = 32,
+        max_read_bytes: int | None = DEFAULT_MAX_READ_BYTES,
         audit: AuditSink | None = None,
         telemetry: Mapping[str, str] | None = None,
         store: SessionStore | None = None,
@@ -806,6 +1010,11 @@ class Host:
         # never named would be inventing access it did not grant.
         self.watcher = watcher
         self._max_watches = max_watches_per_connection
+        #: The largest `resourceRead` this host will answer. Public because an
+        #: embedder serving large assets has to be able to raise it -- and
+        #: `None` removes the bound entirely, which is what the host did before
+        #: anyone measured what a 64 MiB file costs.
+        self.max_read_bytes = max_read_bytes
         self._watches: dict[str, _Watch] = {}
         #: Changeset operations the embedder made invocable. Empty by default,
         #: and nothing in this library ever adds to it.
@@ -860,6 +1069,13 @@ class Host:
         # `core/terminals.py` and `docs/roadmap.md` section 6.
         self.terminals: TerminalBackend = terminals or RefusingTerminalBackend()
         self._live_terminals: dict[str, _Terminal] = {}
+        # Children of a `!command`, keyed by the URI the command minted. These
+        # are NOT terminals a client can name: no registered channel, no
+        # subscribers, no entry in `RootState.terminals` -- so they cannot live
+        # in `_live_terminals`, and for exactly that reason the shutdown sweep
+        # never saw them. Cancel a `!sleep 400` turn and the child outlived the
+        # turn, `aclose()`, and the host process itself.
+        self._oneshot_terminals: dict[str, TerminalProcess] = {}
         self.sequencer.observer = self
         self._root_ready = False
         self.wire_log = WireLog(wire_log) if wire_log is not None else None
@@ -1058,6 +1274,7 @@ class Host:
             for task in list(pending):
                 task.cancel()
             await self.sequencer.unsubscribe_all(connection)
+            await self._release_watches(connection)
             self._connections.discard(connection)
             if connection.overflowed:
                 self._outbox_overflows += 1
@@ -1162,13 +1379,22 @@ class Host:
         self, connection: Connection, params: Mapping[str, Any]
     ) -> dict[str, Any]:
         offered = params.get("protocolVersions")
-        if not isinstance(offered, list) or not offered:
-            raise errors.invalid_params("protocolVersions must be a non-empty array")
+        # The element check is not pedantry: `negotiate` hands every entry to
+        # `re.match`, so one non-string in a peer-controlled array became
+        # -32603 "TypeError: expected string or bytes-like object, got 'int'" --
+        # the host blaming itself, and leaking a Python type name, for a
+        # schema-invalid request. `protocolVersions` is `array of string`.
+        if (
+            not isinstance(offered, list)
+            or not offered
+            or not all(isinstance(version, str) for version in offered)
+        ):
+            raise errors.invalid_params("protocolVersions must be a non-empty array of strings")
 
         chosen = negotiate(offered, self.supported_versions)
         if chosen is None:
             # MUST refuse rather than proceed. No client verifies this for us.
-            raise errors.unsupported_protocol_version(self.supported_versions)
+            raise _unsupported_protocol_version(self.supported_versions)
 
         client_id = params.get("clientId")
         connection.client_id = client_id if isinstance(client_id, str) else str(uuid.uuid4())
@@ -1251,6 +1477,11 @@ class Host:
         summary: dict[str, Any] = {}
         if isinstance(state, Mapping):
             summary = {key: state[key] for key in _SUMMARY_FIELDS if key in state}
+        if session.changes is not None:
+            # Summary-only, and so read from the session rather than from the
+            # channel: `SessionSummary` declares `changes`, `SessionState` does
+            # not.
+            summary["changes"] = session.changes
 
         # Aggregation across chats, spelled out because upstream states it as
         # producer SHOULDs rather than as a reducer, so nothing enforces it:
@@ -1348,6 +1579,23 @@ class Host:
         unchanged on the client's cached summary." Sending nothing when nothing
         changed matters: the client caches a session list and a no-op
         notification per streamed delta would be a notification per token.
+
+        **A field this notification has set can never be un-set.** The diff runs
+        over `current` only, because there is nothing to run it over: omitting a
+        key means "unchanged", `SessionSummaryChangedParams.changes` types every
+        field as its own non-null type (`"activity": {"type": "string"}`,
+        `notifications.schema.json`) so `null` is a schema violation, and unlike
+        the chat catalogue's `session/chatAdded` the root channel has no
+        documented upsert to restate an entry through. A session whose activity
+        is cleared therefore keeps advertising the last tool it ran to any
+        client rendering from the incremental cache, until that client
+        re-fetches -- which the spec tells it to do on reconnect and never
+        otherwise. `listSessions` and every fresh subscriber see the truth.
+
+        Not worked around here. Encoding a retraction as `""`, or re-announcing
+        the session with `root/sessionAdded`, would both be this host inventing
+        wire semantics no other implementation agrees to. Recorded in
+        `docs/research.md` §11 as a question for upstream.
         """
         # BEFORE the early return below. A chat's own title or activity can
         # change without moving anything the session summary projects, and
@@ -1384,23 +1632,79 @@ class Host:
         Partial, like the session summary it mirrors: "only fields present in
         `changes` are written; omitted fields are preserved", and `resource`
         "MUST NOT be carried in `changes`" because it is identity, not data.
+
+        Which is why a RETRACTION cannot go through `changes` at all -- see
+        `_republish_chat`.
         """
         for chat_uri in [session.chat_uri, *sorted(session.chat_uris - {session.chat_uri})]:
             state = self.sequencer.state_of(chat_uri)
             if not isinstance(state, Mapping):
                 continue
+            # `is not None`, not `in`: `chat/activityChanged` reduces as a plain
+            # JS spread, so clearing the activity leaves the key present holding
+            # `undefined` -- `None` here. A wire frame carrying it would be a
+            # schema violation, so it is filtered out and reported as gone.
             current = {
                 key: state[key] for key in _CHAT_SUMMARY_FIELDS if state.get(key) is not None
             }
             published = session.published_chats.get(chat_uri, {})
             changes = {k: v for k, v in current.items() if published.get(k) != v}
-            if not changes:
+            retracted = [key for key in published if key not in current]
+            if not changes and not retracted:
                 continue
             session.published_chats[chat_uri] = current
+            if retracted:
+                await self._republish_chat(session, chat_uri, current)
+                continue
             await self.sequencer.publish(
                 session.uri,
                 {"type": "session/chatUpdated", "chat": chat_uri, "changes": changes},
             )
+
+    async def _republish_chat(
+        self, session: _Session, chat_uri: str, current: Mapping[str, Any]
+    ) -> None:
+        """Restate one catalogue entry, because a field of it is GONE.
+
+        `session/chatUpdated` merges -- the reference reducer is
+        `{...chats[index], ...changes}` -- and every field `changes` declares is
+        typed as its own non-null type (`"activity": {"type": "string"}`,
+        `actions.schema.json`), so no value it can carry means "this field is
+        gone". Omitting the key means "unchanged", which is the opposite. A chat
+        that reported an activity and then stopped kept advertising it forever,
+        in the host's OWN `SessionState`, against a chat channel that had
+        already cleared it.
+
+        The catalogue's one retraction is the upsert: "A chat was added to this
+        session's catalog. Upsert semantics: if a chat with the same
+        `summary.resource` already exists, the existing entry is replaced."
+        Replaced *wholesale*, so the entry is rebuilt from the one already
+        published rather than from the projection alone -- `origin` is on the
+        catalogue entry and nowhere in `_CHAT_SUMMARY_FIELDS`, and losing it
+        would make a side chat indistinguishable from an ordinary one.
+        """
+        catalogue = self.sequencer.state_of(session.uri)
+        entries = catalogue.get("chats") if isinstance(catalogue, Mapping) else None
+        entries = entries if isinstance(entries, list) else []
+        entry = next(
+            (
+                e
+                for e in entries
+                if isinstance(e, Mapping) and js.strict_equal(e.get("resource"), chat_uri)
+            ),
+            None,
+        )
+        if entry is None:
+            # No entry to replace. `session/chatAdded` would ADD one, which is
+            # not what a retraction means, and `session/chatUpdated` no-ops on
+            # an unknown chat -- so there is nothing to say.
+            return
+        summary = {
+            **{k: v for k, v in entry.items() if k not in _CHAT_SUMMARY_FIELDS},
+            "resource": chat_uri,
+            **current,
+        }
+        await self.sequencer.publish(session.uri, {"type": "session/chatAdded", "summary": summary})
 
     def _session_for(self, channel: str) -> _Session | None:
         """The session owning a session, chat or annotations channel.
@@ -1444,8 +1748,7 @@ class Host:
             after = _decode_cursor(cursor)
             visible = [s for s in visible if (s["modifiedAt"], s["resource"]) < after]
 
-        limit = params.get("limit")
-        size = limit if isinstance(limit, int) and 0 < limit <= _MAX_PAGE else _MAX_PAGE
+        size = _page_size(params.get("limit"))
         page, rest = visible[:size], visible[size:]
 
         # A *successful* listSessions MUST carry `items`: the client's
@@ -1538,18 +1841,61 @@ class Host:
             return _read_result(owner.content.get(uri), params.get("encoding"))
 
         operation = {"resourceResolve": "resolve", "resourceRead": "read"}.get(method, "list")
-        follow = params.get("followSymlinks")
+        # `followSymlinks` is declared on `ResourceResolveParams` and on nothing
+        # else. Honouring it on read/list let a peer hand the policy the LINK's
+        # URI -- `resolve(follow_symlinks=False)` answers with the name it was
+        # given -- while `read` went on following the link to its target, so a
+        # policy that refuses the target could be walked around by naming a link
+        # to it.
+        follow = params.get("followSymlinks") if method == "resourceResolve" else None
         info = await self.resources.resolve(uri, follow_symlinks=follow is not False)
         if not self.policy.may_access_resource(connection.info, operation, info.uri):
             raise errors.AhpError(-32009, f"Not permitted to {operation} {uri}")
 
         if method == "resourceResolve":
-            return info.to_wire()
+            wire = info.to_wire()
+            if follow is False:
+                # "Canonical URI after symlink resolution. Equal to the requested
+                # URI when `followSymlinks` is `false`" (`ResourceResolveResult`
+                # `.uri`). The walk canonicalises a symlinked PARENT even when
+                # the final component is not a link, so the echo happens here --
+                # AFTER the policy has seen the canonical path, never instead of
+                # it.
+                wire["uri"] = uri
+            return wire
         if method == "resourceList":
             return {"entries": [e.to_wire() for e in await self.resources.list_dir(info.uri)]}
 
+        self._within_read_budget(info.size, uri)
         content = await self.resources.read(info.uri)
+        # Re-checked against what actually came back: `size` is advisory (a
+        # provider may omit it, and a file can grow between the stat and the
+        # read), and this is still ahead of the base64/JSON amplification that
+        # turned a 64 MiB file into ~970 MB of resident host memory.
+        self._within_read_budget(len(content.data), uri)
         return _read_result(content, params.get("encoding"))
+
+    def _within_read_budget(self, size: int | None, uri: str) -> None:
+        """Refuse a read this host will not survive.
+
+        `ResourceReadParams` carries `channel`, `uri` and `encoding` and nothing
+        else -- **there is no offset or length in the protocol**, so there is no
+        partial read to fall back to and a file above the bound cannot be served
+        at all. One unprivileged read of a 64 MiB file drove host RSS from 29 MB
+        to 970 MB, which makes any served directory holding a video or a disk
+        image an OOM lever for a peer that has only completed `initialize`.
+
+        `PermissionDenied` because the spec has no size code (`AhpErrorCode` is
+        -32001..-32011) and this is a refusal, not a malformed request or a
+        missing file. The bound is `Host(max_read_bytes=...)`: an embedder
+        serving large assets raises it, and `None` removes it.
+        """
+        if self.max_read_bytes is None or size is None or size <= self.max_read_bytes:
+            return
+        raise errors.AhpError(
+            -32009,
+            f"{uri} is {size} bytes, above this host's {self.max_read_bytes}-byte read limit",
+        )
 
     def _resource_request(
         self, connection: Connection, params: Mapping[str, Any], uri: str
@@ -1572,7 +1918,7 @@ class Host:
         ] or ["read"]
         for operation in wanted:
             if (
-                operation == "write" and not isinstance(self.resources, WritableResourceProvider)
+                operation == "write" and not is_writable(self.resources)
             ) or not self.policy.may_access_resource(connection.info, operation, uri):
                 raise errors.AhpError(-32009, f"Not permitted to {operation} {uri}")
             # The JAIL, as well as the policy. This asked the policy alone, and
@@ -1597,7 +1943,7 @@ class Host:
         mean creating it first.
         """
         provider = self.resources
-        if not isinstance(provider, WritableResourceProvider):
+        if not isinstance(provider, WritableResourceProvider) or not is_writable(provider):
             raise errors.AhpError(-32009, "This host does not permit writes")
 
         pair = method in ("resourceMove", "resourceCopy")
@@ -1618,14 +1964,12 @@ class Host:
                 data = base64.b64decode(raw, validate=True) if encoding == _BASE64 else raw.encode()
             except (ValueError, binascii.Error) as exc:
                 raise errors.invalid_params("data is not valid base64") from exc
-            position = params.get("position")
             if_match = params.get("ifMatch")
-            mode = params.get("mode")
             await provider.write(
                 uri,
                 data,
-                mode=mode if isinstance(mode, str) else "truncate",
-                position=position if isinstance(position, int) else 0,
+                mode=_write_mode(params),
+                position=_write_position(params),
                 create_only=bool(params.get("createOnly")),
                 if_match=if_match if isinstance(if_match, str) else None,
             )
@@ -1810,7 +2154,16 @@ class Host:
         if not isinstance(channel, str):
             raise errors.invalid_params("channel is required")
         if self.sequencer.has_channel(channel):
-            raise errors.already_exists(channel)
+            # `AlreadyExists` (-32010), not `SessionAlreadyExists` (-32003).
+            # -32003 is defined as "a session with the given URI already
+            # exists", and the shared helper's message says "Session" -- so a
+            # client re-creating a terminal it forgot about was told a session
+            # collided, on a URI that names no session. -32010 is the general
+            # "the target resource already exists and the operation does not
+            # allow overwriting", which is exactly this.
+            raise errors.AhpError(
+                AHP_ERROR_CODES["AlreadyExists"], f"Channel already exists: {channel}"
+            )
         claim = claim_from_wire(params.get("claim"))
         if claim is None:
             raise errors.invalid_params("a valid claim is required")
@@ -1842,9 +2195,16 @@ class Host:
             "content": [],
             "claim": claim.to_wire(),
             "isPty": process.is_pty,
+            # `title` is REQUIRED by `TerminalState`, and `name` is OPTIONAL on
+            # `CreateTerminalParams`, so the fallback is not a nicety: an
+            # unnamed terminal published a state that failed the whole
+            # `Snapshot.state` union while the root catalogue substituted
+            # "Terminal" -- one terminal with two titles, one of them invalid.
+            # `or`, not `is None`: `name: ""` is schema-valid and renders as a
+            # blank tab, which is the same unusable row by another route.
+            "title": request.name or _DEFAULT_TERMINAL_TITLE,
         }
         for key, value in (
-            ("title", request.name),
             ("cwd", request.cwd),
             ("cols", request.cols),
             ("rows", request.rows),
@@ -2325,19 +2685,31 @@ class Host:
 
         origin: dict[str, Any] = {"kind": kind, "chat": source_chat}
         turn_id = source.get("turnId")
-        if isinstance(turn_id, str):
-            # Validated, not just copied. Publishing an origin that names a
-            # turn the source chat does not have claims a provenance that never
-            # existed, and nothing downstream ever checks it -- the same class
-            # of silent lie as a fork that copies nothing and reports success.
-            self._copy_turns(source_chat, turn_id)
-            origin["turnId"] = turn_id
+        if not isinstance(turn_id, str):
+            # Required on BOTH source forms and on both `ChatOrigin` variants
+            # that carry a chat (`commands.schema.json` ForkChatSource /
+            # SideChatSource `required`, `state.schema.json` ChatOrigin
+            # `required`). Accepting a source without one meant publishing a
+            # `ChatOrigin` that fails the state schema -- so the whole
+            # `Snapshot.state` union fails for every client that validates,
+            # over a field the client simply forgot to send.
+            raise errors.invalid_params("source.turnId is required")
+        # Validated, not just copied. Publishing an origin that names a turn the
+        # source chat does not have claims a provenance that never existed, and
+        # nothing downstream ever checks it -- the same class of silent lie as a
+        # fork that copies nothing and reports success.
+        self._copy_turns(source_chat, turn_id)
+        origin["turnId"] = turn_id
         selection = source.get("selection")
-        if kind == "sideChat" and isinstance(selection, Mapping):
+        if kind == "sideChat" and selection is not None:
             # "The host MUST snapshot and preserve this exact selection when it
             # accepts `createChat`; later source-turn deltas do not alter it."
-            # Copied, therefore, never referenced.
-            origin["selection"] = dict(selection)
+            # Copied, therefore, never referenced -- and checked first, because
+            # "preserve this exact selection" is what makes an unvalidated one
+            # permanent: `{"text": ""}` and `{"text": 123}` were stored verbatim
+            # into a `SideChatSelection` whose `text` is required and whose spec
+            # says "MUST be non-empty".
+            origin["selection"] = _side_chat_selection(selection)
         return origin
 
     def _chat_working_directories(
@@ -2389,6 +2761,22 @@ class Host:
             # The default chat is the session. Disposing it would leave a
             # session with no `defaultChat`, which every client reads.
             raise errors.invalid_params("the default chat cannot be disposed")
+
+        # Before the channel goes: a turn running in this chat has nowhere to
+        # publish once it is dropped, and it holds the provider. Dropping the
+        # channel underneath it left the agent still working on a chat nobody
+        # can see, and -- worse -- left any confirmation it was parked on
+        # advertised in `session/inputNeeded`, pinning the SESSION at
+        # `InputNeeded` with a request that can never be answered because the
+        # channel it must be answered on no longer exists. Cancelling first
+        # ends the turn's pending scope, which is what retracts those entries
+        # (`_run_turn`'s finally).
+        await self._cancel_turn(session, chat_uri, "chat disposed")
+        # And SAID so, on the channel, while it still exists. Cancelling the
+        # task ends the turn for the host; a subscribed client learns nothing
+        # from a channel that simply stops, and waits for a terminal action
+        # that is never coming.
+        await self._end_stranded_turn(session, chat_uri)
 
         session.chat_uris.discard(chat_uri)
         await self.sequencer.publish(session.uri, {"type": "session/chatRemoved", "chat": chat_uri})
@@ -2450,7 +2838,8 @@ class Host:
         if session is None:
             raise errors.session_not_found(session_uri)
 
-        first = changeset.uri not in session.changesets
+        previous = session.changesets.get(changeset.uri)
+        first = previous is None
         if not first:
             # Back to `computing` before the list is replaced. Without it the
             # file list swaps under the user with nothing to say a refresh
@@ -2461,7 +2850,7 @@ class Host:
                 changeset.uri, {"type": "changeset/statusChanged", "status": "computing"}
             )
 
-        already = session.reviewed.get(changeset.uri, set())
+        already = self._reviewed_ids(session, changeset.uri)
         files = [
             file_entry(change, session.content, reviewed=_entry_id(change) in already)
             for change in changes
@@ -2475,6 +2864,14 @@ class Host:
             # out of band. Ownership is inherited from the session it belongs
             # to, which is why `session` is part of the signature.
             self._channel_created(None, changeset.uri, session=session_uri)
+        # Re-emitted whenever the ENTRY changed, not only on the first publish.
+        # The catalogue is the only copy a client has of the label, the
+        # description and `capabilities.review`, and it was written once and
+        # never again -- so a changeset that became reviewable stayed
+        # un-reviewable on screen while `_validate_review` read the new entry
+        # and accepted the review anyway. Full-replacement semantics, so the
+        # whole catalogue goes out.
+        if previous is None or previous.to_catalogue_entry() != changeset.to_catalogue_entry():
             await self.sequencer.publish(
                 session_uri,
                 {
@@ -2486,9 +2883,17 @@ class Host:
         # `contentChanged` replaces the file list wholesale and carries the
         # operations in the same action, so a client never sees a changeset with
         # files but no buttons.
-        action: dict[str, Any] = {"type": "changeset/contentChanged", "files": files}
-        if changeset.operations:
-            action["operations"] = self._operations_wire(session, changeset)
+        #
+        # ALWAYS carried, empty list included: on this action "omit when
+        # operations are unchanged", so omitting an empty list left the previous
+        # buttons standing. That is not cosmetic -- `_declared_operation`
+        # answers "did this changeset declare it" out of the channel's state, so
+        # a republish that withdrew every operation left them all invocable.
+        action: dict[str, Any] = {
+            "type": "changeset/contentChanged",
+            "files": files,
+            "operations": self._operations_wire(session, changeset),
+        }
         await self.sequencer.publish(changeset.uri, action)
         await self.sequencer.publish(
             changeset.uri, {"type": "changeset/statusChanged", "status": "ready"}
@@ -2502,18 +2907,56 @@ class Host:
     async def _set_changes_summary(
         self, session: _Session, files: Sequence[Mapping[str, Any]]
     ) -> None:
-        state = self.sequencer.state_of(session.uri)
-        if not isinstance(state, Mapping):
-            return
-        summary = changes_summary(files)
-        # `SessionSummary.changes` has no action of its own; it rides on the
-        # session state like every other summary field, and `_mirror_summary`
-        # carries it to root.
-        self.sequencer._states[session.uri] = {**state, "changes": summary}
+        # `SessionSummary.changes` has no action of its own, so it cannot ride
+        # on the session channel: it was written straight into `SessionState`,
+        # which declares no such key, and with no envelope behind it every
+        # already-subscribed client kept the old number while every later one
+        # got a field the schema does not define. It belongs to the summary
+        # alone, and `root/sessionSummaryChanged` is the frame that carries it.
+        session.changes = changes_summary(files)
         await self._mirror_summary(session)
 
+    def _reviewed_ids(self, session: _Session, channel: str) -> set[str]:
+        """Which files are ticked, reconciled from the channel's own state.
+
+        `changeset/contentChanged` replaces the file list wholesale, so a
+        republish that did not restate the ticks cleared every one -- which
+        reads from the outside as the checkbox being broken, and is how it was
+        reported.
+
+        Reconciled from state rather than recorded at dispatch, because the
+        action has TWO originators. "Unlike every other `changeset/*` action
+        this one is client-dispatchable ... The server MAY also originate it
+        (e.g. an agent marking its own output reviewed)." Only the client path
+        ran through `_react`, so the host's own tick -- the `ahs-review`
+        operation the demo ships -- was wiped by the very republish that
+        operation triggers. The reducer has already applied both by the time
+        anyone republishes, so the state is the one place that has seen each.
+
+        Ids absent from the current list keep whatever was remembered: a file
+        that leaves the changeset and comes back should not silently lose its
+        tick, and the state cannot say anything about a file it does not hold.
+        """
+        remembered = session.reviewed.setdefault(channel, set())
+        state = self.sequencer.state_of(channel)
+        entries = state.get("files") if isinstance(state, Mapping) else None
+        for entry in entries or ():
+            if not isinstance(entry, Mapping):
+                continue
+            identifier = entry.get("id")
+            if not isinstance(identifier, str):
+                continue
+            # `is True` rather than truthiness: "absent is equivalent to
+            # `false`", and an explicit `false` must clear the memory, not be
+            # confused with an absent key.
+            if entry.get("reviewed") is True:
+                remembered.add(identifier)
+            else:
+                remembered.discard(identifier)
+        return remembered
+
     def _operation_target(
-        self, channel: str, operation: str, target: Any
+        self, declared: Mapping[str, Any], operation: str, target: Any
     ) -> Mapping[str, Any] | None:
         """Validate `invokeChangesetOperation.target` against declared scopes.
 
@@ -2522,10 +2965,16 @@ class Host:
         here rather than left to each handler: an embedder writing a per-file
         operation should be able to trust that a target is present when the
         scope says it will be.
+
+        Takes the PUBLISHED entry, not an id to look up. The lookup used to
+        live here and returned an empty set for an id the changeset never
+        declared, which made every `if declared` guard below vacuous -- so an
+        undeclared id skipped the scope and target checks entirely, on its way
+        to a handler that should never have been reached.
         """
-        declared = self._declared_scopes(channel, operation)
+        kinds = {kind for kind in declared.get("scopes") or () if isinstance(kind, str)}
         if target is None:
-            if declared and "changeset" not in declared:
+            if kinds and "changeset" not in kinds:
                 raise errors.invalid_params(f"{operation!r} requires a target")
             return None
         if not isinstance(target, Mapping):
@@ -2533,23 +2982,38 @@ class Host:
         kind = target.get("kind")
         if kind not in ("resource", "range"):
             raise errors.invalid_params(f"unknown target kind {kind!r}")
-        if declared and kind not in declared:
+        if kind not in kinds:
             raise errors.invalid_params(f"{operation!r} does not declare the {kind!r} scope")
         if not isinstance(target.get("resource"), str):
             raise errors.invalid_params("target.resource is required")
+        if kind == "range":
+            # The range variant requires `range`, and `TextRange` requires both
+            # ends. Without this the handler is the first thing to notice, and
+            # what it raises becomes -32603 -- "the host has a bug" for an
+            # unambiguous caller mistake.
+            span = target.get("range")
+            if not isinstance(span, Mapping) or not all(
+                isinstance(span.get(end), Mapping) for end in ("start", "end")
+            ):
+                raise errors.invalid_params("a range target requires range.start and range.end")
         return target
 
-    def _declared_scopes(self, channel: str, operation: str) -> set[str]:
-        """What the published operation says about itself, or an empty set."""
+    def _declared_operation(self, channel: str, operation: str) -> Mapping[str, Any] | None:
+        """The operation as this changeset currently publishes it, or ``None``.
+
+        "The server validates that `operationId` exists in the changeset's
+        current `operations` list" -- current, so the published state is the
+        authority rather than the embedder's registry. The two differ on
+        purpose: the demo gates `commit` out of the list when nothing is
+        staged while leaving the handler registered, and without this check
+        the button that is not on screen still ran.
+        """
         state = self.sequencer.state_of(channel)
         operations = state.get("operations") if isinstance(state, Mapping) else None
         for entry in operations or ():
             if isinstance(entry, Mapping) and entry.get("id") == operation:
-                scopes = entry.get("scopes")
-                return (
-                    {s for s in scopes if isinstance(s, str)} if isinstance(scopes, list) else set()
-                )
-        return set()
+                return entry
+        return None
 
     async def _invoke_changeset_operation(
         self, connection: Connection, params: Mapping[str, Any]
@@ -2570,11 +3034,20 @@ class Host:
         if not self.policy.may_invoke_operation(connection.info, channel, operation):
             raise errors.AhpError(-32009, f"Not permitted to invoke {operation}")
 
+        # Membership FIRST. "Undeclared" is a refusal, not a licence: an id the
+        # changeset does not currently offer is one no client should have been
+        # able to press, and treating it as unconstrained is worse than
+        # treating it as unknown -- it was reaching the handler with no scope
+        # or target validation at all.
+        declared = self._declared_operation(channel, operation)
+        if declared is None:
+            raise errors.invalid_params(f"{channel} does not declare {operation!r}")
+
         handler = self._operations.get(operation)
         if handler is None:
             raise errors.invalid_params(f"unknown operation {operation!r}")
 
-        target = self._operation_target(channel, operation, params.get("target"))
+        target = self._operation_target(declared, operation, params.get("target"))
 
         # Refused while the agent is writing. Committing or reverting mid-turn
         # races the agent's own writes on the same files, and nothing on screen
@@ -2632,6 +3105,11 @@ class Host:
         `status: "disabled"` is what the client reads for enablement. Without
         it a user can commit or revert mid-turn, racing the agent's own writes,
         with nothing on screen to suggest they should not.
+
+        A snapshot of one instant, which is why `_sync_operation_status` exists:
+        a provider can only publish a changeset from inside its own turn, so
+        every publish sampled "busy" and, with nothing to re-evaluate it, every
+        control stayed greyed for the life of the session.
         """
         busy = bool(session.running())
         wire: list[dict[str, Any]] = []
@@ -2641,6 +3119,46 @@ class Host:
                 entry["status"] = "disabled"
             wire.append(entry)
         return wire
+
+    async def _sync_operation_status(self, session: _Session) -> None:
+        """Re-grey, or un-grey, every operation this session publishes.
+
+        Called at both ends of a turn. The gate is "is a turn in flight", which
+        was sampled once at publish time -- and since a provider publishes from
+        inside the turn that produced the changes, the answer was always yes and
+        never revisited. Every button was disabled from the first publish until
+        the session died.
+
+        `busy` is recomputed here rather than passed in, so a turn that starts
+        while this is queued still ends up with the right answer.
+
+        Only `idle` and `disabled` are touched. `running` belongs to an
+        invocation in flight and `error` to the last one that failed -- and the
+        client renders `error` as the only trace a failed operation leaves, so
+        overwriting either would erase feedback this gate knows nothing about.
+        """
+        target = "disabled" if session.running() else "idle"
+        for changeset_uri in list(session.changesets):
+            state = self.sequencer.state_of(changeset_uri)
+            operations = state.get("operations") if isinstance(state, Mapping) else None
+            for entry in operations or ():
+                if not isinstance(entry, Mapping):
+                    continue
+                identifier = entry.get("id")
+                if entry.get("status") not in ("idle", "disabled") or not isinstance(
+                    identifier, str
+                ):
+                    continue
+                if entry.get("status") == target:
+                    continue
+                await self.sequencer.publish(
+                    changeset_uri,
+                    {
+                        "type": "changeset/operationStatusChanged",
+                        "operationId": identifier,
+                        "status": target,
+                    },
+                )
 
     def register_operation(self, operation_id: str, handler: OperationHandler) -> None:
         """Make an operation invocable. Explicit, per operation, by the embedder."""
@@ -2726,6 +3244,30 @@ class Host:
         if watch is None:
             return
         self._spawn(self._stop_watch(channel, watch))
+
+    async def _release_watches(self, connection: Connection) -> None:
+        """Drop the watches this connection created and nobody ever subscribed to.
+
+        `channel_unobserved` was the only release path and it cannot fire
+        without a subscriber, so a peer that called `createResourceWatch` and
+        never subscribed left the channel registered, the `_Watch` in this dict
+        and a STRONG REFERENCE to its closed connection behind -- for the life
+        of the host, once per call. `max_watches_per_connection` does not bound
+        it, because a fresh connection gets a fresh allowance. The spec makes
+        the teardown a MUST: "when every subscriber has unsubscribed (or the
+        underlying connection drops), the receiver MUST release the watcher"
+        (`CreateResourceWatchParams`).
+
+        `started` is the "has ever been observed" flag, and it is exactly the
+        test that is wanted: an entry still here with `started` set has a live
+        subscriber (an unobserved one is popped by `channel_unobserved`), and
+        severing that peer's watch because the CREATOR walked away would break
+        a channel the spec keeps alive until its last subscriber goes.
+        """
+        for channel, watch in list(self._watches.items()):
+            if watch.owner is connection and not watch.started:
+                del self._watches[channel]
+                await self._stop_watch(channel, watch)
 
     async def _start_watch(self, channel: str, watch: _Watch) -> None:
         assert self.watcher is not None
@@ -2909,6 +3451,55 @@ class Host:
                 return None if entry.reviewable else "this changeset is not reviewable"
         return "unknown changeset"
 
+    #: Which park each tool-resolving action may answer. A `toolCallId` names a
+    #: park but NOT what that park is waiting for, and the two requests are
+    #: answered by different actions: `SessionToolConfirmationRequest` says
+    #: "Respond by dispatching `chat/toolCallConfirmed`",
+    #: `SessionToolClientExecutionRequest` says "Execute and report the result
+    #: by dispatching `chat/toolCallComplete`". Crossing them woke a provider
+    #: with a value that meant something else entirely -- a refusal arriving as
+    #: an empty success, or a result read as an approval and the tool then run
+    #: for real underneath it.
+    _PARK_ANSWERED_BY: Final = {
+        "chat/toolCallConfirmed": {"confirm"},
+        "chat/toolCallComplete": {"clienttool"},
+    }
+
+    def _tool_park_rejection(
+        self, connection: Connection, channel: str, action: Mapping[str, Any]
+    ) -> str | None:
+        """Whether this peer may answer this tool call, in this way.
+
+        Returns a reason, or None to accept. A call the host is not parked on at
+        all is left alone here -- `_validate_client_action` already refuses that
+        by id, and a server-side tool's confirmation is not ownership-gated.
+        """
+        action_type = action.get("type")
+        request_id = self.pending.id_for_key(action.get("toolCallId"), channel=channel)
+        if request_id is None:
+            return None
+        park = self.pending.get(request_id)
+        if park is None:
+            return None
+
+        expected = self._PARK_ANSWERED_BY.get(str(action_type), set())
+        if park.kind not in expected:
+            if park.kind == "clienttool":
+                return "that tool call is already running; execute it and report the result"
+            return "that tool call is awaiting confirmation, not a result"
+
+        # "The server SHOULD reject this action if the dispatching client does
+        # not match the contributor's `clientId`" -- and it is only a rule for a
+        # call a CLIENT owns. A server-side tool has no contributor and anyone
+        # the policy admits may confirm it.
+        if (
+            park.kind == "clienttool"
+            and park.owner is not None
+            and connection.client_id != park.owner
+        ):
+            return "only the owning client may report that tool call's result"
+        return None
+
     def _validate_truncate(self, channel: str) -> str | None:
         """Refuse to rewind a transcript the agent will still remember.
 
@@ -2990,6 +3581,45 @@ class Host:
                 session.uri,
                 {"type": "session/activeClientRemoved", "clientId": client_id},
             )
+            await self._fail_client_tools(session, client_id, "the client disconnected")
+
+    async def _fail_client_tools(self, session: _Session, client_id: str, reason: str) -> None:
+        """End every tool call this client was asked to run.
+
+        "When removing a client, the host SHOULD also cancel that client's
+        in-flight tool calls ... by dispatching `chat/toolCallComplete` with
+        `result.success = false`."
+
+        Without it the call is unanswerable by construction: only its owner may
+        report a result and its owner is gone. `session/inputNeeded` goes on
+        advertising a `toolClientExecution` nobody can satisfy, the session is
+        pinned at `InputNeeded`, the provider waits on a future that will never
+        resolve, and the park outlives `disposeSession`.
+
+        The completion is PUBLISHED before the park is resolved, so state and
+        the provider agree -- the same ordering rule as every other resolution
+        (ADR 0005).
+        """
+        for park in self.pending.owned_by(client_id):
+            if park.kind != "clienttool" or park.channel is None or park.key is None:
+                continue
+            with contextlib.suppress(Exception):
+                await self.sequencer.publish(
+                    park.channel,
+                    {
+                        "type": "chat/toolCallComplete",
+                        "turnId": _turn_id_of(self.sequencer.state_of(park.channel)),
+                        "toolCallId": park.key,
+                        "result": {
+                            "success": False,
+                            "content": [{"type": "text", "text": reason}],
+                            "pastTenseMessage": reason,
+                        },
+                    },
+                )
+            if self.pending.resolve(park.id, RequestOutcome(response="decline", payload=None)):
+                with contextlib.suppress(Exception):
+                    await self._retract_input_needed(session, park.id)
 
     # ─── working directories ─────────────────────────────────────────────
 
@@ -3448,6 +4078,12 @@ class Host:
             task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await task
+        # After the tasks are down and before the channels go: a client
+        # subscribed to a chat that was mid-turn otherwise sees the stream stop
+        # with no terminal action on it, and goes on waiting for one. Disposing
+        # a session is not a reason to strand every turn stream watching it.
+        for mid_turn in [session.chat_uri, *sorted(session.chat_uris - {session.chat_uri})]:
+            await self._end_stranded_turn(session, mid_turn)
         if session.agent_session is not None:
             await session.agent_session.aclose()
 
@@ -3501,7 +4137,12 @@ class Host:
         if connection.client_id not in self._known_clients:
             raise errors.AhpError(-32008, "unknown clientId; initialize instead")
 
-        requested = [uri for uri in params.get("subscriptions") or [] if isinstance(uri, str)]
+        # De-duplicated before anything else looks at it. `subscriptions` is
+        # peer-supplied and the schema does not forbid repeats; `Sequencer.replay`
+        # dedupes too, but `refused` and the policy calls are computed here.
+        requested = list(
+            dict.fromkeys(uri for uri in params.get("subscriptions") or [] if isinstance(uri, str))
+        )
         allowed = [uri for uri in requested if self.policy.may_see_channel(connection.info, uri)]
         # Refused channels are NOT silently dropped. `missing` is documented as
         # "subscriptions that cannot be resumed -- disposed sessions, or
@@ -3510,14 +4151,26 @@ class Host:
         # them tells the client nothing, so it keeps asking forever.
         refused = [uri for uri in requested if uri not in allowed]
 
-        for uri in allowed:
-            await self.sequencer.subscribe(connection, uri)
         last_seen = params.get("lastSeenServerSeq")
+        # `replay` registers this connection for what it resumes, and for
+        # nothing else: a channel it reports `missing` must not stay subscribed
+        # here, or the host says "drop this" and keeps delivering it -- to a URI
+        # that a *different* client may later create a session on.
         result = await self.sequencer.replay(
-            last_seen if isinstance(last_seen, int) else 0, allowed
+            last_seen if isinstance(last_seen, int) else 0, allowed, subscriber=connection
         )
-        if refused:
-            result["missing"] = [*result.get("missing", []), *refused]
+        # A telemetry channel is live but carries no state, so `replay` cannot
+        # resume it and calls it missing. It is not gone: it exists for the life
+        # of the host, this connection may see it, and `reconnect` returns no
+        # `telemetry` map for the client to re-read -- so a client that dropped
+        # it on the host's say-so could never get back to it. Re-registered and
+        # struck from `missing` instead.
+        advertised = set(self.telemetry.values())
+        resumed_stateless = [uri for uri in allowed if uri in advertised]
+        for uri in resumed_stateless:
+            await self.sequencer.subscribe(connection, uri)
+        missing = [uri for uri in result.get("missing", []) if uri not in resumed_stateless]
+        result["missing"] = [*missing, *refused]
         return result
 
     # ─── client-dispatched actions ───────────────────────────────────────
@@ -3593,6 +4246,14 @@ class Host:
         if not self.policy.may_dispatch(connection.info, channel, action):
             return "rejected by policy"
 
+        # Shape before meaning: a tool-call action missing a REQUIRED field is
+        # sequenced and fanned out, then applied by no reducer -- while the host
+        # resolves the parked request by `toolCallId` and runs the tool anyway.
+        # Every client ends up with a call that state says was never answered.
+        malformed = tool_call_dispatch_rejection(action)
+        if malformed is not None:
+            return malformed
+
         if self.sequencer.reducer_of(channel) == "terminal":
             state = self.sequencer.state_of(channel)
             claim = claim_from_wire(state.get("claim") if isinstance(state, Mapping) else None)
@@ -3615,6 +4276,19 @@ class Host:
         if action_type == "session/configChanged":
             return self._validate_session_config(connection, channel, action)
 
+        if action_type == "session/titleChanged" and not isinstance(action.get("title"), str):
+            # `SessionTitleChangedAction` declares `"required": ["type",
+            # "title"]` with `"title": {"type": "string"}`
+            # (actions.schema.json), and the reducer is `assign(state, "title",
+            # get(action, "title"))` -- so an omitted title DELETES the key and
+            # `null`/`7` are written straight through. Either way `SessionState`
+            # and every `SessionSummary` projected from it lose a field their
+            # own schemas require, and the cached catalogue keeps the old title
+            # because `changes` has no way to say a field is gone. Rejected at
+            # the boundary instead, which is also what tells the renaming
+            # client its optimistic rename did not take.
+            return "session/titleChanged requires a string title"
+
         if action_type in _WORKING_DIRECTORY_ACTIONS:
             return self._validate_working_directory_action(connection, channel, action)
 
@@ -3623,8 +4297,22 @@ class Host:
         # breaks the moment a client names one, which `createChat` will allow.
         state = self.sequencer.state_of(channel)
         if self.sequencer.reducer_of(channel) == "chat" and isinstance(state, Mapping):
-            if action_type == "chat/turnCancelled" and state.get("activeTurn") is None:
-                return "no active turn to cancel"
+            if action_type == "chat/turnCancelled":
+                # The id has to MATCH, not merely exist. `_end_turn` no-ops
+                # unless `turnId` names the active turn, while `_react` kills
+                # the running task unconditionally -- so an ordinary late
+                # cancel, or the omitted-`turnId` cancel the Python client
+                # sends, aborted the in-flight turn and left the host's own
+                # state saying it was still running. Permanently: every later
+                # `chat/turnStarted` is then rejected as "a turn is already
+                # active", and no action can clear an `activeTurn` whose id
+                # nothing knows. `turnId` is required by the schema.
+                active = state.get("activeTurn")
+                active_id = active.get("id") if isinstance(active, Mapping) else None
+                if active_id is None:
+                    return "no active turn to cancel"
+                if not js.strict_equal(active_id, action.get("turnId")):
+                    return "turnId does not name the active turn"
             if action_type == "chat/turnStarted" and state.get("activeTurn") is not None:
                 return "a turn is already active"
             if (
@@ -3635,6 +4323,10 @@ class Host:
                 # ignored, so the client reverts its optimistic state instead of
                 # rendering a call as answered forever.
                 return "no tool call awaiting that id"
+            if action_type in _TOOL_RESOLVING_ACTIONS:
+                mismatch = self._tool_park_rejection(connection, channel, action)
+                if mismatch is not None:
+                    return mismatch
             if action_type in _INPUT_ACTIONS and not self.pending.is_open(
                 action.get("requestId"), channel=channel
             ):
@@ -3666,10 +4358,7 @@ class Host:
         if action_type in _MCP_LIFECYCLE_ACTIONS:
             await self._react_to_mcp(channel, action)
             return
-        if action_type == "changeset/filesReviewChanged":
-            self._remember_review(channel, action)
-            return
-        if action_type == "session/activeClientSet" and connection is not None:
+        if action_type in _ACTIVE_CLIENT_ACTIONS and connection is not None:
             await self._react_to_active_client(connection, channel, action)
             return
         if action_type in ("terminal/input", "terminal/resized"):
@@ -3677,6 +4366,19 @@ class Host:
             # session's chat set, so anything after that lookup is unreachable
             # for it.
             await self._forward_to_terminal(channel, action)
+            return
+        if action_type in _CATALOGUE_TERMINAL_ACTIONS and channel in self._live_terminals:
+            # `TerminalInfo` carries `title` and `claim`, and both of these
+            # actions change one of them -- but the catalogue was republished
+            # only on create/exit/dispose, so `RootState.terminals` reported the
+            # OLD owner. That is the field a client reads to decide whether to
+            # offer an input box, so a handed-over terminal stayed typeable in
+            # the wrong window and unusable in the right one.
+            #
+            # Membership-checked because both actions are client-dispatchable at
+            # any channel: aimed at a chat, they no-op in its reducer and must
+            # not drag the root channel along with them.
+            await self._publish_terminal_catalogue()
             return
         session = next((s for s in self._sessions.values() if channel in s.chat_uris), None)
         if session is None:
@@ -3713,7 +4415,10 @@ class Host:
                 if resolved:
                     await self._retract_input_needed(session, request_id)
         elif action_type in _TOOL_RESOLVING_ACTIONS:
-            request_id = self.pending.id_for_key(action.get("toolCallId"))
+            # Scoped to the channel, like every other park lookup. Validation
+            # has already refused a kind mismatch and a foreign owner, so
+            # reaching here means this peer may answer this park in this way.
+            request_id = self.pending.id_for_key(action.get("toolCallId"), channel=channel)
             if request_id is not None:
                 if action_type == "chat/toolCallConfirmed":
                     approved = action.get("approved")
@@ -3727,7 +4432,17 @@ class Host:
                         else {},
                     )
                 else:
-                    outcome = RequestOutcome(response="accept", payload=action.get("result"))
+                    # A client-run tool reports success on the RESULT, and
+                    # `ChatToolCallDeniedAction` says the owner "MUST dispatch
+                    # this if it does not recognize the tool or cannot execute
+                    # it". Reading every completion as an accept turned that
+                    # refusal into a tool that ran and returned nothing, which
+                    # the agent then reported as a result.
+                    result = action.get("result")
+                    failed = isinstance(result, Mapping) and result.get("success") is False
+                    outcome = RequestOutcome(
+                        response="decline" if failed else "accept", payload=result
+                    )
                 if self.pending.resolve(request_id, outcome):
                     await self._retract_input_needed(session, request_id)
 
@@ -3772,28 +4487,6 @@ class Host:
                 if isinstance(cols, int) and isinstance(rows, int):
                     await terminal.process.resize(cols, rows)
 
-    def _remember_review(self, channel: str, action: Mapping[str, Any]) -> None:
-        """Record which files a client marked reviewed.
-
-        The reducer applies the flag to the CURRENT file list, and
-        `changeset/contentChanged` replaces that list wholesale -- so without
-        remembering, every tick cleared on the next republish. From the outside
-        that reads as the checkbox being broken, which is exactly how it was
-        reported.
-        """
-        session = next((s for s in self._sessions.values() if channel in s.changesets), None)
-        if session is None:
-            return
-        reviewed = action.get("reviewed") is True
-        remembered = session.reviewed.setdefault(channel, set())
-        for identifier in action.get("files") or ():
-            if not isinstance(identifier, str):
-                continue
-            if reviewed:
-                remembered.add(identifier)
-            else:
-                remembered.discard(identifier)
-
     async def _react_to_active_client(
         self, connection: Connection, channel: str, action: Mapping[str, Any]
     ) -> None:
@@ -3810,6 +4503,15 @@ class Host:
         on a response that can only arrive through the same read loop.
         """
         if channel not in self._sessions:
+            return
+        if action.get("type") == "session/activeClientRemoved":
+            # The same SHOULD as on disconnect: a client that leaves the session
+            # is as unable to answer as one whose socket dropped.
+            removed = action.get("clientId")
+            if isinstance(removed, str):
+                await self._fail_client_tools(
+                    self._sessions[channel], removed, "the client left the session"
+                )
             return
         entry = action.get("activeClient")
         published = entry.get("customizations") if isinstance(entry, Mapping) else None
@@ -3980,12 +4682,31 @@ class Host:
             await self._settle_turn(session, channel, turn_id, started)
             return
 
-        code = await process.wait()
+        self._oneshot_terminals[terminal_uri] = process
+        try:
+            code = await process.wait()
+        finally:
+            # Reached on CANCELLATION, which is the whole point. A client's
+            # `chat/turnCancelled` cancels this task while it is parked on
+            # `wait()`, and the kill used to be on the line *after* that await:
+            # a cancelled `!sleep 400` left the shell -- and every process in
+            # its group -- running, invisible to `aclose()` because a one-shot
+            # has no `_Terminal` and no entry in `_live_terminals`. Measured:
+            # the child outlived the host process and reparented to init.
+            #
+            # `kill()` is the same SIGHUP -> SIGTERM -> SIGKILL escalation an
+            # ordinary terminal gets, awaited here rather than spawned: a task
+            # started during cancellation is not guaranteed to run before the
+            # loop stops.
+            with contextlib.suppress(Exception):
+                await process.kill()
+            # After the kill, deliberately. If the kill is itself interrupted --
+            # a second cancel, a loop shutting down -- the entry stays in the
+            # registry and `aclose` gets one more chance at the child.
+            self._oneshot_terminals.pop(terminal_uri, None)
         # Decoded with `replace`: a command that writes invalid UTF-8 -- which
         # any binary output is -- must not take the turn down with it.
         output = b"".join(chunks).decode("utf-8", "replace")
-        with contextlib.suppress(Exception):
-            await process.kill()
         await sink.tool_call_completed(
             call_id,
             {"content": [{"type": "text", "text": output}]},
@@ -4018,19 +4739,41 @@ class Host:
             # Never reaches the provider. The user asked the HOST to run a
             # command; handing it to an agent as a message beginning with `!`
             # is what the prefix exists to stop.
-            session.turns[channel] = asyncio.create_task(
+            task = asyncio.create_task(
                 self._run_terminal_command(session, channel, action, command)
             )
+        else:
+            await self._seed_title(session, channel, action)
+            runner = TurnRunner(
+                self.sequencer,
+                channel,
+                self.pending,
+                session.uri,
+                lambda: self._mirror_summary(session),
+            )
+            task = asyncio.create_task(self._run_turn(session, runner, action))
+        session.turns[channel] = task
+        session.turn_started[channel] = time.monotonic()
+        # Both ends of the turn, from ONE place each. A changeset operation is
+        # greyed while a turn is in flight, and the done callback is the only
+        # hook every path passes through -- normal completion, a raise, and the
+        # `task.cancel()` in `_cancel_turn`, `_react_to_truncate` and
+        # `aclose()`. Hanging it off each of those instead is how the gate came
+        # to be evaluated once and never again.
+        task.add_done_callback(lambda _: self._spawn(self._settle_operations(session)))
+        await self._sync_operation_status(session)
+
+    async def _settle_operations(self, session: _Session) -> None:
+        """`_sync_operation_status`, safe to run after the session is gone.
+
+        Fired from a task callback, so it can land during shutdown or after a
+        `disposeSession` dropped the channels underneath it -- neither of which
+        is a fault worth surfacing as an unretrieved task exception.
+        """
+        if self._sessions.get(session.uri) is not session:
             return
-        await self._seed_title(session, channel, action)
-        runner = TurnRunner(
-            self.sequencer,
-            channel,
-            self.pending,
-            session.uri,
-            lambda: self._mirror_summary(session),
-        )
-        session.turns[channel] = asyncio.create_task(self._run_turn(session, runner, action))
+        with contextlib.suppress(Exception):
+            await self._sync_operation_status(session)
 
     async def _cancel_turn(self, session: _Session, chat: str, reason: str) -> None:
         """Stop the turn running in ONE chat.
@@ -4054,6 +4797,36 @@ class Host:
         if session.agent_session is not None and not session.running():
             with contextlib.suppress(Exception):
                 await session.agent_session.cancel(reason)
+
+    async def _end_stranded_turn(self, session: _Session, chat: str) -> None:
+        """Publish a terminal action for a turn nothing else will ever end.
+
+        A turn stream ends on `chat/turnComplete`, `chat/turnCancelled` or
+        `chat/error`, and a dropped channel produces none of the three: a
+        `disposeSession` or `disposeChat` mid-turn left every subscriber
+        awaiting a turn that had already stopped. The client's own `TurnStream`
+        does not time out on the protocol's behalf -- it waits, and the caller
+        of `await prompt()` waits with it.
+
+        `chat/turnCancelled` -- "Turn was aborted; server stops processing" --
+        is what dispose does, said in the spec's own words. Published while the
+        channel still exists and after the task is cancelled, so the reducer
+        clears `activeTurn` and nothing the runner was mid-way through can land
+        behind it.
+        """
+        state = self.sequencer.state_of(chat)
+        active = state.get("activeTurn") if isinstance(state, Mapping) else None
+        turn_id = active.get("id") if isinstance(active, Mapping) else None
+        started = session.turn_started.pop(chat, None)
+        if not isinstance(turn_id, str):
+            return
+        # Measured, like `_settle_turn`'s. `duration` is required on every
+        # terminal action and a client renders it as the turn's elapsed time,
+        # so a hardcoded zero would show every disposed turn as instantaneous.
+        elapsed = 0 if started is None else max(0, int((time.monotonic() - started) * 1000))
+        await self.sequencer.publish(
+            chat, {"type": "chat/turnCancelled", "turnId": turn_id, "duration": elapsed}
+        )
 
     async def _react_to_truncate(
         self, session: _Session, channel: str, action: Mapping[str, Any]
@@ -4306,6 +5079,15 @@ class Host:
             with contextlib.suppress(Exception):
                 await terminal.close()
         self._live_terminals.clear()
+        # And the `!command` children, which are not in that map. Their own
+        # `finally` normally kills them, but `_cancel_turn` pops the task from
+        # `session.turns` before it finishes -- so the loop above never awaited
+        # it, and a host that stopped in that window took the last chance to
+        # reap the child with it.
+        for process in list(self._oneshot_terminals.values()):
+            with contextlib.suppress(Exception):
+                await process.kill()
+        self._oneshot_terminals.clear()
         for connection in list(self._connections):
             await connection.close()
         # Without this the last debounce window of a turn is lost -- which is

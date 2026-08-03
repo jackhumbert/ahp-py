@@ -25,6 +25,7 @@ from agent_host_protocol.transport import memory_pair
 from agent_host_server.core import Host, LoopbackSingleUserPolicy
 from agent_host_server.core.pty_backend import PtyTerminalBackend
 from agent_host_server.core.resources import RootedFilesystemResourceProvider
+from agent_host_server.core.watches import PollingResourceWatcher
 from agent_host_server.provider import EchoProvider
 
 from .schemas import assert_valid_action, assert_valid_result, assert_valid_state
@@ -304,6 +305,61 @@ class TestTheWireMatchesTheSpec:
             f"the shell-integration path was not exercised; saw {sorted(emitted)}"
         )
         _check(client)
+
+    async def test_a_resource_watch(self, tmp_path: Path) -> None:
+        """`resourceWatch/changed` -- where two of the three change types were
+        values the enum does not contain.
+
+        `ResourceChangeType` is closed (`added | updated | deleted`) and this
+        host emitted `created` and `changed`, so a conformant client saw only
+        deletions and a validating one rejected two thirds of the stream. It
+        needs its own flow because a watch is embedder-gated: no other test in
+        this file installs a `ResourceWatcher`, so nothing here ever saw the
+        frame.
+        """
+        root = tmp_path.resolve() / "ws"
+        root.mkdir()
+        (root / "gone.txt").write_text("x")
+        (root / "stays.txt").write_text("x")
+        host = Host(
+            EchoProvider(delay=0.01),
+            LoopbackSingleUserPolicy(),
+            resources=RootedFilesystemResourceProvider(root),
+            watcher=PollingResourceWatcher(interval=0.05),
+        )
+        client_transport, server_transport = memory_pair()
+        serve = asyncio.create_task(host.serve(server_transport))
+        client = Recorder(client_transport)
+        try:
+            await client.request(
+                "initialize",
+                {
+                    "channel": ROOT_URI,
+                    "clientId": "conformance",
+                    "protocolVersions": ["0.7.0"],
+                    "initialSubscriptions": [ROOT_URI],
+                },
+            )
+            created = await client.request(
+                "createResourceWatch", {"channel": ROOT_URI, "uri": root.as_uri()}
+            )
+            channel = created["result"]["channel"]
+            await client.request("subscribe", {"channel": channel})
+            await asyncio.sleep(0.15)
+            # One of each arm of the enum, so no arm can be wrong unnoticed.
+            (root / "fresh.txt").write_text("new")
+            (root / "stays.txt").write_text("modified")
+            (root / "gone.txt").unlink()
+            await client.drain(0.8)
+
+            changed = [a for a in client.actions if a["type"] == "resourceWatch/changed"]
+            assert changed, "the watch reported nothing"
+            seen = {item["type"] for action in changed for item in action["changes"]["items"]}
+            assert seen == {"added", "updated", "deleted"}, seen
+            _check(client)
+        finally:
+            serve.cancel()
+            await host.aclose()
 
     async def test_customizations_and_the_root_channel(
         self, recorder: tuple[Host, Recorder]

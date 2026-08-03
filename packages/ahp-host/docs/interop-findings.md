@@ -18,55 +18,55 @@ never against "the other peer did not like it".
 - **[blocker] multi-chat** — chat/turnCancelled cancels whichever turn started last in the SESSION, not the one in the addressed chat — the innocent chat is bricked ✅ FIXED
 - **[blocker] multi-chat** — createChat with initialMessage wedges the new chat from birth — the agent never sees the message and the chat can never be used ✅ FIXED
 - **[blocker] resources** — createResourceWatch escapes the filesystem jail via strict ancestors of the root, leaking paths outside it ✅ FIXED
-- **[major] changesets** — Changeset operations stay status:"disabled" forever after the publishing turn ends
-- **[major] changesets** — A host-originated changeset/filesReviewChanged is not remembered, so the next republish clears every tick
-- **[major] changesets** — invokeChangesetOperation never checks the operation is one the changeset declared — and skips all scope/target validation when it isn't
+- **[major] changesets** — Changeset operations stay status:"disabled" forever after the publishing turn ends ✅ FIXED
+- **[major] changesets** — A host-originated changeset/filesReviewChanged is not remembered, so the next republish clears every tick ✅ FIXED
+- **[major] changesets** — invokeChangesetOperation never checks the operation is one the changeset declared — and skips all scope/target validation when it isn't ✅ FIXED
 - **[major] elicitation** — Host's EchoProvider misreads the elicitation answer, so the demo silently ignores what the user picked
-- **[major] handshake** — reconnect with a repeated URI in `subscriptions` multiplies every replayed envelope, corrupting chat text
+- **[major] handshake** — reconnect with a repeated URI in `subscriptions` multiplies every replayed envelope, corrupting chat text ✅ FIXED
 - **[major] multi-chat** — A side chat cannot be created from the source chat's ACTIVE turn — the primary side-chat use case is rejected
 - **[major] multi-chat** — Cancelling one chat silently truncates the other chats' in-flight turns, which are then reported as COMPLETE
-- **[major] resources** — resourceWatch/changed emits non-spec ResourceChangeType values 'created' and 'changed' instead of 'added' and 'updated'
-- **[major] resources** — A watch on a single file never reports anything
-- **[major] resources** — Watches created but never subscribed are never released, and accumulate across connections without bound
-- **[major] resources** — A failed ifMatch resourceWrite creates the target file before it fails
-- **[major] resources** — An unrecognised or non-string resourceWrite mode silently truncates the file instead of failing
-- **[major] resources** — resourceRead has no size cap: a 64 MiB file drove host RSS from 31 MB to 970 MB
-- **[major] resources** — resourceWrite cannot write through a symlink that resourceRead and resourceResolve happily follow, and reports NotFound for it
+- **[major] resources** — resourceWatch/changed emits non-spec ResourceChangeType values 'created' and 'changed' instead of 'added' and 'updated' ✅ FIXED
+- **[major] resources** — A watch on a single file never reports anything ✅ FIXED
+- **[major] resources** — Watches created but never subscribed are never released, and accumulate across connections without bound ✅ FIXED
+- **[major] resources** — A failed ifMatch resourceWrite creates the target file before it fails ✅ FIXED
+- **[major] resources** — An unrecognised or non-string resourceWrite mode silently truncates the file instead of failing ✅ FIXED
+- **[major] resources** — resourceRead has no size cap: a 64 MiB file drove host RSS from 31 MB to 970 MB ✅ FIXED
+- **[major] resources** — resourceWrite cannot write through a symlink that resourceRead and resourceResolve happily follow, and reports NotFound for it ✅ FIXED
 - **[major] reverse-direction** — Host._react resolves a parked provider request from an action the chat reducer refused
 - **[major] reverse-direction** — Host accepts chat/toolCallComplete from a client that does not own the tool call
 - **[major] reverse-direction** — A parked client tool is never failed when its owner disconnects or removes itself, pinning the turn open forever
 - **[major] sessions** — root/sessionSummaryChanged can never clear a summary field — `activity` is set on every tool call and never cleared, so a cached session list says "Echo Tool" forever
-- **[major] terminals** — Cancelling a `!command` turn leaks the child shell — it survives Host.aclose()
-- **[major] terminals** — RootState.terminals goes stale after terminal/titleChanged and terminal/claimed — the root catalogue reports the wrong owner
-- **[major] tool-calls** — The host's auto-confirming chat/toolCallReady omits the required `invocationMessage` and `toolInput`, wiping what the provider streamed
-- **[major] tool-calls** — The host publishes `toolInput` on chat/toolCallStart, which is not a field of that action — the plain path shows no tool input at all
-- **[major] tool-calls** — Both TurnSink streaming methods are no-ops in the mode the host itself uses them: tool_call_output before confirmation, tool_call_delta after
-- **[major] turn-basics** — Host accepts a chat/turnCancelled whose turnId does not name the active turn, aborts the turn anyway, and leaves its own state saying the turn is running
-- **[minor] changesets** — The catalogue entry is published once and never refreshed, so label/description/capabilities.review changes never reach the client
-- **[minor] changesets** — A range-scoped target is accepted without the required `range` field
+- **[major] terminals** — Cancelling a `!command` turn leaks the child shell — it survives Host.aclose() ✅ FIXED
+- **[major] terminals** — RootState.terminals goes stale after terminal/titleChanged and terminal/claimed — the root catalogue reports the wrong owner ✅ FIXED
+- **[major] tool-calls** — The host's auto-confirming chat/toolCallReady omits the required `invocationMessage` and `toolInput`, wiping what the provider streamed ✅ FIXED
+- **[major] tool-calls** — The host publishes `toolInput` on chat/toolCallStart, which is not a field of that action — the plain path shows no tool input at all ✅ FIXED
+- **[major] tool-calls** — Both TurnSink streaming methods are no-ops in the mode the host itself uses them: tool_call_output before confirmation, tool_call_delta after ✅ FIXED
+- **[major] turn-basics** — Host accepts a chat/turnCancelled whose turnId does not name the active turn, aborts the turn anyway, and leaves its own state saying the turn is running ✅ FIXED
+- **[minor] changesets** — The catalogue entry is published once and never refreshed, so label/description/capabilities.review changes never reach the client ✅ FIXED
+- **[minor] changesets** — A range-scoped target is accepted without the required `range` field ✅ FIXED
 - **[minor] elicitation** — Host publishes "answers": null on the wire, which the schema types as an object
-- **[minor] handshake** — A non-string entry in `protocolVersions` returns -32603 with a raw Python TypeError
-- **[minor] handshake** — A channel reported in `missing` stays registered as a subscriber, and its later traffic is delivered
-- **[minor] multi-chat** — A fork source with no turnId is accepted and publishes a ChatOrigin missing its required turnId
-- **[minor] resources** — A negative resourceWrite position either NUL-pads the file past EOF or leaks a raw OSError as InternalError
-- **[minor] resources** — resourceRequest(write=true) is granted by a read-only host that then denies every write command
+- **[minor] handshake** — A non-string entry in `protocolVersions` returns -32603 with a raw Python TypeError ✅ FIXED
+- **[minor] handshake** — A channel reported in `missing` stays registered as a subscriber, and its later traffic is delivered ✅ FIXED
+- **[minor] multi-chat** — A fork source with no turnId is accepted and publishes a ChatOrigin missing its required turnId ✅ FIXED
+- **[minor] resources** — A negative resourceWrite position either NUL-pads the file past EOF or leaks a raw OSError as InternalError ✅ FIXED
+- **[minor] resources** — resourceRequest(write=true) is granted by a read-only host that then denies every write command ✅ FIXED
 - **[minor] sessions** — A client-dispatched session/titleChanged with no title leaves SessionState and SessionSummary missing the required `title`, and the cached summary silently keeps the old one
-- **[minor] terminals** — createTerminal without `name` publishes a TerminalState with no `title`, which the schema requires
-- **[nit] changesets** — The changes roll-up is written straight into SessionState with no action, so subscribed clients never see it and the key is not in the schema
-- **[nit] handshake** — listSessions silently ignores a non-integer limit and accepts any well-formed cursor
-- **[nit] multi-chat** — A SideChatSelection with empty text is accepted and stored verbatim
-- **[nit] resources** — resourceResolve with followSymlinks=false still returns the canonicalised URI when a parent component is a symlink
+- **[minor] terminals** — createTerminal without `name` publishes a TerminalState with no `title`, which the schema requires ✅ FIXED
+- **[nit] changesets** — The changes roll-up is written straight into SessionState with no action, so subscribed clients never see it and the key is not in the schema ✅ FIXED
+- **[nit] handshake** — listSessions silently ignores a non-integer limit and accepts any well-formed cursor ✅ FIXED (limit only) — ❌ REFUTED for the cursor: the cursor IS the sort key, so a decodable one is honoured wherever it came from and an undecodable one already answers -32602. There is no set of issued cursors to test membership in, and keeping one would break the schema's own "do not persist across connections" contract in the other direction.
+- **[nit] multi-chat** — A SideChatSelection with empty text is accepted and stored verbatim ✅ FIXED
+- **[nit] resources** — resourceResolve with followSymlinks=false still returns the canonicalised URI when a parent component is a symlink ✅ FIXED
 - **[nit] sessions** — Seeded title overshoots its own 60-char cap when the first word is longer than the limit
-- **[nit] terminals** — Duplicate createTerminal answers -32003 SessionAlreadyExists with a message that says "Session"
-- **[nit] terminals** — disposeTerminal is not claim-gated: a peer refused terminal/input can still destroy the terminal and kill its shell
+- **[nit] terminals** — Duplicate createTerminal answers -32003 SessionAlreadyExists with a message that says "Session" ✅ FIXED (createTerminal only; `createChat` still answers -32003 and belongs to the multi-chat cluster)
+- **[nit] terminals** — disposeTerminal is not claim-gated: a peer refused terminal/input can still destroy the terminal and kill its shell ❌ REFUTED — no spec text gates the command, and a claim gate would make every session-claimed terminal unkillable. Documented in `core/terminals.py` and pinned by `TestDisposalIsNotClaimGated`
 
 ## Both peers (5)
 
-- **[major] errors-and-mirror** — -32005 UnsupportedProtocolVersion data uses `supportedProtocolVersions`; the schema requires `supportedVersions`
-- **[major] handshake** — -32005 error data carries `supportedProtocolVersions`; the vendored schema requires `supportedVersions`
+- **[major] errors-and-mirror** — -32005 UnsupportedProtocolVersion data uses `supportedProtocolVersions`; the schema requires `supportedVersions` ✅ FIXED host-side (`core/host.py`); `agent_host_protocol.errors:126` still writes the old name and is a separate distribution
+- **[major] handshake** — -32005 error data carries `supportedProtocolVersions`; the vendored schema requires `supportedVersions` ✅ FIXED host-side (`core/host.py`); `agent_host_protocol.errors:126` still writes the old name and is a separate distribution
 - **[major] multi-chat** — Chat.cancel() omits the required turnId, so the reducer no-ops while the host still kills the turn — the chat is bricked
-- **[major] tool-calls** — The host accepts and broadcasts client tool-call actions that are missing schema-required fields instead of echoing a rejectionReason
-- **[minor] multi-chat** — disposeChat on a mid-turn chat drops the channel without cancelling the turn or emitting anything on that channel
+- **[major] tool-calls** — The host accepts and broadcasts client tool-call actions that are missing schema-required fields instead of echoing a rejectionReason ✅ FIXED
+- **[minor] multi-chat** — disposeChat on a mid-turn chat drops the channel without cancelling the turn or emitting anything on that channel ✅ FIXED (the turn is cancelled and its inputNeeded entries retracted); no terminal action is published on the dying channel — that half is filed as a CLIENT finding and needs the turn's measured `duration`, which lives in `TurnRunner`
 
 ## Neither (spec/ambiguity) (2)
 
@@ -341,6 +341,7 @@ Where the TS driver proves we can talk to the reference client, this proves we
 can talk to a client that VALIDATES -- it has its own mirror, its own pending
 queue and its own opinion about every shape we publish.
 """
+
 import asyncio, importlib.util, os
 import pytest
 from agent_host_protocol.transport import memory_pair
@@ -355,13 +356,17 @@ if os.environ.get("AHP_INTEROP_REQUIRED") and not _HAVE:
     raise RuntimeError(f"AHP_INTEROP_REQUIRED is set but the client is missing: {SETUP}")
 requires_client = pytest.mark.skipif(not _HAVE, reason=SETUP)
 
+
 @pytest.fixture
-def anyio_backend() -> str: return "asyncio"
+def anyio_backend() -> str:
+    return "asyncio"
+
 
 @contextlib.asynccontextmanager
 async def paired(host, **connect_kwargs):
     """Host + real client over memory_pair, with a hard deadline on the body."""
     from agent_host_client import connect
+
     client_t, server_t = memory_pair()
     serve = asyncio.create_task(host.serve(server_t))
     try:

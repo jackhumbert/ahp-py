@@ -265,6 +265,23 @@ class TestHangupNotTerminate:
         assert await asyncio.wait_for(process.wait(), timeout=10) is not None
 
 
+def children() -> set[int]:
+    """Every process this one is the parent of.
+
+    The whole orphan story is invisible from inside the host: a leaked child
+    reparents and keeps running, and nothing in the Python raises. Asking the
+    process table is the only check that can see it.
+    """
+    listing = subprocess.run(["ps", "-eo", "pid,ppid"], capture_output=True, text=True).stdout
+    mine = str(os.getpid())
+    found = set()
+    for line in listing.splitlines()[1:]:
+        parts = line.split()
+        if len(parts) >= 2 and parts[1] == mine:
+            found.add(int(parts[0]))
+    return found
+
+
 class TestTerminalsDieWithTheHost:
     """Shells outlived the host.
 
@@ -281,18 +298,6 @@ class TestTerminalsDieWithTheHost:
     async def test_aclose_takes_the_shells_with_it(self) -> None:
         from agent_host_server.core import Host, LoopbackSingleUserPolicy
         from agent_host_server.provider import EchoProvider
-
-        def children() -> set[int]:
-            listing = subprocess.run(
-                ["ps", "-eo", "pid,ppid"], capture_output=True, text=True
-            ).stdout
-            mine = str(os.getpid())
-            found = set()
-            for line in listing.splitlines()[1:]:
-                parts = line.split()
-                if len(parts) >= 2 and parts[1] == mine:
-                    found.add(int(parts[0]))
-            return found
 
         host = Host(EchoProvider(), LoopbackSingleUserPolicy(), terminals=PtyTerminalBackend())
         started = set()
@@ -312,6 +317,34 @@ class TestTerminalsDieWithTheHost:
         await asyncio.sleep(0.8)
 
         assert not (started & children()), "a shell outlived the host"
+
+    async def test_aclose_takes_a_one_shot_command_shell_with_it(self) -> None:
+        """The `!command` child is not a terminal a client can name.
+
+        It has no channel, no subscribers and no entry in `_live_terminals` --
+        which is exactly why the sweep above never saw it. Its own `finally`
+        normally reaps it, but `_cancel_turn` pops the turn task out of the
+        session before that finally runs, so a host stopping in that window has
+        this registry and nothing else.
+        """
+        from agent_host_server.core import Host, LoopbackSingleUserPolicy
+        from agent_host_server.provider import EchoProvider
+
+        host = Host(EchoProvider(), LoopbackSingleUserPolicy(), terminals=PtyTerminalBackend())
+        uri = "ahp-terminal:/one-shot"
+        process = await host.terminals.create(
+            _request(channel=uri, command=["/bin/sh", "-c", "sleep 400 & wait"]), lambda _: None
+        )
+        host._oneshot_terminals[uri] = process
+        pid = process._process.pid  # type: ignore[attr-defined]
+
+        await asyncio.sleep(0.6)
+        assert pid in children(), "the shell never started"
+
+        await host.aclose()
+        await asyncio.sleep(0.8)
+
+        assert pid not in children(), "a `!command` shell outlived the host"
 
 
 class _LiveTerminal:

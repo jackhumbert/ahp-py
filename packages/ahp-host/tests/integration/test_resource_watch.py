@@ -125,7 +125,69 @@ class TestResourceWatch:
             if envelope["action"]["type"] == "resourceWatch/changed"
             for item in envelope["action"]["changes"]["items"]
         ]
-        assert any(c["uri"].endswith("b.txt") and c["type"] == "created" for c in changes)
+        assert any(c["uri"].endswith("b.txt") and c["type"] == "added" for c in changes)
+
+    async def test_the_change_types_are_the_ones_the_enum_declares(
+        self, watching: tuple[Host, Path, PollingResourceWatcher]
+    ) -> None:
+        """`ResourceChangeType` is closed: `added | updated | deleted`.
+
+        This emitted `created` and `changed`, which are neither, so a conformant
+        client saw only deletions and a validating one rejected two thirds of
+        the stream. The assertion is written as an equality against the schema's
+        own enum rather than a membership check, so a fourth invented value
+        fails here too.
+        """
+        host, root, _ = watching
+        (root / "doomed.txt").write_text("x")
+        client = await _attach(host)
+        channel = await _watch(client, root)
+        await client.request("subscribe", {"channel": channel})
+        await asyncio.sleep(0.15)
+
+        (root / "b.txt").write_text("new")
+        (root / "a.txt").write_text("edited")
+        (root / "doomed.txt").unlink()
+        await client.collect(seconds=0.6)
+
+        seen = {
+            item["type"]
+            for envelope in client.actions(channel)
+            if envelope["action"]["type"] == "resourceWatch/changed"
+            for item in envelope["action"]["changes"]["items"]
+        }
+        assert seen == {"added", "updated", "deleted"}, seen
+
+    async def test_a_watch_rooted_at_a_single_file_reports_it(
+        self, watching: tuple[Host, Path, PollingResourceWatcher]
+    ) -> None:
+        """`os.walk` yields NOTHING for a file, so this watch was created,
+        subscribed and polled forever without reporting anything -- a
+        healthy-looking dead watch on a case the spec names explicitly:
+        `ResourceWatchState.root` is "for non-recursive watches ... the single
+        file or directory"."""
+        host, root, _ = watching
+        target = root / "a.txt"
+        client = await _attach(host)
+        result = (
+            await client.request(
+                "createResourceWatch", {"channel": ROOT_URI, "uri": target.as_uri()}
+            )
+        )["result"]
+        channel = result["channel"]
+        await client.request("subscribe", {"channel": channel})
+        await asyncio.sleep(0.15)
+
+        target.write_text("mutated")
+        await client.collect(seconds=0.6)
+
+        changes = [
+            item
+            for envelope in client.actions(channel)
+            if envelope["action"]["type"] == "resourceWatch/changed"
+            for item in envelope["action"]["changes"]["items"]
+        ]
+        assert changes == [{"uri": target.as_uri(), "type": "updated"}], changes
 
     async def test_a_burst_is_coalesced_into_few_actions(
         self, watching: tuple[Host, Path, PollingResourceWatcher]
@@ -187,6 +249,52 @@ class TestResourceWatch:
         await client.transport.close()
         await asyncio.sleep(0.3)
         assert not watcher._polls
+
+    async def test_a_watch_nobody_subscribed_to_is_released_on_disconnect(
+        self, watching: tuple[Host, Path, PollingResourceWatcher]
+    ) -> None:
+        """The leak: `channel_unobserved` was the only release path and it
+        cannot fire without a subscriber, so a `createResourceWatch` that was
+        never subscribed left the channel registered and a strong reference to
+        the closed connection behind -- once per call, unbounded across
+        reconnects, since `max_watches_per_connection` gives each new
+        connection a fresh allowance.
+
+        "when every subscriber has unsubscribed (or the underlying connection
+        drops), the receiver MUST release the watcher."
+        """
+        host, root, _ = watching
+        channels = []
+        for index in range(3):
+            client = await _attach(host, f"leaker-{index}")
+            channels.append(await _watch(client, root))
+            await client.transport.close()
+            await asyncio.sleep(0.15)
+
+        assert host._watches == {}, "the watches outlived every connection that made them"
+        assert not any(host.sequencer.has_channel(c) for c in channels)
+
+    async def test_a_watch_someone_else_is_watching_survives_its_creator(
+        self, watching: tuple[Host, Path, PollingResourceWatcher]
+    ) -> None:
+        """Releasing on the CREATOR's disconnect must not sever a live
+        subscriber: the spec keeps the watcher until *every* subscriber has
+        gone, and the channel URI is shareable by design."""
+        host, root, watcher = watching
+        creator = await _attach(host, "creator")
+        channel = await _watch(creator, root)
+        observer = await _attach(host, "observer")
+        await observer.request("subscribe", {"channel": channel})
+        await asyncio.sleep(0.15)
+
+        await creator.transport.close()
+        await asyncio.sleep(0.2)
+        assert channel in host._watches, "the observer's watch was severed"
+        assert watcher._polls, "the poller stopped while a subscriber remained"
+
+        await observer.notify("unsubscribe", {"channel": channel})
+        await asyncio.sleep(0.2)
+        assert host._watches == {}
 
     async def test_the_per_connection_cap_is_enforced(
         self, watching: tuple[Host, Path, PollingResourceWatcher]

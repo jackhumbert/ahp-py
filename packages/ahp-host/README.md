@@ -160,6 +160,37 @@ python -m agent_host_server --elicit
 input; `--client-tools` delegates the work to a tool the client owns;
 `--configurable` publishes a session config schema.
 
+**Params are validated where the schema is specific, and the refusal is the
+schema's code.** A `protocolVersions` array with a non-string entry, a
+`listSessions` `limit` that is a JSON boolean or a string, a chat `source` with
+no `turnId`, a `SideChatSelection` whose `text` is empty: each is `-32602`,
+rather than a Python exception rendered as `-32603`, or a field quietly ignored
+so that it means the opposite of what was asked. `limit` is typed `number`, so
+`3.0` is honoured and `true` is not. The `-32005` refusal carries
+`supportedVersions` — the name `errors.schema.json` declares, and the one frame
+whose whole job is telling a user which host version to install.
+
+**`reconnect` de-duplicates its subscription list and registers a connection
+only for the channels it actually resumes.** The list is peer-supplied and the
+schema does not forbid repeats: N copies of one URI returned N copies of every
+missed envelope, each carrying the same `serverSeq`, so a conformant mirror
+folded every delta N times and a 50 KB request was answered with 62 MB. And a
+channel the reply reports in `missing` is no longer left subscribed — the host
+was saying "drop this" while continuing to deliver it, and because session and
+chat URIs are *client-chosen*, the URI it disowned can be created later by
+somebody else. A telemetry channel is the one exception, carved out explicitly:
+it is stateless but live, and `reconnect` returns no `telemetry` map for a
+client to re-read.
+
+**A `chat/turnCancelled` must name the turn that is running**, not merely arrive
+while one is. The reducer no-ops unless `turnId` matches, so accepting a
+mismatch aborted the provider while the host's own state went on claiming a turn
+was in flight — and nothing could then clear an `activeTurn` whose id nobody
+knew. **`disposeChat` cancels that chat's turn before dropping the channel**,
+which is also what retracts any confirmation it was parked on; otherwise the
+session stayed at `InputNeeded` holding a request that could only be answered on
+a channel that no longer existed.
+
 **Configuration** is `resolveSessionConfig` / `sessionConfigCompletions` plus
 `RootState.config`, and it comes with its gate rather than after it. A host
 publishes no schema by default, and **the schema is the gate**: an unknown key,
@@ -170,10 +201,41 @@ permissive policy is the norm for a loopback host.
 
 **Terminals** run real commands on a POSIX pty behind `--terminal`, with shell
 integration parsed (never injected), process-group teardown on hangup, and
-`terminal/exited` announced so a client can close the tab. **Changesets** are
-driven from a real git working tree: two changesets (`uncommitted` and
-`session`), per-file review flags, and operations wired to `git add`,
-`git commit` and a scoped revert. **Resource watches** poll and coalesce.
+`terminal/exited` announced so a client can close the tab. A `!command` turn is
+a one-shot: its child dies when the turn is cancelled and again when the host
+stops, because a shell that outlives what asked for it is nobody's idea of a
+closed terminal. `terminal/input` and `terminal/claimed` are refused from a peer
+that does not hold the claim; **`disposeTerminal` deliberately is not** — a
+session-claimed terminal is held by no client, so gating disposal on the claim
+would make every handed-over terminal unkillable — and it is gated where the
+other commands are, by `Policy`. **Resource watches** poll and coalesce.
+
+**Changesets** are driven from a real git working tree: two changesets
+(`uncommitted` and `session`), per-file review flags, and operations wired to
+`git add`, `git commit` and a scoped revert. Four rules the schema states and
+a host is on the hook for:
+
+- **An operation is invocable only while the changeset declares it.** A
+  registered handler is not an invitation — the demo drops Commit from the list
+  when nothing is staged — and the check comes first, so an undeclared id is
+  refused rather than reaching a handler with its scope and target unchecked.
+  `target` is validated against the declared `scopes`, and a `range` target
+  without a `range` is `-32602` rather than whatever the handler raises.
+- **The `disabled` gate is re-evaluated at both ends of every turn**, not
+  sampled when the changeset is published. A provider can only publish from
+  inside its own turn, so a gate read once is a gate stuck at "busy" for the
+  life of the session. `running` and `error` are left alone: they belong to an
+  invocation, not to this gate.
+- **Review survives a republish whichever side set it.** `filesReviewChanged`
+  is the one client-dispatchable `changeset/*` action and the server MAY
+  originate it too; the ticks are reconciled from the channel's own state, so
+  the host's own tick is remembered exactly like a reviewer's.
+- **The catalogue entry is re-emitted when it changes** — label, description,
+  `changeKind`, `capabilities.review` — and not when it does not. The entry is
+  the only copy a client has, and the review gate reads the current one.
+
+`SessionSummary.changes` rides on `root/sessionSummaryChanged`. It is not
+written into `SessionState`, which declares no such key.
 
 **The `resource*` family** is implemented, and exposes nothing by default. A
 host does not acquire a filesystem by being upgraded: install
@@ -185,7 +247,14 @@ The jail walks a path one component at a time with `openat` and `O_NOFOLLOW`,
 resolving any symlink itself and re-checking the result against the root. That
 is deliberately not `realpath`-then-open: between the check and the open, a
 component can be swapped for a symlink and the open follows it — the check
-passed, the read escaped. There is a test for exactly that race.
+passed, the read escaped. There is a test for exactly that race. Reads follow
+symlinks; a write whose final component is one is refused rather than followed,
+because a write's policy check runs against the name the peer sent.
+
+Reads are bounded — 16 MiB by default, `Host(max_read_bytes=…)` to raise it and
+`None` to remove it. The protocol has no partial read (`resourceRead` takes no
+offset or length), so a file above the bound is refused rather than truncated:
+unbounded, one 64 MiB file took host memory from 29 MB to 970 MB.
 
 ```bash
 python -m agent_host_server --serve-directory ./workspace
@@ -226,6 +295,17 @@ What is genuinely absent, and why:
   field in the protocol.
 - **`pickle`, `eval`, or any `__reduce__`-capable store format**, permanently.
   JSON only. See [`docs/roadmap.md`](docs/roadmap.md) §10.
+- **Retracting a session-summary field over `root/sessionSummaryChanged`** —
+  the wire cannot say it. "Only fields present in `changes` have new values;
+  omitted fields are unchanged", and every property of `changes` is typed as
+  its own non-null type, so there is no token for "this field is gone". A
+  session that reported an `activity` and then went idle keeps advertising the
+  last one to a client rendering from that incremental cache, until it
+  re-fetches. `listSessions` and every fresh subscriber always see the truth,
+  and the chat catalogue does not have the problem — `session/chatAdded` is a
+  documented upsert and this host retracts through it. Open question 11 in
+  [`docs/research.md`](docs/research.md); this host will not invent an
+  encoding for it unilaterally.
 
 Session state is in-memory by default: sessions do not survive a host restart
 unless the embedder installs a `SessionStore`. `serverSeq` survives one with

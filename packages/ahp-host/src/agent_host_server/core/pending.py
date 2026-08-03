@@ -54,6 +54,12 @@ class PendingRequest:
     #: it. Stored rather than parsed back out of `scope`: a chat URI is
     #: client-chosen and opaque and may legally contain the separator.
     channel: str | None = None
+    #: The client that must answer, when exactly one may. Set for a tool the
+    #: host asked a specific client to RUN -- "the server SHOULD reject this
+    #: action if the dispatching client does not match the contributor's
+    #: `clientId`" -- and left None for a park anyone admitted may answer, such
+    #: as the confirmation of a server-side tool.
+    owner: str | None = None
 
 
 class PendingRequests:
@@ -75,6 +81,7 @@ class PendingRequests:
         key: str | None = None,
         *,
         channel: str | None = None,
+        owner: str | None = None,
     ) -> PendingRequest:
         """Park a new request and return it, un-awaited.
 
@@ -101,6 +108,7 @@ class PendingRequests:
             future=asyncio.get_running_loop().create_future(),
             key=key,
             channel=channel,
+            owner=owner,
         )
         self._by_id[request_id] = request
         self._by_scope.setdefault(scope, set()).add(request_id)
@@ -171,6 +179,15 @@ class PendingRequests:
         if not request.future.done():
             request.future.set_result(outcome)
         return True
+
+    def owned_by(self, owner: str) -> list[PendingRequest]:
+        """Every live request this client alone can answer.
+
+        The host fails these when the client leaves: a park waiting on a peer
+        that is gone advertises `session/inputNeeded` forever, pins the session
+        at `InputNeeded`, and outlives `disposeSession`.
+        """
+        return [r for r in self._by_id.values() if r.owner == owner]
 
     def cancel_scope(self, scope: str, reason: str) -> list[PendingRequest]:
         """End every request opened under *scope*. Returns the ones that were live.
