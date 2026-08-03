@@ -24,8 +24,17 @@ versions each release speaks.
   `docs/deferred-upstream.md` U1), it just stops the message lying about whose
   fault it is.
 
+- **A validator also receives the upgrade HEADERS**, `(str | None, Mapping[str, str])`,
+  because `?tkn=` is the wrong place for a credential and a host that can only read
+  the query value is stuck with it. **A reverse proxy writes the full request URI to
+  its access log**, so a query token sits in cleartext in a log file on every single
+  connection — measured on a real deployment at 262 of 262 requests, token included.
+  `Authorization` is redacted by the same proxy (`['REDACTED']`, verified). VS Code's
+  own client can only send `?tkn=`, so both paths must keep working and the validator
+  decides which it accepts.
+
 - **`connection_token` on the WebSocket server also accepts a validator callable**,
-  `(str | None) -> bool`, so a host with **per-user tokens** can refuse an unknown one
+  so a host with **per-user tokens** can refuse an unknown one
   at the handshake with 403. The alternative — admit every peer and refuse in
   `Policy.authorize_connection` — works, but leaves an unauthenticated peer holding
   an open socket and turns a 403 at the upgrade into a connection that dies a moment

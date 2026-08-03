@@ -91,6 +91,7 @@ def test_connection_token_accepts_a_validator_for_per_user_tokens() -> None:
     an unauthenticated peer holding an open socket.
     """
     import secrets as _secrets
+    from collections.abc import Mapping
 
     from agent_host_server import Host, LoopbackSingleUserPolicy
     from agent_host_server.provider import EchoProvider
@@ -98,9 +99,14 @@ def test_connection_token_accepts_a_validator_for_per_user_tokens() -> None:
 
     known = {"tok-a", "tok-b"}
 
-    def validate(supplied: str | None) -> bool:
+    def validate(supplied: str | None, headers: Mapping[str, str]) -> bool:
+        # A validator sees BOTH the `?tkn=` value and the upgrade headers, because a
+        # query string is written to a proxy's access log and a credential should not
+        # be. Here the header is the stronger offer and wins.
+        bearer = str(headers.get("authorization", "")).removeprefix("Bearer ").strip()
+        candidate = bearer or supplied
         # compare_digest, not `in`: a set lookup on a secret leaks by timing.
-        return any(supplied and _secrets.compare_digest(supplied, k) for k in known)
+        return any(candidate and _secrets.compare_digest(candidate, k) for k in known)
 
     host = Host(EchoProvider(), LoopbackSingleUserPolicy())
     server = WebSocketServer(host, connection_token=validate)
@@ -109,6 +115,11 @@ def test_connection_token_accepts_a_validator_for_per_user_tokens() -> None:
     assert server._authorize("/?tkn=tok-b")
     assert not server._authorize("/?tkn=nope")
     assert not server._authorize("/")
+
+    # And in a header, which is the point: `?tkn=` is logged by a reverse proxy,
+    # `Authorization` is redacted by one.
+    assert server._authorize("/", {"authorization": "Bearer tok-a"})
+    assert not server._authorize("/", {"authorization": "Bearer nope"})
 
     # A string still behaves exactly as before.
     single = WebSocketServer(host, connection_token="only-one")
