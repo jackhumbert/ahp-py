@@ -37,6 +37,7 @@ from agent_host_protocol.types import (
 from agent_host_protocol.types.protocol import SessionStatus, session_status_flags
 from agent_host_protocol.versions import DEFAULT_SUPPORTED_VERSIONS, negotiate
 
+from agent_host_server.core import policy as policy_mod
 from agent_host_server.core.audit import AuditEvent, AuditSink, emit
 from agent_host_server.core.auth import (
     AUTH_REQUIRED_METHOD,
@@ -2189,9 +2190,16 @@ class Host:
         claim = claim_from_wire(params.get("claim"))
         if claim is None:
             raise errors.invalid_params("a valid claim is required")
-        if not self.policy.may_create_terminal(connection.info, params):
+        verdict = self.policy.may_create_terminal(connection.info, params)
+        if not verdict:
             self._audit("terminal.refused", connection, channel=channel, allowed=False)
-            raise errors.AhpError(-32009, "Not permitted to create a terminal")
+            # A `Denied("...")` from the policy replaces this message. Worth doing
+            # here above anywhere else: a client renders a refused terminal as
+            # "the terminal process failed to launch", so the default reads as a
+            # crash rather than as a host that does not offer terminals.
+            raise errors.AhpError(
+                -32009, policy_mod.reason_or(verdict, "Not permitted to create a terminal")
+            )
 
         cols, rows = params.get("cols"), params.get("rows")
         # `cwd` is passed through as the CLIENT asked for it, and it is the
@@ -3934,9 +3942,12 @@ class Host:
         # rather than against the session map, which knows only some of them.
         if channel in self._sessions or self.sequencer.has_channel(channel):
             raise errors.already_exists(channel)
-        if not self.policy.may_create_session(connection.info, params):
+        verdict = self.policy.may_create_session(connection.info, params)
+        if not verdict:
             self._audit("session.refused", connection, channel=channel, allowed=False)
-            raise errors.AhpError(-32009, "Not permitted to create a session")
+            raise errors.AhpError(
+                -32009, policy_mod.reason_or(verdict, "Not permitted to create a session")
+            )
         active_client = params.get("activeClient")
         if active_client is not None and (
             not isinstance(active_client, Mapping)

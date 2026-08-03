@@ -10,6 +10,28 @@ versions each release speaks.
 
 ## [Unreleased]
 
+### Added
+
+- **`Denied("reason")`, returnable from any `may_*` policy hook**, so a refusal can
+  carry the message a person actually reads. It is **falsy**, so every existing
+  `if not policy.may_x(...)` branch and every policy returning plain `False` is
+  unaffected — this is additive. Wired at the two refusals a client renders as a
+  UI error: `createTerminal` and `createSession`. The terminal one is why it
+  exists — VS Code renders a refused terminal as *"The terminal process failed to
+  launch: Not permitted to create a terminal"*, which reads as a crash in the host
+  rather than as a host that does not offer terminals. It does not close the
+  underlying gap (a client cannot *learn* a host has no terminals; see
+  `docs/deferred-upstream.md` U1), it just stops the message lying about whose
+  fault it is.
+
+### Documentation
+
+- **`docs/deferred-upstream.md`** — measured defects belonging to the spec or to VS
+  Code, held until these repos are public. Seeded with U1 (no terminal capability
+  in `AgentCapabilities`) and U2 (VS Code lowercases the `b64-` filesystem
+  authority, which is case-sensitive base64, breaking every agent-host file open
+  for every possible host address).
+
 ### Fixed
 
 Found by driving the sibling Python client against this host — two

@@ -26,10 +26,43 @@ from typing import Any, Protocol, runtime_checkable
 
 __all__ = [
     "ConnectionInfo",
+    "Denied",
     "LoopbackSingleUserPolicy",
     "Policy",
     "TracksChannels",
 ]
+
+
+@dataclass(frozen=True)
+class Denied:
+    """A refusal that carries a reason, returnable anywhere a policy returns bool.
+
+    Every ``may_*`` hook is typed to return ``bool``, and a bare ``False`` leaves
+    the host to invent the message a person eventually reads. That is fine until
+    the client renders it as a failure rather than a decision: VS Code surfaces a
+    refused ``createTerminal`` as **"The terminal process failed to launch: Not
+    permitted to create a terminal"**, which reads like a crash in the host rather
+    than a host that does not offer terminals.
+
+    So a policy may return ``Denied("this host does not provide terminals")`` and
+    the host uses that as the ``PermissionDenied`` message. It is **falsy**, so
+    every existing ``if not policy.may_x(...)`` branch keeps working unchanged and
+    a policy returning plain ``False`` is unaffected — this is additive.
+
+    Not a substitute for the protocol gap it works around: a client cannot *learn*
+    that a host has no terminals, so it still offers the affordance and the user
+    still has to click it once. Improving the message is the half we own.
+    """
+
+    reason: str
+
+    def __bool__(self) -> bool:
+        return False
+
+
+def reason_or(verdict: object, default: str) -> str:
+    """The message for a refusal — the policy's own if it supplied one."""
+    return verdict.reason if isinstance(verdict, Denied) else default
 
 
 @dataclass(frozen=True)

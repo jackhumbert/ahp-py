@@ -17,6 +17,13 @@ first five landed — `Host.serve(headers=, token=)`, `core/policies.py`,
 two is open**, and its first item blocks the partitioning example from being
 usable at all.
 
+## Deferred upstream reports
+
+Measured defects that belong to the spec or to VS Code, held back until these repos are public:
+**[`docs/deferred-upstream.md`](docs/deferred-upstream.md)**. Add to it when you find one — the entry is
+the report, written while the evidence is in front of you. Two rules: only measured things go in, and if
+one turns out to be ours, delete it rather than leaving a wrong accusation lying around.
+
 ## What this project is
 
 A Python **host** library for the Agent Host Protocol. AHP is an external
