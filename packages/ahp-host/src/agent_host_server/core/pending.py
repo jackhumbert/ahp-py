@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -60,6 +61,15 @@ class PendingRequest:
     #: `clientId`" -- and left None for a park anyone admitted may answer, such
     #: as the confirmation of a server-side tool.
     owner: str | None = None
+    #: The protected-resource identifier an `"auth"` park is waiting on, and the
+    #: scopes the challenge demanded. Step-up is "resolved by the client
+    #: obtaining a token for `auth.resource`" -- a token for a DIFFERENT
+    #: resource must not wake this park, and the reference session checks both
+    #: fields before resolving (`copilotAgentSession.ts:1756`). ``None`` means
+    #: the park named no resource, and any push may answer it -- the same
+    #: anywhere-answerable default a channel-less park gets.
+    resource: str | None = None
+    required_scopes: tuple[str, ...] = ()
 
 
 class PendingRequests:
@@ -82,6 +92,8 @@ class PendingRequests:
         *,
         channel: str | None = None,
         owner: str | None = None,
+        resource: str | None = None,
+        required_scopes: Sequence[str] = (),
     ) -> PendingRequest:
         """Park a new request and return it, un-awaited.
 
@@ -91,6 +103,10 @@ class PendingRequests:
 
         *key* is an optional second name -- a `toolCallId` -- because the
         actions that resolve a tool call name the call, not the request.
+
+        *resource* and *required_scopes* are what an `"auth"` park is waiting
+        for, so `authenticate` can wake only the calls its token can actually
+        unblock.
 
         *channel* is where the request was asked, and it is what makes
         :meth:`is_open` and :meth:`id_for_key` answerable. Ids are minted
@@ -109,6 +125,8 @@ class PendingRequests:
             key=key,
             channel=channel,
             owner=owner,
+            resource=resource,
+            required_scopes=tuple(required_scopes),
         )
         self._by_id[request_id] = request
         self._by_scope.setdefault(scope, set()).add(request_id)

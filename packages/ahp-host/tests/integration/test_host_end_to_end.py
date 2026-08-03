@@ -525,18 +525,56 @@ class TestReconnectAsFirstRequest:
     async def test_the_connection_is_usable_after_a_reconnect_handshake(
         self, connected: tuple[Host, FakeClient]
     ) -> None:
+        """A SUCCESSFUL reconnect is a handshake; a refused one is not.
+
+        The clientId must be one this host admitted through `initialize`, so
+        the resume happens on a second connection -- the dropped-socket shape
+        the command exists for."""
+        host, client = connected
+        await _initialize(client, clientId="c1")
+
+        client_transport, server_transport = memory_pair()
+        serve = asyncio.create_task(host.serve(server_transport))
+        resumed = FakeClient(client_transport)
+        try:
+            response = await resumed.request(
+                "reconnect",
+                {
+                    "channel": ROOT_URI,
+                    "clientId": "c1",
+                    "lastSeenServerSeq": 0,
+                    "subscriptions": [ROOT_URI],
+                },
+            )
+            assert "error" not in response, response.get("error")
+            listed = await resumed.request("listSessions", {"channel": ROOT_URI})
+            assert "error" not in listed, "reconnect did not establish the connection"
+        finally:
+            serve.cancel()
+
+    async def test_a_refused_reconnect_does_not_establish_the_connection(
+        self, connected: tuple[Host, FakeClient]
+    ) -> None:
+        """A handshake is `initialize` or a *successful* reconnect.
+
+        Marking the connection initialized before the known-clientId check let
+        every later command sail past the initialize-first gate on a connection
+        that never negotiated a version -- and audited a resumption that was
+        refused."""
         _, client = connected
-        await client.request(
+        refused = await client.request(
             "reconnect",
             {
                 "channel": ROOT_URI,
-                "clientId": "c1",
+                "clientId": "never-admitted",
                 "lastSeenServerSeq": 0,
                 "subscriptions": [ROOT_URI],
             },
         )
+        assert refused["error"]["code"] == AHP_ERROR_CODES["NotFound"]
         listed = await client.request("listSessions", {"channel": ROOT_URI})
-        assert "error" not in listed, "reconnect did not establish the connection"
+        # -32602: the initialize-first gate, still armed.
+        assert listed["error"]["code"] == -32602, "a refused reconnect left the connection admitted"
 
 
 class TestReconnectAcrossAHostRestart:
@@ -571,6 +609,10 @@ class TestReconnectAcrossAHostRestart:
             "replaying an empty action list would leave the client silently stale"
         )
         assert [s["resource"] for s in result["snapshots"]] == [ROOT_URI]
+        # `ReconnectSnapshotResult` is `{type, snapshots}`: `missing` exists
+        # only on the replay arm, and on this arm absence from `snapshots` IS
+        # the drop signal the reference client acts on.
+        assert "missing" not in result
 
     async def test_a_sequence_from_this_epoch_still_replays(
         self, connected: tuple[Host, FakeClient]
@@ -1424,7 +1466,10 @@ class TestDisposalIsIdempotent:
         response = await client.request(
             "disposeTerminal", {"channel": "ahp-terminal:/never-existed"}
         )
-        assert response["result"] == {}
+        # `null`, not `{}`: the CommandMap declares `result: null` for every
+        # create/dispose lifecycle command, and the reference host serializes
+        # `result ?? null`.
+        assert response["result"] is None
 
 
 class TestProviderIdentity:
@@ -1441,6 +1486,19 @@ class TestProviderIdentity:
         response = await client.request(
             "createSession", {"channel": "echo:/bogus", "provider": "not-a-real-provider"}
         )
+        assert response["error"]["code"] == AHP_ERROR_CODES["ProviderNotFound"]
+
+    async def test_an_empty_provider_is_a_provider_nobody_answers_to(
+        self, connected: tuple[Host, FakeClient]
+    ) -> None:
+        """Absence selects the default; `""` is a PRESENT value (invariant 5).
+
+        Bare truthiness (`params.get("provider") or default`) silently swapped
+        in the default agent for a client that named a provider no agent
+        answers to."""
+        _, client = connected
+        await _initialize(client)
+        response = await client.request("createSession", {"channel": "echo:/empty", "provider": ""})
         assert response["error"]["code"] == AHP_ERROR_CODES["ProviderNotFound"]
 
     async def test_the_real_provider_is_accepted(self, connected: tuple[Host, FakeClient]) -> None:

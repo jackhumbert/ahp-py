@@ -76,7 +76,15 @@ class Connection:
         )
         self.overflowed = False
         self._writer: asyncio.Task[None] | None = None
+        # Two flags, not one. `_closed` means "no more frames may be enqueued";
+        # `_close_started` means "close() has begun tearing down". Overflow sets
+        # only the first, because reusing one flag for both made `close()`'s
+        # idempotence guard treat an overflowed connection as already torn down
+        # -- so `serve`'s finally never closed the transport or joined the
+        # writer, and the peer kept an open socket with a silent hole in its
+        # outbound stream.
         self._closed = False
+        self._close_started = False
 
     @property
     def info(self) -> ConnectionInfo:
@@ -123,7 +131,25 @@ class Connection:
                 self._outbox.maxsize,
             )
             self._closed = True
-            with contextlib.suppress(Exception):
+            self._signal_writer()
+
+    def _signal_writer(self) -> None:
+        """Put the stop sentinel where the writer WILL see it.
+
+        The queue that needs the sentinel is by definition full -- overflow is
+        the reason we are here -- so a bare `put_nowait(None)` deterministically
+        raised `QueueFull`, was suppressed, and the writer never learned it
+        should stop: no code path fulfilled the enqueue docstring's promise
+        that the peer is disconnected. One queued frame is evicted to make
+        room; the connection is being terminated, so its delivery was already
+        forfeit, and the reconnect/replay path is how the peer recovers it.
+        """
+        try:
+            self._outbox.put_nowait(None)
+        except asyncio.QueueFull:
+            with contextlib.suppress(asyncio.QueueEmpty):
+                self._outbox.get_nowait()
+            with contextlib.suppress(asyncio.QueueFull):
                 self._outbox.put_nowait(None)
 
     def start_writer(self) -> None:
@@ -134,7 +160,7 @@ class Connection:
         while True:
             message = await self._outbox.get()
             if message is None:
-                return
+                break
             if self.wire_log is not None:
                 self.wire_log.record("s2c", message, self.client_id or "?")
             try:
@@ -142,7 +168,23 @@ class Connection:
             except TransportClosed:
                 return
             except Exception:
-                continue
+                # Fatal, not skipped. Continuing past a failed send delivers
+                # every LATER frame while this one is missing -- the silent,
+                # signal-free ordering hole that invariant 10 exists to
+                # prevent, and the exact corruption the overflow policy trades
+                # a visible disconnect to avoid. Same trade here.
+                _log.exception(
+                    "connection %s: send failed; closing so the peer reconnects",
+                    self.client_id or self.peer or "?",
+                )
+                break
+        # Reached on the stop sentinel or a failed send. Closing the TRANSPORT
+        # is what makes the failure visible: it ends `transport.receive()` in
+        # `Host.serve`, whose finally then runs the full teardown -- without
+        # this, an overflowed peer kept an open socket that would never carry
+        # another frame.
+        with contextlib.suppress(Exception):
+            await self.transport.close()
 
     async def drain(self) -> None:
         """Wait until every queued message has been handed to the transport.
@@ -156,10 +198,15 @@ class Connection:
     # ─── lifecycle ───────────────────────────────────────────────────────
 
     async def close(self) -> None:
-        if self._closed:
+        # Guarded by `_close_started`, NOT `_closed`: overflow sets `_closed`
+        # to stop new frames, and reusing it here made this method a no-op for
+        # exactly the connection that most needs its transport closed and its
+        # writer joined.
+        if self._close_started:
             return
+        self._close_started = True
         self._closed = True
-        self._outbox.put_nowait(None)
+        self._signal_writer()
         if self._writer is not None:
             with contextlib.suppress(asyncio.CancelledError):
                 await self._writer

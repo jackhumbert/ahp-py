@@ -14,6 +14,7 @@ into the buffer, and the claim model.
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import subprocess
 from collections.abc import AsyncIterator
@@ -25,7 +26,11 @@ from agent_host_protocol.transport import memory_pair
 from agent_host_protocol.types import AHP_ERROR_CODES
 
 from agent_host_server.core import Host, LoopbackSingleUserPolicy
-from agent_host_server.core.terminals import OutputSink, TerminalRequest
+from agent_host_server.core.terminals import (
+    STRICT_CLAIM_GATED_ACTIONS,
+    OutputSink,
+    TerminalRequest,
+)
 from agent_host_server.provider import EchoProvider
 
 from .test_host_end_to_end import FakeClient
@@ -119,6 +124,9 @@ async def _open(client: FakeClient, channel: str = "agenthost-terminal:/t1") -> 
         },
     )
     assert "error" not in result, result
+    # `null`, not `{}`: the CommandMap declares `result: null` for every
+    # create/dispose lifecycle command.
+    assert result["result"] is None
     await client.request("subscribe", {"channel": channel})
     return channel
 
@@ -164,7 +172,9 @@ class TestLifecycle:
         host, backend = wired
         client = await _client(host)
         channel = await _open(client)
-        await client.request("disposeTerminal", {"channel": channel})
+        disposed = await client.request("disposeTerminal", {"channel": channel})
+        # `result: null` per the CommandMap, like `_open`'s create.
+        assert disposed["result"] is None
 
         assert backend.process.killed
         assert not host.sequencer.has_channel(channel)
@@ -732,3 +742,133 @@ class TestTheBangCommandShellDiesWithItsTurn:
             await asyncio.sleep(0.1)
         assert not self._alive(pid), "the shell outlived the turn that started it"
         assert not host._oneshot_terminals, "the one-shot registry still holds a dead child"
+
+
+class TestCommandFinishedWithoutAnExitCode:
+    async def test_the_exit_code_member_is_omitted_not_null(
+        self, wired: tuple[Host, FakeBackend]
+    ) -> None:
+        """OSC 633 `D` may carry no code (an interrupted command). The schema
+        declares `exitCode` an optional NUMBER -- "`undefined` if the shell did
+        not report one" -- and the reducer writes the value through into
+        `TerminalCommandPart`, so an explicit null failed the action schema and
+        every later snapshot of the channel. Omission, as `terminal/exited`
+        already does."""
+        host, backend = wired
+        client = await _client(host)
+        channel = await _open(client)
+        await backend.emit(b"\x1b]633;E;make\x07\x1b]633;C\x07building\r\n\x1b]633;D\x07")
+        await client.collect(seconds=0.4)
+
+        finished = next(
+            e["action"]
+            for e in client.actions(channel)
+            if e["action"]["type"] == "terminal/commandFinished"
+        )
+        assert "exitCode" not in finished
+
+
+class EagerBackend(FakeBackend):
+    """Delivers output from INSIDE `create`, before it returns.
+
+    The pty backend's shape: `add_reader` is armed in the process constructor,
+    so the child's first bytes -- a fast prompt, an immediate error -- can
+    reach the sink while `_create_terminal` is still awaiting registration."""
+
+    def __init__(self, early: bytes) -> None:
+        super().__init__()
+        self.early = early
+
+    async def create(self, request: TerminalRequest, output: OutputSink) -> FakeProcess:
+        process = await super().create(request, output)
+        output(self.early)
+        return process
+
+
+class TestOutputDuringSpawn:
+    async def test_bytes_written_before_registration_still_arrive(self) -> None:
+        """Chunks for a channel not yet in `_live_terminals` were returned to
+        nobody: the first bytes of a fast shell never reached `terminal/data`."""
+        backend = EagerBackend(b"early prompt$ ")
+        host = Host(EchoProvider(), LoopbackSingleUserPolicy(), terminals=backend)
+        try:
+            client = await _client(host)
+            channel = await _open(client)
+            await backend.emit(b"and then output\r\n")
+
+            state = (await client.request("subscribe", {"channel": channel}))["result"]["snapshot"][
+                "state"
+            ]
+            # `content` parts keep arrival order, so the serialized state does
+            # too -- shape-independent, since parts store text under different
+            # keys (`value`, `output`) depending on classification.
+            text = json.dumps(state)
+            assert "early prompt$" in text
+            # In arrival order: spawn-window bytes precede post-registration ones.
+            assert text.index("early prompt$") < text.index("and then output")
+        finally:
+            await host.aclose()
+
+
+class TestStrictClaimGating:
+    """The knob `core/terminals.py` documents: a multi-trust-domain host passes
+    `STRICT_CLAIM_GATED_ACTIONS` via `Host(claim_gated_actions=...)` and the
+    contested actions -- `terminal/cleared`, `terminal/resized`,
+    `terminal/titleChanged` -- become claim-gated too."""
+
+    async def test_a_non_holder_cannot_resize_under_the_strict_set(self) -> None:
+        backend = FakeBackend()
+        host = Host(
+            EchoProvider(),
+            LoopbackSingleUserPolicy(),
+            terminals=backend,
+            claim_gated_actions=STRICT_CLAIM_GATED_ACTIONS,
+        )
+        try:
+            owner = await _client(host)
+            channel = await _open(owner)
+
+            other_transport, other_server = memory_pair()
+            task = asyncio.create_task(host.serve(other_server))
+            assert task is not None
+            viewer = FakeClient(other_transport)
+            await viewer.request(
+                "initialize",
+                {
+                    "channel": ROOT_URI,
+                    "clientId": "viewer",
+                    "protocolVersions": ["0.7.0"],
+                    "initialSubscriptions": [ROOT_URI],
+                },
+            )
+            await viewer.request("subscribe", {"channel": channel})
+            await viewer.notify(
+                "dispatchAction",
+                {
+                    "channel": channel,
+                    "clientSeq": 1,
+                    "action": {"type": "terminal/resized", "cols": 10, "rows": 5},
+                },
+            )
+            await viewer.collect(seconds=0.3)
+
+            assert backend.process.size is None, "a non-holder reflowed somebody else's pty"
+            echoes = [
+                e for e in viewer.actions(channel) if e["action"]["type"] == "terminal/resized"
+            ]
+            assert echoes
+            assert "rejectionReason" in echoes[-1]
+
+            # The claim holder is not collateral damage.
+            await owner.notify(
+                "dispatchAction",
+                {
+                    "channel": channel,
+                    "clientSeq": 1,
+                    "action": {"type": "terminal/resized", "cols": 120, "rows": 40},
+                },
+            )
+            await owner.collect(seconds=0.3)
+            assert backend.process.size == (120, 40)
+        finally:
+            await host.aclose()

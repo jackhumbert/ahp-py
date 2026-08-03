@@ -104,6 +104,50 @@ with zero implementations, so nothing else exercises it:
 fine and 5000 raised `RecursionError` inside the read task — a remote crash
 from unauthenticated input. Now a loop with a bounded run of unusable frames.
 
+### Fixed — a three-repo conformance review against the pin and VS Code
+
+An adversarially-verified review of the host against the vendored `spec/v0.7.0`
+sources, the spec prose and VS Code's client. Each fix is pinned by a test.
+
+- **Outbox overflow never actually closed the connection.** The close sentinel
+  was enqueued into a queue that was by definition full, so `put_nowait` always
+  raised and was suppressed — the writer never learned it should stop. The
+  sentinel now evicts the oldest frame to guarantee itself a slot, a
+  non-`TransportClosed` send failure closes the connection instead of silently
+  skipping one frame, and `close()` tears the writer down.
+- **`authenticate` refused resources the host itself had asked about.** Only
+  the static `AgentInfo.protectedResources` list was accepted, so a token for a
+  resource advertised through a live `chat/toolCallAuthRequired` or MCP
+  `authRequired` challenge — the spec's step-up flow — bounced. And a pushed
+  token resolved **every** parked challenge regardless of resource; it now
+  wakes only the calls whose challenge named that resource.
+- **`createSession.activeClient.clientId` was never checked** against the
+  connection's clientId, though the pin says it MUST match; a mismatch is
+  `-32602` now. `provider: ""` no longer resolves as "absent" (`-32002`).
+- **Four commands answered `{}` where the pinned `CommandMap` says `null`**:
+  `createTerminal`, `disposeTerminal`, `createChat`, `disposeChat` — the
+  session pair already answered `null`, so the host disagreed with itself.
+- **`terminal/commandFinished` published a schema-invalid explicit
+  `exitCode: null`** when the shell reported none, and the unconditional spread
+  wrote it into `TerminalCommandPart` where it persisted in snapshots. The
+  field is omitted now, which the reducer's delete-on-`undefined` respects.
+- **Disposing a session dropped its changeset channels with no terminal
+  action**, leaving subscribers rendering the last file list forever;
+  `changeset/cleared` is published first. A duplicate chat URI is refused with
+  `AlreadyExists` (`-32010`), not `SessionAlreadyExists` and a message naming a
+  session that does not exist.
+- **A refused `reconnect` still marked the connection initialized** (and
+  audited `connection.resumed`); the snapshot arm of `reconnect` carried an
+  undeclared `missing` member the pinned `ReconnectSnapshotResult` does not
+  define — it is replay-arm only now, and the sibling client was verified to
+  read it only there.
+- **Terminal output between process spawn and channel registration was
+  silently dropped** — buffered and published in order now.
+- **`Host(claim_gated_actions=…)`** makes `STRICT_CLAIM_GATED_ACTIONS` wirable,
+  as the terminals module docstring had promised without a seam; the local
+  `-32005` emitter workaround was retired in favour of the shared package's
+  now-correct `supportedVersions` field.
+
 ### Changed
 
 - **The protocol layer is now a separate package.** Wire types, the seven

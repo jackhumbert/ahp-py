@@ -126,8 +126,9 @@ with no adapter installed.
 
 ### Implemented
 
-Protocol **0.7.0 and 0.6.0** on the wire · root, session, chat and annotations
-channels · **all seven reducers**, gated on upstream's whole 247-fixture corpus
+Protocol **0.7.0 and 0.6.0** on the wire · **all seven channels** — root,
+session, chat, annotations, terminal, changeset and resource-watch, each
+detailed below · **all seven reducers**, gated on upstream's whole 247-fixture corpus
 · host-global sequencing with per-channel replay budgets · a pluggable agent
 provider with an offline echo implementation · WebSocket transport behind a
 transport abstraction.

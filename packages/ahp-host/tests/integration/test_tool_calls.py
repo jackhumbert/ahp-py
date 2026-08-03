@@ -140,13 +140,18 @@ class TestActiveClients:
         finally:
             await host.aclose()
 
-    async def test_an_entry_without_a_client_id_is_dropped(self) -> None:
-        """Unaddressable: nothing could update it, remove it, or be told to run
-        its tools."""
+    async def test_an_entry_without_a_client_id_is_rejected(self) -> None:
+        """Present-but-unaddressable is malformed, not ignorable.
+
+        "The `clientId` MUST match the `clientId` the creating client supplied
+        in `initialize`", and the reference host rejects whenever `activeClient`
+        is present with any non-matching clientId -- including a missing one.
+        Silently dropping the entry admitted a session whose client believed it
+        had claimed the active-client role."""
         host = Host(EchoProvider(), LoopbackSingleUserPolicy())
         try:
             client = await _attach(host, "vscode")
-            await client.request(
+            response = await client.request(
                 "createSession",
                 {
                     "channel": "echo:/tools-3",
@@ -154,11 +159,27 @@ class TestActiveClients:
                     "activeClient": {"displayName": "Nameless", "tools": []},
                 },
             )
-            await client.collect(seconds=0.3)
-            state = (await client.request("subscribe", {"channel": "echo:/tools-3"}))["result"][
-                "snapshot"
-            ]["state"]
-            assert state["activeClients"] == []
+            assert response["error"]["code"] == -32602
+        finally:
+            await host.aclose()
+
+    async def test_an_entry_claiming_another_clients_id_is_rejected(self) -> None:
+        """Unchecked, client B could claim the active-client role AS client A:
+        tool executions were addressed to a peer that never volunteered, and
+        disconnect cleanup retired the wrong one."""
+        host = Host(EchoProvider(), LoopbackSingleUserPolicy())
+        try:
+            client = await _attach(host, "vscode")
+            response = await client.request(
+                "createSession",
+                {
+                    "channel": "echo:/tools-4",
+                    "provider": "echo",
+                    "activeClient": {"clientId": "somebody-else", "tools": _TOOLS},
+                },
+            )
+            assert response["error"]["code"] == -32602
+            assert "clientId" in response["error"]["message"]
         finally:
             await host.aclose()
 

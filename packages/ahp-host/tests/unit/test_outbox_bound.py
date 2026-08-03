@@ -15,6 +15,7 @@ guarantee is exactly what makes a hole undetectable.
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 import pytest
@@ -76,3 +77,92 @@ class TestTheBound:
         """A turn produces tens of frames, not thousands. The default must not
         disconnect an ordinary client that paused for a moment."""
         assert DEFAULT_OUTBOX_LIMIT >= 1024
+
+
+class Recorder:
+    """A transport that drains and remembers, so the writer can actually run."""
+
+    def __init__(self) -> None:
+        self.sent: list[Any] = []
+        self.closed = False
+
+    async def send(self, message: Any) -> None:
+        self.sent.append(message)
+
+    async def receive(self) -> Any:  # pragma: no cover - the writer never reads
+        return None
+
+    async def close(self) -> None:
+        self.closed = True
+
+
+class FailsOnSecondSend(Recorder):
+    """A send that raises for ONE frame -- a serialization error, a transport
+    fault not mapped to TransportClosed."""
+
+    async def send(self, message: Any) -> None:
+        if len(self.sent) == 1:
+            raise ValueError("frame 2 refused to serialize")
+        await super().send(message)
+
+
+class TestOverflowActuallyTerminates:
+    """The sentinel is enqueued into a queue that is BY DEFINITION full, so a
+    bare `put_nowait(None)` deterministically raised QueueFull and was
+    suppressed: the writer never learned it should stop, `close()`'s
+    idempotence guard saw `_closed` and skipped the teardown, and the peer kept
+    an open socket with a permanent, signal-free hole in its outbound stream --
+    no code path fulfilled the enqueue docstring's promise."""
+
+    async def test_the_writer_sees_the_sentinel_and_closes_the_transport(self) -> None:
+        transport = Recorder()
+        connection = Connection(transport, outbox_limit=4)
+        for index in range(10):
+            connection.enqueue({"jsonrpc": "2.0", "method": "action", "params": {"n": index}})
+        assert connection.overflowed
+
+        connection.start_writer()
+        writer = connection._writer
+        assert writer is not None
+        await asyncio.wait_for(writer, timeout=1)
+
+        assert transport.closed, "the overflowed connection never closed its transport"
+        # The OLDEST queued frame was evicted to make room for the sentinel --
+        # its delivery was already forfeit, and reconnect/replay is the
+        # recovery. The rest deliver in order, and nothing follows the
+        # sentinel.
+        assert [m["params"]["n"] for m in transport.sent] == [1, 2, 3]
+
+    async def test_close_still_tears_down_an_overflowed_connection(self) -> None:
+        """`close()` must not treat "overflowed" as "already torn down": that
+        is exactly the connection whose transport most needs closing."""
+        transport = Recorder()
+        connection = Connection(transport, outbox_limit=4)
+        for index in range(10):
+            connection.enqueue({"jsonrpc": "2.0", "method": "action", "params": {"n": index}})
+        assert connection.overflowed
+
+        await asyncio.wait_for(connection.close(), timeout=1)
+        assert transport.closed
+
+
+class TestASendFailureIsFatal:
+    async def test_a_failed_send_closes_instead_of_skipping_the_frame(self) -> None:
+        """Continuing past a failed send delivers every LATER frame while this
+        one is missing -- the silent ordering hole invariant 10 exists to
+        prevent, and the same trade as overflow: visible interruption over
+        invisible corruption."""
+        transport = FailsOnSecondSend()
+        connection = Connection(transport, outbox_limit=8)
+        for index in range(4):
+            connection.enqueue({"jsonrpc": "2.0", "method": "action", "params": {"n": index}})
+
+        connection.start_writer()
+        writer = connection._writer
+        assert writer is not None
+        await asyncio.wait_for(writer, timeout=1)
+
+        assert transport.closed, "the connection outlived a hole in its outbound stream"
+        assert [m["params"]["n"] for m in transport.sent] == [0], (
+            "frames were delivered past the one that failed"
+        )

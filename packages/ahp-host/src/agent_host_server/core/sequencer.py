@@ -425,18 +425,23 @@ class Sequencer:
             # The gap exceeds the replay buffer: fresh snapshots instead. This
             # is explicitly allowed, and is also the honest answer after a host
             # restart, when the counter no longer relates to what the client saw.
-            # `missing` belongs on BOTH branches. Omitting it here stranded
-            # every client that reconnected after a host restart: the snapshot
-            # path is the one a restart always takes, and a channel the host no
-            # longer knows was neither snapshotted nor reported gone -- so the
-            # client kept it in its local set and waited for state that would
-            # never arrive. Observed as three chats stuck loading forever, with
-            # nothing on the wire to explain it.
+            #
+            # NO `missing` here. `ReconnectSnapshotResult` is `{type,
+            # snapshots}` -- the field exists only on `ReconnectReplayResult`
+            # -- and the reference client's snapshot branch reads nothing but
+            # `snapshots`: it reseats each named subscription and treats
+            # absence from the array as the drop signal
+            # (`remoteAgentHostProtocolClient.ts:_applyReconnectResult`). An
+            # earlier revision returned `missing` on both branches, reasoning
+            # that a restart otherwise stranded lost channels; the shipping
+            # client never read it on this branch, so the extra member bought
+            # nothing and failed a strict schema check. If the field ever
+            # belongs here, that is an upstream spec change, not a unilateral
+            # one on this wire.
             return {
                 "type": "snapshot",
                 "snapshots": [
                     {"resource": uri, "state": self._states[uri], "fromSeq": self._seq}
                     for uri in known
                 ],
-                "missing": missing,
             }

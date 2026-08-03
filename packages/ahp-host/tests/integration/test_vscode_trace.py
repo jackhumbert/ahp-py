@@ -10,7 +10,10 @@ from VS Code doing something the spec's *examples* do not:
 * its session URIs are ``<provider>:/<uuid>``, not ``ahp-session:/<uuid>``, so a
   host routing reducers on the URI scheme applies none at all and its state
   silently freezes at the snapshot;
-* it offers a single protocol version, ``["0.7.0"]``.
+* it prefers protocol ``0.7.0``. (This capture recorded ``["0.7.0"]`` alone,
+  but the reference client sends its full four-version ladder --
+  ``registry.ts`` `SUPPORTED_PROTOCOL_VERSIONS` -- so only the most-preferred
+  entry is guarded, and a faithful re-capture still passes.)
 
 Replaying shapes rather than the raw log on purpose: ids, UUIDs and VS Code's
 polling volume are noise, and a byte-exact replay would be brittle without
@@ -94,8 +97,15 @@ class TestCapturedShapes:
         assert REQUESTS[0]["method"] == "reconnect"
         assert REQUESTS[1]["method"] == "initialize"
 
-    def test_vscode_offers_a_single_protocol_version(self) -> None:
-        assert _request("initialize")["params"]["protocolVersions"] == ["0.7.0"]
+    def test_vscode_prefers_protocol_0_7_0(self) -> None:
+        """First entry only, not the whole array: the reference client
+        advertises four versions (`registry.ts` SUPPORTED_PROTOCOL_VERSIONS,
+        with an explicit negotiate-down comment), so pinning `== ["0.7.0"]`
+        would fail a faithful re-capture. This capture happened to record a
+        single entry; what the replay depends on is which version is
+        most-preferred."""
+        versions = _request("initialize")["params"]["protocolVersions"]
+        assert versions[0] == "0.7.0"
 
     def test_session_uri_uses_the_provider_scheme(self) -> None:
         channel = _request("createSession")["params"]["channel"]

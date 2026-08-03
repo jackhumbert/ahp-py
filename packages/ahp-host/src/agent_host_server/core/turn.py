@@ -158,6 +158,7 @@ class ActionTurnSink:
         pending: PendingRequests | None = None,
         session_uri: str | None = None,
         session_changed: SessionChanged | None = None,
+        advertise_resource: Callable[[str], None] | None = None,
     ) -> None:
         self._sequencer = sequencer
         self._channel = channel
@@ -167,6 +168,12 @@ class ActionTurnSink:
         #: sink stays constructible in a test without a session around it.
         self._session_uri = session_uri
         self._session_changed = session_changed
+        #: Tells the host a `chat/toolCallAuthRequired` is about to name a
+        #: protected resource. "Servers MUST accept any `resource` value they
+        #: have themselves advertised" -- including ones advertised only
+        #: through a live challenge -- so the host has to hear about the
+        #: advertisement, not just the park.
+        self._advertise_resource = advertise_resource
         self._markdown_part_id: str | None = None
         self._reasoning_part_id: str | None = None
         self._activity: str | None = None
@@ -691,11 +698,23 @@ class ActionTurnSink:
         independently." This is the second one -- it pauses one call, and says
         nothing about the MCP server's own state.
         """
+        # The canonical identifier is the metadata's own `resource` member
+        # (RFC 9728; `session-state.ts:1282-1287`), and it is what keys the
+        # park: `authenticate` resolves only the calls whose challenge named
+        # the pushed resource, so it has to be stored here.
+        resource = challenge.resource.get("resource")
+        resource_id = resource if isinstance(resource, str) else None
+        if resource_id is not None and self._advertise_resource is not None:
+            # Before the publish, so no client can see a challenge whose
+            # resource the host would still refuse a token for.
+            self._advertise_resource(resource_id)
         parked = self._pending.open(
             turn_scope(self._channel, self._turn_id),
             "auth",
             key=f"auth:{call_id}",
             channel=self._channel,
+            resource=resource_id,
+            required_scopes=challenge.required_scopes,
         )
         await self._sequencer.publish(
             self._channel,
@@ -931,12 +950,14 @@ class TurnRunner:
         pending: PendingRequests | None = None,
         session_uri: str | None = None,
         session_changed: SessionChanged | None = None,
+        advertise_resource: Callable[[str], None] | None = None,
     ) -> None:
         self._sequencer = sequencer
         self._channel = channel
         self._pending = pending if pending is not None else PendingRequests()
         self._session_uri = session_uri
         self._session_changed = session_changed
+        self._advertise_resource = advertise_resource
         #: The chat this turn ran on. The caller drains that chat's queue when
         #: the turn ends, and it should not have to remember which one.
         self.channel = channel
@@ -960,6 +981,7 @@ class TurnRunner:
             self._pending,
             self._session_uri,
             self._session_changed,
+            self._advertise_resource,
         )
         # However the turn ends -- return, raise or cancellation -- the session
         # must not be left advertising a tool that is no longer running. A

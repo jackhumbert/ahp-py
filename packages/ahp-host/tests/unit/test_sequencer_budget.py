@@ -159,21 +159,18 @@ class TestSubscriptionEdges:
 
 
 class TestReconnectAfterRestart:
-    """Two defects a real VS Code reconnect found that this suite did not.
+    """The snapshot arm conforms to the pin; the replay arm reports the gap.
 
-    Both are invisible unless the reconnect asks for a channel the host does
-    not have -- which is what every client does after a host restart, and
-    never what a test does unless it means to.
+    `ReconnectSnapshotResult` is `{type, snapshots}` -- `missing` exists only
+    on `ReconnectReplayResult` -- and the reference client's snapshot branch
+    reads nothing but `snapshots`: absence from the array IS the drop signal.
+    An earlier revision added `missing` to both arms; the extra member bought
+    nothing for the shipping client and failed a strict schema check.
     """
 
-    async def test_snapshot_reports_missing_channels(self) -> None:
-        """A channel the host does not know is REPORTED, not dropped.
-
-        `missing` was returned on the replay branch only. A restart always
-        takes the snapshot branch, so a client heard nothing about the channels
-        it had lost, kept them in its local set, and showed them loading
-        forever with nothing on the wire to explain it.
-        """
+    async def test_snapshot_omits_lost_channels_and_the_missing_member(self) -> None:
+        """A channel the host does not know is absent from `snapshots`, and no
+        undeclared `missing` member rides along to say so twice."""
         sequencer = Sequencer()
         await sequencer.register_channel("kept://", {"n": 0}, "session")
 
@@ -181,7 +178,7 @@ class TestReconnectAfterRestart:
 
         assert result["type"] == "snapshot"
         assert [s["resource"] for s in result["snapshots"]] == ["kept://"]
-        assert set(result["missing"]) == {"gone://", "also-gone://"}
+        assert "missing" not in result
 
     async def test_replay_still_reports_missing_channels(self) -> None:
         """The branch that was already right stays right."""

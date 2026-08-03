@@ -103,7 +103,10 @@ class TestCreateChat:
         await _session(multi, client, uri)
 
         result = await client.request("createChat", {"channel": uri, "chat": "ahp-chat:/second"})
-        assert result["result"] == {}
+        # `null`, not `{}`: the CommandMap declares `result: null` for every
+        # create/dispose lifecycle command, matching `createSession` on this
+        # same host.
+        assert result["result"] is None
 
         state = (await client.request("subscribe", {"channel": uri}))["result"]["snapshot"]["state"]
         assert "ahp-chat:/second" in [c["resource"] for c in state["chats"]]
@@ -191,12 +194,16 @@ class TestCreateChat:
         assert state["origin"]["selection"]["text"] == "the selected bit"
 
     async def test_a_duplicate_chat_uri_is_refused(self, multi: Host) -> None:
+        """`AlreadyExists` (-32010), not `SessionAlreadyExists` (-32003): the
+        colliding URI names a chat, not a session -- the same reasoning
+        `createTerminal` already applies."""
         client = await _client(multi)
         uri = "echo:/mc-6"
         await _session(multi, client, uri)
         await client.request("createChat", {"channel": uri, "chat": "ahp-chat:/dup"})
         response = await client.request("createChat", {"channel": uri, "chat": "ahp-chat:/dup"})
-        assert response["error"]["code"] == -32003
+        assert response["error"]["code"] == AHP_ERROR_CODES["AlreadyExists"]
+        assert "Session" not in response["error"]["message"]
 
     async def test_a_working_directory_outside_the_session_set_is_refused(self) -> None:
         """ "Every entry MUST be present in the owning session's
@@ -241,7 +248,10 @@ class TestDisposeChat:
         await _session(multi, client, uri)
         await client.request("createChat", {"channel": uri, "chat": "ahp-chat:/temp"})
 
-        assert "error" not in await client.request("disposeChat", {"channel": "ahp-chat:/temp"})
+        disposed = await client.request("disposeChat", {"channel": "ahp-chat:/temp"})
+        assert "error" not in disposed
+        # `result: null` per the CommandMap, like every create/dispose command.
+        assert disposed["result"] is None
         assert not multi.sequencer.has_channel("ahp-chat:/temp")
         state = (await client.request("subscribe", {"channel": uri}))["result"]["snapshot"]["state"]
         assert "ahp-chat:/temp" not in [c["resource"] for c in state["chats"]]

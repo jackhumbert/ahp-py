@@ -19,7 +19,7 @@ import logging
 import math
 import time
 import uuid
-from collections.abc import Coroutine, Mapping, Sequence
+from collections.abc import Collection, Coroutine, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Any, Final
@@ -45,6 +45,7 @@ from agent_host_server.core.auth import (
     TokenStore,
     auth_required,
     auth_required_params,
+    scopes_satisfied,
 )
 from agent_host_server.core.changesets import (
     Changeset,
@@ -372,6 +373,14 @@ class _Terminal:
     #: Watches the child and publishes `terminal/exited`. Held so it is not
     #: garbage-collected mid-flight.
     reaper: asyncio.Task[None] | None = None
+    #: False until the channel is registered and buffered output flushed. A pty
+    #: backend arms its reader in the constructor, so the child's first bytes
+    #: can arrive while `_create_terminal` is still awaiting registration --
+    #: they are held in `early_output` (in arrival order) instead of being fed
+    #: to a parser whose publishes would land on a channel that does not exist
+    #: yet and vanish.
+    ready: bool = False
+    early_output: list[bytes] = field(default_factory=list)
 
     async def close(self) -> None:
         if self.process is not None:
@@ -596,28 +605,6 @@ def _page_size(limit: Any) -> int:
     return min(int(limit), _MAX_PAGE)
 
 
-def _unsupported_protocol_version(supported: Sequence[str]) -> errors.AhpError:
-    """-32005, with the field name the schema actually declares.
-
-    `UnsupportedProtocolVersionErrorData` requires exactly one key,
-    `supportedVersions` (`errors.schema.json:65,74`; `vendor/upstream/ts/errors.ts:157`).
-    `agent_host_protocol.errors.unsupported_protocol_version` writes
-    `supportedProtocolVersions`, so every conformant client -- this is the one
-    frame that tells a user which host version to install -- reads `undefined`
-    and can say nothing beyond "the handshake failed". Built here until the
-    shared emitter is corrected; that package is a separate distribution.
-
-    `_meta.vscodeUpgradeMethod` is still deliberately omitted: it is for hosts
-    spawned by the VS Code CLI, and upstream states servers without a managing
-    CLI omit it.
-    """
-    return errors.AhpError(
-        AHP_ERROR_CODES["UnsupportedProtocolVersion"],
-        "No mutually supported protocol version",
-        {"supportedVersions": list(supported)},
-    )
-
-
 def _encode_cursor(summary: Mapping[str, Any]) -> str:
     """A keyset cursor: the sort key of the last entry on the page.
 
@@ -684,6 +671,16 @@ class _Publisher:
     async def mcp_server_changed(
         self, customization_id: str, state: Mapping[str, Any], channel: str | None = None
     ) -> None:
+        if state.get("kind") == "authRequired":
+            # `McpServerAuthRequiredState.resource` is the second of the three
+            # advertisement mechanisms `authenticate` MUST honour; recorded
+            # before the publish so no client can see a challenge whose
+            # resource the host would still refuse a token for. The identifier
+            # is the metadata's own `resource` member (RFC 9728).
+            metadata = state.get("resource")
+            identifier = metadata.get("resource") if isinstance(metadata, Mapping) else None
+            if isinstance(identifier, str):
+                self._host._advertise_resource(identifier)
         action: dict[str, Any] = {
             "type": "session/mcpServerStateChanged",
             "id": customization_id,
@@ -971,6 +968,7 @@ class Host:
         default_directory: str | None = None,
         completion_trigger_characters: Sequence[str] | None = None,
         outbox_limit: int = DEFAULT_OUTBOX_LIMIT,
+        claim_gated_actions: Collection[str] = CLAIM_GATED_ACTIONS,
     ) -> None:
         if policy is None:  # pragma: no cover - defensive; typing already forbids it
             raise ValueError("a Policy is required; there is no default")
@@ -1045,6 +1043,24 @@ class Host:
         # identity, so a per-connection store is not observable by a conformant
         # client. The consequence is real and gated: `Policy.may_push_token`.
         self.tokens = TokenStore()
+        #: Protected-resource identifiers this host advertised OUTSIDE
+        #: `AgentInfo.protectedResources` -- through a live
+        #: `ToolCallAuthRequiredState.auth.resource` or an MCP server's
+        #: `authRequired` state. "Servers MUST accept any `resource` value they
+        #: have themselves advertised through one of these three mechanisms"
+        #: (`commands.ts`, authenticate), so `_authenticate`'s gate has to know
+        #: about all three, not just the static list. A set that only grows:
+        #: the spec keys acceptance on having-been-advertised, not on the
+        #: challenge still being open.
+        self._dynamic_resources: set[str] = set()
+        #: Terminal actions refused from a peer that does not hold the claim.
+        #: The default gates what a document names; a multi-trust-domain host
+        #: passes `STRICT_CLAIM_GATED_ACTIONS` (see `core/terminals.py`) and
+        #: accepts that a viewer can no longer resize the pty to its own
+        #: window. A constructor knob because the module docstring promises
+        #: one, and `Policy.may_dispatch` can only refuse with the generic
+        #: "rejected by policy" instead of the claim-specific reason.
+        self._claim_gated: frozenset[str] = frozenset(claim_gated_actions)
         #: Client ids THIS host instance has admitted through `initialize`.
         #: `reconnect` resumes on a client-asserted id alone, so without this
         #: any id is accepted and the client never learns the host has no idea
@@ -1394,7 +1410,9 @@ class Host:
         chosen = negotiate(offered, self.supported_versions)
         if chosen is None:
             # MUST refuse rather than proceed. No client verifies this for us.
-            raise _unsupported_protocol_version(self.supported_versions)
+            # The shared emitter writes the schema's `supportedVersions`; the
+            # local workaround this replaced existed only while it did not.
+            raise errors.unsupported_protocol_version(self.supported_versions)
 
         client_id = params.get("clientId")
         connection.client_id = client_id if isinstance(client_id, str) else str(uuid.uuid4())
@@ -2140,15 +2158,19 @@ class Host:
 
     # ─── terminals ───────────────────────────────────────────────────────
 
-    async def _create_terminal(
-        self, connection: Connection, params: Mapping[str, Any]
-    ) -> dict[str, Any]:
+    async def _create_terminal(self, connection: Connection, params: Mapping[str, Any]) -> None:
         """Open a terminal, if a backend was installed and the policy allows it.
 
         The default backend declines with `PermissionDenied`, not
         `MethodNotFound` -- once the method is registered it exists, and -32601
         for a request the host parsed and rejected would tell a client to stop
         asking for terminals entirely rather than that this one was refused.
+
+        Returns ``None``: `CommandMap` declares `result: null` for every
+        create/dispose lifecycle command, and the reference host serializes
+        `result ?? null` -- `{}` failed a strictly-validating peer on every
+        terminal it opened, while `createSession` on the same host correctly
+        answered `null`.
         """
         channel = params.get("channel")
         if not isinstance(channel, str):
@@ -2186,9 +2208,22 @@ class Host:
         )
 
         terminal = _Terminal(channel=channel, parser=ShellIntegrationParser())
-        process = await self.terminals.create(
-            request, lambda chunk: self._on_terminal_output(channel, chunk)
-        )
+        # In the live map BEFORE the process exists. A pty backend arms its
+        # reader inside `create`, so the child's first bytes -- a fast prompt,
+        # an immediate error -- can reach `_on_terminal_output` while this
+        # method is still awaiting registration below. With no entry they were
+        # returned to nobody; with an un-`ready` entry they are buffered and
+        # flushed once the channel can carry them.
+        self._live_terminals[channel] = terminal
+        try:
+            process = await self.terminals.create(
+                request, lambda chunk: self._on_terminal_output(channel, chunk)
+            )
+        except BaseException:
+            # The refusing default backend raises here; a half-created entry
+            # must not make the URI look occupied to the retry.
+            self._live_terminals.pop(channel, None)
+            raise
         terminal.process = process
 
         state: dict[str, Any] = {
@@ -2214,9 +2249,20 @@ class Host:
         # Bound at registration, never routed from the scheme: VS Code uses
         # three `agenthost-terminal:` forms and the spec's examples use a
         # fourth (invariant 15).
-        await self.sequencer.register_channel(channel, state, "terminal")
+        try:
+            await self.sequencer.register_channel(channel, state, "terminal")
+        except BaseException:
+            self._live_terminals.pop(channel, None)
+            await terminal.close()
+            raise
         self._channel_created(connection, channel)
-        self._live_terminals[channel] = terminal
+        # Everything the child wrote during the spawn window, in order, BEFORE
+        # `ready` flips: a chunk arriving mid-flush is appended behind the ones
+        # being flushed, and nothing runs between the loop's final empty check
+        # and the flip, so order is preserved and nothing is dropped.
+        while terminal.early_output:
+            await self._publish_terminal_output(terminal, terminal.early_output.pop(0))
+        terminal.ready = True
         # Nothing published `terminal/exited`, so a shell that ended left the
         # channel looking live forever and the client's tab never closed: the
         # last frame after `exit 7` was the input echo, and then silence.
@@ -2225,7 +2271,7 @@ class Host:
         terminal.reaper.add_done_callback(self._background.discard)
         await self._publish_terminal_catalogue()
         self._audit("terminal.created", connection, channel=channel)
-        return {}
+        return
 
     async def _reap_terminal(self, terminal: _Terminal) -> None:
         """Wait for the child and announce its exit.
@@ -2264,9 +2310,9 @@ class Host:
         await self._publish_terminal_catalogue()
         _log.info("terminal %s exited with %s", terminal.channel, exit_code)
 
-    async def _dispose_terminal(
-        self, connection: Connection, params: Mapping[str, Any]
-    ) -> dict[str, Any]:
+    async def _dispose_terminal(self, connection: Connection, params: Mapping[str, Any]) -> None:
+        # `result: null` per the CommandMap, on BOTH paths -- see
+        # `_create_terminal`.
         channel = params.get("channel")
         if not isinstance(channel, str):
             raise errors.invalid_params("channel is required")
@@ -2282,13 +2328,13 @@ class Host:
             # to CREATE a terminal fail again trying to clean it up, which is
             # how this host answered every one of VS Code's three disposals
             # with an error after refusing all three creations.
-            return {}
+            return
         await terminal.close()
         await self.sequencer.drop_channel(channel)
         self._channel_dropped(channel)
         await self._publish_terminal_catalogue()
         self._audit("terminal.disposed", connection, channel=channel)
-        return {}
+        return
 
     async def _publish_terminal_catalogue(self) -> None:
         """`RootState.terminals`. Full replacement, as the reducer expects."""
@@ -2306,6 +2352,13 @@ class Host:
     def _on_terminal_output(self, channel: str, chunk: bytes) -> Any:
         terminal = self._live_terminals.get(channel)
         if terminal is None:
+            return None
+        if not terminal.ready:
+            # Output that raced ahead of channel registration. Buffered here,
+            # synchronously, so it keeps stream order with everything that
+            # follows; `_create_terminal` flushes it once publishing can reach
+            # a subscriber.
+            terminal.early_output.append(chunk)
             return None
         return self._spawn_result(self._publish_terminal_output(terminal, chunk))
 
@@ -2360,7 +2413,15 @@ class Host:
                     {
                         "type": "terminal/commandFinished",
                         "commandId": terminal.command_id,
-                        "exitCode": item.exit_code,
+                        # OMITTED when the shell reported none, never an
+                        # explicit null: the schema declares `exitCode` an
+                        # optional number ("`undefined` if the shell did not
+                        # report one"), and the reducer writes the value
+                        # through into `TerminalCommandPart` -- so a published
+                        # null failed the action schema AND every later
+                        # snapshot of the channel. Same handling as
+                        # `terminal/exited` above.
+                        **({"exitCode": item.exit_code} if item.exit_code is not None else {}),
                         # The client renders `finish(exitCode, durationMs)` and
                         # falls back to `??0`, so omitting it made every
                         # command read as instantaneous.
@@ -2419,6 +2480,16 @@ class Host:
         The resource must be one the host advertised. Accepting an unadvertised
         one would let a peer fill the store with credentials for services this
         agent never mentioned, and give it no way to learn that they are useless.
+
+        "Advertised" is three mechanisms, not one: "whether declared statically
+        in `AgentInfo.protectedResources`, or discovered dynamically from a live
+        `McpServerAuthRequiredState.resource` or
+        `ToolCallAuthRequiredState.auth.resource` ... Servers MUST accept any
+        `resource` value they have themselves advertised through one of these
+        three mechanisms." Checking only the static list deadlocked the step-up
+        flow for any provider that challenges for a resource it never declared
+        up front: the client's token was refused -32602 and the parked call
+        could never clear.
         """
         resource = params.get("resource")
         token = params.get("token")
@@ -2426,7 +2497,7 @@ class Host:
             raise errors.invalid_params("resource and token are required")
 
         known = {r.resource for r in self._protected_resources()}
-        if resource not in known:
+        if resource not in known and resource not in self._dynamic_resources:
             raise errors.invalid_params(f"{resource!r} is not a protected resource of this agent")
         if not self.policy.may_push_token(connection.info, resource):
             self._audit("auth.refused", connection, allowed=False, detail={"resource": resource})
@@ -2437,7 +2508,7 @@ class Host:
             [s for s in raw_scopes if isinstance(s, str)] if isinstance(raw_scopes, list) else None
         )
         self.tokens.push(resource, token, scopes=scopes, client_id=connection.client_id)
-        await self._resolve_auth_challenges(resource)
+        await self._resolve_auth_challenges(resource, scopes)
         # The resource, never the token. `AuditEvent` carries identifiers only,
         # and a credential in an audit record is a credential on disk.
         self._audit("auth.accepted", connection, detail={"resource": resource})
@@ -2446,15 +2517,48 @@ class Host:
         # spec agrees with the wire.
         return {}
 
-    async def _resolve_auth_challenges(self, resource: str) -> None:
-        """Wake every tool call that was paused waiting for this credential.
+    def _advertise_resource(self, resource: str) -> None:
+        """Record a protected resource advertised through a live challenge.
+
+        Called from the turn sink (`ToolCallAuthRequiredState.auth.resource`)
+        and the publisher (`McpServerAuthRequiredState.resource`), the two
+        dynamic mechanisms `authenticate` MUST honour alongside the static
+        `AgentInfo` list.
+        """
+        self._dynamic_resources.add(resource)
+
+    async def _resolve_auth_challenges(
+        self, resource: str, scopes: Sequence[str] | None = None
+    ) -> None:
+        """Wake every tool call that was paused waiting for THIS credential.
 
         Resolved on the `authenticate` command rather than on an action, which
         is what makes step-up different from every other suspended request here:
         the resolution arrives as a COMMAND, not through `dispatchAction`. The
         registry does not care -- that is the point of having one.
+
+        Only the calls whose challenge named the pushed resource, and whose
+        required scopes the push covers: "It's resolved by the client obtaining
+        a token for `auth.resource`", and the reference session checks both
+        before resolving (`copilotAgentSession.ts:1756`). Waking everything on
+        any push resumed a call blocked on resource B with a token for resource
+        A -- across sessions, since the registry is host-global -- and the
+        unsatisfied call just failed upstream again and re-challenged.
         """
         for request_id in list(self.pending.ids_of_kind("auth")):
+            request = self.pending.get(request_id)
+            if request is None:
+                continue
+            # A park that named no resource stays answerable by any push -- the
+            # same anywhere-answerable default a channel-less park gets.
+            if request.resource is not None and request.resource != resource:
+                continue
+            if not scopes_satisfied(
+                scopes,
+                request.required_scopes,
+                unscoped_satisfies_any=self.tokens.unscoped_satisfies_any,
+            ):
+                continue
             if self.pending.resolve(request_id, RequestOutcome("accept", {"resource": resource})):
                 for session in self._sessions.values():
                     await self._retract_input_needed(session, request_id)
@@ -2558,9 +2662,7 @@ class Host:
         capability = self.provider.agent.capabilities.get("multipleChats")
         return capability if isinstance(capability, Mapping) else None
 
-    async def _create_chat(
-        self, connection: Connection, params: Mapping[str, Any]
-    ) -> dict[str, Any]:
+    async def _create_chat(self, connection: Connection, params: Mapping[str, Any]) -> None:
         """Open a second chat in a session.
 
         The chat URI is **client-chosen**, which contradicts `chat-channel.md:71`
@@ -2569,6 +2671,9 @@ class Host:
         and VS Code's client sends one -- so three implementations agree against
         one sentence of prose. Recorded as an upstream question in
         `docs/roadmap.md` section 11.
+
+        Returns ``None`` -- `result: null` per the CommandMap, see
+        `_create_terminal`.
         """
         session_uri = params.get("channel")
         chat_uri = params.get("chat")
@@ -2584,7 +2689,13 @@ class Host:
         if capability is None:
             raise errors.invalid_params("this agent does not advertise multipleChats")
         if self.sequencer.has_channel(chat_uri):
-            raise errors.already_exists(chat_uri)
+            # `AlreadyExists` (-32010), not `SessionAlreadyExists` (-32003) --
+            # the same reasoning as `_create_terminal`: -32003 is "a session
+            # with the given URI already exists" and the shared helper's
+            # message says "Session", on a URI that names no session.
+            raise errors.AhpError(
+                AHP_ERROR_CODES["AlreadyExists"], f"Channel already exists: {chat_uri}"
+            )
 
         source = params.get("source")
         origin = self._chat_origin(session, capability, source)
@@ -2657,7 +2768,7 @@ class Host:
             # answered `{}`.
             await self._react(chat_uri, started)
         await self._mirror_summary(session)
-        return {}
+        return
 
     def _chat_origin(
         self, session: _Session, capability: Mapping[str, Any], source: Any
@@ -2738,9 +2849,7 @@ class Host:
                 raise errors.invalid_params(f"{directory} is not a session working directory")
         return subset
 
-    async def _dispose_chat(
-        self, connection: Connection, params: Mapping[str, Any]
-    ) -> dict[str, Any]:
+    async def _dispose_chat(self, connection: Connection, params: Mapping[str, Any]) -> None:
         """Dispose one chat.
 
         `DisposeChatParams` carries only `channel`, so the channel IS the chat --
@@ -2748,6 +2857,9 @@ class Host:
         a `disposeChat` command" while the types, the message map and the
         reference host all define it. Same contradiction as `createChat`, same
         resolution: three implementations against one sentence.
+
+        Returns ``None`` -- `result: null` per the CommandMap, see
+        `_create_terminal`.
         """
         chat_uri = params.get("channel")
         if not isinstance(chat_uri, str):
@@ -2784,7 +2896,7 @@ class Host:
         self._channel_dropped(chat_uri)
         self._audit("chat.disposed", connection, channel=chat_uri)
         await self._mirror_summary(session)
-        return {}
+        return
 
     # ─── changesets ──────────────────────────────────────────────────────
 
@@ -3825,8 +3937,34 @@ class Host:
         if not self.policy.may_create_session(connection.info, params):
             self._audit("session.refused", connection, channel=channel, allowed=False)
             raise errors.AhpError(-32009, "Not permitted to create a session")
+        active_client = params.get("activeClient")
+        if active_client is not None and (
+            not isinstance(active_client, Mapping)
+            or not js.strict_equal(active_client.get("clientId"), connection.client_id)
+        ):
+            # "The `clientId` MUST match the `clientId` the creating client
+            # supplied in `initialize`" (`commands-session.ts`), and the
+            # reference host rejects the mismatch with InvalidParams
+            # (`protocolServerHandler.ts:1188`). Unchecked, client B could
+            # claim the active-client role AS client A: tool executions were
+            # then addressed to a peer that never volunteered, and disconnect
+            # cleanup (`_retire_active_client`) fired for the wrong one. An
+            # entry with no clientId at all is rejected too, mirroring the
+            # reference -- present-but-unaddressable is malformed, not
+            # ignorable.
+            raise errors.invalid_params(
+                "createSession.activeClient.clientId must match the connection's clientId"
+            )
 
-        provider_id = params.get("provider") or self.provider.agent.provider
+        # Absence, not falsiness (invariant 5): `provider: ""` is a present
+        # value naming a provider no agent answers to, and `or` silently
+        # swapped in the default -- a session served by an agent the client
+        # never asked for. Only a missing key (or explicit null, which the
+        # optional-string schema reads as absent) selects the default.
+        requested_provider = params.get("provider")
+        provider_id = (
+            requested_provider if requested_provider is not None else self.provider.agent.provider
+        )
         if provider_id != self.provider.agent.provider:
             # Checked rather than copied through. Unvalidated, a client could
             # name any string and the host would publish the session under it
@@ -4089,6 +4227,14 @@ class Host:
 
         del self._sessions[channel]
         for changeset_uri in session.changesets:
+            # SAID, then dropped -- the same pre-teardown pattern as
+            # `_end_stranded_turn` two loops up. "Existing subscriptions
+            # receive `changeset/cleared` and the server unsubscribes them"
+            # (changesets guide, lifecycle step 5): the reducer empties
+            # `files` on it, so it is the terminal action a subscriber renders
+            # as "this change set is gone" rather than a stream that silently
+            # stops mid-list.
+            await self.sequencer.publish(changeset_uri, {"type": "changeset/cleared"})
             await self.sequencer.drop_channel(changeset_uri)
             self._channel_dropped(changeset_uri)
         for owned_chat in session.chat_uris:
@@ -4116,15 +4262,14 @@ class Host:
         # adopt our most-preferred one. It also carries no credential: it
         # resumes on a client-asserted `clientId` alone, which is exactly why
         # admission is the Policy's decision and not this method's.
-        if not connection.initialized:
+        first_request = not connection.initialized
+        if first_request:
             client_id = params.get("clientId")
             connection.client_id = client_id if isinstance(client_id, str) else str(uuid.uuid4())
             connection.protocol_version = self.supported_versions[0]
             if not self.policy.authorize_connection(connection.info):
                 self._audit("connection.refused", connection, allowed=False)
                 raise errors.AhpError(-32009, "Connection refused by policy")
-            connection.initialized = True
-            self._audit("connection.resumed", connection)
 
         # An id this host has never admitted gets `NotFound`, which is the
         # client's cue to start over: it catches exactly this code and issues a
@@ -4134,8 +4279,18 @@ class Host:
         # `defaultDirectory`, so a host that always accepts a reconnect leaves
         # every client permanently browsing from `/`, with no way to discover
         # otherwise.
+        #
+        # Checked BEFORE the connection is marked initialized. A handshake is
+        # `initialize` or a *successful* reconnect; marking first meant the
+        # refusal left the connection admitted anyway -- every later command
+        # sailed past the initialize-first gate on a connection that never
+        # negotiated a version, and the audit log recorded a resumption that
+        # was refused.
         if connection.client_id not in self._known_clients:
             raise errors.AhpError(-32008, "unknown clientId; initialize instead")
+        if first_request:
+            connection.initialized = True
+            self._audit("connection.resumed", connection)
 
         # De-duplicated before anything else looks at it. `subscriptions` is
         # peer-supplied and the schema does not forbid repeats; `Sequencer.replay`
@@ -4169,8 +4324,15 @@ class Host:
         resumed_stateless = [uri for uri in allowed if uri in advertised]
         for uri in resumed_stateless:
             await self.sequencer.subscribe(connection, uri)
-        missing = [uri for uri in result.get("missing", []) if uri not in resumed_stateless]
-        result["missing"] = [*missing, *refused]
+        # Refused channels join `missing` on the REPLAY arm only.
+        # `ReconnectSnapshotResult` is `{type, snapshots}` -- `missing` exists
+        # solely on `ReconnectReplayResult` -- and on the snapshot arm absence
+        # from `snapshots` is already the drop signal a client acts on (the
+        # reference client's snapshot branch reads nothing else,
+        # `remoteAgentHostProtocolClient.ts:_applyReconnectResult`).
+        if result.get("type") == "replay":
+            missing = [uri for uri in result.get("missing", []) if uri not in resumed_stateless]
+            result["missing"] = [*missing, *refused]
         return result
 
     # ─── client-dispatched actions ───────────────────────────────────────
@@ -4261,7 +4423,7 @@ class Host:
                 action,
                 claim=claim,
                 client_id=connection.client_id,
-                gated=CLAIM_GATED_ACTIONS,
+                gated=self._claim_gated,
             )
 
         if action_type == "root/configChanged":
@@ -4644,6 +4806,7 @@ class Host:
             self.pending,
             session.uri,
             lambda: self._mirror_summary(session),
+            self._advertise_resource,
         )
         call_id = f"terminal-{uuid.uuid4()}"
         started = time.monotonic()
@@ -4750,6 +4913,7 @@ class Host:
                 self.pending,
                 session.uri,
                 lambda: self._mirror_summary(session),
+                self._advertise_resource,
             )
             task = asyncio.create_task(self._run_turn(session, runner, action))
         session.turns[channel] = task

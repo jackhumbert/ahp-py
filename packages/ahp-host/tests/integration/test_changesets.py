@@ -212,6 +212,24 @@ class TestPublishing:
         await client.request("disposeSession", {"channel": uri})
         assert not host.sequencer.has_channel(channel)
 
+    async def test_disposal_says_cleared_before_dropping_the_channel(self, host: Host) -> None:
+        """ "Existing subscriptions receive `changeset/cleared` and the server
+        unsubscribes them" (changesets guide, lifecycle step 5).
+
+        `drop_channel` discards subscribers silently, so without the terminal
+        action first, a subscriber's stream just stopped and it rendered the
+        last file list forever."""
+        uri = "echo:/cs-10"
+        client = await _session(host, uri)
+        channel = await host.publish_changeset(uri, Changeset(label="c"), [_EDIT])
+        await client.request("subscribe", {"channel": channel})
+
+        await client.request("disposeSession", {"channel": uri})
+        await client.collect(seconds=0.3)
+
+        kinds = [e["action"]["type"] for e in client.actions(channel)]
+        assert "changeset/cleared" in kinds, "the subscriber never heard the changeset end"
+
 
 class TestReview:
     async def test_review_is_refused_unless_advertised(self, host: Host) -> None:

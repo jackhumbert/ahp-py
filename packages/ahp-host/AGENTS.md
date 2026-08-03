@@ -114,17 +114,28 @@ believes it.
 
 Each of these is load-bearing; breaking one produces silent, hard-to-diagnose
 failures in *clients*, not in our tests. Evidence for every item is in
-`docs/research.md`.
+`docs/research.md`. The reducer-porting rules among them (2–6, 18–19) travel
+with the reducers, which now live in `agent-host-protocol` — that repo's
+`AGENTS.md` carries the authoritative copies. They stay listed here because
+host code calls the reducers and reviews touch both sides of that line.
 
-1. **`types/` and `reducers/` perform no I/O and import nothing from `core/`.**
-   Enforced by `lint-imports`.
+1. **The protocol layer performs no I/O and imports nothing from `core/`.**
+   `types/` and `reducers/` are no longer directories here — they are the
+   `agent-host-protocol` distribution, and the boundary the retired
+   `lint-imports` contract used to enforce is enforced by packaging: the
+   dependency cannot import its consumer. (`pyproject.toml`'s import-linter
+   note records the retirement.)
 2. **Reducers are pure except for the injected clock.** Never call
    `time.time()`; take the clock from the module-level provider. The conformance
    harness pins it to `9999`.
 3. **Unknown action ⇒ return the input state unchanged.** Never raise. Every
    reducer's fallthrough returns `state`.
-4. **Every discriminated union keeps an `Unknown(raw)` arm that round-trips
-   verbatim.** Unknown enum values must not raise either.
+4. **Unknown enum values and union variants must not raise, and must
+   round-trip verbatim.** Wire values are plain dicts precisely so this is free
+   ([ADR 0001](docs/decisions/0001-wire-representation.md)). An earlier draft
+   of this invariant described an `Unknown(raw)` arm on every discriminated
+   union; no such class ever shipped — ADR 0001's plain-dict decision
+   superseded the design it belonged to.
 5. **Never use bare truthiness on an optional field.** `[]` is truthy in
    JavaScript and falsy in Python; `if x:` silently changes reducer behaviour.
    Always `if x is not None:`.
@@ -148,8 +159,17 @@ failures in *clients*, not in our tests. Evidence for every item is in
     silently dropped. Actions on an unknown channel are silently ignored with no
     echo — that asymmetry is specified.
 13. **No `Host` without a `Policy`.** No socket-binding convenience function.
-14. **Unimplemented commands return `MethodNotFound` (`-32601`)** and appear in
-    the README's unimplemented list. No silent stubs, no invented error codes.
+14. **A declined feature answers a specific error, never a silent stub and
+    never a blanket `MethodNotFound`.** All 29 protocol commands are dispatched
+    (`tests/docs/test_readme_is_true.py` parses the dispatcher out of
+    `core/host.py` and checks the README's list both ways), so `-32601` is
+    reserved for a method
+    the protocol does not define. A refusal names its reason:
+    `PermissionDenied` for what the host will not do, `NotFound` for what it
+    does not have, `ProviderNotFound` for an agent that does not exist. No
+    invented error codes. (This invariant used to mandate `MethodNotFound` for
+    unimplemented commands and a README list of them; both the refusal style
+    and the list are retired.)
 15. **Never route on a channel URI's scheme.** Session and chat URIs are
     client-chosen and opaque: VS Code uses `<provider>:/<uuid>` for sessions and
     `ahp-chat://<chatId>/<base64 session uri>` for chats. The reducer is bound

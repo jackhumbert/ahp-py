@@ -218,7 +218,12 @@ class TestMcpLifecycle:
         publisher = provider.session.context.publisher
         assert publisher is not None
 
-        await publisher.mcp_server_changed("srv-1", {"kind": "authRequired", **_RESOURCE})
+        # The pinned `McpServerAuthRequiredState` (session-state.ts:1273,1325)
+        # requires `reason` and nests the RFC 9728 metadata under `resource`;
+        # a flattened payload here would pin a shape no conformant peer sends.
+        await publisher.mcp_server_changed(
+            "srv-1", {"kind": "authRequired", "reason": "required", "resource": _RESOURCE}
+        )
         await client.collect(seconds=0.3)
         state = (await client.request("subscribe", {"channel": uri}))["result"]["snapshot"]["state"]
         assert any(r["kind"] == "toolAuthentication" for r in state.get("inputNeeded") or [])
@@ -368,3 +373,206 @@ class TestStepUpAuth:
         )
         await client.collect(seconds=0.4)
         assert len(host.pending) == 0
+
+
+_OTHER_RESOURCE = {
+    "resource": "https://other.example.invalid",
+    "authorization_servers": ["https://auth.example.invalid"],
+}
+
+
+class DynamicOnlyProvider(McpProvider):
+    """Advertises NOTHING statically; a live challenge is the only advertisement."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._info = type(self._info)(
+            provider="echo",
+            display_name="Echo",
+            description="",
+            models=(),
+            protected_resources=(),
+        )
+
+
+class TwoResourceProvider(McpProvider):
+    """Both resources are static, so `authenticate` accepts a push for either.
+
+    What distinguishes the parks is which resource each CHALLENGE named --
+    exactly the case a resolve-everything `authenticate` gets wrong."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._info = type(self._info)(
+            provider="echo",
+            display_name="Echo",
+            description="",
+            models=(),
+            protected_resources=(_RESOURCE, _OTHER_RESOURCE),
+        )
+
+
+async def _challenge(client: FakeClient, chat: str) -> None:
+    """Start the turn that parks on `chat/toolCallAuthRequired`."""
+    await client.notify(
+        "dispatchAction",
+        {
+            "channel": chat,
+            "clientSeq": 1,
+            "action": {
+                "type": "chat/turnStarted",
+                "turnId": "t1",
+                "startedAt": "1970-01-01T00:00:01.000Z",
+                "message": {"text": "go", "origin": {"kind": "user"}},
+            },
+        },
+    )
+    await client.collect(seconds=0.4)
+
+
+class TestDynamicallyAdvertisedResources:
+    """ "Servers MUST accept any `resource` value they have themselves
+    advertised" -- statically in `AgentInfo.protectedResources`, or discovered
+    dynamically from a live `ToolCallAuthRequiredState.auth.resource` or
+    `McpServerAuthRequiredState.resource`. Checking only the static list
+    deadlocked step-up for any provider that challenges for a resource it never
+    declared up front: the token was refused -32602 and the parked call could
+    never clear."""
+
+    async def test_a_resource_advertised_only_by_a_tool_call_challenge_is_accepted(self) -> None:
+        provider = DynamicOnlyProvider()
+        host = Host(provider, LoopbackSingleUserPolicy())
+        try:
+            client = await _client(host)
+            chat = await _session(host, client, "echo:/dyn-1")
+            await _challenge(client, chat)
+            assert len(host.pending) == 1
+
+            pushed = await client.request(
+                "authenticate",
+                {
+                    "channel": ROOT_URI,
+                    "resource": _RESOURCE["resource"],
+                    "token": "fresh-token",
+                    "scopes": ["read:all"],
+                },
+            )
+            assert "error" not in pushed, pushed.get("error")
+            await client.collect(seconds=0.5)
+            assert provider.session is not None
+            assert provider.session.authenticated, "the parked call never resumed"
+            assert len(host.pending) == 0
+        finally:
+            await host.aclose()
+
+    async def test_a_resource_advertised_only_by_an_mcp_auth_state_is_accepted(self) -> None:
+        """`McpServerAuthRequiredState.resource` is RFC 9728 metadata whose own
+        `resource` member is the canonical identifier."""
+        provider = DynamicOnlyProvider()
+        host = Host(provider, LoopbackSingleUserPolicy())
+        try:
+            client = await _client(host)
+            await _session(host, client, "echo:/dyn-2")
+            assert provider.session is not None
+            publisher = provider.session.context.publisher
+            assert publisher is not None
+
+            await publisher.mcp_server_changed(
+                "srv-1",
+                {"kind": "authRequired", "reason": "insufficientScope", "resource": _RESOURCE},
+            )
+            await client.collect(seconds=0.3)
+
+            pushed = await client.request(
+                "authenticate",
+                {"channel": ROOT_URI, "resource": _RESOURCE["resource"], "token": "fresh-token"},
+            )
+            assert "error" not in pushed, pushed.get("error")
+        finally:
+            await host.aclose()
+
+
+class TestChallengeKeyedResolution:
+    """Step-up is "resolved by the client obtaining a token for
+    `auth.resource`" -- so a push wakes only the calls whose challenge named
+    the pushed resource AND whose required scopes the push covers, the two
+    checks the reference session makes before resolving."""
+
+    async def test_a_token_for_a_different_resource_does_not_resume_the_call(self) -> None:
+        provider = TwoResourceProvider()
+        host = Host(provider, LoopbackSingleUserPolicy())
+        try:
+            client = await _client(host)
+            chat = await _session(host, client, "echo:/keyed-1")
+            await _challenge(client, chat)
+            assert len(host.pending) == 1
+
+            # Advertised -- the push itself is accepted -- but it is not the
+            # resource this challenge named.
+            pushed = await client.request(
+                "authenticate",
+                {
+                    "channel": ROOT_URI,
+                    "resource": _OTHER_RESOURCE["resource"],
+                    "token": "wrong-door",
+                    "scopes": ["read:all"],
+                },
+            )
+            assert "error" not in pushed, pushed.get("error")
+            await client.collect(seconds=0.4)
+            assert len(host.pending) == 1, "a token for resource B resumed a call parked on A"
+            kinds = [e["action"]["type"] for e in client.actions(chat)]
+            assert "chat/toolCallAuthResolved" not in kinds
+
+            # The token the challenge actually asked for still works.
+            await client.request(
+                "authenticate",
+                {
+                    "channel": ROOT_URI,
+                    "resource": _RESOURCE["resource"],
+                    "token": "right-door",
+                    "scopes": ["read:all"],
+                },
+            )
+            await client.collect(seconds=0.5)
+            assert len(host.pending) == 0
+        finally:
+            await host.aclose()
+
+    async def test_a_token_missing_the_required_scopes_does_not_resume_the_call(self) -> None:
+        """An explicit grant that omits the challenged scope is the client
+        saying the token does not cover it; only an unscoped push gets the
+        benefit of the doubt."""
+        provider = McpProvider()
+        host = Host(provider, LoopbackSingleUserPolicy())
+        try:
+            client = await _client(host)
+            chat = await _session(host, client, "echo:/keyed-2")
+            await _challenge(client, chat)
+            assert len(host.pending) == 1
+
+            await client.request(
+                "authenticate",
+                {
+                    "channel": ROOT_URI,
+                    "resource": _RESOURCE["resource"],
+                    "token": "too-narrow",
+                    "scopes": ["profile"],
+                },
+            )
+            await client.collect(seconds=0.4)
+            assert len(host.pending) == 1, "a token without the challenged scope resumed the call"
+
+            await client.request(
+                "authenticate",
+                {
+                    "channel": ROOT_URI,
+                    "resource": _RESOURCE["resource"],
+                    "token": "wide-enough",
+                    "scopes": ["read:all"],
+                },
+            )
+            await client.collect(seconds=0.5)
+            assert len(host.pending) == 0
+        finally:
+            await host.aclose()

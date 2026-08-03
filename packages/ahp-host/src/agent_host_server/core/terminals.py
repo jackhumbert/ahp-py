@@ -21,7 +21,8 @@ client-dispatchable, so *any* peer that can name a terminal channel can wipe
 another peer's scrollback -- and `terminal/resized` reflows a pty someone else is
 looking at, and `terminal/titleChanged` relabels it. None of that is a bug in the
 spec; it is a spec that assumes one trust domain. :data:`CONTESTED_ACTIONS` names
-them so a host can pass :data:`STRICT_CLAIM_GATED_ACTIONS` and close the hole
+them so a host can pass :data:`STRICT_CLAIM_GATED_ACTIONS` -- the
+``claim_gated_actions`` constructor argument on ``Host`` -- and close the hole
 deliberately, instead of the hole being invisible.
 
 **`disposeTerminal` is deliberately NOT claim-gated**, and that asymmetry --
@@ -236,8 +237,8 @@ CLAIM_GATED_ACTIONS: Final[frozenset[str]] = frozenset({"terminal/input", "termi
 #: every other subscriber of the channel. `terminal/cleared` is the sharp one --
 #: it destroys scrollback the peer that produced it may still need. A host that
 #: serves more than one trust domain passes
-#: :data:`STRICT_CLAIM_GATED_ACTIONS` and accepts that a viewer can no longer
-#: resize the pty to its own window.
+#: :data:`STRICT_CLAIM_GATED_ACTIONS` (via ``Host(claim_gated_actions=...)``)
+#: and accepts that a viewer can no longer resize the pty to its own window.
 CONTESTED_ACTIONS: Final[frozenset[str]] = frozenset(
     {"terminal/cleared", "terminal/resized", "terminal/titleChanged"}
 )

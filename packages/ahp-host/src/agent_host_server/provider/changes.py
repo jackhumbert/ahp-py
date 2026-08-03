@@ -49,8 +49,10 @@ class ChangesetOperation:
     #: the entire operations list for the changeset and logged an error nobody
     #: was reading.
     scopes: Sequence[str] = ("changeset",)
-    #: REQUIRED. `idle` | `running` | `failed`, and the reason a failed one
-    #: carries rides on `operationStatusChanged`, not here.
+    #: REQUIRED. `idle` | `running` | `error` | `disabled`
+    #: (`ChangesetOperationStatus`; there is no `failed`) -- and the cause an
+    #: `error` one carries rides on `changeset/operationStatusChanged`'s
+    #: `error` info, not here.
     status: str = "idle"
     #: Rendered as the button's icon and grouping. Both are read by the
     #: shipping client, and both cost nothing to send.

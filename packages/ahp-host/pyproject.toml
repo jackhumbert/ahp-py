@@ -93,15 +93,9 @@ ignore = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
-"src/agent_host_server/types/_generated.py" = ["E501"]
 # TransportClosed signals end-of-stream, not a fault; the Error suffix would mislead.
 "src/agent_host_server/transport/base.py" = ["N818"]
 "tests/**" = ["RUF059"]
-
-[tool.ruff.format]
-# The generator is the sole authority on this file's content; formatting it
-# here would break the `git diff --exit-code` reproducibility gate in CI.
-exclude = ["src/agent_host_server/types/_generated.py"]
 
 [tool.importlinter]
 root_package = "agent_host_server"
