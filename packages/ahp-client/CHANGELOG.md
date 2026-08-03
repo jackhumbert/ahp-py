@@ -32,9 +32,88 @@ had to be driven through `client.protocol.request`.
   §1.3 states the reasoning. Absent is the answer, and a wrapper that exists to
   make a table look complete is a cost, not a feature.
 
+### Fixed — a three-repo conformance review against the pin and VS Code
+
+An adversarially-verified review of all three repos against the vendored
+`spec/v0.7.0` sources and VS Code's own implementation. Every finding below was
+confirmed by an independent second reading before it was fixed, and each fix is
+pinned by a test.
+
+- **`UnsupportedProtocolVersion.supported_versions` read a field no conformant
+  host sends.** The pin names the `-32005` data field `supportedVersions`
+  (`errors.ts:157`); the property read `supportedProtocolVersions` and returned
+  `()` against every conformant host — including this project's own server. The
+  legacy spelling is still accepted as a fallback.
+- **Cancelling a `request()` caller leaked its pending entry** on the default
+  timeout path: `asyncio.shield` kept the inner future pending, so the
+  `finally` guard missed. The entry is popped through the shield, the id is
+  burned, and a late response is dropped with an `UnknownResponse` diagnostic.
+- **One malformed frame from an eagerly-parsing transport ended the read loop
+  permanently** while the state stayed `connected` — the `JSONDecodeError`
+  handler sat outside the loop. It now logs-and-continues per invariant 8, and
+  hitting `MALFORMED_FRAME_LIMIT` also closes the transport (parity with VS
+  Code's forced 4002 close). `WebSocketClientTransport.receive()` raises per
+  undecodable frame instead of silently skipping, so the accounting fires over
+  the real wire.
+- **Reader/writer task failures surface onto the connection state** via a
+  reaping done-callback, as the class docstring always claimed; a response
+  frame with a boolean `id` no longer settles request 1; an idle bounded
+  `BroadcastQueue` no longer accumulates and emits false `DroppedEvents`.
+- **Request ids and `clientSeq` really do survive transport swaps now.**
+  `AhpClient` grew `first_request_id`/`first_client_seq` seeds plus
+  `next_request_id`/`next_client_seq`, and the supervisor threads each
+  successor from where its predecessor stopped — the plan's "VS Code's first
+  frame on a fresh socket carried id 66" promise, previously kept by nobody.
+- **`HostConfig.initial_subscriptions` with a non-root URI wedged every later
+  reconnect**: the URI was recorded with reducer name `""`, which fails
+  `bind()` with a `KeyError` on each snapshot path until the policy exhausts.
+  Entries now accept `(uri, reducer_name)`, and a bare URI shape-sniffs.
+- **The snapshot-arm reconnect silently dropped a subscription made while the
+  RPC was in flight** — the plan's "keep iff surviving or not prior" rule,
+  stated in an inline comment the code did not implement.
+- **No authentication re-check ran after a reconnect.** `HostConfig.auth_check`
+  is awaited against the fresh client after every successful handshake, before
+  the state flips to connected (plan §6.3; `authentication.md` Auth Expiry).
+- **The mirror ports VS Code's `_promotePendingTurnStartIfTerminal`**: a
+  server-originated terminal turn action retires the matching pending
+  optimistic `chat/turnStarted`. Optimistic reads are cached per write, never
+  reduce onto a missing snapshot, and assert the running loop on the read path;
+  gap detection treats `fromSeq: 0` as a real baseline; the `ahp-root:`
+  spelling is accepted on envelopes as VS Code accepts it.
+- **The default approval policy silently denied every tool call.** It is now
+  truly manual: the event surfaces, the drained stream waits
+  `approval_timeout`, then raises `UnansweredToolCallError(tool_call_id,
+  tool_name)` — plan §7's loud, specific error.
+- **The client-tool pump ran gated calls before anyone approved them, ran other
+  sessions' calls, and lost calls to tap eviction or a disconnected window.**
+  It is level-triggered on confirmed mirror state now: a ready without the
+  `confirmed` handover marker waits; scope is the session's own chats;
+  recovery scans state after every wake and reconnect; executors run on their
+  own tracked tasks so one slow tool blocks nothing. A `ContentRef` `toolInput`
+  is resolved fresh via `resourceRead` before the executor runs, never cached
+  across confirmation.
+- **`Session.prompt(model=…)` put a bare string on the wire** where the pin
+  requires a `ModelSelection` `{id, config?}` object; **`create_chat`'s
+  string-convenience `initialMessage` omitted the required `Message.origin`**;
+  **`fetch_turns` documented its channel as the session URI** when
+  `FetchTurnsParams.channel` is the chat; `create_session` treats
+  `creationFailed` (not `"failed"`) as the failure lifecycle and raises on
+  timeout instead of returning a dead session; `>1 workingDirectories` is
+  refused locally unless `capabilities.multipleWorkingDirectories` is
+  advertised.
+- **`TurnStream` leaked one events cursor per prompt** on long-lived
+  connections; it detaches on every finish path and gained `aclose()`. Rejected
+  envelopes no longer decode as ordinary turn events in `ChatWatch` or
+  `TurnStream` — a host refusal is not a `TurnStarted`.
+- **`serve/` answered wrong shapes on three reverse methods**: `resourceWrite`
+  with `ifMatch` on a missing file re-created it instead of answering `-32011
+  Conflict`; `VirtualResourceServer.resourceList` answered `{}` for a missing
+  URI instead of `-32008`; read/write results carried an undeclared `etag`.
+  `ClientToolHost.owns()` requires the pinned `clientId`.
+
 ### Fixed — the first interop run against a real host
 
-Driven against the sibling [`agent-host-server-py`](https://github.com/jackhubert/agent-host-server-py)
+Driven against the sibling [`agent-host-server-py`](https://github.com/jackhumbert/agent-host-server-py)
 across ten protocol surfaces. Two implementations built independently from the
 same spec, meeting for the first time; every disagreement adjudicated against
 the vendored schema rather than against what the other peer happened to want.
@@ -108,7 +187,8 @@ the reducer then refuses while the sender believes it succeeded.
 - **M6 — the supervisor.** Reconnect, backoff with injectable jitter, replay,
   `clientId` persistence, and a `link()` context manager that makes the
   reference implementation's listener leak structurally impossible.
-- **M7 — the reverse direction.** All 10 `ServerCommandMap` methods, a
+- **M7 — the reverse direction.** All 10 `ServerCommandMap` methods routed, 9
+  served (`createResourceWatch` declined on purpose — plan §1.3), a
   symlink-safe file server whose write half is a second opt-in, in-memory
   `virtual://` plugin content, client-owned tool execution, and the elicitation
   surfaces including `chat/toolCallResultConfirmed`.

@@ -337,6 +337,33 @@ async def test_a_refused_reconnect_falls_back_to_initialize() -> None:
     await factory.stop()
 
 
+async def test_request_ids_continue_across_a_transport_swap() -> None:
+    """Plan section 6.1: ids and clientSeq never reset across transport swaps
+    (VS Code's first frame on a fresh socket carried id 66). One `AhpClient` is
+    one transport, so continuity is the supervisor's to keep -- it seeds each
+    successor from where the predecessor stopped."""
+    factory = _Factory()
+    runtime = HostRuntime(
+        HostConfig(factory, label="h", reconnect_policy=immediate_forever_policy())
+    )
+    await runtime.start()
+
+    first = factory.hosts[0]
+    first_ids = [m["id"] for m in first.received if "id" in m]
+    await first.stop()
+    for _ in range(200):
+        await asyncio.sleep(0.01)
+        if len(factory.hosts) > 1 and runtime.state.status == "connected":
+            break
+    second = factory.hosts[1]
+    second_ids = [m["id"] for m in second.received if "id" in m]
+    assert first_ids
+    assert second_ids
+    assert min(second_ids) > max(first_ids)
+    await runtime.shutdown()
+    await factory.stop()
+
+
 # ── cancellation ─────────────────────────────────────────────────────────────
 
 

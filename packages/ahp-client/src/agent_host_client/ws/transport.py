@@ -127,8 +127,10 @@ class WebSocketClientTransport:
     def close_info(self) -> WebSocketCloseInfo | None:
         """How the peer closed, once it has. ``None`` while open.
 
-        The supervisor reads this to tell "the host shut down on purpose" from
-        "the network blinked", which are different reconnect decisions.
+        For embedders deciding between "the host shut down on purpose" and
+        "the network blinked" -- different reconnect decisions. The supervisor
+        itself never reads it (plan section 2.4 keeps the shared ``Transport``
+        contract narrow); this is the duck-typed diagnostic seam beside it.
         """
         return self._close_info
 

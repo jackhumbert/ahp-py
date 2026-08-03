@@ -178,6 +178,11 @@ class HostRuntime:
         self._client_id = config.client_id or ""
         self._state = HostState("disconnected")
         self._client: AhpClient | None = None
+        #: Where the previous client's request-id and clientSeq counters
+        #: stopped. "Ids never reset across transport swaps" (plan section 6.1;
+        #: VS Code's first frame on a fresh socket carried id 66) is a promise
+        #: only this layer can keep, because one `AhpClient` is one transport.
+        self._counter_seed: tuple[int, int] = (1, 1)
         self._generation = 0
         self._server_seq = 0
         #: ``None`` -- never ``""`` -- marks a kind the caller did not state:
@@ -460,7 +465,13 @@ class HostRuntime:
         self, waiters: Sequence[asyncio.Future[Any]]
     ) -> BroadcastReader[ClientEvent]:
         transport = await race(self._config.transport_factory(), waiters)
-        client = AhpClient(transport, self._config.client_config)
+        first_request_id, first_client_seq = self._counter_seed
+        client = AhpClient(
+            transport,
+            self._config.client_config,
+            first_request_id=first_request_id,
+            first_client_seq=first_client_seq,
+        )
         if self._config.server_request_handler is not None:
             client.set_server_request_handler(self._config.server_request_handler)
         client.set_state_mirror(self._mirror)
@@ -739,6 +750,9 @@ class HostRuntime:
     async def _tear_down_client(self) -> None:
         client, self._client = self._client, None
         if client is not None:
+            # Captured before shutdown so the successor resumes numbering where
+            # this client stopped, keeping ids monotonic across transport swaps.
+            self._counter_seed = (client.next_request_id, client.next_client_seq)
             with contextlib.suppress(Exception):
                 await client.shutdown()
 

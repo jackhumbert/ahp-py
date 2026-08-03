@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import importlib.util
 from pathlib import Path
 
 import pytest
@@ -181,11 +182,11 @@ async def test_every_finding_names_where_the_requirement_comes_from() -> None:
 
 # ── interop with the sibling host ────────────────────────────────────────────
 
-sibling = pytest.importorskip(
-    "agent_host_server", reason="the sibling host is not installed in this environment"
+
+@pytest.mark.skipif(
+    importlib.util.find_spec("agent_host_server") is None,
+    reason="the sibling host is not installed in this environment",
 )
-
-
 async def test_a_full_turn_against_the_sibling_python_host() -> None:
     """**Not independent evidence**, and the README says so in those words.
 

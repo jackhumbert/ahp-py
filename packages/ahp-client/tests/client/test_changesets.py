@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import importlib.util
 import inspect
 import json
 import re
@@ -755,9 +756,16 @@ async def test_waiting_ends_on_an_error_status_too() -> None:
 
 # ── interop with the sibling host ────────────────────────────────────────────
 
-pytest.importorskip("agent_host_server", reason="the sibling host is not installed here")
+# A marker, not a module-level `importorskip`: the latter runs at import time
+# and skipped every pure unit test below this line whenever the sibling was
+# absent -- ~50 offline tests silently not running.
+_needs_sibling = pytest.mark.skipif(
+    importlib.util.find_spec("agent_host_server") is None,
+    reason="the sibling host is not installed here",
+)
 
 
+@_needs_sibling
 async def test_a_real_changeset_against_the_sibling_host(tmp_path: Any) -> None:
     """**Not independent evidence** -- both peers share the reducers -- but it is
     the only thing that exercises the content store, the review gate and the
