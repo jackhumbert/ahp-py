@@ -108,3 +108,47 @@ async def test_a_scope_reports_requests_whose_future_was_already_cancelled() -> 
     assert [r.id for r in reported] == [request.id]
     assert len(pending) == 0
     assert pending.id_for_key("call-1") is None, "the key index leaked"
+
+
+class TestKeysAreScopedToTheirChannel:
+    """A `toolCallId` is chosen by the provider and unique only within its own
+    chat. `EchoProvider` hardcodes `"echo-tool-1"`; any adapter numbering calls
+    per turn does the same.
+
+    The registry keyed on the bare id, so two ORDINARY sessions -- no
+    capabilities, nothing exotic -- collided: the second park overwrote the
+    first's entry, the first session's approval was then refused forever with
+    "no tool call awaiting that id", and its chat stayed pinned at InputNeeded
+    with a live `session/inputNeeded` until the session was disposed.
+
+    The channel scoping existed, but only on the LOOKUP -- so it filtered a
+    collision that had already happened in the store.
+    """
+
+    async def test_two_channels_may_use_the_same_tool_call_id(self) -> None:
+        pending = PendingRequests()
+        first = pending.open("s#t", "confirm", key="echo-tool-1", channel="ahp-chat:/a")
+        second = pending.open("s#t", "confirm", key="echo-tool-1", channel="ahp-chat:/b")
+
+        assert first.id != second.id
+        assert pending.id_for_key("echo-tool-1", channel="ahp-chat:/a") == first.id
+        assert pending.id_for_key("echo-tool-1", channel="ahp-chat:/b") == second.id
+
+    async def test_resolving_one_leaves_the_other(self) -> None:
+        pending = PendingRequests()
+        first = pending.open("s#t", "confirm", key="dup", channel="ahp-chat:/a")
+        pending.open("s#t", "confirm", key="dup", channel="ahp-chat:/b")
+
+        assert pending.resolve(first.id, RequestOutcome(response="accept"))
+        assert pending.id_for_key("dup", channel="ahp-chat:/a") is None
+        assert pending.id_for_key("dup", channel="ahp-chat:/b") is not None
+        assert len(pending) == 1
+
+    async def test_a_channelless_park_is_still_answerable_from_anywhere(self) -> None:
+        """A bare sink in a test opens without a channel, and that has to keep
+        working -- the scoping is a fix for collisions, not a new requirement."""
+        pending = PendingRequests()
+        parked = pending.open("s#t", "confirm", key="loose")
+
+        assert pending.id_for_key("loose", channel="ahp-chat:/anything") == parked.id
+        assert pending.id_for_key("loose") == parked.id

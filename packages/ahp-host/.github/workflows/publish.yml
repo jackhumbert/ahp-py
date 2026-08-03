@@ -51,7 +51,14 @@ jobs:
           path: dist/
 
   publish:
-    needs: build
+    # AFTER `release`, and this order is the whole point. The CHANGELOG gate
+    # lives in `release` and exits non-zero when a version has no section of
+    # its own -- but it used to run after the upload, so a release nobody
+    # described would already be on PyPI by the time it failed. PyPI does not
+    # let a version be replaced, so that failure is permanent.
+    #
+    # `release` reads nothing from `publish`; it only needs the artifacts.
+    needs: [build, release]
     runs-on: ubuntu-latest
     # Trusted publishing: PyPI verifies this workflow's OIDC identity, so there
     # is no long-lived token anywhere -- nothing to leak and nothing to rotate.
@@ -71,7 +78,7 @@ jobs:
       - uses: pypa/gh-action-pypi-publish@release/v1
 
   release:
-    needs: [build, publish]
+    needs: build
     runs-on: ubuntu-latest
     permissions:
       contents: write

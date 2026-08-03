@@ -368,3 +368,44 @@ class _LiveTerminal:
     async def close(self) -> None:
         await self.process.kill()  # type: ignore[attr-defined]
         await self.process.wait()  # type: ignore[attr-defined]
+
+
+class TestTheTailIsNotLost:
+    """`_drain` is an `add_reader` callback, so bytes the child wrote between
+    the loop's last callback and its exit sit in the pty buffer -- and closing
+    the master discarded them.
+
+    CONCURRENTLY, deliberately. Serially the reader callback almost always wins
+    the race against `_reap`'s close and the tail arrives by the normal path --
+    a serial loop of 120 passed with the drain removed, proving nothing. Under
+    load the loop is busy enough that the close wins, which is both how this was
+    found and the only way to hold it fixed.
+    """
+
+    async def test_output_survives_when_the_loop_is_busy(self) -> None:
+        backend = PtyTerminalBackend()
+
+        async def run(index: int) -> bool:
+            chunks: list[bytes] = []
+            process = await backend.create(
+                _request(
+                    channel=f"ahp-terminal:/tail-{index}",
+                    command=["/bin/sh", "-c", f"printf 'MARKER-{index}'"],
+                ),
+                chunks.append,
+            )
+            try:
+                await asyncio.wait_for(process.wait(), timeout=15)
+                for _ in range(100):
+                    if f"MARKER-{index}".encode() in b"".join(chunks):
+                        return True
+                    await asyncio.sleep(0.01)
+                return False
+            finally:
+                await process.kill()
+
+        lost = 0
+        for round_ in range(6):
+            results = await asyncio.gather(*(run(round_ * 8 + i) for i in range(8)))
+            lost += sum(1 for ok in results if not ok)
+        assert lost == 0, f"{lost}/48 concurrent runs lost the command's output entirely"

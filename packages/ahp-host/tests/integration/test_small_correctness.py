@@ -127,6 +127,32 @@ def _state(host: Host, uri: str) -> dict[str, Any]:
     return state
 
 
+async def _completed(host: Host, client: FakeClient, chat: str, *, timeout: float = 15.0) -> None:
+    """Wait for *chat* to have a completed turn carrying a tool call.
+
+    This replaced a fixed `collect(seconds=2.0)` that failed in a full-suite
+    run and passed in isolation. I first read that as a timing budget -- two
+    seconds being comfortable on an idle laptop and not under load -- and that
+    diagnosis was WRONG. The cause was data loss in the pty backend: the parent
+    closed its slave fd immediately, so a macOS pty master reported EOF and
+    discarded whatever the child had just written. Measured at 48/48 concurrent
+    commands losing their output entirely; the fix is in `pty_backend.py` and
+    the load test is `TestTheTailIsNotLost`.
+
+    The condition wait is still the right shape -- it is faster and it does not
+    encode a guess about how slow a runner might be -- but it was not what made
+    this test honest.
+    """
+    # The CALL's terminal status, not merely its existence: a `!command` lands
+    # in `turns` as soon as the turn settles, and the completion that carries
+    # the output is a separate frame. Waiting only for the call to appear
+    # reintroduced the race in a slower form.
+    await client.collect_until(
+        lambda: any(c.get("status") in {"completed", "cancelled"} for c in _tool_calls(host, chat)),
+        timeout=timeout,
+    )
+
+
 def _tool_calls(host: Host, chat: str) -> list[dict[str, Any]]:
     return [
         part["toolCall"]
@@ -237,7 +263,7 @@ class TestTheTerminalCommandPrefix:
         chat = await _session(shell, client, "echo:/t-1")
 
         await _turn(client, chat, text="!echo hello-from-the-shell")
-        await client.collect(seconds=2.0)
+        await _completed(shell, client, chat)
 
         calls = _tool_calls(shell, chat)
         assert len(calls) == 1, "no tool call was published for the command"
@@ -250,7 +276,7 @@ class TestTheTerminalCommandPrefix:
         chat = await _session(shell, client, "echo:/t-2")
 
         await _turn(client, chat, text="!exit 3")
-        await client.collect(seconds=2.0)
+        await _completed(shell, client, chat)
 
         call = _tool_calls(shell, chat)[0]
         assert call["success"] is False
@@ -263,7 +289,13 @@ class TestTheTerminalCommandPrefix:
         chat = await _session(shell, client, "echo:/t-3")
 
         await _turn(client, chat, text="!true")
-        await client.collect(seconds=2.0)
+        await client.collect_until(
+            lambda: (
+                (shell.sequencer.state_of(chat) or {}).get("activeTurn") is None
+                and bool((shell.sequencer.state_of(chat) or {}).get("turns"))
+            ),
+            timeout=15.0,
+        )
 
         turn = _state(shell, chat)["turns"][0]
         kinds = [part.get("kind") for part in turn["responseParts"]]

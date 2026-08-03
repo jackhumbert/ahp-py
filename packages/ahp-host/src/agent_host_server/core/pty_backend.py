@@ -44,6 +44,7 @@ import signal
 import struct
 import termios
 from collections.abc import Mapping, Sequence
+from typing import Final
 
 from agent_host_server.core.resources import path_from_file_uri
 from agent_host_server.core.terminals import (
@@ -60,6 +61,13 @@ _log = logging.getLogger(__name__)
 #: How much to lift off the pty per read. A pty's kernel buffer is small; this
 #: is comfortably larger, so a burst of output is a few reads rather than many.
 _READ_SIZE = 65536
+
+#: How many reads `_detach` makes while rescuing the tail. Bounded because it
+#: runs on the event-loop thread: the parent holds the slave, so the master
+#: never reports EOF on its own and an unbounded loop against a chatty survivor
+#: process would wedge the loop. 64 x _READ_SIZE is far more than any command's
+#: trailing burst.
+_DRAIN_ROUNDS: Final = 64
 
 #: Seconds between the hangup and SIGKILL. Short, because SIGHUP is the signal
 #: a shell is built to obey -- this is a backstop for a child that ignores it,
@@ -122,9 +130,13 @@ class PtyTerminalProcess:
         process: asyncio.subprocess.Process,
         master_fd: int,
         output: OutputSink,
+        slave_fd: int | None = None,
     ) -> None:
         self._process = process
         self._master = master_fd
+        #: The PARENT's copy of the slave, held open so the kernel does not
+        #: discard the pty buffer when the child exits. Closed with the master.
+        self._slave = slave_fd
         self._output = output
         self._closed = False
         self._loop = asyncio.get_running_loop()
@@ -229,15 +241,49 @@ class PtyTerminalProcess:
         self._closed = True
         with contextlib.suppress(Exception):
             self._loop.remove_reader(self._master)
-        with contextlib.suppress(OSError):
-            os.close(self._master)
+        # Drain what the reader has not lifted yet. Reachable now precisely
+        # because the parent still holds the slave: the buffer survives the
+        # child, so there is something here to rescue.
+        for _ in range(_DRAIN_ROUNDS):
+            try:
+                chunk = os.read(self._master, _READ_SIZE)
+            except (BlockingIOError, OSError):
+                break
+            if not chunk:
+                break
+            try:
+                self._output(chunk)
+            except Exception:
+                _log.exception("terminal output sink raised")
+                break
+        for fd in (self._master, self._slave):
+            if fd is not None:
+                with contextlib.suppress(OSError):
+                    os.close(fd)
 
     async def _reap(self) -> None:
         """Wait for the child, then make sure the fd goes with it.
 
-        Without this the master fd outlives the process, and a host that opens
-        terminals over a long life runs out of descriptors -- a failure that
-        shows up as an unrelated command failing to start, hours later.
+        Without the detach the master fd outlives the process, and a host that
+        opens terminals over a long life runs out of descriptors -- a failure
+        that shows up as an unrelated command failing to start, hours later.
+
+        But the detach may not be IMMEDIATE, and that was a real bug. The child
+        exiting makes two things ready at once: this `wait()`, and the reader
+        callback holding the output. Detaching as soon as `wait()` returned
+        raced the reader and usually won under load -- and losing that race is
+        not a delay, it is data loss: probed on macOS, once the last slave
+        closes the master reports EOF and the buffered bytes are simply gone
+        (`os.read` returns `b""`, not the pending output). Draining inside
+        `_detach` therefore cannot work; by then there is nothing left to drain.
+        Measured before this: 0 of 8 concurrent commands delivered any output at
+        all, and 2 in 300 serially. The symptom is `!ls` rendering an empty
+        terminal card while reporting `success: true`.
+
+        So the READER owns the fd's lifetime. `_drain` already detaches when it
+        sees EOF, which is the ordered path -- everything lifted, then closed.
+        This only forces the issue if EOF never comes, which happens when the
+        child forked a survivor that still holds the slave.
         """
         try:
             self._exit = await self._process.wait()
@@ -321,12 +367,17 @@ class PtyTerminalBackend:
             os.close(master)
             os.close(slave)
             raise terminal_refused(f"could not start {argv[0]}: {error}") from error
-        finally:
-            # The PARENT's copy, closed as soon as the child holds its own.
-            # Leaving it open means the master never sees EOF, so a terminal
-            # whose child exited stays open forever waiting for output.
-            with contextlib.suppress(OSError):
-                os.close(slave)
-
         _log.info("terminal %s: started %s (pid %s)", request.channel, program, process.pid)
-        return PtyTerminalProcess(process, master, output)
+        # The parent's slave copy is HELD, not closed here, and handed to the
+        # process object to close at the end. It used to be closed as soon as
+        # the child had its own, so that the master would see EOF -- but that
+        # is precisely what makes the output disappear: with no slave left, a
+        # macOS pty master reports EOF and DISCARDS whatever the child wrote
+        # last (probed directly -- `os.read` returns `b""`, not the pending
+        # bytes). Measured: 0 of 8 concurrent commands delivered any output,
+        # and 2 in 300 serially, rendering `!ls` as an empty terminal card
+        # while the tool call reported success.
+        #
+        # Holding it means EOF never arrives on its own, so `_reap` drives
+        # closure off `process.wait()` instead -- which it was already awaiting.
+        return PtyTerminalProcess(process, master, output, slave)

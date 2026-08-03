@@ -78,7 +78,19 @@ class PendingRequests:
     def __init__(self) -> None:
         self._by_id: dict[str, PendingRequest] = {}
         self._by_scope: dict[str, set[str]] = {}
-        self._by_key: dict[str, str] = {}
+        #: Keyed by (channel, key), NOT by the bare key. A `toolCallId` is
+        #: chosen by the provider and is only unique within its own chat --
+        #: `EchoProvider` hardcodes "echo-tool-1", and any adapter numbering
+        #: calls per turn does the same. Host-globally, two ordinary sessions
+        #: doing the same thing collided: the second park overwrote the first's
+        #: entry, the first session's approval was then refused forever with
+        #: "no tool call awaiting that id", and its chat stayed pinned at
+        #: InputNeeded with a live `session/inputNeeded` until disposal.
+        #:
+        #: That is verbatim the failure `open()`'s docstring says the channel
+        #: scoping prevents -- the scoping was applied to the LOOKUP and not to
+        #: the storage, so it filtered a collision that had already happened.
+        self._by_key: dict[tuple[str | None, str], str] = {}
         self._counter = 0
 
     def __len__(self) -> int:
@@ -131,7 +143,7 @@ class PendingRequests:
         self._by_id[request_id] = request
         self._by_scope.setdefault(scope, set()).add(request_id)
         if key is not None:
-            self._by_key[key] = request_id
+            self._by_key[(channel, key)] = request_id
         return request
 
     def id_for_key(self, key: Any, *, channel: str | None = None) -> str | None:
@@ -147,12 +159,11 @@ class PendingRequests:
         """
         if not isinstance(key, str):
             return None
-        request_id = self._by_key.get(key)
-        if request_id is None or channel is None:
-            return request_id
-        request = self._by_id.get(request_id)
-        if request is None or request.channel not in (None, channel):
-            return None
+        request_id = self._by_key.get((channel, key))
+        if request_id is None and channel is not None:
+            # A park opened without a channel is answerable from anywhere,
+            # which is what a bare sink in a test wants.
+            request_id = self._by_key.get((None, key))
         return request_id
 
     def ids_of_kind(self, kind: str) -> list[str]:
@@ -245,6 +256,8 @@ class PendingRequests:
             scoped.discard(request_id)
             if not scoped:
                 del self._by_scope[request.scope]
-        if request.key is not None and self._by_key.get(request.key) == request_id:
-            del self._by_key[request.key]
+        if request.key is not None:
+            entry = (request.channel, request.key)
+            if self._by_key.get(entry) == request_id:
+                del self._by_key[entry]
         return request
