@@ -15,8 +15,11 @@ pip install "agent-host-protocol @ git+https://github.com/jackhumbert/agent-host
 pip install "agent-host-client[ws] @ git+https://github.com/jackhumbert/agent-host-client-py"
 ```
 
-Pinned by tag (`…-py@v0.1.0`) when they want a release rather than `main`. The
-order matters and is the closest thing to a cross-repo constraint left: the
+Pinned by tag (`…-py@v0.1.0`) when they want a release rather than `main` —
+though today no tag exists in any of the three repositories: **`v0.1.0` is the
+pending first release for the whole family**, so both lines currently install
+`main`. The order matters and is the closest thing to a cross-repo constraint
+left: the
 `~=` pin on `agent-host-protocol` resolves against what is already installed,
 and pip cannot fetch that name from an index that does not carry it — skipping
 the first line fails with `No matching distribution found for

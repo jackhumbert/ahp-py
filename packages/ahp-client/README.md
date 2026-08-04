@@ -28,11 +28,13 @@ pip install "agent-host-protocol @ git+https://github.com/jackhumbert/agent-host
 pip install "agent-host-client[ws] @ git+https://github.com/jackhumbert/agent-host-client-py"
 ```
 
-Pin a release by appending its tag (`…agent-host-client-py@v0.1.0`); each
+No release is tagged yet — **`v0.1.0` is pending** — so these lines install
+`main`. Once the first tag lands, pin it by appending the tag
+(`…agent-host-client-py@v0.1.0`), and each
 [GitHub release](https://github.com/jackhumbert/agent-host-client-py/releases)
-carries the built wheel and sdist. `[ws]` is the WebSocket transport — leave it
-off where a `Transport` comes from somewhere else, such as a notebook reading a
-wire log.
+will carry the built wheel and sdist. `[ws]` is the WebSocket transport —
+leave it off where a `Transport` comes from somewhere else, such as a notebook
+reading a wire log.
 
 ```python
 import asyncio
