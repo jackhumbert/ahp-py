@@ -9,6 +9,14 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# Every job below checks out a sibling repository, because neither sibling is on
+# PyPI yet. `GITHUB_TOKEN` is scoped to THIS repository alone: while the siblings
+# are private, those checkouts fail with "Repository not found" no matter what
+# else is correct. Set `SIBLING_REPO_TOKEN` to a fine-grained PAT with read-only
+# Contents on both siblings, or make them public. The `||` falls back to the
+# default token, which is exactly what works in the public case -- so the
+# expression is right in both worlds and needs no edit when they flip.
+
 jobs:
   check:
     runs-on: ubuntu-latest
@@ -27,6 +35,7 @@ jobs:
         with:
           repository: jackhumbert/agent-host-protocol-py
           path: .protocol
+          token: ${{ secrets.SIBLING_REPO_TOKEN || github.token }}
       # Until `agent-host-protocol` is on PyPI. The pin in
       # pyproject.toml is the real declaration; this only supplies it.
       - run: pip install -e .protocol
@@ -64,10 +73,12 @@ jobs:
         with:
           repository: jackhumbert/agent-host-protocol-py
           path: .protocol
+          token: ${{ secrets.SIBLING_REPO_TOKEN || github.token }}
       - uses: actions/checkout@v4
         with:
           repository: jackhumbert/agent-host-client-py
           path: .client
+          token: ${{ secrets.SIBLING_REPO_TOKEN || github.token }}
       - run: pip install -e .protocol
       - run: pip install -e .client
       - run: pip install -e '.[dev,ws]'
@@ -96,6 +107,7 @@ jobs:
         with:
           repository: jackhumbert/agent-host-protocol-py
           path: .protocol
+          token: ${{ secrets.SIBLING_REPO_TOKEN || github.token }}
       - run: pip install build
       - run: python -m build --wheel --outdir dist
       - name: Install the wheel into a clean venv
@@ -123,6 +135,7 @@ jobs:
           repository: jackhumbert/agent-host-protocol-py
           ref: main
           path: .protocol
+          token: ${{ secrets.SIBLING_REPO_TOKEN || github.token }}
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
