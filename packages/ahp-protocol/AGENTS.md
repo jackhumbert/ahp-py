@@ -195,8 +195,14 @@ them. Four steps, in order:
    the packaged version, so the two cannot drift apart at the one moment it
    would be permanent.
 4. That triggers a build, a wheel that is installed and *run* from outside the
-   checkout, then PyPI via trusted publishing (OIDC — no token exists to leak),
-   then a GitHub release.
+   checkout, then the GitHub release — and **only then** PyPI, via trusted
+   publishing (OIDC, so no token exists to leak).
+
+   That order is deliberate and it used to be the other way round. Every check
+   that can fail now runs before the one step that cannot be undone: PyPI does
+   not let a version be replaced, so an upload that precedes the CHANGELOG gate
+   is a release nobody described, permanently. A GitHub release created for a
+   version that then fails to upload is recoverable in a click.
 
 **One-time setup before the first tag**, which nobody can do from here: PyPI
 needs a *pending publisher* configured for the project — owner `jackhumbert`,
