@@ -8,6 +8,30 @@ Every release states the protocol versions it speaks.
 
 Under construction. `docs/plan.md` is the design and its §12 is the build order.
 
+### Added — continuous integration
+
+- **This repository had none.** 487 tests, `ruff`, `mypy` and `lint-imports`
+  ran on no push and no pull request, while both sibling repositories checked
+  *this* one out to prove they still worked with it. Four jobs now: `check`
+  across 3.11/3.12/3.13 with the client alone, `against-the-sibling-host` with
+  the real `agent-host-server` installed, `wheel-is-installable`, and a
+  non-blocking `protocol-main` that surfaces drift the `~=0.1.0` pin hides.
+
+- **`tests/client/_sibling.py`** — one decision about whether the sibling host
+  is importable, made once. Four modules decided separately, two of them with a
+  bare `importorskip`, which makes a job whose cross-repo install silently
+  failed report exactly what a healthy one reports. Under
+  `AHP_INTEROP_REQUIRED` — the same switch the host's own interop suite uses —
+  a missing sibling is now a collection error instead of a skip.
+
+- **`scripts/smoke_wheel.py`** — imports the built wheel from outside the
+  checkout and runs the conformance probe through it, which is the only way to
+  catch a name in `__all__` that is never bound, a subpackage the backend did
+  not collect, or an absent `py.typed`. It found something immediately:
+  `agent_host_client.ws` is the `[ws]` extra, so a `--no-deps` install cannot
+  import it and the job has to supply `websockets` by hand — otherwise "not
+  packaged" and "not installed" are the same red.
+
 ### Added — typed APIs for the surfaces that had none
 
 `docs/plan.md` §1.3, written after the first interop run, measured the axis the
