@@ -1,0 +1,9 @@
+# Actions only. Python dependencies are deliberate floors (`>=`) and one tight
+# pin (`~=`, because the spec lands breaking changes in MINOR bumps) — those
+# move by decision, not by bot.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly

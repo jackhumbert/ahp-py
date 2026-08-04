@@ -14,6 +14,10 @@ build/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+# Grimp writes its own `.import_linter_cache/.gitignore`, which keeps git clean
+# but not the sdist: hatchling reads only this file, so without this line the
+# cache shipped in the source distribution.
+.import_linter_cache/
 .coverage
 htmlcov/
 

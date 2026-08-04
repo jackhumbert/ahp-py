@@ -1,5 +1,8 @@
 # agent-host-server
 
+[![CI](https://github.com/jackhumbert/agent-host-server-py/actions/workflows/ci.yml/badge.svg)](https://github.com/jackhumbert/agent-host-server-py/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/jackhumbert/agent-host-server-py/blob/main/LICENSE)
+
 A Python **host/server** library for the [Agent Host Protocol][ahp] (AHP) —
 Microsoft's protocol for synchronized multi-client state over AI agent sessions.
 
@@ -9,27 +12,38 @@ Microsoft's protocol for synchronized multi-client state over AI agent sessions.
 > this one is spelled out. If you want pairwise-comparison matrices and
 > consistency ratios, you want one of those instead.
 
-> ### ⚠️ Status: working, but pre-alpha. Not published.
+> ### ⚠️ Status: working, but pre-alpha.
 >
 > A real client can connect, create a session, and run a turn. **All seven
 > reducers pass upstream's whole 247-fixture corpus**, the v0.1 command set plus
-> `fetchTurns` is implemented, and a WebSocket transport is in place. Not on
-> PyPI, API not stable, single-trust-domain only.
-> [`docs/roadmap.md`](docs/roadmap.md) scopes everything that remains;
-> [`docs/decisions/`](docs/decisions/) records the decisions taken.
+> `fetchTurns` is implemented, and a WebSocket transport is in place.
+> Distributed from this repository — deliberately not on PyPI. API not stable,
+> single-trust-domain only.
+> [`docs/roadmap.md`](https://github.com/jackhumbert/agent-host-server-py/blob/main/docs/roadmap.md) scopes everything that remains;
+> [`docs/decisions/`](https://github.com/jackhumbert/agent-host-server-py/tree/main/docs/decisions) records the decisions taken.
 
 ## Try it
 
 The wire types and the seven reducers live in a sibling package,
-[`agent-host-protocol`][protocol], which a client stands on too. It is not on
-PyPI yet, so install it from its checkout first — on its own, the line below it
-fails with `No matching distribution found for agent-host-protocol`.
+[`agent-host-protocol`][protocol], which a client stands on too. This family
+of packages installs from GitHub, not from PyPI, and the protocol package must
+go in first — on its own, the second line fails with
+`No matching distribution found for agent-host-protocol`, because pip asks an
+index that does not carry it.
 
 ```bash
-pip install -e ../agent-host-protocol-py
-pip install -e '.[ws]'
+pip install "agent-host-protocol @ git+https://github.com/jackhumbert/agent-host-protocol-py"
+pip install "agent-host-server[ws] @ git+https://github.com/jackhumbert/agent-host-server-py"
 python -m agent_host_server
 ```
+
+No release is tagged yet — **`v0.1.0` is pending** — so these lines install
+`main`. Once the first tag lands, pin it by appending the tag
+(`…agent-host-server-py@v0.1.0`), and each
+[GitHub release](https://github.com/jackhumbert/agent-host-server-py/releases)
+will carry the built wheel and sdist. For development, editable installs from
+sibling checkouts work the same way: `pip install -e ../agent-host-protocol-py`
+then `pip install -e '.[ws]'`.
 
 That serves the offline echo provider on loopback and prints the VS Code
 settings to paste — add them to `settings.json`, then open the **Agent Sessions**
@@ -53,7 +67,7 @@ Connecting a third-party host is a supported, extension-free VS Code feature
 (1.131+). Verified working against **VS Code Stable 1.131.0**: handshake,
 session creation, and a full turn. The details of what it sends — and the three
 host bugs that finding out uncovered — are in
-[`docs/experiments.md`](docs/experiments.md) §E12.
+[`docs/experiments.md`](https://github.com/jackhumbert/agent-host-server-py/blob/main/docs/experiments.md) §E12.
 
 ### Demo flags
 
@@ -152,7 +166,7 @@ All 29 commands, and none of them a stub:
 
 A provider can also **stop and wait for a human** — elicitation, tool-call
 confirmation, and handing a tool to a client to execute — all on one primitive
-([ADR 0005](docs/decisions/0005-suspending-provider-requests.md)). That last one
+([ADR 0005](https://github.com/jackhumbert/agent-host-server-py/blob/main/docs/decisions/0005-suspending-provider-requests.md)). That last one
 is worth calling out: the host marks a tool call `contributor: {kind: "client"}`,
 the client runs it in its own process, and the client reports the result. **The
 agent gets the editor's own tools with no filesystem API on the host at all.**
@@ -300,7 +314,7 @@ What is genuinely absent, and why:
   VS Code's own in-process host, with no channel, command, action or state
   field in the protocol.
 - **`pickle`, `eval`, or any `__reduce__`-capable store format**, permanently.
-  JSON only. See [`docs/roadmap.md`](docs/roadmap.md) §10.
+  JSON only. See [`docs/roadmap.md`](https://github.com/jackhumbert/agent-host-server-py/blob/main/docs/roadmap.md) §10.
 - **Retracting a session-summary field over `root/sessionSummaryChanged`** —
   the wire cannot say it. "Only fields present in `changes` have new values;
   omitted fields are unchanged", and every property of `changes` is typed as
@@ -310,7 +324,7 @@ What is genuinely absent, and why:
   re-fetches. `listSessions` and every fresh subscriber always see the truth,
   and the chat catalogue does not have the problem — `session/chatAdded` is a
   documented upsert and this host retracts through it. Open question 11 in
-  [`docs/research.md`](docs/research.md); this host will not invent an
+  [`docs/research.md`](https://github.com/jackhumbert/agent-host-server-py/blob/main/docs/research.md); this host will not invent an
   encoding for it unilaterally.
 
 Session state is in-memory by default: sessions do not survive a host restart
@@ -342,7 +356,7 @@ refusals, session creation, tool-call resolutions — with **no conversation
 content by construction**. Both are absent by default.
 
 One host runs **one provider**. `RootState.agents` is plural and this publishes
-one entry, deliberately: see [`docs/roadmap.md`](docs/roadmap.md) §4a.
+one entry, deliberately: see [`docs/roadmap.md`](https://github.com/jackhumbert/agent-host-server-py/blob/main/docs/roadmap.md) §4a.
 
 ## ⚠️ Security: read this before exposing a host
 
@@ -387,8 +401,8 @@ Code uses a single connection token; the one third-party host states outright
 that remote and multi-tenant security are unimplemented — but that is context,
 not reassurance.
 
-[`SECURITY.md`](SECURITY.md) has the scope and the disclosure path;
-[`docs/guide/deploying.md`](docs/guide/deploying.md) has the long version, with
+[`SECURITY.md`](https://github.com/jackhumbert/agent-host-server-py/blob/main/SECURITY.md) has the scope and the disclosure path;
+[`docs/guide/deploying.md`](https://github.com/jackhumbert/agent-host-server-py/blob/main/docs/guide/deploying.md) has the long version, with
 examples the test suite executes.
 
 ## Conformance
@@ -432,7 +446,7 @@ This project targets an external specification. Protocol changes come from
 upstream, not from contributors' preferences. Where something is underspecified,
 the question is filed upstream and recorded in `docs/research.md` — this project
 does not fork the spec or diverge privately. See
-[`CONTRIBUTING.md`](CONTRIBUTING.md) and [`UPSTREAM.md`](UPSTREAM.md).
+[`CONTRIBUTING.md`](https://github.com/jackhumbert/agent-host-server-py/blob/main/CONTRIBUTING.md) and [`UPSTREAM.md`](https://github.com/jackhumbert/agent-host-server-py/blob/main/UPSTREAM.md).
 
 Licensed **MIT**, matching upstream — [`agent-host-protocol`][protocol], which
 this package stands on, vendors upstream's MIT-licensed conformance fixtures and

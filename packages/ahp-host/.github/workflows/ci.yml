@@ -5,17 +5,16 @@ on:
     branches: [main]
   pull_request:
 
+permissions:
+  contents: read
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
-# Every job below checks out a sibling repository, because neither sibling is on
-# PyPI yet. `GITHUB_TOKEN` is scoped to THIS repository alone: while the siblings
-# are private, those checkouts fail with "Repository not found" no matter what
-# else is correct. Set `SIBLING_REPO_TOKEN` to a fine-grained PAT with read-only
-# Contents on both siblings, or make them public. The `||` falls back to the
-# default token, which is exactly what works in the public case -- so the
-# expression is right in both worlds and needs no edit when they flip.
+# Every job below checks out a sibling repository: the family is distributed
+# from GitHub rather than an index, so the siblings ARE the dependency source
+# and the default token is enough -- they are public.
 
 jobs:
   check:
@@ -23,7 +22,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.11", "3.12", "3.13"]
+        python-version: ["3.11", "3.12", "3.13", "3.14"]
     steps:
       - uses: actions/checkout@v4
 
@@ -35,9 +34,8 @@ jobs:
         with:
           repository: jackhumbert/agent-host-protocol-py
           path: .protocol
-          token: ${{ secrets.SIBLING_REPO_TOKEN || github.token }}
-      # Until `agent-host-protocol` is on PyPI. The pin in
-      # pyproject.toml is the real declaration; this only supplies it.
+      # The pin in pyproject.toml is the real declaration; this supplies it
+      # from the working tree -- no index carries it, by design.
       - run: pip install -e .protocol
       - run: pip install -e '.[dev]'
 
@@ -73,12 +71,10 @@ jobs:
         with:
           repository: jackhumbert/agent-host-protocol-py
           path: .protocol
-          token: ${{ secrets.SIBLING_REPO_TOKEN || github.token }}
       - uses: actions/checkout@v4
         with:
           repository: jackhumbert/agent-host-client-py
           path: .client
-          token: ${{ secrets.SIBLING_REPO_TOKEN || github.token }}
       - run: pip install -e .protocol
       - run: pip install -e .client
       - run: pip install -e '.[dev,ws]'
@@ -107,15 +103,14 @@ jobs:
         with:
           repository: jackhumbert/agent-host-protocol-py
           path: .protocol
-          token: ${{ secrets.SIBLING_REPO_TOKEN || github.token }}
       - run: pip install build
       - run: python -m build --wheel --outdir dist
       - name: Install the wheel into a clean venv
         run: |
           python -m venv /tmp/fresh
-          # The dependency first, from the sibling checkout, until it is on
-          # PyPI. `--no-deps` on the wheel so pip does not then try to resolve
-          # the same name from an index that does not have it yet.
+          # The dependency first, from the sibling checkout -- no index
+          # carries it, by design. `--no-deps` on the wheel so pip does not
+          # then try to resolve the same name from an index that lacks it.
           /tmp/fresh/bin/pip install ./.protocol
           /tmp/fresh/bin/pip install --no-deps "$(echo dist/*.whl)" websockets
       - name: Smoke-test it from outside the checkout
@@ -135,7 +130,6 @@ jobs:
           repository: jackhumbert/agent-host-protocol-py
           ref: main
           path: .protocol
-          token: ${{ secrets.SIBLING_REPO_TOKEN || github.token }}
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"

@@ -224,11 +224,14 @@ def test_the_readme_does_not_call_an_action_absent_that_the_host_publishes() -> 
 
 def test_the_install_block_supplies_every_sibling_dependency() -> None:
     """`pip install -e '.[ws]'` was the README's only install line, and it
-    failed: `agent-host-protocol` is not on PyPI, so pip resolved it from an
-    index that has never heard of it and stopped.
+    failed: `agent-host-protocol` is not on PyPI — by design, now — so pip
+    resolved it from an index that has never heard of it and stopped.
 
     Derived from `pyproject.toml` rather than from a list here, so a second
     sibling dependency cannot be added without the README learning about it.
+    The repository name is what both supported forms contain — the
+    `git+https://…/<name>-py` install and the `-e ../<name>-py` checkout — so
+    the assertion covers either.
     """
     pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
     block = re.search(r"^dependencies\s*=\s*\[(.*?)\]", pyproject, re.S | re.M)
@@ -240,8 +243,9 @@ def test_the_install_block_supplies_every_sibling_dependency() -> None:
     start = README.index("## Try it")
     try_it = README[start : README.index("\n## ", start)]
     for name in siblings:
-        checkout = name + "-py"
-        assert checkout in try_it, (
-            f"{name} is a dependency and is not on PyPI, so the install block has to "
-            f"install it from its checkout ({checkout}) before the line that needs it"
+        repository = name + "-py"
+        assert repository in try_it, (
+            f"{name} is a dependency and no index carries it, so the install block "
+            f"has to supply it from its repository ({repository}) before the line "
+            f"that needs it"
         )

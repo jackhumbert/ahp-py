@@ -1,8 +1,13 @@
-name: Publish
+name: Release
 
 # Tag-triggered, and the tag has to agree with the version in the package --
-# publishing is the one thing that cannot be undone, and PyPI will not let a
-# version be replaced.
+# the tag and the GitHub release are the public record of what shipped, and a
+# record that disagrees with the artifact it points at is worse than none.
+#
+# There is no index upload here on purpose: this family of packages is
+# distributed from GitHub (`pip install "agent-host-server[ws] @ git+…"`,
+# protocol package first), and the GitHub release -- notes from the CHANGELOG,
+# distributions attached -- is the whole release.
 on:
   push:
     tags: ["v*"]
@@ -37,11 +42,13 @@ jobs:
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
-      # The same install-and-run check CI does on every push. A wheel that
-      # cannot be imported from a clean venv must not reach an index.
+      # The same install-and-run check CI does on every push -- except the
+      # dependency comes from ITS repository the way a user's would, not from a
+      # sibling checkout, so this also proves the documented install path.
       - name: Smoke-test the built wheel
         run: |
           python -m venv /tmp/fresh
+          /tmp/fresh/bin/pip install "agent-host-protocol @ git+https://github.com/jackhumbert/agent-host-protocol-py"
           /tmp/fresh/bin/pip install "$(echo dist/*.whl)[ws]"
           cd /tmp && /tmp/fresh/bin/python "$GITHUB_WORKSPACE/scripts/smoke_wheel.py"
 
@@ -49,33 +56,6 @@ jobs:
         with:
           name: dist
           path: dist/
-
-  publish:
-    # AFTER `release`, and this order is the whole point. The CHANGELOG gate
-    # lives in `release` and exits non-zero when a version has no section of
-    # its own -- but it used to run after the upload, so a release nobody
-    # described would already be on PyPI by the time it failed. PyPI does not
-    # let a version be replaced, so that failure is permanent.
-    #
-    # `release` reads nothing from `publish`; it only needs the artifacts.
-    needs: [build, release]
-    runs-on: ubuntu-latest
-    # Trusted publishing: PyPI verifies this workflow's OIDC identity, so there
-    # is no long-lived token anywhere -- nothing to leak and nothing to rotate.
-    # Configure the publisher at https://pypi.org/manage/project/agent-host-server/settings/publishing/
-    # with owner `jackhumbert`, repository `agent-host-server-py`, workflow
-    # `publish.yml`, environment `pypi`.
-    environment:
-      name: pypi
-      url: https://pypi.org/p/agent-host-server
-    permissions:
-      id-token: write # the OIDC token; this is the whole mechanism
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          name: dist
-          path: dist/
-      - uses: pypa/gh-action-pypi-publish@release/v1
 
   release:
     needs: build

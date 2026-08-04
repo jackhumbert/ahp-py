@@ -193,8 +193,20 @@ reaching into private attributes. Whatever exposes them is the embedder's.
 
 All five above shipped, and the same embedder then tried to actually wire the
 result: a multi-user deployment, sessions partitioned by principal, surviving a
-service restart. Two things stop that today, and both are small. The third and
-fourth are smaller still.
+service restart. Two things stopped that at the time of writing, and both were
+small. The third and fourth were smaller still.
+
+**All four landed**, as Tier 0 of
+[`release-plan.md`](release-plan.md): 6 became
+`Policy.channel_created`/`channel_dropped` — the alternative the request
+offered — proven over the wire by two principals in
+`tests/integration/test_ownership_over_the_wire.py`; 7 became
+`StoredSession.metadata`, round-tripped verbatim; 8 is
+[`guide/deploying.md`](guide/deploying.md) §"Liveness and readiness", executed
+as a test; and 9 was decided and bounded — 2048 frames by default,
+`Host(outbox_limit=…)`, overflow disconnects the peer rather than dropping or
+reordering frames. The items below stay as written: they are the record of
+what an embedder could not do, which is the shape a request is made of.
 
 ## 6. Ownership cannot be registered, so `OwnedSessionPolicy` cannot be wired — blocking
 

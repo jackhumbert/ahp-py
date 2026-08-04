@@ -13,9 +13,12 @@ means, and parity with VS Code's own host).
 [`docs/requests.md`](docs/requests.md) is the outside-in view: what an embedder
 deploying this behind a proxy for several users needed and could not get. The
 first five landed — `Host.serve(headers=, token=)`, `core/policies.py`,
-`core/audit.py`, `Host.counters()`, and one-host-one-provider decided. **Round
-two is open**, and its first item blocks the partitioning example from being
-usable at all.
+`core/audit.py`, `Host.counters()`, and one-host-one-provider decided. Round
+two landed as Tier 0 of the release plan — the channel hooks on `Policy`,
+`StoredSession.metadata`, the bounded outbox, and the worked liveness example.
+[`RELEASING.md`](RELEASING.md) is the procedure that cuts a release — a tag
+plus the GitHub release with distributions attached; this family of packages
+is public on GitHub and deliberately not on PyPI.
 
 ## Deferred upstream reports
 
@@ -29,7 +32,9 @@ one turns out to be ours, delete it rather than leaving a wrong accusation lying
 A Python **host** library for the Agent Host Protocol. AHP is an external
 specification owned by Microsoft. We implement it; we do not design it.
 
-Current state: **v0.1 complete; v0.2 landing.** All **247** reducer fixtures and
+Current state: **feature-complete for `0.1.0`; not yet published.** What was
+scoped as v0.2 landed before the first release, so it ships in `0.1.0` too.
+All **247** reducer fixtures and
 all 39 round-trip fixtures pass, the v0.1 command set is implemented, and the
 real published Microsoft TypeScript client drives a full turn against the host
 over WebSocket in CI. v0.1's build order is
@@ -69,7 +74,8 @@ script all live in
 [`agent-host-protocol`](https://github.com/jackhumbert/agent-host-protocol-py),
 which this package depends on. Bump the spec there.
 
-Until that package is on PyPI, install it from the sibling checkout:
+It installs from its repository (no index carries it, by design) — or, for
+development, from the sibling checkout:
 
 ```bash
 pip install -e ../agent-host-protocol-py

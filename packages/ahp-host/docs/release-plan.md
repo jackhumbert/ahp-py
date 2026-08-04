@@ -17,11 +17,26 @@ Ordering within a tier is by user-visible value per unit of effort, with
 correctness ahead of features: a wrong shape outranks an absent one, because
 wrong shapes fail silently.
 
+> **Status: complete.** Tier 0, Tier 1 and 2B–2E are done; 2A is done except
+> the `turn` changeset ("Last Turn Changes" never appears — the demo publishes
+> `uncommitted` and `session`). What sits between here and the first release is
+> procedure rather than code, and the procedure is
+> [`RELEASING.md`](../RELEASING.md). The release is a tag plus the GitHub
+> release cut from it — this family of packages is public on GitHub and
+> deliberately not on PyPI, so there is no index step and no cross-repo
+> publish ordering; the README's install block is already in its final,
+> `tests/docs/`-guarded form.
+
 ---
 
 ## Tier 0 — an embedder cannot ship without these
 
-### 0.1 Session lifecycle must be knowable by the Policy — **blocking**
+### 0.1 Session lifecycle must be knowable by the Policy — **done**
+
+Landed as the alternative weighed below: `Policy.channel_created` /
+`channel_dropped`, with the honest test this item demanded —
+`tests/integration/test_ownership_over_the_wire.py`, two connections, two
+principals, nothing built in-process. The original finding:
 
 `OwnedSessionPolicy` keeps a channel→principal map and **nothing populates it**.
 `claim()` has no caller in the library; its only call site is a test that builds
@@ -55,7 +70,11 @@ it is one call site instead of two.
 principals — not by constructing sessions in-process, which is what made the
 existing test pass while the feature was unusable.
 
-### 0.2 `StoredSession` needs embedder metadata
+### 0.2 `StoredSession` needs embedder metadata — **done**
+
+`StoredSession.metadata`, round-tripped verbatim and never interpreted,
+asserted through `may_see_channel` after a store → restart → restore cycle.
+The original finding:
 
 `may_restore_session` refuses by default and its docstring is right about why: a
 restored session has no owner, and `may_see_channel` refuses unowned channels,
@@ -71,7 +90,14 @@ already gets. Ownership then travels with the session it describes.
 **Test:** store → restart → restore → the principal still owns it, asserted
 through `may_see_channel` rather than by reading the mapping back.
 
-### 0.3 Decide the outbox bound
+### 0.3 Decide the outbox bound — **done**
+
+Decided: bounded at 2048 frames, `Host(outbox_limit=…)` to change it, and
+overflow **disconnects** the peer — dropping frames would break replay
+expectations silently, and a disconnected client already knows how to
+reconnect and be told what it missed. `counters()["outboxOverflows"]` counts
+evictions, and the limit is documented where this item asked,
+[`guide/deploying.md`](guide/deploying.md). The original finding:
 
 `Connection._outbox` is an unbounded `asyncio.Queue`. A peer that stops
 reading — a suspended laptop, a wedged renderer, a stalled proxy — accumulates
@@ -87,7 +113,10 @@ documented overflow behaviour is probably the answer, and the limit belongs in
 
 **This is the one Tier 0 item that is a decision before it is a change.**
 
-### 0.4 A worked liveness example
+### 0.4 A worked liveness example — **done**
+
+[`guide/deploying.md`](guide/deploying.md) §"Liveness and readiness", executed
+by `tests/docs/`. The original finding:
 
 `Host.counters()` is the right API and deliberately not an endpoint. Every
 deployment still writes the same twenty lines: a loopback listener returning
@@ -100,6 +129,18 @@ tests, so the shown pattern cannot rot.
 ---
 
 ## Tier 1 — what "published" means
+
+**All six landed.** The version is single-sourced from
+`src/agent_host_server/__init__.py` and reads `0.1.0`; the CHANGELOG's
+`0.1.0` section is the complete first-release record (the release workflow
+refuses a tag whose version has no section); `release.yml` is tag-triggered —
+build, tag/version gate, a wheel smoke whose dependency installs from its
+repository the way a user's does, then the GitHub release with the CHANGELOG
+section as its notes; `SECURITY.md` has the posture and the disclosure path;
+interop and the wheel smoke test run in CI on every push. "Published" means
+released on GitHub: this family of packages is deliberately not on PyPI. What
+remains is the procedure in [`RELEASING.md`](../RELEASING.md), not code. The
+original list:
 
 1. **A version.** `0.0.0` in two places (`pyproject.toml`, `__init__.py`) —
    single-source it and pick `0.1.0`.
@@ -134,7 +175,18 @@ What is missing is *what we publish*, not *what we implement*.
 The ranked gaps cluster, and the cluster is exactly what has been reported by
 hand this week.
 
-### 2A. Changesets — ranked 1, 2, 5, 7 (and 6, 11, 20, 23)
+### 2A. Changesets — ranked 1, 2, 5, 7 (and 6, 11, 20, 23) — **done**, except the `turn` changeset
+
+The picker renders (`workingDirectories` rides the summary), the four
+operations keep their own buttons (`group` is set per operation), `reviewed`
+survives a republish whichever side ticked it, a failed operation fails the
+request — the one failure channel the client surfaces — and publishes
+`error` alongside, operations are gated while a turn runs (the `disabled` gate is
+re-evaluated at both ends of every turn), the demo's list is derived from live
+git state (Commit is dropped when nothing is staged), and a refresh passes
+through `computing` before the list is replaced. Still absent: a `turn`
+changeset, so "Last Turn Changes" never appears — the demo publishes
+`uncommitted` and `session`. The original findings:
 
 **The picker never renders** because the session summary carries no
 `workingDirectories`; the client gates the changeset dropdown on it. So only the
