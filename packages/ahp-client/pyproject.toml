@@ -4,7 +4,10 @@ build-backend = "hatchling.build"
 
 [project]
 name = "agent-host-client"
-version = "0.1.0.dev0"
+# The version lives in `src/agent_host_client/__init__.py` as `__version__` and
+# nowhere else; hatch reads it from there. Two spellings of a version agree
+# right up until the release where somebody bumps one of them.
+dynamic = ["version"]
 description = "A client implementation of the Agent Host Protocol (AHP) for Python."
 readme = "README.md"
 license = "MIT"
@@ -18,6 +21,7 @@ classifiers = [
   "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
   "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
   "Topic :: Software Development :: Libraries",
   "Typing :: Typed",
 ]
@@ -40,6 +44,7 @@ ws = ["websockets>=13"]
 Homepage = "https://github.com/jackhumbert/agent-host-client-py"
 Repository = "https://github.com/jackhumbert/agent-host-client-py"
 Issues = "https://github.com/jackhumbert/agent-host-client-py/issues"
+Changelog = "https://github.com/jackhumbert/agent-host-client-py/blob/main/CHANGELOG.md"
 
 # PEP 735, not [project.optional-dependencies]: the latter is baked into the
 # wheel's Requires-Dist, and PyPI rejects metadata carrying a direct reference
@@ -55,8 +60,31 @@ dev = [
   "websockets>=13",
 ]
 
+[tool.hatch.version]
+path = "src/agent_host_client/__init__.py"
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/agent_host_client"]
+
+# An allowlist, not an ignore list. Hatchling's default sdist selection honours
+# only the ROOT .gitignore -- the tool caches that self-ignore with a nested
+# one (`.hypothesis/`, `.import_linter_cache/`) look clean to git and shipped
+# ~350 Hypothesis example blobs in the sdist anyway. Naming what belongs is the
+# form that cannot regress when the next tool invents a new cache directory.
+[tool.hatch.build.targets.sdist]
+include = [
+  "/src",
+  "/tests",
+  "/docs",
+  "/scripts",
+  "/AGENTS.md",
+  "/CHANGELOG.md",
+  "/CONTRIBUTING.md",
+  "/LICENSE",
+  "/README.md",
+  "/RELEASING.md",
+  "/SECURITY.md",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -65,6 +93,11 @@ markers = [
   "interop: drives a real third-party host; needs Node and a network install",
 ]
 asyncio_mode = "auto"
+# Every warning is a failure. The suite earned this: the one ResourceWarning it
+# ever produced was a real leak -- a cancelled closing handshake abandoning its
+# socket, once per reconnect. A warning policy that only reports would have
+# left it scrolling past forever.
+filterwarnings = ["error"]
 
 [tool.mypy]
 python_version = "3.11"

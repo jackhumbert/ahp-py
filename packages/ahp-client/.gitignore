@@ -14,6 +14,11 @@ build/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+# Both of these also self-ignore with a nested .gitignore, which fools git and
+# nothing else -- hatchling's sdist selection reads only this file, and the
+# sdist shipped both caches before they were named here.
+.hypothesis/
+.import_linter_cache/
 .coverage
 htmlcov/
 
