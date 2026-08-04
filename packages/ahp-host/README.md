@@ -20,7 +20,13 @@ Microsoft's protocol for synchronized multi-client state over AI agent sessions.
 
 ## Try it
 
+The wire types and the seven reducers live in a sibling package,
+[`agent-host-protocol`][protocol], which a client stands on too. It is not on
+PyPI yet, so install it from its checkout first — on its own, the line below it
+fails with `No matching distribution found for agent-host-protocol`.
+
 ```bash
+pip install -e ../agent-host-protocol-py
 pip install -e '.[ws]'
 python -m agent_host_server
 ```
@@ -290,7 +296,6 @@ What is genuinely absent, and why:
 - **Model routing.** `AgentInfo.models` is published for the client's picker
   and `UserMessage.model` carries back what the user chose — the host is a
   courier and never selects.
-- **`chat/usage`.** No producer, so no token counts or cost attribution.
 - **Checkpoints and plan review.** Not host-drivable: they are internal to
   VS Code's own in-process host, with no channel, command, action or state
   field in the protocol.
@@ -429,9 +434,10 @@ the question is filed upstream and recorded in `docs/research.md` — this proje
 does not fork the spec or diverge privately. See
 [`CONTRIBUTING.md`](CONTRIBUTING.md) and [`UPSTREAM.md`](UPSTREAM.md).
 
-Licensed **MIT**, matching upstream — this repository vendors upstream's
-MIT-licensed conformance fixtures and ports its reducers, so identical terms
-avoid any compatibility question.
+Licensed **MIT**, matching upstream — [`agent-host-protocol`][protocol], which
+this package stands on, vendors upstream's MIT-licensed conformance fixtures and
+ports its reducers, so identical terms avoid any compatibility question.
 
 [ahp]: https://microsoft.github.io/agent-host-protocol/
+[protocol]: https://github.com/jackhumbert/agent-host-protocol-py
 [transport]: https://microsoft.github.io/agent-host-protocol/specification/transport

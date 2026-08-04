@@ -62,6 +62,38 @@ versions each release speaks.
 
 ### Fixed
 
+- **An empty `clientId` made every peer that sent one the same peer.** The host
+  minted a UUID for a `clientId` that was not a string and kept one that was,
+  including `""` — which is what an unset config value looks like on the wire.
+  `holds_claim` then handed two connections each other's terminals, the
+  active-client gate let one assert the other's role, and the removal on
+  disconnect skipped them entirely, leaving the session advertising tools nobody
+  could execute. An empty id is now the absence it is, and an `activeClient`
+  claim on `""` is refused rather than quietly rewritten — the client asked to
+  be an identity the host cannot give it, since `InitializeResult` has no field
+  to hand a minted one back. `terminals.claim_from_wire` refuses it too, which
+  the sibling client's parser has always done: the host used to accept an empty
+  claim as real while every client rendered the same payload as *unclaimed*,
+  and because `terminal/claimed` is itself claim-gated, no peer could ever take
+  the terminal back.
+
+- **An activity a provider set itself was never retracted.** `session/activityChanged`
+  has two writers — the turn sink, and `SessionPublisher.activity_changed`,
+  which the provider guide tells providers to call and which works outside a
+  turn. The sink deduped against a cache only it wrote, so a string it had not
+  published looked like no string at all and the `set_activity(None)` in the
+  turn's `finally` deduped itself away. A session went idle still claiming to
+  be editing a file, and only a later tool call could clear it. The sink now
+  reads what is published from the session's own state, which is the thing both
+  writers write to.
+
+- **The connection token was logged verbatim**, at DEBUG and again at WARNING
+  when a handshake was refused — the latter on by default. `?tkn=` is a bearer
+  credential in a query string, and the same repository already says so about
+  somebody else's reverse proxy. Redacted at both sites and on the public
+  `last_handshake_path`, leaving `tkn=<redacted>` so a reader can still tell a
+  rejected token from a missing one.
+
 Found by driving the sibling Python client against this host — two
 implementations built independently from the same spec, meeting for the first
 time. All four needed a *second* chat or a *second* session to see, which is
@@ -209,6 +241,35 @@ sources, the spec prose and VS Code's client. Each fix is pinned by a test.
   verified to fail all three assertions against a child spawned without a pty.
   Test-only; the backend itself was correct.
 
+### Fixed — CI and documentation
+
+- **Every CI job failed at a checkout, not at a test.** All five cross-repo
+  checkouts here name a *private* sibling, and `GITHUB_TOKEN` is scoped to the
+  repository the workflow runs in — so each one failed with "Repository not
+  found" and nothing downstream of it ever ran. They now take
+  `secrets.SIBLING_REPO_TOKEN` with a fallback to the default token, which is
+  what works once the siblings are public: right in both worlds, no second edit.
+
+- **The README's only install line could not work.** `pip install -e '.[ws]'`
+  resolves `agent-host-protocol~=0.1.0` from an index that has never heard of
+  it and stops. It now installs the sibling checkout first, and a new derived
+  check in `tests/docs/test_readme_is_true.py` reads the dependency list from
+  `pyproject.toml`, so a second sibling dependency cannot be added without the
+  README learning about it.
+
+- **The README called `chat/usage` unimplemented** — "no producer, so no token
+  counts or cost attribution" — long after one shipped, with tests asserting
+  where it lands in the turn. That section is the one a reader uses to decide
+  whether to build around a gap, so a stale entry costs somebody real work.
+  A second derived check now reads each "genuinely absent" bullet that names a
+  bare action and looks for a publisher of it.
+
+- **The CHANGELOG dated a release that never happened.** No `v0.1.0` tag was
+  ever cut and nothing was uploaded, so its two link definitions pointed at a
+  tag and a release page that do not exist, and two of its entries described
+  `vendor/upstream/` and `scripts/generate_tables.py` as things this package
+  has — both moved to `agent-host-protocol` in the extraction below.
+
 ### Changed
 
 - **The protocol layer is now a separate package.** Wire types, the seven
@@ -226,9 +287,17 @@ sources, the spec prose and VS Code's client. Each fix is pinned by a test.
 
   Bumping the spec pin is no longer a change to this repository.
 
-## [0.1.0] - 2026-08-02
+## [0.1.0] — prepared 2026-08-02, never published
 
-The first release. It speaks protocol versions **0.7.0 and 0.6.0**, answers all
+> No `v0.1.0` tag was ever cut and nothing was uploaded to PyPI, so there is no
+> version anyone can install and nothing below has shipped. Kept as a section
+> rather than folded into `[Unreleased]` because it is the chronology of a
+> coherent milestone — but read it as *what was built by that date*, not as a
+> release. Two entries describe files that have since moved to
+> [`agent-host-protocol`](https://github.com/jackhumbert/agent-host-protocol-py);
+> they are marked where they appear.
+
+It speaks protocol versions **0.7.0 and 0.6.0**, answers all
 29 client→host commands plus the reverse `resource*` direction, and is driven by
 the real VS Code client and the published TypeScript client in CI.
 
@@ -316,9 +385,11 @@ no model in here — you write a provider, and routing is yours.
   the v0.1 plan (`docs/plan.md`) and ADRs 0001–0004.
 - Vendoring of the upstream conformance corpora and schemas at `spec/v0.7.0`
   (`scripts/vendor_upstream.sh`), committed under `vendor/upstream/`.
+  **Since moved** to `agent-host-protocol`; neither path exists here now.
 - Generation of the upstream data tables — action types, `IS_CLIENT_DISPATCHABLE`,
   `ACTION_INTRODUCED_IN`, error codes — from the vendored TypeScript source of
   truth (`scripts/generate_tables.py`), reproducibility enforced in CI.
+  **Since moved** to `agent-host-protocol`, where CI still enforces it.
 - Wire value representation: plain dicts with `TypedDict` views, the `??`
   equivalent, a type-aware deep comparator, and the two opposing null-comparison
   rules the upstream corpora require (ADR 0001).
@@ -398,5 +469,10 @@ feature look identical:
 - Requires POSIX for the pty backend. Everything else is portable.
 
 
-[Unreleased]: https://github.com/jackhumbert/agent-host-server-py/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/jackhumbert/agent-host-server-py/releases/tag/v0.1.0
+<!-- No tag exists yet, so a `compare/v0.1.0...HEAD` link 404s and a
+     `releases/tag/v0.1.0` link points at a release that was never drafted.
+     Both become real the moment the first tag is pushed; until then they say
+     the true thing, which is that everything here is still in the branch. -->
+
+[Unreleased]: https://github.com/jackhumbert/agent-host-server-py/commits/main
+[0.1.0]: https://github.com/jackhumbert/agent-host-server-py/commits/main

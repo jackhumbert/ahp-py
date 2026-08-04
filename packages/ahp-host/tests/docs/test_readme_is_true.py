@@ -173,3 +173,75 @@ def test_the_typed_marker_ships() -> None:
 
     classifiers = (ROOT / "pyproject.toml").read_text()
     assert "Typing :: Typed" in classifiers, "the marker ships but the claim was dropped"
+
+
+#: A bullet in the "genuinely absent" list whose bold lead is a bare action
+#: name, e.g. ``- **`chat/usage`.** No producer, ...``. Deliberately not every
+#: backticked action in that section: the `root/sessionSummaryChanged` bullet is
+#: about a *field retraction* the wire cannot express, not about an action the
+#: host never publishes, and a looser pattern would read it as a claim the code
+#: contradicts.
+_ABSENT_ACTION = re.compile(r"^- \*\*`([a-z]+/[A-Za-z]+)`\.?\*\*", re.MULTILINE)
+
+#: Proof that the pattern still matches the shape it is looking for. The
+#: README's own list is EMPTY of these today, which is the correct state and
+#: also the state in which a broken regex is indistinguishable from a clean
+#: bill of health -- so the extractor is exercised on a known input first.
+_ABSENT_SAMPLE = "- **`chat/usage`.** No producer, so no token counts.\n"
+
+
+def _absent_section() -> str:
+    start = README.index("What is genuinely absent, and why:")
+    return README[start : README.index("\n## ", start)]
+
+
+def _published_action_types() -> str:
+    return "\n".join(path.read_text(encoding="utf-8") for path in (ROOT / "src").rglob("*.py"))
+
+
+def test_the_readme_does_not_call_an_action_absent_that_the_host_publishes() -> None:
+    """The README said `chat/usage` had "no producer" long after one shipped.
+
+    Nothing could catch that: it is prose about the *absence* of a feature, and
+    every other check here is derived from what the host does have. This one
+    reads the claim and looks for the thing it says is not there.
+
+    A reader acts on this list -- it is the section that decides whether to
+    build a client feature around a gap -- so a stale entry costs someone the
+    work of routing around something that is right there.
+    """
+    assert _ABSENT_ACTION.findall(_ABSENT_SAMPLE) == ["chat/usage"], (
+        "the pattern no longer matches the bullet shape it exists to find"
+    )
+
+    sources = _published_action_types()
+    claimed_absent = set(_ABSENT_ACTION.findall(_absent_section()))
+    published = {name for name in claimed_absent if f'"{name}"' in sources}
+    assert not published, (
+        f"the README calls these absent, and the host publishes them: {sorted(published)}"
+    )
+
+
+def test_the_install_block_supplies_every_sibling_dependency() -> None:
+    """`pip install -e '.[ws]'` was the README's only install line, and it
+    failed: `agent-host-protocol` is not on PyPI, so pip resolved it from an
+    index that has never heard of it and stopped.
+
+    Derived from `pyproject.toml` rather than from a list here, so a second
+    sibling dependency cannot be added without the README learning about it.
+    """
+    pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    block = re.search(r"^dependencies\s*=\s*\[(.*?)\]", pyproject, re.S | re.M)
+    assert block is not None, "pyproject declares no dependencies; this test has drifted"
+
+    siblings = re.findall(r"[\"'](agent-host-[a-z-]+)", block.group(1))
+    assert siblings, "no sibling dependency found; if that is real, delete this test"
+
+    start = README.index("## Try it")
+    try_it = README[start : README.index("\n## ", start)]
+    for name in siblings:
+        checkout = name + "-py"
+        assert checkout in try_it, (
+            f"{name} is a dependency and is not on PyPI, so the install block has to "
+            f"install it from its checkout ({checkout}) before the line that needs it"
+        )
