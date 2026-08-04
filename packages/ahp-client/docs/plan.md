@@ -317,10 +317,10 @@ three** distributions — without it in `agent-host-protocol`, every re-exported
 type is `Any` downstream.
 
 Dev dependencies go in a **`[dependency-groups]` table (PEP 735)**, never
-`[project.optional-dependencies]`: the latter is baked into the wheel's
-`Requires-Dist`, and PyPI rejects any distribution whose metadata contains a
-direct-reference (`@ <url>`) requirement — which a local path to the sibling
-repo would be.
+`[project.optional-dependencies]`: an extra is baked into the wheel's
+`Requires-Dist` and rides along to every installer forever, and the tools that
+build and lint this package are not part of its interface. A group is a
+development-side concept and never ships.
 
 ---
 

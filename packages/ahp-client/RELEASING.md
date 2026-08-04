@@ -2,32 +2,27 @@
 
 The release itself is one action: pushing a `v*` tag. Everything after the tag
 is [`release.yml`](.github/workflows/release.yml) — rebuild, re-check, smoke
-the wheel against the real index, publish to PyPI via trusted publishing, then
-cut a GitHub release whose notes are the changelog section verbatim. Nothing in
-the pipeline needs a secret; there is no API token to rotate or leak.
+the wheel along the documented install path, then a GitHub release whose notes
+are the changelog section verbatim, with the built wheel and sdist attached.
+**The GitHub release is the whole release**: this family of packages is public
+on GitHub and deliberately not on PyPI. Nothing in the pipeline needs a
+secret, an environment, or any index-side setup.
 
-## Ordering, or why a release here can fail on purpose
+## How people install it
 
-This package pins `agent-host-protocol ~= 0.1.0`. The release workflow installs
-the built wheel **from PyPI's point of view** — real resolution, no sibling
-checkouts — so while the protocol package is unpublished, the release fails at
-the install step, before anything irreversible. That is the intended sequence,
-not an accident to work around:
+```bash
+pip install "agent-host-protocol @ git+https://github.com/jackhumbert/agent-host-protocol-py"
+pip install "agent-host-client[ws] @ git+https://github.com/jackhumbert/agent-host-client-py"
+```
 
-1. `agent-host-protocol` publishes first.
-2. `agent-host-server` and this client release against it, in either order.
-
-Do not "fix" a failing release by teaching `release.yml` about sibling
-checkouts; a wheel that cannot install from the index alone is not releasable.
-
-## One-time setup (before the first tag)
-
-1. On PyPI, create the `agent-host-client` project (or reserve it at first
-   publish) and add a **trusted publisher**: owner `jackhumbert`, repository
-   `agent-host-client-py`, workflow `release.yml`, environment `pypi`.
-2. In the GitHub repository settings, create the `pypi` environment. Optional
-   but worth it: require a reviewer on it, which turns "publish" into a
-   two-person action without touching the workflow.
+Pinned by tag (`…-py@v0.1.0`) when they want a release rather than `main`. The
+order matters and is the closest thing to a cross-repo constraint left: the
+`~=` pin on `agent-host-protocol` resolves against what is already installed,
+and pip cannot fetch that name from an index that does not carry it — skipping
+the first line fails with `No matching distribution found for
+agent-host-protocol`. The release workflow smokes exactly this two-line path,
+so a release cut while the protocol repository is unreachable or incompatible
+fails before the release exists.
 
 ## Cutting a release
 
@@ -40,20 +35,26 @@ checkouts; a wheel that cannot install from the index alone is not releasable.
    the only place it is written; drop the `.devN` suffix. The workflow refuses
    a tag that disagrees with `__version__`.
 3. **First release only:** flip the `Development Status` classifier in
-   `pyproject.toml` (Pre-Alpha → Alpha) and replace the README's "not
-   published" status banner with an install section — both say "not on PyPI"
-   today because it is true today, and shipping a release that still says so
-   contradicts `AGENTS.md`'s documentation rule.
+   `pyproject.toml` (Pre-Alpha → Alpha) and update the README's status banner —
+   it currently says the API is unstable and nothing is tagged, and shipping a
+   release that still says so contradicts `AGENTS.md`'s documentation rule.
 4. **Run the gate locally** — the same commands CI runs:
    `pytest && ruff check . && ruff format --check . && mypy && lint-imports`.
 5. **Commit, tag, push.** Conventional commit (`release: v0.1.0`), then
    `git tag v0.1.0 && git push origin main v0.1.0`.
-6. **Watch the workflow.** Build → `pypi` environment (approval, if you
-   configured a reviewer) → publish → GitHub release. Then prove the result the
-   way a user will: `pip install agent-host-client[ws]` into a scratch venv.
+6. **Watch the workflow, then verify the thing users get** — the two install
+   lines above, pinned to the new tag, in a scratch venv; then
+   `python -c "import agent_host_client; print(agent_host_client.__version__)"`.
 7. **Open the next cycle.** Bump `__version__` to the next `X.Y.Z.dev0` in a
    follow-up commit so a stray build from `main` can never impersonate a
    release.
+
+## If a release goes wrong after the tag
+
+Delete the GitHub release, delete the tag, fix, re-tag — nothing is spent
+forever, which is one of the reasons the release stops at GitHub. Prefer a
+patch bump anyway once anyone may plausibly have installed the tag: a moved
+tag is a lie to every environment that already resolved it.
 
 ## Versioning
 

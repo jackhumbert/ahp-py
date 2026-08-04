@@ -46,9 +46,9 @@ Repository = "https://github.com/jackhumbert/agent-host-client-py"
 Issues = "https://github.com/jackhumbert/agent-host-client-py/issues"
 Changelog = "https://github.com/jackhumbert/agent-host-client-py/blob/main/CHANGELOG.md"
 
-# PEP 735, not [project.optional-dependencies]: the latter is baked into the
-# wheel's Requires-Dist, and PyPI rejects metadata carrying a direct reference
-# (`name @ url`) -- which a local path to a sibling repo would be.
+# PEP 735, not [project.optional-dependencies]: an extra is baked into the
+# wheel's Requires-Dist and rides along to every installer forever, and the
+# tools that build and lint this package are not part of its interface.
 [dependency-groups]
 dev = [
   "pytest>=8",

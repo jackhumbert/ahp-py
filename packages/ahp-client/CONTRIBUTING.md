@@ -18,8 +18,9 @@ same PR.
 
 ## Setup
 
-The shared protocol layer is not on PyPI yet, so install it from a sibling
-checkout first:
+This family of packages installs from GitHub, deliberately not from PyPI; for
+development, the shared protocol layer comes from a sibling checkout, and the
+install order matters (its `~=` pin resolves against what is installed):
 
 ```bash
 git clone https://github.com/jackhumbert/agent-host-protocol-py ../agent-host-protocol-py

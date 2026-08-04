@@ -14,13 +14,10 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
-# `agent-host-protocol` is not on PyPI yet, so every job below checks out the
-# sibling repository to supply it. `GITHUB_TOKEN` is scoped to THIS repository
-# alone: while the siblings are private, those checkouts fail with "Repository
-# not found" no matter what else is correct. Set `SIBLING_REPO_TOKEN` to a
-# fine-grained PAT with read-only Contents on both siblings, or make them
-# public. The `||` falls back to the default token, which is exactly what works
-# in the public case -- so the expression is right in both worlds.
+# Every job below checks out the sibling protocol repository to supply the
+# dependency: the family is distributed from GitHub rather than an index, so
+# the siblings ARE the dependency source and the default token is enough --
+# they are public.
 
 jobs:
   check:
@@ -40,7 +37,6 @@ jobs:
         with:
           repository: jackhumbert/agent-host-protocol-py
           path: .protocol
-          token: ${{ secrets.SIBLING_REPO_TOKEN || github.token }}
 
       # `--group` is a pip 25.1 feature and setup-python installs whatever pip
       # the interpreter build bundled -- which for some patch releases predates
@@ -83,12 +79,10 @@ jobs:
         with:
           repository: jackhumbert/agent-host-protocol-py
           path: .protocol
-          token: ${{ secrets.SIBLING_REPO_TOKEN || github.token }}
       - uses: actions/checkout@v4
         with:
           repository: jackhumbert/agent-host-server-py
           path: .host
-          token: ${{ secrets.SIBLING_REPO_TOKEN || github.token }}
       - run: python -m pip install --upgrade pip
       - run: pip install -e .protocol
       - run: pip install -e .host
@@ -116,7 +110,6 @@ jobs:
         with:
           repository: jackhumbert/agent-host-protocol-py
           path: .protocol
-          token: ${{ secrets.SIBLING_REPO_TOKEN || github.token }}
       - run: pip install build twine
       # Both distributions: the sdist is what a distro packager builds from,
       # and it is where the packaging defects live that a wheel cannot show.
@@ -136,9 +129,9 @@ jobs:
       - name: Install the wheel into a clean venv
         run: |
           python -m venv /tmp/fresh
-          # The dependency first, from the sibling checkout, until it is on
-          # PyPI. `--no-deps` on the wheel so pip does not then try to resolve
-          # the same name from an index that does not have it yet.
+          # The dependency first, from the sibling checkout -- no index
+          # carries it, by design. `--no-deps` on the wheel so pip does not
+          # then try to resolve the same name from an index that lacks it.
           /tmp/fresh/bin/pip install ./.protocol
           # `websockets` by hand: it is the `[ws]` extra, and `--no-deps` does
           # not resolve extras. Without it the ws transport cannot be imported
@@ -161,7 +154,6 @@ jobs:
           repository: jackhumbert/agent-host-protocol-py
           ref: main
           path: .protocol
-          token: ${{ secrets.SIBLING_REPO_TOKEN || github.token }}
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"

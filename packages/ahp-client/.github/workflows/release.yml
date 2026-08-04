@@ -3,13 +3,15 @@ name: Release
 # Pushing a `v*` tag is the release action; everything after that is mechanical.
 # The full CI suite is not re-run here -- a tag is cut from a commit CI already
 # proved on main -- but the distributions are rebuilt, re-checked and smoked
-# from PyPI's own view of the world before anything is published.
+# before the release exists.
 #
-# Unlike ci.yml, nothing here checks out a sibling repository. The wheel is
-# installed with its real dependencies resolved from PyPI, which is exactly
-# what a user's `pip install` will do -- and it makes the release order
-# self-enforcing: while `agent-host-protocol` is not published, this workflow
-# fails at the install step, before anything irreversible.
+# There is no index upload on purpose: this family of packages is public on
+# GitHub and deliberately not on PyPI. The GitHub release -- notes from the
+# CHANGELOG, distributions attached -- is the whole release, and users install
+# with `pip install "agent-host-client[ws] @ git+https://…"`, protocol package
+# first. Unlike ci.yml, the smoke test here supplies that dependency from its
+# own repository rather than a sibling checkout, because that is the documented
+# install path and this is the last place to prove it.
 
 on:
   push:
@@ -29,8 +31,10 @@ jobs:
 
       - name: The tag names the version the package carries
         # `v0.1.0` pushed against a tree whose __init__ still says 0.1.0.dev0
-        # is the classic release-day mistake, and PyPI offers no second try at
-        # a version number.
+        # is the classic release-day mistake. A wrong tag is recoverable here --
+        # that is one reason the release stops at GitHub -- but every
+        # environment that resolved it keeps what it saw, so refuse loudly
+        # instead of relying on the recovery.
         run: |
           version=$(python -c "import re, pathlib; print(re.search(r'__version__ = \"(.+?)\"', pathlib.Path('src/agent_host_client/__init__.py').read_text()).group(1))")
           if [ "v${version}" != "${GITHUB_REF_NAME}" ]; then
@@ -50,11 +54,12 @@ jobs:
           fi
 
       - name: Install the wheel the way a user will
-        # Real resolution, real index. `[ws]` because the smoke test imports
-        # the transport subpackage, and because this is the install most
-        # embedders run.
+        # The dependency from its repository, then the wheel with `[ws]` --
+        # exactly the two documented install lines, with the wheel standing in
+        # for this repository's own git URL.
         run: |
           python -m venv /tmp/fresh
+          /tmp/fresh/bin/pip install "agent-host-protocol @ git+https://github.com/jackhumbert/agent-host-protocol-py"
           /tmp/fresh/bin/pip install "$(echo dist/*.whl)[ws]"
       - name: Smoke-test it from outside the checkout
         run: cd /tmp && /tmp/fresh/bin/python "$GITHUB_WORKSPACE/scripts/smoke_wheel.py"
@@ -65,26 +70,8 @@ jobs:
           path: dist/
           if-no-files-found: error
 
-  publish-pypi:
-    needs: build
-    runs-on: ubuntu-latest
-    # The `pypi` environment is where the trusted-publisher trust lives, and
-    # where a reviewer requirement can be added without touching this file.
-    environment:
-      name: pypi
-      url: https://pypi.org/p/agent-host-client
-    permissions:
-      # OIDC trusted publishing; no long-lived token exists anywhere.
-      id-token: write
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          name: dist
-          path: dist/
-      - uses: pypa/gh-action-pypi-publish@release/v1
-
   github-release:
-    needs: publish-pypi
+    needs: build
     runs-on: ubuntu-latest
     permissions:
       contents: write

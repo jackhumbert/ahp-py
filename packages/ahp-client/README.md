@@ -9,12 +9,30 @@ protocol for synchronized multi-client state over AI agent sessions.
 > Process.** The PyPI names `ahp` and `pyahp` belong to packages for the latter,
 > which is why this one is spelled out.
 
-> ### ⚠️ Status: working, pre-alpha. Not published.
+> ### ⚠️ Status: working, pre-alpha.
 >
 > M1–M8 of [`docs/plan.md`](docs/plan.md) §12 are done: the client core, all 27
 > commands, the state mirror with write-ahead reconciliation, the front door,
 > the per-host supervisor, the reverse direction, wire logs and `doctor`. A full
-> turn runs against the sibling Python host. Not on PyPI; the API is not stable.
+> turn runs against the sibling Python host. Distributed from this repository —
+> deliberately not on PyPI — and the API is not stable.
+
+## Install
+
+From GitHub, protocol package first — its `~=` pin resolves against what is
+already installed, and no index carries these names, so on its own the second
+line fails with `No matching distribution found for agent-host-protocol`:
+
+```bash
+pip install "agent-host-protocol @ git+https://github.com/jackhumbert/agent-host-protocol-py"
+pip install "agent-host-client[ws] @ git+https://github.com/jackhumbert/agent-host-client-py"
+```
+
+Pin a release by appending its tag (`…agent-host-client-py@v0.1.0`); each
+[GitHub release](https://github.com/jackhumbert/agent-host-client-py/releases)
+carries the built wheel and sdist. `[ws]` is the WebSocket transport — leave it
+off where a `Transport` comes from somewhere else, such as a notebook reading a
+wire log.
 
 ```python
 import asyncio
@@ -144,8 +162,7 @@ Every divergence from a reference client is an ADR in
 
 ## Development
 
-The shared layer is not published yet, so install it from the sibling checkout
-first:
+The same install-order rule as above, from editable sibling checkouts:
 
 ```bash
 python -m venv .venv

@@ -35,15 +35,22 @@ Under construction. `docs/plan.md` is the design and its §12 is the build order
 
 ### Added — release engineering
 
+- **The distribution model is settled: public on GitHub, deliberately not on
+  PyPI.** Installs are two git lines, protocol package first —
+  `pip install "agent-host-client[ws] @ git+https://…"` — pinned by tag for a
+  release, with the built wheel and sdist attached to each GitHub release.
+  There is no index upload, no trusted publisher, no `pypi` environment, and
+  no secret anywhere in the pipeline; CI checks out the public siblings with
+  the default token.
 - **The release is a tag push.** `release.yml`: rebuild, `twine check
   --strict`, a tag-must-equal-`__version__` guard, a smoke install that
-  resolves dependencies from PyPI alone — which makes the
-  protocol-package-first release order self-enforcing rather than remembered —
-  then trusted publishing (OIDC against the `pypi` environment; no API token
-  exists anywhere), and a GitHub release whose notes are the changelog section
-  verbatim, refused if the section is missing. `RELEASING.md` is the checklist,
-  including the one-time trusted-publisher setup and the next-`.dev0` bump that
-  keeps a stray build from `main` from impersonating a release.
+  supplies `agent-host-protocol` from its repository and then installs the
+  wheel with `[ws]` — exactly the documented install path, proven before the
+  release exists — and a GitHub release whose notes are the changelog section
+  verbatim, refused if the section is missing. `RELEASING.md` is the
+  checklist, including the next-`.dev0` bump that keeps a stray build from
+  `main` from impersonating a release, and the recovery story a moved index
+  could never offer: delete the release, delete the tag, fix, re-tag.
 - **The version is written once.** `pyproject.toml` declares `version` as
   dynamic and hatch reads `__version__` out of `__init__.py`. Previously the
   two spellings agreed by discipline, which is to say: until a release day.
