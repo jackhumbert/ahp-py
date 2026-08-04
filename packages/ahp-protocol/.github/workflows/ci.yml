@@ -23,6 +23,11 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
+      # `--group` is a pip 25.1 feature and setup-python installs whatever pip
+      # the interpreter build bundled -- which for some 3.11/3.12 patch releases
+      # predates it. Without this the install fails on "no such option".
+      - run: python -m pip install --upgrade pip
+
       # Dev requirements are a PEP 735 group, not an extra: an extra is baked
       # into the wheel's Requires-Dist and PyPI rejects direct references there.
       - run: pip install -e . && pip install --group dev
@@ -51,6 +56,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      - run: python -m pip install --upgrade pip
       - run: pip install -e . && pip install --group dev
       - run: python scripts/generate_tables.py
       - name: Fail if _generated.py is stale
@@ -87,22 +93,30 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        consumer: [agent-host-server-py, agent-host-client-py]
+        include:
+          # The consumers declare dev requirements differently -- the server as
+          # an extra, the client as a PEP 735 group -- and that difference is
+          # spelled out per consumer rather than hidden behind a `||` fallback,
+          # so that when one of them moves, this file has to move with it.
+          - consumer: agent-host-server-py
+            dev-install: pip install -e '.[dev]'
+          - consumer: agent-host-client-py
+            dev-install: pip install -e . && pip install --group dev
     steps:
       - uses: actions/checkout@v4
       - uses: actions/checkout@v4
         with:
           repository: jackhumbert/${{ matrix.consumer }}
           path: .consumer
+          token: ${{ secrets.SIBLING_REPO_TOKEN || github.token }}
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      - run: python -m pip install --upgrade pip
       # This package first, so the consumer's own pin resolves to the working
       # tree rather than to whatever is on PyPI.
       - run: pip install -e .
-      # Both consumers declare dev requirements as an extra today. If one moves
-      # to a PEP 735 group this needs to follow it -- deliberately not written
-      # as a `||` fallback, which would hide the change rather than surface it.
-      - run: pip install -e '.consumer[dev]'
+      - run: ${{ matrix.dev-install }}
+        working-directory: .consumer
       - run: pytest
         working-directory: .consumer
