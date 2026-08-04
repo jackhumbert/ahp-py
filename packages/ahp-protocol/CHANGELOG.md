@@ -8,6 +8,29 @@ the spec revision it targets.
 
 ## [Unreleased]
 
+### Fixed — CI and release mechanics
+
+- **`consumers-still-build` could not install either consumer.** Three defects
+  at once, none of which can fail locally: it checks out two *private*
+  repositories with a `GITHUB_TOKEN` scoped to this one; the client has since
+  moved its dev requirements to a PEP 735 group, so `.consumer[dev]` names an
+  extra that does not exist — which the job's own comment predicted and could
+  not detect; and `--group` is a pip 25.1 feature while `setup-python` installs
+  whatever pip the interpreter build bundled, so `check` and
+  `codegen-is-reproducible` were one runner image away from failing on "no such
+  option". The consumers' installs are now spelled out per consumer in the
+  matrix rather than hidden behind a `||`, so the next move breaks this file
+  loudly.
+
+- **PyPI was published to before the gates, not after.** `publish` needed only
+  `build`, and `release` needed `publish` — so the CHANGELOG gate, which lives
+  in `release` and exits non-zero when a version has no section of its own, ran
+  *after* the upload it exists to guard. PyPI does not let a version be
+  replaced, so a release nobody described would have been permanent the moment
+  that gate first fired. A GitHub release for a version that then fails to
+  upload is recoverable in a click, which is the direction the irreversibility
+  should point.
+
 ### Added
 
 - **`agent_host_protocol.conformance.schemas`** — the vendored JSON Schemas as
