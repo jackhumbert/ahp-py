@@ -189,7 +189,11 @@ distributions attached; everyone installs with
 `pip install "agent-host-protocol @ git+https://…"`. Three steps, in order:
 
 1. **Bump `__version__`** in `src/agent_host_protocol/__init__.py`. That is the
-   only place; `pyproject.toml` reads it from there.
+   only place; `pyproject.toml` reads it from there. While a version's tag is
+   still pending it stays the bare number (`0.1.0`), never `0.1.0.dev0`: both
+   consumers pin `~=0.1.0`, and a dev pre-release sorts *below* `0.1.0` and is
+   excluded by that specifier — flipping to dev breaks every documented
+   install, theirs and their users'.
 2. **Give the CHANGELOG a section with that exact heading** — `## [0.1.0] - …`,
    not `## [Unreleased]`. The release job extracts the section by heading and
    **fails when it finds nothing**, deliberately: a release nobody described is

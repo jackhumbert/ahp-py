@@ -51,9 +51,11 @@ Straight from this repository — the packages in this family are not on PyPI:
 pip install "agent-host-protocol @ git+https://github.com/jackhumbert/agent-host-protocol-py"
 ```
 
-Pin a release by appending its tag: `…agent-host-protocol-py@v0.1.0`. Each
+No release is tagged yet — **`v0.1.0` is pending** — so the line above
+installs `main`. Once the first tag lands, pin it by appending the tag
+(`…agent-host-protocol-py@v0.1.0`), and each
 [GitHub release](https://github.com/jackhumbert/agent-host-protocol-py/releases)
-also carries the built wheel and sdist it was cut from.
+will carry the built wheel and sdist it was cut from.
 
 Zero runtime dependencies, permanently. Anything this package required, both
 peers would inherit.
