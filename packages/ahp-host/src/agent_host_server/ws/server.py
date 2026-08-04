@@ -16,11 +16,12 @@ socket without a :class:`~agent_host_server.core.policy.Policy`.
 from __future__ import annotations
 
 import logging
+import re
 import secrets
 from collections.abc import AsyncIterator, Callable, Mapping
 from contextlib import asynccontextmanager
 from http import HTTPStatus
-from typing import Any
+from typing import Any, Final
 from urllib.parse import parse_qs, urlparse
 
 from agent_host_server.core.host import Host
@@ -36,6 +37,27 @@ _LOOPBACK = frozenset({"127.0.0.1", "::1", "localhost"})
 def _token_of(path: str) -> str | None:
     """VS Code's `?tkn=` from the upgrade path."""
     return parse_qs(urlparse(path).query).get("tkn", [None])[0]
+
+
+_TOKEN_IN_PATH: Final = re.compile(r"([?&]tkn=)[^&]*")
+_REDACTED_TOKEN: Final = r"\1<redacted>"
+
+
+def _safe_path(path: str) -> str:
+    """The upgrade path with the connection token taken out, for logging.
+
+    The token is a bearer credential carried in a query string, and the two
+    places that logged the path logged it verbatim -- one of them at WARNING,
+    which is on by default. Log files outlive the connection they describe:
+    they get shipped to aggregators, tailed over a shoulder and pasted into bug
+    reports. The wire log has redacted credentials since it existed; the
+    server's own logging had not.
+
+    Substituted rather than re-encoded, because the diagnostic value is in what
+    is left: `tkn=<redacted>` and a path with no `tkn` at all are the two cases
+    anyone reading a rejected handshake is trying to tell apart.
+    """
+    return _TOKEN_IN_PATH.sub(_REDACTED_TOKEN, path)
 
 
 def _headers_of(request: Any) -> Mapping[str, str] | None:
@@ -80,6 +102,7 @@ class WebSocketServer:
         self.port = port
         self.connection_token = connection_token
         #: The most recent handshake path, for diagnosing a refused client.
+        #: Token-redacted -- see :func:`_safe_path`.
         self.last_handshake_path: str | None = None
         self._server: Any = None
 
@@ -162,11 +185,16 @@ class WebSocketServer:
         connection including valid ones.
         """
         path = getattr(request, "path", "") or ""
-        _log.debug("handshake path=%r", path)
-        self.last_handshake_path = path
+        _log.debug("handshake path=%r", _safe_path(path))
+        # Redacted here too: it is a public attribute, so anything an embedder
+        # does with it -- print it, put it in a health endpoint -- is a second
+        # copy of the credential in a place nobody was thinking about it.
+        self.last_handshake_path = _safe_path(path)
         if self._authorize(path, _headers_of(request)):
             return None
-        _log.warning("rejecting handshake: bad or missing connection token (path=%r)", path)
+        _log.warning(
+            "rejecting handshake: bad or missing connection token (path=%r)", _safe_path(path)
+        )
         return connection.respond(HTTPStatus.FORBIDDEN, "invalid connection token\n")
 
     async def start(self) -> None:

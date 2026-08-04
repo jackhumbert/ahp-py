@@ -362,6 +362,17 @@ class TestClaimParsing:
         whose owner it merely resembles."""
         assert claim_from_wire({"kind": "client", "clientId": 123}) is None
 
+    def test_an_empty_id_is_not_a_client(self) -> None:
+        """It is schema-legal, it is what an unset config value looks like, and
+        it strands the terminal permanently.
+
+        `terminal/claimed` is itself claim-gated, so a holder no connection can
+        ever be leaves disposal as the only operation any peer has left. The
+        client's parser has always refused it; the host accepted it as a real
+        claim, so the two ends disagreed about whether the terminal was held.
+        """
+        assert claim_from_wire({"kind": "client", "clientId": ""}) is None
+
     def test_extra_fields_are_ignored(self) -> None:
         assert claim_from_wire({"kind": "client", "clientId": "a", "future": 1}) == (
             TerminalClientClaim("a")

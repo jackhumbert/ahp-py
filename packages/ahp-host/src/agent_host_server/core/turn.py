@@ -176,7 +176,6 @@ class ActionTurnSink:
         self._advertise_resource = advertise_resource
         self._markdown_part_id: str | None = None
         self._reasoning_part_id: str | None = None
-        self._activity: str | None = None
         self._segment: str | None = None
         #: Calls still in `streaming`, i.e. announced but never moved on by a
         #: `chat/toolCallReady`, and what was published about each of them. See
@@ -855,10 +854,21 @@ class ActionTurnSink:
         rather than being invented for the gaps. `activity` is omitted rather
         than nulled to clear it: the schema says "or `undefined` to clear", and
         the field is optional.
+
+        What is already published is read from the session's own state, not
+        from a cache on this sink. There are two writers -- this and
+        `SessionPublisher.activity_changed`, which a provider may call at any
+        time, including outside a turn -- and a per-sink cache only ever knew
+        about one of them. So a provider that set an activity itself left this
+        sink believing there was nothing to clear, and the `set_activity(None)`
+        in the turn's `finally` deduped itself away: the string outlived the
+        turn and the session sat idle claiming to be editing a file.
         """
-        if self._session_uri is None or activity == self._activity:
+        if self._session_uri is None:
             return
-        self._activity = activity
+        state = self._sequencer.state_of(self._session_uri)
+        if activity == (state.get("activity") if isinstance(state, Mapping) else None):
+            return
         action: dict[str, Any] = {"type": "session/activityChanged"}
         if activity is not None:
             action["activity"] = activity

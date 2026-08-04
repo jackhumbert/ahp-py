@@ -516,6 +516,25 @@ def _reducer_for_restored(uri: str, state: Mapping[str, Any], session_uri: str) 
     return "session"
 
 
+def _connection_identity(client_id: Any) -> str:
+    """The id a connection is known by, minted when the client supplied none.
+
+    The schema calls `clientId` a "Unique client identifier", and `""` is not
+    one -- it is what an unset config value looks like on the wire. Kept
+    verbatim it made every peer that sent it the *same* peer: `holds_claim`
+    handed them each other's terminals, the active-client gate let one assert
+    another's role, and the removal on disconnect skipped them all, leaving the
+    session advertising tools nobody could execute.
+
+    So an empty id is treated as the absence it is. A client cannot learn the
+    minted value -- `InitializeResult` has no field for it, which was already
+    true of the non-string case -- and that is why an `activeClient` claim on
+    `""` is then refused by the gate in `_create_session` rather than quietly
+    rewritten: the client asked to be an identity the host cannot give it.
+    """
+    return client_id if isinstance(client_id, str) and client_id else str(uuid.uuid4())
+
+
 def _active_clients(active_client: Any) -> list[Any]:
     """`createSession.activeClient` as the initial `activeClients` list.
 
@@ -526,9 +545,11 @@ def _active_clients(active_client: Any) -> list[Any]:
     """
     if not isinstance(active_client, Mapping):
         return []
-    if not isinstance(active_client.get("clientId"), str):
+    client_id = active_client.get("clientId")
+    if not isinstance(client_id, str) or not client_id:
         # Without a clientId the entry is unaddressable: nothing can update it,
-        # remove it, or be told to execute its tools.
+        # remove it, or be told to execute its tools. An empty one is no more
+        # addressable than a missing one -- see `_connection_identity`.
         return []
     entry = dict(active_client)
     if not isinstance(entry.get("tools"), list):
@@ -1415,8 +1436,7 @@ class Host:
             # local workaround this replaced existed only while it did not.
             raise errors.unsupported_protocol_version(self.supported_versions)
 
-        client_id = params.get("clientId")
-        connection.client_id = client_id if isinstance(client_id, str) else str(uuid.uuid4())
+        connection.client_id = _connection_identity(params.get("clientId"))
         connection.protocol_version = chosen
 
         if not self.policy.authorize_connection(connection.info):
@@ -4275,8 +4295,7 @@ class Host:
         # admission is the Policy's decision and not this method's.
         first_request = not connection.initialized
         if first_request:
-            client_id = params.get("clientId")
-            connection.client_id = client_id if isinstance(client_id, str) else str(uuid.uuid4())
+            connection.client_id = _connection_identity(params.get("clientId"))
             connection.protocol_version = self.supported_versions[0]
             if not self.policy.authorize_connection(connection.info):
                 self._audit("connection.refused", connection, allowed=False)

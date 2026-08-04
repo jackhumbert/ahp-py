@@ -1381,6 +1381,81 @@ class TestAnnotationsChannel:
         assert response["result"] == {}, "the channel outlived its session"
 
 
+class TestAnEmptyClientIdIsNotAnIdentity:
+    """`clientId` is "Unique client identifier"; `""` identifies nothing.
+
+    The host minted a UUID for a `clientId` that was not a string, and kept
+    one that was -- including the empty string. So every peer that sent `""`,
+    or that left an unset config value at its default, became the *same* peer:
+    `holds_claim` granted them each other's terminals, the active-client gate
+    let one assert another's role, and the removal on disconnect skipped them
+    all, leaving the session advertising tools nobody could execute.
+
+    `InitializeResult` carries no `clientId`, so a client can never learn the
+    minted one. That is already true for the non-string case and is the reason
+    an `activeClient` claim on `""` is now refused rather than quietly
+    rewritten: the client asked for an identity the host cannot give it.
+    """
+
+    async def test_two_connections_sending_an_empty_id_are_two_peers(
+        self, connected: tuple[Host, FakeClient]
+    ) -> None:
+        """Read back from the host's own origin stamp, which is the one thing
+        that reports the identity a connection actually got."""
+        host, first = connected
+        await _initialize(first, clientId="")
+
+        transport, server_transport = memory_pair()
+        serve = asyncio.create_task(host.serve(server_transport))
+        second = FakeClient(transport)
+        try:
+            await _initialize(second, clientId="")
+
+            stamps = []
+            for index, client in enumerate((first, second)):
+                uri = f"ahp-session:/{index}0000000-0000-0000-0000-000000000000"
+                await client.request("createSession", {"channel": uri})
+                await client.request("subscribe", {"channel": uri})
+                await client.notify(
+                    "dispatchAction",
+                    {
+                        "channel": uri,
+                        "clientSeq": 1,
+                        "action": {"type": "session/titleChanged", "title": "t"},
+                    },
+                )
+                await client.collect_until(
+                    lambda c=client, u=uri: any(  # type: ignore[misc]
+                        a["action"]["type"] == "session/titleChanged" for a in c.actions(u)
+                    )
+                )
+                echo = next(
+                    a for a in client.actions(uri) if a["action"]["type"] == "session/titleChanged"
+                )
+                stamps.append(echo["origin"]["clientId"])
+
+            assert all(stamps), f"an empty clientId was kept verbatim: {stamps}"
+            assert stamps[0] != stamps[1], "two connections were given one identity"
+        finally:
+            serve.cancel()
+
+    async def test_an_active_client_claim_on_an_empty_id_is_refused(
+        self, connected: tuple[Host, FakeClient]
+    ) -> None:
+        """The gate compares the claim with the connection's own id. Both were
+        `""`, so it passed -- and any later peer could assert the same role."""
+        _, client = connected
+        await _initialize(client, clientId="")
+        response = await client.request(
+            "createSession",
+            {
+                "channel": "ahp-session:/1e1e1e1e-1e1e-1e1e-1e1e-1e1e1e1e1e1e",
+                "activeClient": {"clientId": "", "displayName": "Nobody"},
+            },
+        )
+        assert response["error"]["code"] == -32602
+
+
 class TestChannelOwnership:
     """`createSession` may not take a channel the host already registered.
 

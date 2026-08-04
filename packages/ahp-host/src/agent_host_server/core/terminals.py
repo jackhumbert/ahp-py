@@ -194,7 +194,15 @@ def claim_from_wire(value: Any) -> TerminalClaim | None:
     kind = js.get(value, "kind")
     if js.strict_equal(kind, "client"):
         client_id = js.get(value, "clientId")
-        return TerminalClientClaim(client_id) if isinstance(client_id, str) else None
+        # Non-empty, and the client's own parser agrees. An empty id is
+        # schema-legal and strands the terminal permanently: `terminal/claimed`
+        # is itself claim-gated, so once the holder is a `clientId` no
+        # connection has, no peer can take it back and disposal is the only
+        # operation left. The host used to accept it as a real claim while
+        # every client rendered the same payload as *unclaimed*.
+        if not isinstance(client_id, str) or not client_id:
+            return None
+        return TerminalClientClaim(client_id)
     if js.strict_equal(kind, "session"):
         session = js.get(value, "session")
         if not isinstance(session, str):

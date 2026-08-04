@@ -22,6 +22,7 @@ from agent_host_protocol.types.protocol import SessionStatus
 from agent_host_server.core import Host, LoopbackSingleUserPolicy
 from agent_host_server.core.host import _promotion_rank, _title_from
 from agent_host_server.provider import EchoProvider
+from agent_host_server.provider.echo import EchoSession
 
 from .test_host_end_to_end import FakeClient
 
@@ -68,6 +69,34 @@ async def tooled() -> AsyncIterator[Host]:
     made = Host(
         EchoProvider(capabilities=_FORKABLE, confirm_tools=True), LoopbackSingleUserPolicy()
     )
+    try:
+        yield made
+    finally:
+        await made.aclose()
+
+
+class _SelfNarrating(EchoSession):
+    """Sets an activity itself, the way `writing-a-provider.md` says to.
+
+    Outside a tool call, so the sink never publishes the string and never sees
+    it published -- which is the whole point: the provider and the sink are two
+    writers of `session/activityChanged`.
+    """
+
+    async def send_user_message(self, message: Any, sink: Any) -> None:
+        await sink.text_delta("done")
+        assert self.context.publisher is not None
+        await self.context.publisher.activity_changed("Editing core.py")
+
+
+class _SelfNarratingProvider(EchoProvider):
+    async def create_session(self, context: Any) -> _SelfNarrating:
+        return _SelfNarrating(context)
+
+
+@pytest.fixture
+async def narrating() -> AsyncIterator[Host]:
+    made = Host(_SelfNarratingProvider(), LoopbackSingleUserPolicy())
     try:
         yield made
     finally:
@@ -432,6 +461,32 @@ class TestActivity:
         await _no_activity(tooled, client, uri)
 
         assert "activity" not in _state(tooled, uri)
+
+    async def test_a_provider_set_activity_is_retracted_too(self, narrating: Host) -> None:
+        """The one the sink never published, and so believed was not there.
+
+        `session/activityChanged` has two writers: this sink, and
+        `SessionPublisher.activity_changed`, which a provider may call at any
+        time -- the guide tells it to, in those words. The sink deduped against
+        a cache only it wrote, so a string it had not published looked like no
+        string at all, and the `set_activity(None)` in the turn's `finally`
+        deduped itself away. The session went idle still claiming to be editing
+        a file, and only a later tool call could ever clear it.
+        """
+        client = await _client(narrating)
+        uri = "echo:/a-4"
+        chat = await _session(narrating, client, uri)
+        await client.request("subscribe", {"channel": chat})
+
+        await _turn(client, chat, text="hello")
+        await client.collect_until(
+            lambda: _at(narrating, uri).get("activity") == "Editing core.py", timeout=10.0
+        )
+        assert _state(narrating, uri).get("activity") == "Editing core.py"
+
+        await _no_activity(narrating, client, uri)
+        assert "activity" not in _state(narrating, uri), "the activity outlived the turn"
+        assert _summary_status(narrating, uri) == SessionStatus.IDLE
 
 
 class TestUnread:
