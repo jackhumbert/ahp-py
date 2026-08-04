@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import importlib.util
 import inspect
 import json
 import re
@@ -36,6 +35,8 @@ from agent_host_client.client import actions
 from agent_host_client.client.commands import CommandsMixin
 from agent_host_client.client.errors import AhpClientError, InvalidArgument
 from agent_host_client.testing import FakeHost
+
+from ._sibling import requires_sibling_host
 
 CHAT = "ahp-chat://c/s"
 CHANGESET = "ahp-changeset:/one"
@@ -759,10 +760,7 @@ async def test_waiting_ends_on_an_error_status_too() -> None:
 # A marker, not a module-level `importorskip`: the latter runs at import time
 # and skipped every pure unit test below this line whenever the sibling was
 # absent -- ~50 offline tests silently not running.
-_needs_sibling = pytest.mark.skipif(
-    importlib.util.find_spec("agent_host_server") is None,
-    reason="the sibling host is not installed here",
-)
+_needs_sibling = requires_sibling_host
 
 
 @_needs_sibling

@@ -1,0 +1,152 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# `agent-host-protocol` is not on PyPI yet, so every job below checks out the
+# sibling repository to supply it. `GITHUB_TOKEN` is scoped to THIS repository
+# alone: while the siblings are private, those checkouts fail with "Repository
+# not found" no matter what else is correct. Set `SIBLING_REPO_TOKEN` to a
+# fine-grained PAT with read-only Contents on both siblings, or make them
+# public. The `||` falls back to the default token, which is exactly what works
+# in the public case -- so the expression is right in both worlds.
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - uses: actions/checkout@v4
+        with:
+          repository: jackhumbert/agent-host-protocol-py
+          path: .protocol
+          token: ${{ secrets.SIBLING_REPO_TOKEN || github.token }}
+
+      # `--group` is a pip 25.1 feature and setup-python installs whatever pip
+      # the interpreter build bundled -- which for some patch releases predates
+      # it. Without this the install fails on "no such option".
+      - run: python -m pip install --upgrade pip
+
+      # The pin in pyproject.toml is the real declaration; this only supplies
+      # it, from the working tree rather than from an index that lacks it.
+      - run: pip install -e .protocol
+      # Dev requirements are a PEP 735 group, not an extra.
+      - run: pip install -e '.[ws]' && pip install --group dev
+
+      - name: Lint
+        run: ruff check . && ruff format --check .
+
+      - name: Type-check
+        run: mypy
+
+      - name: Import contracts
+        run: lint-imports
+
+      # The sibling host is deliberately NOT installed here: this job is the
+      # client on its own, across three interpreters. The handful of tests that
+      # need the host skip, and the job below is where they are required to run.
+      - name: Test
+        run: pytest
+
+  against-the-sibling-host:
+    # The client is only interesting if it can talk to something. These tests
+    # drive the real `agent-host-server` in-process -- not independent evidence,
+    # since both peers share the protocol package's reducers, but the only thing
+    # that exercises a live handshake, a real pty and the claim arbitration.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/checkout@v4
+        with:
+          repository: jackhumbert/agent-host-protocol-py
+          path: .protocol
+          token: ${{ secrets.SIBLING_REPO_TOKEN || github.token }}
+      - uses: actions/checkout@v4
+        with:
+          repository: jackhumbert/agent-host-server-py
+          path: .host
+          token: ${{ secrets.SIBLING_REPO_TOKEN || github.token }}
+      - run: python -m pip install --upgrade pip
+      - run: pip install -e .protocol
+      - run: pip install -e .host
+      - run: pip install -e '.[ws]' && pip install --group dev
+      - name: Test with the host present
+        # Without this the sibling-gated tests skip themselves when the checkout
+        # or the install breaks, and a skipped suite looks exactly like a
+        # passing one. `tests/client/_sibling.py` turns that into a hard error.
+        env:
+          AHP_INTEROP_REQUIRED: "1"
+        run: pytest
+
+  wheel-is-installable:
+    # Everything above imports the source tree. A name in `__all__` that is
+    # never bound, a subpackage the backend did not collect, and an absent
+    # py.typed all pass from a checkout and fail from an install -- and all
+    # three have happened in this family of repositories.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/checkout@v4
+        with:
+          repository: jackhumbert/agent-host-protocol-py
+          path: .protocol
+          token: ${{ secrets.SIBLING_REPO_TOKEN || github.token }}
+      - run: pip install build
+      - run: python -m build --wheel --outdir dist
+      - name: Install the wheel into a clean venv
+        run: |
+          python -m venv /tmp/fresh
+          # The dependency first, from the sibling checkout, until it is on
+          # PyPI. `--no-deps` on the wheel so pip does not then try to resolve
+          # the same name from an index that does not have it yet.
+          /tmp/fresh/bin/pip install ./.protocol
+          # `websockets` by hand: it is the `[ws]` extra, and `--no-deps` does
+          # not resolve extras. Without it the ws transport cannot be imported
+          # and the smoke test cannot tell "not packaged" from "not installed".
+          /tmp/fresh/bin/pip install --no-deps "$(echo dist/*.whl)" websockets
+      - name: Smoke-test it from outside the checkout
+        run: cd /tmp && /tmp/fresh/bin/python "$GITHUB_WORKSPACE/scripts/smoke_wheel.py"
+
+  protocol-main:
+    # Non-blocking. The dependency is pinned `~=0.1.0`, so this repository is
+    # insulated from the protocol package's main branch -- which is exactly why
+    # drift there would otherwise be invisible until a release. This makes it
+    # visible the day it lands, without failing a PR for someone else's commit.
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: jackhumbert/agent-host-protocol-py
+          ref: main
+          path: .protocol
+          token: ${{ secrets.SIBLING_REPO_TOKEN || github.token }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install --upgrade pip
+      - run: pip install -e .protocol
+      - run: pip install -e '.[ws]' && pip install --group dev
+      - run: pytest

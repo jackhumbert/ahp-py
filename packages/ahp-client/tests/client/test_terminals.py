@@ -40,6 +40,8 @@ from agent_host_client.client.errors import AhpClientError, InvalidArgument, Req
 from agent_host_client.testing import FakeHost
 from agent_host_client.testing.fake_host import FakeRpcError
 
+from ._sibling import requires_sibling_pty
+
 #: A VS Code-shaped URI, deliberately: the scheme the shared layer's display-only
 #: `classify()` does NOT recognise. Every test here that applies an action proves
 #: the reducer was bound from the kind we passed, not sniffed from this string.
@@ -627,6 +629,7 @@ def test_a_rejected_envelope_never_decodes_as_the_action_it_names() -> None:
 # ── against the sibling host, with a real pty ────────────────────────────────
 
 
+@requires_sibling_pty
 async def test_a_real_terminal_against_the_sibling_host() -> None:
     """**Not independent evidence** -- both peers share the reducers -- but the
     claim is arbitrated by the host, and nothing else exercises that.
@@ -635,9 +638,6 @@ async def test_a_real_terminal_against_the_sibling_host() -> None:
     leaked pty outlives the test process, reparents to init, and keeps a shell
     running that nothing can name.
     """
-    pytest.importorskip("agent_host_server", reason="the sibling host is not installed here")
-    pytest.importorskip("agent_host_server.core.pty_backend", reason="POSIX pty only")
-
     from agent_host_protocol.transport import memory_pair
     from agent_host_server.core import Host, LoopbackSingleUserPolicy
     from agent_host_server.core.pty_backend import PtyTerminalBackend
@@ -704,6 +704,7 @@ async def _first_refusal(stream: Any) -> Any:
     raise AssertionError("the stream ended before the refusal arrived")
 
 
+@requires_sibling_pty
 async def test_the_bang_shorthand_runs_on_the_host_and_not_on_the_agent() -> None:
     """The affordance the surface is for, end to end.
 
@@ -711,9 +712,6 @@ async def test_the_bang_shorthand_runs_on_the_host_and_not_on_the_agent() -> Non
     reports it back as a tool call named `terminal`, which is why the client
     needs no second code path for a `!` turn -- only a way to know in advance.
     """
-    pytest.importorskip("agent_host_server", reason="the sibling host is not installed here")
-    pytest.importorskip("agent_host_server.core.pty_backend", reason="POSIX pty only")
-
     from agent_host_protocol.transport import memory_pair
     from agent_host_server.core import Host, LoopbackSingleUserPolicy
     from agent_host_server.core.pty_backend import PtyTerminalBackend

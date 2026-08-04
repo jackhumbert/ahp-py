@@ -4,15 +4,14 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import importlib.util
 from pathlib import Path
-
-import pytest
 
 from agent_host_client.client.client import AhpClient
 from agent_host_client.doctor import diagnose
 from agent_host_client.testing import FakeRpcError, echo_host
 from agent_host_client.wirelog.jsonl import WireLog, logged, read_jsonl
+
+from ._sibling import requires_sibling_host
 
 # ── wire logs ────────────────────────────────────────────────────────────────
 
@@ -221,10 +220,7 @@ async def test_every_finding_names_where_the_requirement_comes_from() -> None:
 # ── interop with the sibling host ────────────────────────────────────────────
 
 
-@pytest.mark.skipif(
-    importlib.util.find_spec("agent_host_server") is None,
-    reason="the sibling host is not installed in this environment",
-)
+@requires_sibling_host
 async def test_a_full_turn_against_the_sibling_python_host() -> None:
     """**Not independent evidence**, and the README says so in those words.
 
