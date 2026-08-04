@@ -183,7 +183,10 @@ A change is not finished until:
 ## Cutting a release
 
 Both consumers pin this package with `~=`, so a release here is a release for
-them. Four steps, in order:
+them. **This family of packages is public on GitHub and deliberately not on
+PyPI** — a release is a tag plus the GitHub release the workflow cuts from it,
+distributions attached; everyone installs with
+`pip install "agent-host-protocol @ git+https://…"`. Three steps, in order:
 
 1. **Bump `__version__`** in `src/agent_host_protocol/__init__.py`. That is the
    only place; `pyproject.toml` reads it from there.
@@ -191,28 +194,21 @@ them. Four steps, in order:
    not `## [Unreleased]`. The release job extracts the section by heading and
    **fails when it finds nothing**, deliberately: a release nobody described is
    worse than one that did not happen.
-3. **Tag `v<version>`.** The publish workflow refuses a tag that disagrees with
-   the packaged version, so the two cannot drift apart at the one moment it
-   would be permanent.
-4. That triggers a build, a wheel that is installed and *run* from outside the
-   checkout, then the GitHub release — and **only then** PyPI, via trusted
-   publishing (OIDC, so no token exists to leak).
+3. **Tag `v<version>`.** The release workflow (`release.yml`) refuses a tag
+   that disagrees with the packaged version, builds, installs and *runs* the
+   wheel from outside the checkout, and only then creates the GitHub release —
+   every check that can fail runs before the step people will link to. A
+   release that is wrong anyway is recoverable — delete it, fix, re-tag — which
+   is a property an index upload would not have: PyPI never lets a version be
+   replaced, and that permanence is part of why there is no PyPI step to
+   configure, and no publisher trust to set up.
 
-   That order is deliberate and it used to be the other way round. Every check
-   that can fail now runs before the one step that cannot be undone: PyPI does
-   not let a version be replaced, so an upload that precedes the CHANGELOG gate
-   is a release nobody described, permanently. A GitHub release created for a
-   version that then fails to upload is recoverable in a click.
-
-**One-time setup before the first tag**, which nobody can do from here: PyPI
-needs a *pending publisher* configured for the project — owner `jackhumbert`,
-repository `agent-host-protocol-py`, workflow `publish.yml`, environment
-`pypi`. Without it the publish step fails with an authentication error that
-looks like a workflow bug and is not.
-
-The order across the three repos is forced: this package must reach an index
-before `agent-host-server` or `agent-host-client` can be installed at all,
-because their dependency on it cannot resolve until it is there.
+There is no index-forced release order across the three repositories. There
+*is* a documented install order for users: this package before either
+consumer, because their `~=` pins resolve against what is already installed —
+pip cannot fetch this package from an index that does not carry it, and the
+error it prints ("No matching distribution found for agent-host-protocol")
+does not say "install the protocol package first". Both consumers' READMEs do.
 
 ## Absorbing a new upstream spec release
 

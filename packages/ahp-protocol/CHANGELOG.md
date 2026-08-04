@@ -8,6 +8,22 @@ the spec revision it targets.
 
 ## [Unreleased]
 
+### Changed — public on GitHub, deliberately not on PyPI
+
+- **The distribution model is settled: these repositories are public, and the
+  packages install from GitHub, not from an index.**
+  `pip install "agent-host-protocol @ git+https://…"`, with releases pinned by
+  tag and the built wheel and sdist attached to each GitHub release. The
+  `publish.yml` workflow is `release.yml` now: the same gates — tag must match
+  `__version__`, the wheel is installed and run from outside the checkout, the
+  CHANGELOG must describe the version — and then the GitHub release, with no
+  upload after it. The trusted-publisher setup, the `pypi` environment and the
+  index-driven "protocol must publish first" ordering all cease to exist; what
+  remains is a documented *install* order (this package before its consumers,
+  since their `~=` pins resolve against the installed environment). CI checks
+  out the sibling repositories without a token, which public repositories make
+  the ordinary case rather than the fallback.
+
 ### Fixed — CI and release mechanics
 
 - **`consumers-still-build` could not install either consumer.** Three defects

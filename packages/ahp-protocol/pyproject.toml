@@ -21,6 +21,7 @@ classifiers = [
   "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
   "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
   "Topic :: Software Development :: Libraries",
   "Typing :: Typed",
 ]
@@ -34,10 +35,10 @@ Repository = "https://github.com/jackhumbert/agent-host-protocol-py"
 Issues = "https://github.com/jackhumbert/agent-host-protocol-py/issues"
 
 # Dev requirements live in a PEP 735 dependency group, NOT in
-# [project.optional-dependencies]. The latter is baked into the wheel's
-# Requires-Dist metadata, and PyPI rejects any distribution whose metadata
-# carries a direct reference (`name @ url`) -- which a local path to a sibling
-# repo would be. A group is a lockfile-side concept and never ships.
+# [project.optional-dependencies]. An extra is baked into the wheel's
+# Requires-Dist metadata and rides along to every installer forever; the tools
+# that build and lint this package are not part of its interface. A group is a
+# lockfile-side concept and never ships.
 [dependency-groups]
 dev = [
   "pytest>=8",

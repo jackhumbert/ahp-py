@@ -10,11 +10,12 @@ wheel**.
 > a decision-making method with no relationship to this project — which is why
 > this one is spelled out.
 
-> ### ⚠️ Status: pre-alpha, not published.
+> ### ⚠️ Status: pre-alpha.
 >
 > Extracted from [`agent-host-server-py`][server], whose reducers this is. All
 > **247** upstream reducer fixtures, all **39** round-trip fixtures and the
-> 43-case JS-semantics oracle pass. Not on PyPI; the API is not stable.
+> 43-case JS-semantics oracle pass. Distributed from this repository —
+> deliberately not on PyPI — and the API is not stable.
 
 ## What this is for
 
@@ -44,9 +45,15 @@ implementations disagree about what a peer just sent.
 
 ## Install
 
+Straight from this repository — the packages in this family are not on PyPI:
+
 ```bash
-pip install agent-host-protocol
+pip install "agent-host-protocol @ git+https://github.com/jackhumbert/agent-host-protocol-py"
 ```
+
+Pin a release by appending its tag: `…agent-host-protocol-py@v0.1.0`. Each
+[GitHub release](https://github.com/jackhumbert/agent-host-protocol-py/releases)
+also carries the built wheel and sdist it was cut from.
 
 Zero runtime dependencies, permanently. Anything this package required, both
 peers would inherit.
