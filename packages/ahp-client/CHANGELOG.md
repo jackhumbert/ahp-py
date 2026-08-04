@@ -13,9 +13,10 @@ Under construction. `docs/plan.md` is the design and its §12 is the build order
 - **This repository had none.** 487 tests, `ruff`, `mypy` and `lint-imports`
   ran on no push and no pull request, while both sibling repositories checked
   *this* one out to prove they still worked with it. Four jobs now: `check`
-  across 3.11/3.12/3.13 with the client alone, `against-the-sibling-host` with
-  the real `agent-host-server` installed, `wheel-is-installable`, and a
-  non-blocking `protocol-main` that surfaces drift the `~=0.1.0` pin hides.
+  across 3.11 through 3.14 with the client alone, `against-the-sibling-host`
+  with the real `agent-host-server` installed, `distributions-are-installable`,
+  and a non-blocking `protocol-main` that surfaces drift the `~=0.1.0` pin
+  hides.
 
 - **`tests/client/_sibling.py`** — one decision about whether the sibling host
   is importable, made once. Four modules decided separately, two of them with a
@@ -31,6 +32,61 @@ Under construction. `docs/plan.md` is the design and its §12 is the build order
   `agent_host_client.ws` is the `[ws]` extra, so a `--no-deps` install cannot
   import it and the job has to supply `websockets` by hand — otherwise "not
   packaged" and "not installed" are the same red.
+
+### Added — release engineering
+
+- **The release is a tag push.** `release.yml`: rebuild, `twine check
+  --strict`, a tag-must-equal-`__version__` guard, a smoke install that
+  resolves dependencies from PyPI alone — which makes the
+  protocol-package-first release order self-enforcing rather than remembered —
+  then trusted publishing (OIDC against the `pypi` environment; no API token
+  exists anywhere), and a GitHub release whose notes are the changelog section
+  verbatim, refused if the section is missing. `RELEASING.md` is the checklist,
+  including the one-time trusted-publisher setup and the next-`.dev0` bump that
+  keeps a stray build from `main` from impersonating a release.
+- **The version is written once.** `pyproject.toml` declares `version` as
+  dynamic and hatch reads `__version__` out of `__init__.py`. Previously the
+  two spellings agreed by discipline, which is to say: until a release day.
+- **The sdist is an allowlist.** Hatchling's default file selection honours
+  only the root `.gitignore`, and both `.hypothesis/` and
+  `.import_linter_cache/` self-ignore with a *nested* one — invisible to
+  `git status`, shipped by the build. The sdist carried ~350 Hypothesis
+  example-database blobs, a linter cache and `.github/`. Named includes now,
+  both caches in the root `.gitignore`, and a CI tripwire so the next tool's
+  cache directory stays out too. `twine check` runs in CI on both
+  distributions, and the wheel job builds the sdist as well.
+- **`CONTRIBUTING.md`** — `docs/plan.md` §12 lists it in the M1 scaffold, and
+  it did not exist — plus **`SECURITY.md`** stating this library's actual
+  trust boundaries (the host is untrusted input; token redaction; the
+  `serve/` mount roots; approval gating). CI runs under a least-privilege
+  `permissions:` block, Dependabot watches actions and pip weekly, and the
+  matrix and classifiers gain Python 3.14. The `LICENSE` now names this
+  project's contributors; it named the sibling server's, verbatim, since the
+  file was first copied over.
+- **The empty `tests/unit/` package is gone** — scaffolding from a layout this
+  repository never adopted, collected by every tool and populated by nothing.
+
+### Fixed — a bounded close now releases its socket
+
+- **`WebSocketClientTransport.close()` could abandon its socket forever.** The
+  two-second bound was `asyncio.wait_for(self._socket.close(), 2.0)` — and
+  `wait_for` *cancels* the closing handshake it interrupts, after which
+  nothing ever aborts the TCP transport. The case that reaches it is real, not
+  theoretical: once the read loop stops receiving — the malformed-frame limit
+  is exactly such a stop — flow control pauses the reader, the peer's close
+  frame sits unreadable behind the backlog, and the handshake can never
+  complete. Every timed-out close leaked its socket, and a supervisor
+  reconnecting to a hung host paid one per cycle, each surfacing only as a
+  `ResourceWarning` at garbage-collection time attributed to nowhere useful.
+  `connect()` now passes `close_timeout` so `websockets` itself aborts the
+  transport after the budget, and the outer backstop — still there for
+  `from_socket()` connections that keep their own — ends in
+  `transport.abort()` instead of a suppressed timeout.
+- **Warnings are errors** (`filterwarnings = ["error"]`). The suite was one
+  warning away from clean, and that warning was the leak above; a policy that
+  only reports would have kept scrolling past it. The loopback tests' servers
+  now tear down with a close that *waits*, so a GC-time warning can no longer
+  be misattributed to whichever unlucky test the collector runs during.
 
 ### Added — typed APIs for the surfaces that had none
 
@@ -178,15 +234,6 @@ the reducer then refuses while the sender believes it succeeded.
   reconnect. Measured at 9.99s; now bounded, with a healthy close still
   completing in microseconds.
 
-### Changed
-
-- An action the client deliberately does not surface — mostly its own writes
-  echoing back — is now skipped rather than delivered as `UnknownEvent`.
-  `UnknownEvent` is forward compatibility, and conflating the two meant a
-  caller watching it for a version mismatch got one on every turn it approved
-  a tool or answered a question. A *rejected* echo still reaches the caller,
-  which is the case that matters.
-
 ### Added
 
 - **M1 — scaffold.** Packaging, `mypy --strict`, ruff, three import-linter
@@ -302,6 +349,12 @@ the reducer then refuses while the sender believes it succeeded.
 
 ### Changed
 
+- An action the client deliberately does not surface — mostly its own writes
+  echoing back — is now skipped rather than delivered as `UnknownEvent`.
+  `UnknownEvent` is forward compatibility, and conflating the two meant a
+  caller watching it for a version mismatch got one on every turn it approved
+  a tool or answered a question. A *rejected* echo still reaches the caller,
+  which is the case that matters.
 - **Subscriptions are refcounted in `HostRuntime`.** Two handles on one channel
   is the ordinary case — `open_chat`, `open_changeset` and `open_terminal` each
   mint a fresh object and none memoises — and an unrefcounted `unsubscribe` from

@@ -1,5 +1,7 @@
 # agent-host-client
 
+[![CI](https://github.com/jackhumbert/agent-host-client-py/actions/workflows/ci.yml/badge.svg)](https://github.com/jackhumbert/agent-host-client-py/actions/workflows/ci.yml)
+
 A Python **client** for the [Agent Host Protocol][ahp] (AHP) — Microsoft's
 protocol for synchronized multi-client state over AI agent sessions.
 
@@ -157,6 +159,11 @@ drive the sibling host guard themselves with `pytest.importorskip`, and the
 skip is module-wide — without the host installed, `test_m8.py` and
 `test_changesets.py` sit out entirely, their pure unit tests included. Install
 it (`pip install -e ../agent-host-server-py`) to run everything.
+
+[`CONTRIBUTING.md`](CONTRIBUTING.md) has the rest — the full gate, what a
+finished change includes, and the one rule that surprises people (protocol
+questions go upstream). Releases are documented in
+[`RELEASING.md`](RELEASING.md).
 
 ## On conformance evidence, honestly
 
