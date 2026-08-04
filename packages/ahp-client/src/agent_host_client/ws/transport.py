@@ -15,7 +15,6 @@ widening a contract the sibling host also implements.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -101,6 +100,7 @@ class WebSocketClientTransport:
                 subprotocols=list(subprotocols) if subprotocols else None,  # type: ignore[arg-type]
                 ssl=ssl,
                 open_timeout=open_timeout,
+                close_timeout=_CLOSE_TIMEOUT,
                 max_size=max_size,
             )
         except websockets.InvalidStatus as exc:
@@ -199,9 +199,25 @@ class WebSocketClientTransport:
         Past the deadline the socket is dropped rather than negotiated: the
         peer is not answering, and a polite close it will never read is worth
         nothing to either side.
+
+        The bound is enforced twice on purpose. Sockets this class opened carry
+        ``close_timeout`` from :meth:`connect`, so ``websockets`` itself aborts
+        the TCP transport when the handshake stalls -- the case that matters is
+        a peer whose close frame sits behind unread frames after this side
+        stopped receiving, where flow control pauses the reader and the ack can
+        never arrive. The outer deadline covers :meth:`from_socket` connections
+        that kept their own (default 10s) budget, and it must end in ``abort()``:
+        ``wait_for`` *cancels* the closing handshake it interrupts, and a
+        cancelled close releases nothing -- the socket would outlive every
+        owner and surface only as a ``ResourceWarning`` at collection time,
+        once per reconnect.
         """
-        with contextlib.suppress(TimeoutError):
-            await asyncio.wait_for(self._socket.close(), _CLOSE_TIMEOUT)
+        try:
+            # One second wider than `close_timeout`, so for our own sockets the
+            # library's orderly abort wins and this is purely the backstop.
+            await asyncio.wait_for(self._socket.close(), _CLOSE_TIMEOUT + 1.0)
+        except TimeoutError:
+            self._socket.transport.abort()
 
 
 def _with_token(url: str, token: str | None) -> str:
