@@ -31,11 +31,22 @@ your own compatibility check and then apply the wrong reducer branches. Any peer
 defaulting its offered list to the upstream constant has this bug; a test should
 assert the offered list is a subset of what the pin covers.
 
-For the record, and re-verified at this pin: there is no `spec/v0.8.0` tag
-upstream. `0.8.0` is unreleased `main`. The `spec/v0.7.0`→`HEAD` diff of
-`types/` is three files — a `ResourceReponsePart`→`ResourceResponsePart`
-spelling fix, an `index.ts` re-export refactor, and the registry version bump —
-and the action tables are identical at both points: 85 types, 38 dispatchable.
+For the record, re-verified **2026-08-13**: there is still no `spec/v0.8.0`
+tag upstream; `0.8.0` is unreleased `main`, now 24 commits past the pin. The
+`spec/v0.7.0`→`HEAD` diff is **no longer trivial** — an earlier check found
+three cosmetic files, but main now carries real 0.8.0-dev spec churn on the
+vendored surface: `channels-session/reducer.ts` (+43/−6), `state.ts`
+(+64/−12) and `actions.ts` (+14/−9), roughly ten `session/customization*`
+reducer fixtures reshaped, all five published JSON Schemas substantially
+rewritten, and a new `types/extension-prefix.test.ts`. The next pin bump is a
+real absorb under the procedure below — reducer diff read by hand, fixtures
+re-vendored, tables regenerated — not a rubber stamp. Watch for the
+`spec/v0.8.0` tag; nothing is actionable here until it exists.
+
+Separately, upstream published `@microsoft/agent-host-protocol@0.7.0` to npm
+on 2026-08-06, built from the same `spec/v0.7.0` tag this pin vendors — the
+first time the newest installable client and the vendored spec agree. The
+sibling host's interop suite drives it.
 
 ## What is vendored, and from where
 

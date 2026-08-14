@@ -8,6 +8,18 @@ the spec revision it targets.
 
 ## [Unreleased]
 
+### Documentation
+
+- **The upstream watch record in `UPSTREAM.md` is re-verified as of
+  2026-08-13, and its old claim retired.** `spec/v0.7.0` is still the newest
+  spec tag, so the pin stands — but the recorded "the tag→HEAD `types/` diff
+  is three cosmetic files" is no longer true: unreleased 0.8.0 work on
+  upstream `main` now touches the session-channel reducer, state and actions,
+  reshapes the `session/customization*` fixture family, and rewrites all five
+  published schemas. The record now says so, and says the next bump is a full
+  absorb. Also noted: `@microsoft/agent-host-protocol@0.7.0` reached npm on
+  2026-08-06, built from the same tag this pin vendors.
+
 ### Changed — public on GitHub, deliberately not on PyPI
 
 - **The distribution model is settled: these repositories are public, and the
