@@ -26,6 +26,39 @@ def test_a_frame_is_written_verbatim_with_the_inspector_sidecar(tmp_path: Path) 
     assert entry["_ahpLog"]["transport"] == "websocket"
 
 
+def test_the_sidecar_satisfies_the_inspectors_wire_meta_contract(tmp_path: Path) -> None:
+    """Mirror of ahp-inspector 1.5.3 `parser/src/wire-meta.ts::extractWireMeta`,
+    which is what "ahp-inspector-compatible" means and the shape this suite
+    previously never pinned.
+
+    The inspector requires `ts` to be a non-empty **string** that `Date.parse`
+    accepts, and rejects the whole sidecar otherwise -- its fixture pins
+    `{ts: 42} -> null`. This log wrote epoch-millisecond integers for months
+    and every assertion here stayed green, because `dir` was asserted and `ts`
+    never was: the inspector then discarded the real wire timestamps *and* the
+    direction marker in the same rejection, and its structural fallback
+    classifies any request as c2s -- inverting logged host->client requests,
+    the reverse direction this client is unusual in serving.
+    """
+    from datetime import datetime
+
+    log = WireLog(tmp_path / "ahp-test.jsonl")
+    log.record("s2c", {"jsonrpc": "2.0", "id": 7, "method": "resourceRead", "params": {}})
+    sidecar = next(iter(read_jsonl(log.path)))["_ahpLog"]
+
+    # `typeof ts === "string"` and non-empty, or extractWireMeta returns null.
+    assert isinstance(sidecar["ts"], str)
+    assert sidecar["ts"]
+    # `Date.parse(ts)` must be finite; the interchange subset both it and
+    # `fromisoformat` accept is ISO 8601 with an explicit UTC offset. The
+    # sibling host writes the identical shape, so the two logs interleave.
+    parsed = datetime.fromisoformat(sidecar["ts"])
+    assert parsed.tzinfo is not None
+    assert sidecar["ts"].endswith("Z")
+    # `dir` must be exactly one of the two accepted spellings.
+    assert sidecar["dir"] in {"c2s", "s2c"}
+
+
 def test_credentials_never_reach_the_file(tmp_path: Path) -> None:
     """A flag to log them verbatim is a flag somebody eventually sets on a
     machine they do not control. The client is the party that sends

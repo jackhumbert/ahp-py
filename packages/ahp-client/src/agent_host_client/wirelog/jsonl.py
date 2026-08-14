@@ -5,6 +5,17 @@ sidecar. The inspector discovers files matching
 ``/^(agenthost|agent-host|ahp).*\\.jsonl$/i`` with no arguments, so the default
 filename is chosen to be found.
 
+"Compatible" is a specific contract, verified against ahp-inspector 1.5.3's
+``parser/src/wire-meta.ts``: ``_ahpLog.ts`` must be a non-empty **string**
+``Date.parse`` accepts, and ``dir`` must be ``"c2s"`` or ``"s2c"``. The
+inspector rejects the whole sidecar otherwise -- its own test fixture pins
+``{ts: 42} -> null`` -- and then falls back to ingest time and *structural*
+direction inference, which classifies any request as client-sent and any
+response as host-sent. That fallback inverts exactly the reverse-direction
+traffic this client is unusual in having, so the sidecar surviving is not
+cosmetic. The format here mirrors the sibling host's ``core/wirelog.py``
+byte for byte.
+
 **Credentials are redacted, with no opt-out.** A flag to log them verbatim is a
 flag somebody eventually sets on a machine they do not control -- and the client
 is the party that sends ``authenticate{token}``, so this matters more on this
@@ -16,8 +27,8 @@ from __future__ import annotations
 
 import json
 import os
-import time
 from collections.abc import Iterator, Mapping
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Final, Literal
 
@@ -75,7 +86,11 @@ class WireLog:
     def record(self, direction: Literal["c2s", "s2c"], message: Mapping[str, Any]) -> None:
         entry: JsonObject = dict(_redact(message))
         entry["_ahpLog"] = {
-            "ts": int(time.time() * 1000),
+            # A string, never epoch milliseconds: the inspector's
+            # `extractWireMeta` requires `typeof ts === "string"` and rejects
+            # the whole sidecar -- direction included -- for a number. Same
+            # recipe as the sibling host, so the two logs interleave.
+            "ts": datetime.now(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z"),
             "dir": direction,
             "connectionId": self._connection_id,
             "transport": self._transport,

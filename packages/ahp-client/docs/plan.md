@@ -1331,10 +1331,14 @@ expected. Rust and Go hid their in-memory transports and their users complained;
 Swift and TypeScript shipped theirs.
 
 **Wire logs.** ahp-inspector-compatible JSONL — the raw JSON-RPC object plus a
-root-level `_ahpLog` sidecar `{ts, dir, connectionId, transport, byteLength}`,
-one compact UTF-8 line each, default filename matching the inspector's
-`/^(agenthost|agent-host|ahp).*\.jsonl$/i` discovery. Credential redaction is
-inherited from the sibling's `core/wirelog.py`, with no opt-out.
+root-level `_ahpLog` sidecar `{ts, dir, connectionId, transport}`, one compact
+UTF-8 line each, default filename matching the inspector's
+`/^(agenthost|agent-host|ahp).*\.jsonl$/i` discovery. `ts` is an ISO-8601 UTC
+string, never epoch milliseconds: the inspector's `extractWireMeta` (verified
+at 1.5.3) rejects a non-string `ts` and takes the `dir` marker down with it,
+after which its structural fallback inverts reverse-direction frames. Format
+and credential redaction are inherited from the sibling's `core/wirelog.py`,
+with no opt-out on the redaction.
 **`ahp replay <file.jsonl>` reconstructs state through the *same* `StateMirror`**,
 so the debugger and the client provably cannot drift — and the reader stops
 being dead weight.

@@ -73,6 +73,25 @@ Under construction. `docs/plan.md` is the design and its §12 is the build order
 - **The empty `tests/unit/` package is gone** — scaffolding from a layout this
   repository never adopted, collected by every tool and populated by nothing.
 
+### Fixed — "ahp-inspector-compatible" is now verified, and was false
+
+- **The wire log's `_ahpLog.ts` was epoch milliseconds; the inspector requires
+  an ISO string.** ahp-inspector 1.5.3's `extractWireMeta` demands
+  `typeof ts === "string"` with `Date.parse` accepting it — its own fixture
+  pins `{ts: 42} → null` — and a rejected sidecar takes the `dir` marker down
+  with it. Every frame this client ever logged therefore rendered at
+  *ingest* time rather than wire time, and direction fell back to structural
+  inference, which classifies any request as client-sent and any response as
+  host-sent — inverting exactly the logged host→client traffic this client is
+  unusual in serving. The suite never noticed because `dir`, `connectionId`
+  and `transport` were asserted and `ts` never was. The sidecar now mirrors
+  the sibling host's `core/wirelog.py` byte for byte, a regression test pins
+  the inspector's acceptance rule, and the claim is verified the honest way:
+  the doctor's probe logged over a real transport and every frame run through
+  the inspector's **own** `wire-meta.ts` — 10/10 accepted, directions
+  preserved, with the structural fallback shown misclassifying the
+  reverse-direction pair the sidecar saves.
+
 ### Fixed — a bounded close now releases its socket
 
 - **`WebSocketClientTransport.close()` could abandon its socket forever.** The
