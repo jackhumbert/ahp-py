@@ -26,18 +26,22 @@ be able to arrive as a patch upgrade.
 | Working revision read during research | `bd27d354b39c1b2090fbcc6db392d406b743280c` (2026-07-31) |
 | **Protocol version negotiated on the wire** | **`0.7.0`** (we offer `0.7.0, 0.6.0`) |
 | Conformance corpus | with the dependency, vendored there from `spec/v0.7.0` → `types/test-cases/` |
-| Reference client for interop tests | `@microsoft/agent-host-protocol@0.6.0` (npm) |
+| Reference client for interop tests | `@microsoft/agent-host-protocol@0.7.0` (npm, published 2026-08-06) |
 
-### The interop client trails the wire version
+### The interop client no longer trails the wire version
 
-An earlier revision of this section argued that the corpus tag and the wire
-version must differ — `spec/v0.7.0` for the fixtures, `0.6.0` on the wire.
-That premise is gone: this host prefers **`0.7.0`**, the same revision the
-corpus is pinned to. What survives of the old argument is the interop client:
-the newest TypeScript client on **npm** is `0.6.0` (`docs/research.md` §1),
-so `tests/interop/` drives `@microsoft/agent-host-protocol@0.6.0` and that
-run negotiates `0.6.0`. Keeping `0.6.0` in the offered list is what keeps the
-host testable against a client somebody can actually install.
+Two earlier revisions of this section successively lost their premise. The
+first argued the corpus tag and the wire version must differ — `spec/v0.7.0`
+for the fixtures, `0.6.0` on the wire. The second recorded what survived:
+this host prefers **`0.7.0`**, but npm's newest client was `0.6.0`
+(`docs/research.md` §1, checked 2026-08-01), so the interop run trailed the
+preferred version by one MINOR. That gap closed on 2026-08-06 when upstream
+published `@microsoft/agent-host-protocol@0.7.0` — built from the same
+`spec/v0.7.0` tag the corpus is vendored from — so `tests/interop/` now
+drives `0.7.0` and that run negotiates `0.7.0`: the fixtures, the wire, and
+the interop counterparty finally agree on one revision. `0.6.0` stays in the
+offered list for peers built against the previous client, and the negotiation
+tests still cover the downgrade path.
 
 ## Vendoring moved out
 

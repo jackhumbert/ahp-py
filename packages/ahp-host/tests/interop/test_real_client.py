@@ -2,7 +2,7 @@
 
 Skipped unless Node and the published client are available:
 
-    npm i --no-save @microsoft/agent-host-protocol@0.6.0 ws
+    npm i --no-save @microsoft/agent-host-protocol@0.7.0 ws
 
 This is the only test in the suite that needs anything outside Python. It is
 worth the cost: the reference client validates almost nothing, so nothing else
@@ -31,7 +31,7 @@ ROOT = Path(__file__).resolve().parents[2]
 DRIVER = Path(__file__).parent / "driver.mjs"
 
 
-SETUP = "needs node + `npm i --no-save @microsoft/agent-host-protocol@0.6.0 ws`"
+SETUP = "needs node + `npm i --no-save @microsoft/agent-host-protocol@0.7.0 ws`"
 
 
 def _client_available() -> bool:
