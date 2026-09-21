@@ -1,0 +1,147 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "agent-host-broker"
+# The version lives in `src/agent_host_broker/__init__.py` as `__version__` and
+# nowhere else; hatch reads it from there. Two spellings of a version agree
+# right up until the release where somebody bumps one of them.
+dynamic = ["version"]
+description = "A federated broker for the Agent Host Protocol (AHP): one AHP host for the surfaces, one AHP client per node."
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.11"
+authors = [{ name = "agent-host-broker contributors" }]
+keywords = ["ahp", "agent-host-protocol", "agent", "broker", "federation", "json-rpc", "websocket"]
+classifiers = [
+  "Development Status :: 2 - Pre-Alpha",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+  "Topic :: Software Development :: Libraries",
+  "Typing :: Typed",
+]
+
+# Three runtime dependencies, and every one of them is the rest of this family.
+# `agent-host-protocol` is the shared wire layer; `agent-host-server` supplies
+# the broker's host edge (what the surfaces dial); `agent-host-client` supplies
+# the broker's client edge (what dials each node). The broker is the only
+# component in the family that stands on both sides at once.
+#
+# The siblings are distributed from GitHub, not from an index, so CI supplies
+# them from sibling checkouts. The pins are the protocol-version statement:
+# the spec lands breaking changes in MINOR bumps, so a looser pin would let a
+# spec break arrive as a patch upgrade.
+dependencies = [
+  "agent-host-protocol~=0.1.0",
+  "agent-host-server~=0.1.0",
+  "agent-host-client~=0.1.0",
+]
+
+[project.optional-dependencies]
+# Transports are implementations of the protocol package's transport ABC; a
+# consumer embedding only the routing core should not pull a socket stack.
+ws = ["websockets>=13"]
+
+# PEP 735, not [project.optional-dependencies]: the tools that build and lint
+# this package are not part of its interface.
+[dependency-groups]
+dev = [
+  "pytest>=8",
+  "pytest-asyncio>=0.24",
+  "mypy>=1.11",
+  "ruff>=0.6",
+  "import-linter>=2",
+  "websockets>=13",
+]
+
+[project.urls]
+Homepage = "https://github.com/jackhumbert/agent-host-broker-py"
+Repository = "https://github.com/jackhumbert/agent-host-broker-py"
+Issues = "https://github.com/jackhumbert/agent-host-broker-py/issues"
+Changelog = "https://github.com/jackhumbert/agent-host-broker-py/blob/main/CHANGELOG.md"
+
+[tool.hatch.version]
+path = "src/agent_host_broker/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/agent_host_broker"]
+
+# An allowlist, not an ignore list. Hatchling's default sdist selection honours
+# only the ROOT .gitignore, and the tool caches that self-ignore with a nested
+# one look clean to git and ship anyway.
+[tool.hatch.build.targets.sdist]
+include = [
+  "/src",
+  "/tests",
+  "/docs",
+  "/scripts",
+  "/AGENTS.md",
+  "/CHANGELOG.md",
+  "/CONTRIBUTING.md",
+  "/LICENSE",
+  "/README.md",
+  "/SECURITY.md",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q --strict-markers"
+asyncio_mode = "auto"
+# Every warning is a failure; the sibling client earned this policy with a real
+# socket leak that a reporting-only policy left scrolling past forever.
+filterwarnings = ["error"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+files = ["src", "tests", "scripts"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N", "UP", "B", "A", "C4", "PT", "RET", "SIM", "TID", "RUF"]
+ignore = [
+  # The protocol's own field names are camelCase; mirroring them is correct.
+  "N815",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["RUF059"]
+
+[tool.importlinter]
+root_package = "agent_host_broker"
+include_external_packages = true
+
+# Parenthesised layers are optional, so the contract holds while the upper
+# layers are still being built out (docs/plan.md §7).
+[[tool.importlinter.contracts]]
+name = "Layered: the routing core sits below its edges"
+type = "layers"
+# `core` defines the interfaces (a node connection, a session route, the
+# aggregated namespace) and `registry` supplies the node records and per-node
+# admission decisions the core consults. `relay` and `ws` sit above: the relay
+# carries AHP frames verbatim for nodes that cannot be dialed, and `ws`
+# supplies concrete transports, but neither is something the core imports.
+layers = [
+  "(agent_host_broker.relay)",
+  "(agent_host_broker.ws)",
+  "agent_host_broker.core",
+  "agent_host_broker.registry",
+]
+
+# The registry is a directory with admission logic, not a network component.
+# A registry import reaching for a transport means routing policy leaked into
+# the thing that should only answer "may user X start on node Y".
+[[tool.importlinter.contracts]]
+name = "the registry stays offline"
+type = "forbidden"
+source_modules = ["agent_host_broker.registry"]
+forbidden_modules = ["agent_host_broker.ws", "agent_host_broker.relay", "websockets"]

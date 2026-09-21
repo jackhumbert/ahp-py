@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+# Self-ignores with a nested .gitignore, which fools git and nothing else --
+# hatchling's sdist selection reads only this file.
+.hypothesis/
+.import_linter_cache/
+.coverage
+htmlcov/
+
+# Editors / OS
+.vscode/
+.DS_Store
+.idea/
+*.swp
