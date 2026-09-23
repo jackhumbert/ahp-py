@@ -83,6 +83,3 @@ def test_the_first_owner_keeps_a_channel() -> None:
     owners.claim("b", {"x", "y"})
     assert owners.owner_of("x") == "a"
     assert owners.owner_of("y") == "b"
-    owners.forget_node("a")
-    assert owners.owner_of("x") is None
-    assert owners.owner_of("y") == "b"

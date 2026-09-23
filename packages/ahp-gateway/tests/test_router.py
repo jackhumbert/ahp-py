@@ -30,6 +30,7 @@ class ScriptedLink:
         self.replies: asyncio.Queue[asyncio.Future[Any]] = asyncio.Queue()
         self.fail_close = fail_close
         self.closed = False
+        self.notified: list[tuple[str, Mapping[str, Any]]] = []
 
     @property
     def node_id(self) -> str:
@@ -45,7 +46,7 @@ class ScriptedLink:
         return await reply
 
     def notify(self, method: str, params: Mapping[str, Any]) -> None:
-        pass
+        self.notified.append((method, dict(params)))
 
     async def frames(self) -> AsyncIterator[dict[str, Any]]:
         return
@@ -176,3 +177,33 @@ async def test_a_node_repeating_an_empty_cursor_ends_its_own_listing() -> None:
     page, positions = await merge_pages(["stuck", "ok"], {}, 10, fetch)
     assert [item["resource"] for item in page] == ["ok:/1"]
     assert not has_more(positions)
+
+
+async def test_what_the_owner_streams_while_being_probed_is_not_lost() -> None:
+    # A reconnect's subscribe for a channel no node has named yet: the broker
+    # asks each node in turn. An action the owner streams while the probe is
+    # still asking must reach the surface behind the snapshot, not vanish.
+    conn = connection()
+    owner, other = ScriptedLink("a"), ScriptedLink("b")
+    node_a = attach(conn, owner, set())
+    attach(conn, other, set())
+    after: list[dict[str, Any]] = []
+    probing = asyncio.create_task(conn._subscribe_channel("ch", after))
+
+    reply_a = await owner.replies.get()
+    reply_a.set_result(snapshot("ch", 0))
+    reply_b = await other.replies.get()
+    # The owner's subscription is live now, and it streams before the probe
+    # has heard from every node.
+    conn._relay(node_a, action("ch", 1))
+    assert drain(conn) == [], "held until the reply, not sent ahead of it"
+    reply_b.set_result({})
+    result = await probing
+
+    assert result is not None
+    assert result["resource"] == "ch"
+    assert [f["params"]["serverSeq"] for f in after] == [1]
+    assert conn.owners.owner_of("ch") == "a"
+    # Only the node that does not have the channel is unsubscribed.
+    assert owner.notified == []
+    assert other.notified == [("unsubscribe", {"channel": "ch"})]

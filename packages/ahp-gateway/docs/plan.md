@@ -173,14 +173,39 @@ when every node agrees on them (invariant 4).
 node's own cursor and offset, so it is stateless and exact across page
 boundaries, including when a node returns short pages.
 
+**Reconnect: always the snapshot arm.** The broker keeps no replay log and
+needs none. A `reconnect` is authenticated and admitted exactly like an
+`initialize`, links are opened to every admitted node, and every channel in
+`subscriptions` is re-read from its node. A channel no node has is left out,
+which is how the snapshot arm reports it gone. The new connection's counter
+starts at the surface's `lastSeenServerSeq`, because the reply carries no
+`serverSeq` of its own. A reconnecting connection has never seen which node
+owns which channel, so a channel no node has named yet is found by asking
+each node for it: a node that does not have a channel answers `subscribe`
+with no snapshot, which is plain AHP. The broker process therefore keeps no
+state, and a surface can reconnect to a different broker instance.
+
+**Node recovery: redial, then bounce.** A node whose link drops, or that was
+unreachable at the handshake, is redialed in the background with doubling
+backoff (`Broker(redial_backoff=(first, ceiling))`). While it is gone its
+agents leave the merged root and requests for its channels are refused as
+"not connected", never rerouted to another node. When it answers again, the
+broker closes the surface's connection on purpose. The surface's own
+reconnect then re-reads every channel, that node's included, from fresh
+snapshots. AHP has no server-pushed re-snapshot, so this is the only way to
+repair a surface's state without inventing wire semantics. The cost is a
+reconnect on every node for that surface, and any request in flight at that
+moment fails. The stock client prunes any subscription a snapshot reply
+leaves out, which is why the bounce waits for the node to come back instead
+of happening at the moment of loss.
+
 **Not yet:**
 
-- `reconnect`: refused with `-32008` ("initialize instead"), because the
-  broker keeps no replay log.
-- A node dropping mid-connection: its agents leave the merged root, but its
-  sessions stay in the surface's cache until the surface re-lists.
 - `authenticate` and the other root-level commands when more than one node
   could answer them: refused as ambiguous.
+- Clients that never send `reconnect` (a surface that only ever
+  `initialize`s) resync after a bounce through `initialize` instead; nothing
+  is lost, but that client re-subscribes on its own.
 
 **Gaps that belong in the siblings:**
 

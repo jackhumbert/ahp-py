@@ -30,8 +30,10 @@ _WINDOW: Final = 4096
 class BrokerClock:
     """The broker's own counter, shared by every link of one surface connection."""
 
-    def __init__(self) -> None:
-        self._seq = 0
+    def __init__(self, start: int = 0) -> None:
+        # A reconnecting surface has already seen `start`; a counter that began
+        # again at zero would make every new action look older than its mirror.
+        self._seq = start
 
     @property
     def current(self) -> int:

@@ -20,9 +20,14 @@ as their authority (`agent_host_broker.core.uris`). No private method, header
 or action type crosses either edge: broker<->node is plain AHP (invariant 3),
 and a surface cannot tell the endpoint is not a single host (invariant 1).
 
-Not yet: `reconnect` (refused with "initialize instead" - the broker keeps no
-replay log), and replaying a node that drops mid-connection (its agents leave
-the merged root; its sessions stay in the surface's cache until it re-lists).
+**Reconnect and recovery.** `reconnect` is always answered with the snapshot
+arm: the broker keeps no replay log, but it can re-dial every node and hand
+back a fresh snapshot of every channel, which is exact. A node that drops (or
+was down at connect time) is redialed in the background; when it answers, the
+broker closes the surface connection on purpose, and the surface's own
+reconnect brings everything - that node included - back from fresh snapshots.
+AHP has no server-pushed re-snapshot, so this is the one way to repair a
+surface's state without inventing wire semantics.
 """
 
 from __future__ import annotations
@@ -87,8 +92,6 @@ that proxy - the embedder's guarantee to make, as with `agent_host_server`.
 
 #: `-32009`, the code the sibling host uses for a policy refusal.
 _REFUSED: Final = -32009
-#: `-32008`, which tells a resuming client to `initialize` instead.
-_INITIALIZE_INSTEAD: Final = -32008
 
 #: Params whose value is a channel some node owns, in routing precedence.
 _CHANNEL_KEYS: Final = ("channel", "resource", "session", "sessionResource", "chat")
@@ -121,6 +124,7 @@ class Broker:
         info: BrokerInfo | None = None,
         supported_versions: Sequence[str] = DEFAULT_SUPPORTED_VERSIONS,
         connect_timeout: float = 10.0,
+        redial_backoff: tuple[float, float] = (0.5, 30.0),
     ) -> None:
         self.directory = directory
         self.connector = connector
@@ -128,6 +132,8 @@ class Broker:
         self.info = info or BrokerInfo()
         self.supported_versions = tuple(supported_versions)
         self.connect_timeout = connect_timeout
+        #: (first delay, ceiling) in seconds, doubling, for redialing a node.
+        self.redial_backoff = redial_backoff
 
     async def serve(
         self,
@@ -172,7 +178,14 @@ class _SurfaceConnection:
         self.headers = headers
         self.token = token
         self.initialized = False
+        self.closing = False
         self.nodes: dict[str, _Node] = {}
+        #: Set by the handshake: who this connection is, and what it may use.
+        self.principal: Principal | None = None
+        self.client_id = ""
+        self.version = ""
+        self.client_info: Mapping[str, Any] | None = None
+        self.records: dict[str, NodeRecord] = {}
         self.clock = BrokerClock()
         self.owners = ChannelOwners()
         self.root: dict[str, Any] = merge_root([])
@@ -216,6 +229,7 @@ class _SurfaceConnection:
         finally:
             # Detached first, so the pumps this cancels do not report their
             # own ends as nodes dropping out of a fleet that is shutting down.
+            self.closing = True
             nodes, self.nodes = list(self.nodes.values()), {}
             for task in list(self.tasks):
                 task.cancel()
@@ -272,7 +286,9 @@ class _SurfaceConnection:
         # so a channel it has finished could stream actions ahead of the reply
         # that carries its snapshot. Everything sent meanwhile is held, and
         # released behind the reply.
-        holding = method == "initialize" and self.held is None and not self.initialized
+        holding = (
+            method in {"initialize", "reconnect"} and self.held is None and not self.initialized
+        )
         if holding:
             self.held = []
         reply: dict[str, Any]
@@ -301,9 +317,7 @@ class _SurfaceConnection:
         if method == "initialize":
             return await self._initialize(params, after)
         if method == "reconnect":
-            raise AhpError(
-                _INITIALIZE_INSTEAD, "this broker keeps no replay log; initialize instead"
-            )
+            return await self._reconnect(params, after)
         if not self.initialized:
             raise invalid_params("initialize must be the first request")
         if method == "subscribe":
@@ -334,37 +348,12 @@ class _SurfaceConnection:
         if chosen is None:
             raise unsupported_protocol_version(self.broker.supported_versions)
 
-        client_id = params.get("clientId")
-        if not isinstance(client_id, str) or not client_id:
-            client_id = f"broker-{uuid.uuid4()}"
-        info = ConnectionInfo(client_id, peer=self.peer, token=self.token, headers=self.headers)
-        principal = self.broker.authenticate(info)
-        if principal is None:
-            raise AhpError(_REFUSED, "Connection refused by policy")
-
-        # Admission before AHP (invariant 2): only nodes the registry admits
-        # this principal to are ever dialed, so the rest cannot even appear.
-        records = self.broker.directory.nodes_for(principal)
         client_info = params.get("clientInfo")
-        opened = await asyncio.gather(
-            *(
-                self._open(
-                    record,
-                    principal,
-                    client_id,
-                    chosen,
-                    client_info if isinstance(client_info, Mapping) else None,
-                )
-                for record in records
-            )
+        await self._admit(
+            params.get("clientId"),
+            chosen,
+            client_info if isinstance(client_info, Mapping) else None,
         )
-        for node in opened:
-            if node is not None:
-                self.nodes[node.link.node_id] = node
-        self.root = merge_root([node.root for node in self.nodes.values()])
-        self.initialized = True
-        for node in self.nodes.values():
-            node.pump = self._spawn(self._pump(node))
 
         snapshots: list[dict[str, Any]] = []
         for uri in params.get("initialSubscriptions") or []:
@@ -389,22 +378,109 @@ class _SurfaceConnection:
         result.update(self._agreed_handshake_fields())
         return result
 
-    async def _open(
-        self,
-        record: NodeRecord,
-        principal: Principal,
-        client_id: str,
-        version: str,
-        client_info: Mapping[str, Any] | None,
-    ) -> _Node | None:
+    async def _admit(
+        self, client_id: Any, version: str, client_info: Mapping[str, Any] | None
+    ) -> None:
+        """Authenticate, then open a link to every node the principal may use.
+
+        Shared by both handshakes: a `reconnect` is a new connection, and it is
+        authenticated and admitted from scratch - the `clientId` it asserts is
+        an identifier, never a credential.
+        """
+        if not isinstance(client_id, str) or not client_id:
+            client_id = f"broker-{uuid.uuid4()}"
+        info = ConnectionInfo(client_id, peer=self.peer, token=self.token, headers=self.headers)
+        principal = self.broker.authenticate(info)
+        if principal is None:
+            raise AhpError(_REFUSED, "Connection refused by policy")
+        self.principal, self.client_id, self.version = principal, client_id, version
+        self.client_info = client_info
+
+        # Admission before AHP (invariant 2): only nodes the registry admits
+        # this principal to are ever dialed, so the rest cannot even appear.
+        self.records = {r.node_id: r for r in self.broker.directory.nodes_for(principal)}
+        opened = await asyncio.gather(*(self._open(r) for r in self.records.values()))
+        for node in opened:
+            if node is not None:
+                self.nodes[node.link.node_id] = node
+        self.root = merge_root([node.root for node in self.nodes.values()])
+        self.initialized = True
+        for node in self.nodes.values():
+            node.pump = self._spawn(self._pump(node))
+        for node_id in self.records:
+            if node_id not in self.nodes:
+                self._spawn(self._redial(node_id))
+
+    async def _reconnect(self, params: Mapping[str, Any], after: list[dict[str, Any]]) -> Any:
+        """Always the snapshot arm: fresh state for every channel still there.
+
+        There is no replay log to answer the replay arm from, and none is
+        needed - every node can be re-read. A channel no node can produce is
+        simply absent, which is how the snapshot arm says it is gone.
+        """
+        if self.initialized:
+            raise invalid_params("already initialized")
+        last_seen = params.get("lastSeenServerSeq")
+        if isinstance(last_seen, int) and not isinstance(last_seen, bool) and last_seen > 0:
+            self.clock = BrokerClock(last_seen)
+        # No `protocolVersions` to negotiate: adopt the most preferred, as the
+        # sibling host does.
+        await self._admit(params.get("clientId"), self.broker.supported_versions[0], None)
+
+        wanted = [uri for uri in params.get("subscriptions") or [] if isinstance(uri, str)]
+        snapshots: list[dict[str, Any]] = []
+        for uri in dict.fromkeys(wanted):
+            if uri == ROOT_URI:
+                continue
+            with contextlib.suppress(AhpError):
+                snapshot = await self._subscribe_channel(uri, after)
+                if snapshot is not None:
+                    snapshots.append(snapshot)
+        if ROOT_URI in wanted:
+            snapshots.insert(0, self._subscribe_root())
+        return {"type": "snapshot", "snapshots": snapshots}
+
+    async def _redial(self, node_id: str) -> None:
+        """Wait for a lost node to answer again, then bounce the surface.
+
+        The link opened here is only proof of life and is closed at once: the
+        bounce tears this connection down, and the surface's reconnect opens
+        fresh links to every node and re-reads every channel from them.
+        """
+        record = self.records[node_id]
+        delay, ceiling = self.broker.redial_backoff
+        while not self.closing:
+            await asyncio.sleep(delay)
+            if self.closing:
+                return
+            node = await self._open(record, quiet=True)
+            if node is not None:
+                try:
+                    await node.link.aclose()
+                except Exception as exc:
+                    # Still bounce: the surface's resync matters more than one
+                    # probe link. But say so, since the node may now hold a
+                    # connection nobody will close.
+                    _log.warning("closing the probe link to %s failed: %r", node_id, exc)
+                _log.info("node %s is back; closing the surface so it resyncs", node_id)
+                self.closing = True
+                with contextlib.suppress(Exception):
+                    await self.transport.close()
+                return
+            delay = min(delay * 2, ceiling)
+
+    async def _open(self, record: NodeRecord, *, quiet: bool = False) -> _Node | None:
+        principal = self.principal
+        assert principal is not None, "admission sets the principal before any dial"
+
         async def connect() -> NodeLink:
             transport = await self.broker.connector.connect(record, principal)
             return await open_node_link(
                 record.node_id,
                 transport,
-                client_id=client_id,
-                protocol_version=version,
-                client_info=client_info,
+                client_id=self.client_id,
+                protocol_version=self.version,
+                client_info=self.client_info,
             )
 
         try:
@@ -412,8 +488,8 @@ class _SurfaceConnection:
         except Exception as exc:
             # One unreachable node degrades the fleet; it does not refuse the
             # surface. It is simply absent, as a node the principal was never
-            # admitted to would be.
-            _log.warning("node %s unavailable: %s", record.node_id, exc)
+            # admitted to would be, until a redial finds it again.
+            (_log.debug if quiet else _log.warning)("node %s unavailable: %s", record.node_id, exc)
             return None
         handshake = link.handshake
         node_seq = handshake.get("serverSeq")
@@ -471,19 +547,28 @@ class _SurfaceConnection:
         self, channel: str, after: list[dict[str, Any]]
     ) -> dict[str, Any] | None:
         node_id = self._route({"channel": channel})
-        if node_id is None:
-            # The answer a host gives for a channel it does not know.
-            return None
-        node = self.nodes[node_id]
+        # The buffer opens BEFORE any node is asked - including by the probe
+        # below, whose subscription to the owner IS the real one. Opened any
+        # later, whatever the owner streams between its subscribe and the
+        # buffer existing would match neither the buffer nor a live
+        # subscription, and be dropped.
         buffer: list[tuple[int, dict[str, Any]]] = []
         self.pending.setdefault(channel, []).append(buffer)
         try:
-            result = await self._call(node_id, "subscribe", {"channel": channel})
+            if node_id is None:
+                found = await self._probe_owner(channel)
+                if found is None:
+                    # The answer a host gives for a channel it does not know.
+                    return None
+                node_id, result = found
+            else:
+                result = await self._call(node_id, "subscribe", {"channel": channel})
         finally:
             buffers = self.pending[channel]
             buffers.remove(buffer)
             if not buffers:
                 del self.pending[channel]
+        node = self.nodes[node_id]
         node.subscribed.add(channel)
         self.subscriptions.add(channel)
         snapshot = result.get("snapshot") if isinstance(result, Mapping) else None
@@ -494,6 +579,42 @@ class _SurfaceConnection:
         from_seq = node.sequence.translate(node_from if isinstance(node_from, int) else 0)
         self._release(channel, buffer, from_seq, after)
         return {**snapshot, "fromSeq": from_seq}
+
+    async def _probe_owner(self, channel: str) -> tuple[str, Any] | None:
+        """Ask every node for `channel`; the first with a snapshot owns it.
+
+        Reached when no node has named the channel yet - always the case on
+        `reconnect`, where the surface's subscriptions come from a connection
+        this one never saw. A node that does not know a channel answers
+        `subscribe` with no snapshot, so the question is plain AHP.
+
+        The owner's answer is kept as the subscription itself, not repeated:
+        the caller's buffer has been open since before the first ask, so
+        nothing the owner streams from here on can fall through. Only the
+        nodes that turned out not to own it are unsubscribed.
+        """
+        owner: tuple[str, Any] | None = None
+        for node_id in list(self.nodes):
+            try:
+                result = await self._call(node_id, "subscribe", {"channel": channel})
+            except AhpError:
+                continue
+            found = isinstance(result, Mapping) and isinstance(result.get("snapshot"), Mapping)
+            if found and owner is None:
+                owner = (node_id, result)
+                self.owners.claim(node_id, {channel})
+                continue
+            if found and owner is not None:
+                # Two nodes claim one channel: two clients minted the same URI,
+                # or a node answers for one it does not own. First writer wins,
+                # as everywhere else, but it should not happen silently.
+                _log.warning(
+                    "channel %s is on %s and %s; keeping %s", channel, owner[0], node_id, owner[0]
+                )
+            node = self.nodes.get(node_id)
+            if node is not None:
+                node.link.notify("unsubscribe", {"channel": channel})
+        return owner
 
     def _release(
         self,
@@ -744,8 +865,12 @@ class _SurfaceConnection:
     def _drop_node(self, node_id: str) -> None:
         _log.warning("node %s link closed", node_id)
         self.nodes.pop(node_id, None)
-        self.owners.forget_node(node_id)
+        # Ownership is kept on purpose: a request for one of this node's
+        # channels must be refused as "not connected", not rerouted to
+        # whichever node the fallback rules would pick.
         self._republish_root()
+        if not self.closing and node_id in self.records:
+            self._spawn(self._redial(node_id))
 
     # ─── node -> surface requests ────────────────────────────────────────
 

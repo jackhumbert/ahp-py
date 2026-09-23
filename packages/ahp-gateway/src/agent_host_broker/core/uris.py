@@ -119,7 +119,9 @@ class ChannelOwners:
 
     First writer wins. Two nodes claiming one URI would mean two clients minted
     the same UUID, or a node echoing a URI it does not own; either way the
-    first route is kept rather than silently re-pointed mid-session.
+    first route is kept rather than silently re-pointed mid-session. Nothing
+    is ever forgotten: a node that drops keeps its channels, so a request for
+    one is refused as "not connected" instead of falling through to another.
     """
 
     def __init__(self) -> None:
@@ -131,6 +133,3 @@ class ChannelOwners:
 
     def owner_of(self, uri: str) -> str | None:
         return self._owner.get(uri)
-
-    def forget_node(self, node_id: str) -> None:
-        self._owner = {uri: node for uri, node in self._owner.items() if node != node_id}

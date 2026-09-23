@@ -159,15 +159,6 @@ async def test_an_unreachable_node_degrades_the_fleet_rather_than_refusing() -> 
         await fleet.aclose()
 
 
-async def test_reconnect_asks_the_client_to_initialize_instead(fleet: Fleet) -> None:
-    raw = AhpClient(fleet.surface_transport())
-    await raw.connect()
-    with pytest.raises(RpcError) as caught:
-        await raw.reconnect(client_id="c1", last_seen_server_seq=5, subscriptions=[])
-    await raw.shutdown()
-    assert caught.value.code == -32008
-
-
 async def test_actions_reach_the_surface_on_one_monotonic_sequence(fleet: Fleet) -> None:
     async with fleet.surface() as client:
         seqs: list[int] = []

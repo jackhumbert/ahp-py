@@ -22,6 +22,13 @@ Under construction. `docs/plan.md` is the design and its §7 is the build order.
   sibling's transport, and `serve_broker` serves the surfaces with the server
   sibling's WebSocket server.
 
+- **Reconnect**: answered with the snapshot arm from fresh node reads, so a
+  surface can reconnect to any broker instance. Channels are found by asking
+  the nodes when no node has named them yet.
+- **Node recovery**: a lost or initially unreachable node is redialed with
+  backoff, and the surface is bounced once it answers, so it resyncs from
+  fresh snapshots. A lost node's channels are refused, never rerouted.
+
 ### Changed
 
 - `agent-host-client` is pinned `>=0.1.0.dev0,<0.2` until it releases 0.1.0.
