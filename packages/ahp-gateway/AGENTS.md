@@ -30,18 +30,22 @@ filesystem and the terminal are all host-side).
                     agent-host-broker       ← this repo
 ```
 
-**Current state: scaffold.** Packaging, the layer skeleton, strict mypy,
-ruff, import-linter contracts and the family CI shape exist; no broker logic
-does. `docs/plan.md` §7 is the build order.
+**Current state: the multiplexer (plan §7 unit 1) exists**, with the
+registry's interfaces and a declarative inventory behind it. `docs/plan.md`
+§9 records how it works and what it does not do yet; §7 is the build order.
 
 ## Depend on the shared layer; do not fork it
 
 `agent-host-protocol` holds the wire types, the reducers, version
 negotiation, the error taxonomy and the transport ABC. **Do not copy any of
-it into this repository.** The broker's host edge comes from
-`agent-host-server` and its client edge from `agent-host-client`; if neither
-sibling exposes something the broker needs, extend the sibling, not this
-repo - the broker is a control plane beside AHP, never a fork of it.
+it into this repository.** The broker's client edge is `agent-host-client`'s
+`AhpClient`. Its host edge is a **frame router**, not `agent-host-server`'s
+`Host`: `Host` owns sessions, turns, terminals and resources itself, and a
+broker built on it would re-host every session instead of relaying the node's
+(plan §9). What the host edge does take from `agent-host-server` is its
+`ConnectionInfo` and its WebSocket server. If neither sibling exposes
+something the broker needs, extend the sibling, not this repo - the broker is
+a control plane beside AHP, never a fork of it.
 
 ## Federation stays out of the AHP packages
 

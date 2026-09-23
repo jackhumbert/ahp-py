@@ -37,6 +37,14 @@ jobs:
         with:
           repository: jackhumbert/agent-host-protocol-py
           path: .protocol
+      - uses: actions/checkout@v4
+        with:
+          repository: jackhumbert/agent-host-server-py
+          path: .server
+      - uses: actions/checkout@v4
+        with:
+          repository: jackhumbert/agent-host-client-py
+          path: .client
 
       # `--group` is a pip 25.1 feature and setup-python installs whatever pip
       # the interpreter build bundled -- which for some patch releases predates
@@ -45,8 +53,9 @@ jobs:
 
       # The pins in pyproject.toml are the real declaration; this only
       # supplies them, from working trees rather than from an index that
-      # lacks them.
-      - run: pip install -e .protocol
+      # lacks them. One command, so pip resolves the server's and client's
+      # dependency on the protocol against the checkout beside them.
+      - run: pip install -e .protocol -e .server -e .client
       - run: pip install -e '.[ws]' && pip install --group dev
 
       - name: Lint
@@ -76,6 +85,14 @@ jobs:
         with:
           repository: jackhumbert/agent-host-protocol-py
           path: .protocol
+      - uses: actions/checkout@v4
+        with:
+          repository: jackhumbert/agent-host-server-py
+          path: .server
+      - uses: actions/checkout@v4
+        with:
+          repository: jackhumbert/agent-host-client-py
+          path: .client
       - run: pip install build twine
       # Both distributions: the sdist is what a distro packager builds from,
       # and it is where the packaging defects live that a wheel cannot show.
@@ -98,15 +115,17 @@ jobs:
           # The dependency first, from the sibling checkout -- no index
           # carries it, by design. `--no-deps` on the wheel so pip does not
           # then try to resolve the same names from an index that lacks them.
-          /tmp/fresh/bin/pip install ./.protocol
+          /tmp/fresh/bin/pip install ./.protocol ./.server ./.client
           # `websockets` by hand: it is the `[ws]` extra, and `--no-deps` does
           # not resolve extras.
           /tmp/fresh/bin/pip install --no-deps "$(echo dist/*.whl)" websockets
       - name: Smoke-test it from outside the checkout
-        run: cd /tmp && /tmp/fresh/bin/python -c "import agent_host_broker; print(agent_host_broker.__version__)"
+        # The edges, not just the package root: `core` and `ws` are where the
+        # sibling imports live, so this is what proves they resolve.
+        run: cd /tmp && /tmp/fresh/bin/python -c "import agent_host_broker, agent_host_broker.core, agent_host_broker.ws; print(agent_host_broker.__version__)"
 
   siblings-main:
-    # Non-blocking. The dependencies are pinned `~=0.1.0`, so this repository
+    # Non-blocking. The dependencies are pinned to 0.1, so this repository
     # is insulated from the siblings' main branches -- which is exactly why
     # drift there would otherwise be invisible until a release. This makes it
     # visible the day it lands, without failing a PR for someone else's commit.
@@ -119,10 +138,20 @@ jobs:
           repository: jackhumbert/agent-host-protocol-py
           ref: main
           path: .protocol
+      - uses: actions/checkout@v4
+        with:
+          repository: jackhumbert/agent-host-server-py
+          ref: main
+          path: .server
+      - uses: actions/checkout@v4
+        with:
+          repository: jackhumbert/agent-host-client-py
+          ref: main
+          path: .client
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
       - run: python -m pip install --upgrade pip
-      - run: pip install -e .protocol
+      - run: pip install -e .protocol -e .server -e .client
       - run: pip install -e '.[ws]' && pip install --group dev
       - run: pytest

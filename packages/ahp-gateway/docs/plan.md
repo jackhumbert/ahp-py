@@ -123,3 +123,71 @@ This repo is (1), with (2)'s interfaces stubbed in `core/` and `registry/`.
 - Broker↔node traffic is indistinguishable from any AHP client against any
   AHP host - conformance evidence comes from the sibling suites, not from
   new fixtures.
+
+## 9. Milestone 1: the multiplexer (as built)
+
+`agent_host_broker.core.Broker` is §7 unit (1). What it does, and the
+decisions it rests on:
+
+**The host edge is a frame router.** `agent-host-server`'s `Host` owns
+sessions, turns, terminals and resources itself, and its only plug-in point
+is the agent loop. A broker built on it would re-host every session and
+bridge the node's approvals, terminals and resources through that one seam.
+So `Broker.serve(transport, ...)` is its own AHP endpoint that relays JSON-RPC
+frames. It keeps `Host.serve`'s signature, so `agent-host-server`'s WebSocket
+server can serve it (`agent_host_broker.ws.serve_broker`).
+
+**One node link per surface connection.** At `initialize`, the broker
+authenticates the peer, asks the registry which nodes admit the principal,
+and opens one `AhpClient` link to each. The handshake uses the surface's own
+`clientId` and the protocol version negotiated with the surface. Nodes the
+principal is not admitted to are never dialed. A node that cannot be reached
+is left out; the connection still succeeds.
+
+**Routing (fork 2 settled: aggregated namespace).** Channel URIs are opaque
+and client-chosen, so they are never rewritten. The broker learns which node
+owns each one from the node's own payloads. File URIs are the node's path
+space, so the surfaces see them as `file://<node>/path`, and the authority is
+stripped again on the way in. A request routes by, in order:
+
+1. a channel the broker knows the owner of;
+2. a file URI's authority (`workingDirectories`, `workingDirectory`, `uri`,
+   `root`, `cwd`);
+3. the one node offering the named provider;
+4. the only node, if there is one.
+
+Anything else is refused as ambiguous rather than guessed.
+
+**One `serverSeq`.** Every node action is restamped from the broker's own
+counter, and every snapshot's `fromSeq` is translated to the stamp of that
+link's last action at or before it. Actions that reach the broker for a
+channel before its snapshot are held, and are released after the reply.
+
+**The root channel is merged**, not relayed: agents are the union (the first
+node wins a shared provider id), `activeSessions` is the sum, and `terminals`
+is the concatenation. `config` is never advertised. The handshake extras
+`completionTriggerCharacters` and `terminalCommandPrefix` are advertised only
+when every node agrees on them (invariant 4).
+
+**`listSessions`** fans out and merges newest-first. The cursor records each
+node's own cursor and offset, so it is stateless and exact across page
+boundaries, including when a node returns short pages.
+
+**Not yet:**
+
+- `reconnect`: refused with `-32008` ("initialize instead"), because the
+  broker keeps no replay log.
+- A node dropping mid-connection: its agents leave the merged root, but its
+  sessions stay in the surface's cache until the surface re-lists.
+- `authenticate` and the other root-level commands when more than one node
+  could answer them: refused as ambiguous.
+
+**Gaps that belong in the siblings:**
+
+- `AhpClient` forwards only the notification methods it models, so a new
+  upstream method would be dropped at the node edge.
+- `AhpClient`'s `events()` tap is bounded. A drop closes the link rather than
+  leave a surface on a silently wrong mirror.
+- `WebSocketServer` is typed to take a concrete `Host`. `serve_broker` casts
+  around it; typing that parameter as a protocol with a `serve` method would
+  remove the cast.

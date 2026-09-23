@@ -36,10 +36,14 @@ classifiers = [
 # them from sibling checkouts. The pins are the protocol-version statement:
 # the spec lands breaking changes in MINOR bumps, so a looser pin would let a
 # spec break arrive as a patch upgrade.
+#
+# The client's pin admits its pre-releases because it has not cut 0.1.0 yet
+# (its tree says 0.1.0.dev0, which `~=0.1.0` excludes). Same 0.1 ceiling;
+# tighten it back to `~=0.1.0` once the client releases.
 dependencies = [
   "agent-host-protocol~=0.1.0",
   "agent-host-server~=0.1.0",
-  "agent-host-client~=0.1.0",
+  "agent-host-client>=0.1.0.dev0,<0.2",
 ]
 
 [project.optional-dependencies]
@@ -99,7 +103,7 @@ filterwarnings = ["error"]
 [tool.mypy]
 python_version = "3.11"
 strict = true
-files = ["src", "tests", "scripts"]
+files = ["src", "tests"]
 
 [tool.ruff]
 line-length = 100

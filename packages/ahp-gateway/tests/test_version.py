@@ -14,7 +14,8 @@ def test_version_is_semver_shaped() -> None:
     # `0.1.0.dev0` at scaffold time; a release tag must equal it (RELEASING).
     parts = agent_host_broker.__version__.split(".")
     assert len(parts) >= 3
-    assert parts[0].isdigit() and parts[1].isdigit()
+    assert parts[0].isdigit()
+    assert parts[1].isdigit()
 
 
 def test_installed_version_matches_the_source() -> None:

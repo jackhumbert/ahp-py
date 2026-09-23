@@ -22,8 +22,10 @@ It is the newest member of the family:
                     agent-host-broker       ← this repo
 ```
 
-Status: pre-alpha scaffold. [`docs/plan.md`](docs/plan.md) is the design; its
-§7 is the build order.
+Status: pre-alpha. The multiplexer (build-order unit 1) works end to end:
+stock clients through the broker to stock hosts, in-process and over
+WebSocket. [`docs/plan.md`](docs/plan.md) is the design; §9 records what is
+built and what is not.
 
 ## Install
 
