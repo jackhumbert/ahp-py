@@ -432,9 +432,16 @@ class HostRuntime:
 
             if self._config.reconnect_policy.reset_on_success:
                 attempt = 0
-            await self._drain(events)
-            await self._tear_down_client()
-            self._connected.clear()
+            try:
+                await self._drain(events)
+            finally:
+                # Runs even when `_drain` re-raises a genuine external
+                # cancellation (see its comment): the transport must not be
+                # leaked just because the cancellation is about to propagate
+                # out of this task rather than being absorbed as an ordinary
+                # disconnect.
+                await self._tear_down_client()
+                self._connected.clear()
             if self._shutdown.triggered:
                 return
             self._manual.reset()
@@ -662,6 +669,19 @@ class HostRuntime:
                 try:
                     event = await race(next_event(), waiters)
                 except asyncio.CancelledError:
+                    # Two things arrive here as `CancelledError`: `race()`'s
+                    # own "a signal fired" (a fresh exception; the task is
+                    # not being cancelled), and a genuine `Task.cancel()` of
+                    # the supervisor -- e.g. `asyncio.run()` tearing down a
+                    # client its caller never closed. Only the first is ours
+                    # to absorb. Returning on the second made `_supervise`
+                    # treat it as a disconnect and reconnect, so the task
+                    # could never be cancelled and `asyncio.run()` hung on
+                    # exit. `cancelling()` tells the two apart exactly,
+                    # including when a signal and a real cancel coincide.
+                    task = asyncio.current_task()
+                    if task is not None and task.cancelling():
+                        raise
                     return
                 if event is None:
                     return

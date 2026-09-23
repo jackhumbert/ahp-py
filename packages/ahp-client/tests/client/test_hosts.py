@@ -259,6 +259,37 @@ async def test_exhausting_the_policy_ends_in_failed_not_a_hang() -> None:
     await runtime.shutdown()
 
 
+async def test_cancelling_the_supervisor_without_shutdown_still_stops_it() -> None:
+    """Regression: an un-closed `Client` whose owning coroutine raises or
+    returns leaves the supervisor task running when `asyncio.run()` cancels
+    every still-pending task on the way out (`_cancel_all_tasks`). `_drain`
+    used to catch `asyncio.CancelledError` unconditionally and `return`,
+    because `race()` raises that same exception both for a genuine external
+    cancellation and for its own `_shutdown`/`_manual` signal firing --
+    swallowing the former let `_supervise`'s loop read the return as an
+    ordinary disconnect and reconnect, so the task `asyncio.run()` was
+    waiting on never finished and the whole process hung.
+
+    This never calls `shutdown()` -- that already worked, because it sets
+    `_shutdown` *before* cancelling. It cancels the supervisor the way
+    `asyncio.run()` does: from outside, with nothing set first."""
+    factory = _Factory()
+    runtime = HostRuntime(HostConfig(factory, label="h"))
+    await runtime.start()
+    assert runtime.state.status == "connected"
+
+    task = runtime._supervisor
+    assert task is not None
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        # A bounded wait: if the regression is back, this raises
+        # `TimeoutError` instead of `CancelledError`, failing loudly rather
+        # than hanging the suite the way the real bug hung a process.
+        await asyncio.wait_for(task, 2)
+
+    await factory.stop()
+
+
 async def test_the_client_is_not_handed_out_while_disconnected() -> None:
     factory = _Factory()
     factory.fail_first = 99
