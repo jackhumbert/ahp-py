@@ -18,7 +18,8 @@ import os
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Final
-from urllib.parse import quote, unquote, urlparse
+from urllib.parse import urlparse
+from urllib.request import url2pathname
 
 from agent_host_protocol.reducers.clock import to_iso
 from agent_host_protocol.types import JsonObject
@@ -55,15 +56,22 @@ def file_uri(path: str | os.PathLike[str]) -> str:
             f"file_uri() takes a filesystem path, not a URI: {text!r} "
             f"(already has scheme {scheme!r}). Pass working_directories=[...] instead."
         )
-    resolved = Path(path).resolve()
-    return "file://" + quote(str(resolved))
+    # `as_uri`, not `"file://" + quote(str(path))`: the two agree byte for
+    # byte on POSIX, but on Windows the hand-built form quoted the drive colon
+    # and every backslash and dropped the leading slash -- `file://C%3A%5C...`,
+    # whose "authority" is the whole path. A host, or a broker routing on the
+    # authority, then saw a directory on a machine named `C%3A%5CUsers...`.
+    return Path(path).resolve().as_uri()
 
 
 def path_from_uri(uri: str) -> Path:
     parsed = urlparse(uri)
     if parsed.scheme != "file":
         raise NotFound(-32008, f"not a file URI: {uri!r}")
-    return Path(unquote(parsed.path))
+    # `url2pathname` is `unquote` on POSIX, and on Windows also turns `/C:/x`
+    # into `C:\x`; a bare `Path(unquote(...))` made that `\C:\x`, which no
+    # served root contains.
+    return Path(url2pathname(parsed.path))
 
 
 class FileResourceServer:
