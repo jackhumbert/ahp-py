@@ -98,11 +98,11 @@ def classify(uri: str) -> ChannelKind:
 #: directory of a ``ResourceWatchState`` -- is checked after it so the two
 #: cannot collide.
 #:
-#: Verified against all 247 upstream reducer fixtures by
+#: Verified against all 256 upstream reducer fixtures by
 #: ``tests/conformance/test_state_shapes.py``: every one of them classifies to
 #: the reducer the fixture itself declares, with no unclassifiable case --
-#: root 7, session 70, chat 123, terminal 19, changeset 16, resourceWatch 2,
-#: annotations 10. That is 247 correctness cases from data neither peer wrote.
+#: root 7, session 79, chat 123, terminal 19, changeset 16, resourceWatch 2,
+#: annotations 10. That is 256 correctness cases from data neither peer wrote.
 _SHAPE_ORDER: Final[tuple[tuple[str, str], ...]] = (
     ("agents", "root"),
     ("lifecycle", "session"),

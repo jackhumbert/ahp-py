@@ -13,8 +13,8 @@ wheel**.
 > ### ⚠️ Status: pre-alpha.
 >
 > Extracted from [`agent-host-server-py`][server], whose reducers this is. All
-> **247** upstream reducer fixtures, all **39** round-trip fixtures and the
-> 43-case JS-semantics oracle pass. Distributed from this repository —
+> **256** upstream reducer fixtures, all **39** round-trip fixtures and the
+> 63-case JS-semantics oracle pass. Distributed from this repository —
 > deliberately not on PyPI — and the API is not stable.
 
 ## What this is for
@@ -39,7 +39,7 @@ and a host library in no language at all.
 JavaScript semantics with a documented history of six defects that only an
 adversarial oracle could find. A fork with a drift-detecting CI job makes
 divergence *detectable*; it does not make it impossible, and the failure mode is
-silent — the 247-fixture comparator normalises `null` away on both sides, so a
+silent — the 256-fixture comparator normalises `null` away on both sides, so a
 null-passthrough fix landing on one side leaves both suites green while the two
 implementations disagree about what a peer just sent.
 
@@ -120,7 +120,7 @@ of them `ahp-terminal:`. Routing on a scheme therefore applies *no* reducer,
 which freezes state silently while actions keep arriving.
 
 Bind the reducer when you register the channel. Where you cannot,
-`reducer_for_state()` reads the shape instead, and is verified against all 247
+`reducer_for_state()` reads the shape instead, and is verified against all 256
 fixtures: every one classifies to the reducer it declares, with no
 unclassifiable case.
 
@@ -129,8 +129,8 @@ unclassifiable case.
 "Conformant" without a conformance test is a lie, and this package's entire
 value is that other implementations can trust it.
 
-- **All 247 upstream reducer fixtures**, consumed unmodified — the same artifact
-  the Rust, Go, Kotlin and Swift clients are gated on. All 247, not a subset.
+- **All 256 upstream reducer fixtures**, consumed unmodified — the same artifact
+  the Rust, Go, Kotlin and Swift clients are gated on. All 256, not a subset.
 - **All 39 round-trip fixtures**, plus `encode(decode(x)) == x` over the whole
   reducer corpus.
 - **The corpus's own blind spot, covered separately.** Its comparator drops
@@ -140,7 +140,7 @@ value is that other implementations can trust it.
   by running adversarial cases through the **real pinned TypeScript reducers**
   under Node and freezing the output verbatim, nulls and all. Comparison is
   byte-for-byte, offline.
-- **The shape classifier** is asserted against all 247 fixtures' declared
+- **The shape classifier** is asserted against all 256 fixtures' declared
   reducers.
 
 The corpora ship **inside the wheel**, so a downstream implementation can run
@@ -160,7 +160,7 @@ Two constants, and they are not the same number:
 
 - `UPSTREAM_SUPPORTED_PROTOCOL_VERSIONS` — what upstream declares.
 - `DEFAULT_SUPPORTED_VERSIONS` — what a peer built on this pin can honestly
-  speak (`0.7.0`, `0.6.0`).
+  speak (`0.8.0`, `0.7.0`, `0.6.0`).
 
 Offer the second. Offering a version whose action and state tables are not
 vendored here means negotiating a protocol you cannot reduce: you pass your own

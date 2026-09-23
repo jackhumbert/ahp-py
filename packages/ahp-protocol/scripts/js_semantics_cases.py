@@ -284,6 +284,122 @@ case(
     [{"type": "session/inputNeededRemoved", "id": True}],
 )
 
+# ── session: 0.8.0 branches ──────────────────────────────────────────────────
+#
+# `workingDirectoryReplaced` is two `indexOf`s and a `!==` filter: an absent
+# replacement becomes a null array element, and `true` never matches `1`.
+# `applyCustomizationEnablement` reads `enablement` unguarded -- only the
+# non-throwing shapes can be asked of the oracle.
+
+_DIRS = {**_SESSION, "workingDirectories": ["a", "b", "c"]}
+
+case(
+    "sess/workingDirectoryReplaced-absent-replacement",
+    "session",
+    _DIRS,
+    [{"type": "session/workingDirectoryReplaced", "directory": "b"}],
+)
+case(
+    "sess/workingDirectoryReplaced-null-replacement-dedupes",
+    "session",
+    {**_SESSION, "workingDirectories": ["a", None, "b"]},
+    [{"type": "session/workingDirectoryReplaced", "directory": "b", "replacement": None}],
+)
+case(
+    "sess/workingDirectoryReplaced-bool-vs-int",
+    "session",
+    {**_SESSION, "workingDirectories": [1, "b", True]},
+    [{"type": "session/workingDirectoryReplaced", "directory": "b", "replacement": True}],
+)
+case(
+    "sess/workingDirectoryReplaced-self",
+    "session",
+    {**_SESSION, "workingDirectories": ["a", "b", "a"]},
+    [{"type": "session/workingDirectoryReplaced", "directory": "a", "replacement": "a"}],
+)
+
+_CUSTOMIZATIONS = {
+    **_SESSION,
+    "customizations": [
+        {"type": "plugin", "id": "p", "enablement": [{"kind": "global", "enabled": False}]},
+        {
+            "type": "directory",
+            "id": "d",
+            "enabled": False,
+            "children": [{"type": "agent", "id": "k"}],
+        },
+    ],
+}
+
+case(
+    "sess/customizationToggled-plugin-empty-clears",
+    "session",
+    _CUSTOMIZATIONS,
+    [{"type": "session/customizationToggled", "id": "p", "enablement": []}],
+)
+case(
+    "sess/customizationToggled-plugin-string-spreads",
+    "session",
+    _CUSTOMIZATIONS,
+    [{"type": "session/customizationToggled", "id": "p", "enablement": "ab"}],
+)
+case(
+    "sess/customizationToggled-plugin-number-clears",
+    "session",
+    _CUSTOMIZATIONS,
+    [{"type": "session/customizationToggled", "id": "p", "enablement": 3}],
+)
+case(
+    "sess/customizationToggled-directory-null-first-defaults-true",
+    "session",
+    _CUSTOMIZATIONS,
+    [{"type": "session/customizationToggled", "id": "d", "enablement": [None]}],
+)
+case(
+    "sess/customizationToggled-child-null-enabled-defaults-true",
+    "session",
+    _CUSTOMIZATIONS,
+    [
+        {
+            "type": "session/customizationToggled",
+            "id": "k",
+            "enablement": [{"kind": "session", "enabled": None}],
+        }
+    ],
+)
+case(
+    "sess/customizationToggled-child-object-index",
+    "session",
+    _CUSTOMIZATIONS,
+    [
+        {
+            "type": "session/customizationToggled",
+            "id": "k",
+            "enablement": {"0": {"kind": "global", "enabled": False}},
+        }
+    ],
+)
+
+# A client-execution entry does not raise InputNeeded; any other kind -- or a
+# kind-less entry -- still does.
+case(
+    "sess/inputNeededSet-client-execution-only",
+    "session",
+    {**_SESSION, "status": 8},
+    [
+        {
+            "type": "session/inputNeededSet",
+            "request": {"id": "r", "kind": "toolClientExecution"},
+        }
+    ],
+)
+case(
+    "sess/inputNeededSet-kindless-raises",
+    "session",
+    {**_SESSION, "status": 8},
+    [{"type": "session/inputNeededSet", "request": {"id": "r"}}],
+)
+
 # ── chat: strict ids, spread-of-anything answers, truthiness gates ───────────
 #
 # Each case pins one hazard the review found ported wrong once: `===` on

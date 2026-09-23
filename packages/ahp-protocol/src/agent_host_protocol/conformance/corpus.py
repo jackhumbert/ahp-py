@@ -116,7 +116,7 @@ def _require(raw: dict[str, Any], path: Path, *keys: str) -> None:
 
 
 def reducer_fixtures() -> Iterator[ReducerFixture]:
-    """The 247-fixture reducer corpus, validated structurally as it loads.
+    """The 256-fixture reducer corpus, validated structurally as it loads.
 
     A malformed upstream fixture must fail loudly rather than be silently
     skipped -- a skipped fixture looks identical to a passing one in a summary.

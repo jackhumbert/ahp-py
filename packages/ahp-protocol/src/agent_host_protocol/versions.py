@@ -3,11 +3,16 @@
 Semantics are ported from the reference host's
 ``src/vs/platform/agentHost/common/state/protocol/version/negotiation.ts``, with
 one deliberate extension: the reference host holds a single ``current`` version
-and therefore speaks exactly one MINOR, so a host declaring ``0.7.0`` there
-*rejects* an offered ``0.6.0``. We hold a **set**, because the two clients we
-care about disagree -- VS Code prefers 0.7.0 while the installable npm client
-speaks 0.6.0 -- and the action delta between them is entirely outside v0.1's
-scope. See ADR 0002.
+and therefore speaks exactly one MINOR, so a host declaring ``0.8.0`` there
+*rejects* an offered ``0.7.0``. We hold a **set**, because the clients we care
+about do not move in lockstep with the spec, and upstream itself still declares
+the older MINORs supported. See ADR 0002.
+
+The set is honest about *actions*, not about every shape: the reducers are the
+pinned revision's. One 0.8.0 change is breaking on the wire --
+``session/customizationToggled`` carries ``enablement`` where it carried
+``enabled`` -- so a toggle from a pre-0.8.0 client reduces to a no-op here,
+exactly as it would against upstream's own 0.8.0 reducer.
 
 Correctness here is entirely ours: the reference client does not verify the
 version a host returns, and will happily proceed on one it never offered
@@ -28,7 +33,7 @@ __all__ = [
 ]
 
 #: Most-preferred first, mirroring the client-side convention.
-DEFAULT_SUPPORTED_VERSIONS: Final[tuple[str, ...]] = ("0.7.0", "0.6.0")
+DEFAULT_SUPPORTED_VERSIONS: Final[tuple[str, ...]] = ("0.8.0", "0.7.0", "0.6.0")
 
 _SEMVER = re.compile(r"^(\d+)\.(\d+)\.(\d+)$")
 

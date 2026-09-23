@@ -1447,6 +1447,656 @@
    }
   },
   {
+   "name": "sess/workingDirectoryReplaced-absent-replacement",
+   "reducer": "session",
+   "initial": {
+    "provider": "p",
+    "title": "T",
+    "status": 1,
+    "lifecycle": "ready",
+    "activeClients": [],
+    "chats": [],
+    "workingDirectories": [
+     "a",
+     "b",
+     "c"
+    ]
+   },
+   "actions": [
+    {
+     "type": "session/workingDirectoryReplaced",
+     "directory": "b"
+    }
+   ],
+   "expected": {
+    "provider": "p",
+    "title": "T",
+    "status": 1,
+    "lifecycle": "ready",
+    "activeClients": [],
+    "chats": [],
+    "workingDirectories": [
+     "a",
+     null,
+     "c"
+    ]
+   }
+  },
+  {
+   "name": "sess/workingDirectoryReplaced-null-replacement-dedupes",
+   "reducer": "session",
+   "initial": {
+    "provider": "p",
+    "title": "T",
+    "status": 1,
+    "lifecycle": "ready",
+    "activeClients": [],
+    "chats": [],
+    "workingDirectories": [
+     "a",
+     null,
+     "b"
+    ]
+   },
+   "actions": [
+    {
+     "type": "session/workingDirectoryReplaced",
+     "directory": "b",
+     "replacement": null
+    }
+   ],
+   "expected": {
+    "provider": "p",
+    "title": "T",
+    "status": 1,
+    "lifecycle": "ready",
+    "activeClients": [],
+    "chats": [],
+    "workingDirectories": [
+     "a",
+     null
+    ]
+   }
+  },
+  {
+   "name": "sess/workingDirectoryReplaced-bool-vs-int",
+   "reducer": "session",
+   "initial": {
+    "provider": "p",
+    "title": "T",
+    "status": 1,
+    "lifecycle": "ready",
+    "activeClients": [],
+    "chats": [],
+    "workingDirectories": [
+     1,
+     "b",
+     true
+    ]
+   },
+   "actions": [
+    {
+     "type": "session/workingDirectoryReplaced",
+     "directory": "b",
+     "replacement": true
+    }
+   ],
+   "expected": {
+    "provider": "p",
+    "title": "T",
+    "status": 1,
+    "lifecycle": "ready",
+    "activeClients": [],
+    "chats": [],
+    "workingDirectories": [
+     1,
+     true
+    ]
+   }
+  },
+  {
+   "name": "sess/workingDirectoryReplaced-self",
+   "reducer": "session",
+   "initial": {
+    "provider": "p",
+    "title": "T",
+    "status": 1,
+    "lifecycle": "ready",
+    "activeClients": [],
+    "chats": [],
+    "workingDirectories": [
+     "a",
+     "b",
+     "a"
+    ]
+   },
+   "actions": [
+    {
+     "type": "session/workingDirectoryReplaced",
+     "directory": "a",
+     "replacement": "a"
+    }
+   ],
+   "expected": {
+    "provider": "p",
+    "title": "T",
+    "status": 1,
+    "lifecycle": "ready",
+    "activeClients": [],
+    "chats": [],
+    "workingDirectories": [
+     "a",
+     "b"
+    ]
+   }
+  },
+  {
+   "name": "sess/customizationToggled-plugin-empty-clears",
+   "reducer": "session",
+   "initial": {
+    "provider": "p",
+    "title": "T",
+    "status": 1,
+    "lifecycle": "ready",
+    "activeClients": [],
+    "chats": [],
+    "customizations": [
+     {
+      "type": "plugin",
+      "id": "p",
+      "enablement": [
+       {
+        "kind": "global",
+        "enabled": false
+       }
+      ]
+     },
+     {
+      "type": "directory",
+      "id": "d",
+      "enabled": false,
+      "children": [
+       {
+        "type": "agent",
+        "id": "k"
+       }
+      ]
+     }
+    ]
+   },
+   "actions": [
+    {
+     "type": "session/customizationToggled",
+     "id": "p",
+     "enablement": []
+    }
+   ],
+   "expected": {
+    "provider": "p",
+    "title": "T",
+    "status": 1,
+    "lifecycle": "ready",
+    "activeClients": [],
+    "chats": [],
+    "customizations": [
+     {
+      "type": "plugin",
+      "id": "p"
+     },
+     {
+      "type": "directory",
+      "id": "d",
+      "enabled": false,
+      "children": [
+       {
+        "type": "agent",
+        "id": "k"
+       }
+      ]
+     }
+    ]
+   }
+  },
+  {
+   "name": "sess/customizationToggled-plugin-string-spreads",
+   "reducer": "session",
+   "initial": {
+    "provider": "p",
+    "title": "T",
+    "status": 1,
+    "lifecycle": "ready",
+    "activeClients": [],
+    "chats": [],
+    "customizations": [
+     {
+      "type": "plugin",
+      "id": "p",
+      "enablement": [
+       {
+        "kind": "global",
+        "enabled": false
+       }
+      ]
+     },
+     {
+      "type": "directory",
+      "id": "d",
+      "enabled": false,
+      "children": [
+       {
+        "type": "agent",
+        "id": "k"
+       }
+      ]
+     }
+    ]
+   },
+   "actions": [
+    {
+     "type": "session/customizationToggled",
+     "id": "p",
+     "enablement": "ab"
+    }
+   ],
+   "expected": {
+    "provider": "p",
+    "title": "T",
+    "status": 1,
+    "lifecycle": "ready",
+    "activeClients": [],
+    "chats": [],
+    "customizations": [
+     {
+      "type": "plugin",
+      "id": "p",
+      "enablement": [
+       "a",
+       "b"
+      ]
+     },
+     {
+      "type": "directory",
+      "id": "d",
+      "enabled": false,
+      "children": [
+       {
+        "type": "agent",
+        "id": "k"
+       }
+      ]
+     }
+    ]
+   }
+  },
+  {
+   "name": "sess/customizationToggled-plugin-number-clears",
+   "reducer": "session",
+   "initial": {
+    "provider": "p",
+    "title": "T",
+    "status": 1,
+    "lifecycle": "ready",
+    "activeClients": [],
+    "chats": [],
+    "customizations": [
+     {
+      "type": "plugin",
+      "id": "p",
+      "enablement": [
+       {
+        "kind": "global",
+        "enabled": false
+       }
+      ]
+     },
+     {
+      "type": "directory",
+      "id": "d",
+      "enabled": false,
+      "children": [
+       {
+        "type": "agent",
+        "id": "k"
+       }
+      ]
+     }
+    ]
+   },
+   "actions": [
+    {
+     "type": "session/customizationToggled",
+     "id": "p",
+     "enablement": 3
+    }
+   ],
+   "expected": {
+    "provider": "p",
+    "title": "T",
+    "status": 1,
+    "lifecycle": "ready",
+    "activeClients": [],
+    "chats": [],
+    "customizations": [
+     {
+      "type": "plugin",
+      "id": "p"
+     },
+     {
+      "type": "directory",
+      "id": "d",
+      "enabled": false,
+      "children": [
+       {
+        "type": "agent",
+        "id": "k"
+       }
+      ]
+     }
+    ]
+   }
+  },
+  {
+   "name": "sess/customizationToggled-directory-null-first-defaults-true",
+   "reducer": "session",
+   "initial": {
+    "provider": "p",
+    "title": "T",
+    "status": 1,
+    "lifecycle": "ready",
+    "activeClients": [],
+    "chats": [],
+    "customizations": [
+     {
+      "type": "plugin",
+      "id": "p",
+      "enablement": [
+       {
+        "kind": "global",
+        "enabled": false
+       }
+      ]
+     },
+     {
+      "type": "directory",
+      "id": "d",
+      "enabled": false,
+      "children": [
+       {
+        "type": "agent",
+        "id": "k"
+       }
+      ]
+     }
+    ]
+   },
+   "actions": [
+    {
+     "type": "session/customizationToggled",
+     "id": "d",
+     "enablement": [
+      null
+     ]
+    }
+   ],
+   "expected": {
+    "provider": "p",
+    "title": "T",
+    "status": 1,
+    "lifecycle": "ready",
+    "activeClients": [],
+    "chats": [],
+    "customizations": [
+     {
+      "type": "plugin",
+      "id": "p",
+      "enablement": [
+       {
+        "kind": "global",
+        "enabled": false
+       }
+      ]
+     },
+     {
+      "type": "directory",
+      "id": "d",
+      "enabled": true,
+      "children": [
+       {
+        "type": "agent",
+        "id": "k"
+       }
+      ]
+     }
+    ]
+   }
+  },
+  {
+   "name": "sess/customizationToggled-child-null-enabled-defaults-true",
+   "reducer": "session",
+   "initial": {
+    "provider": "p",
+    "title": "T",
+    "status": 1,
+    "lifecycle": "ready",
+    "activeClients": [],
+    "chats": [],
+    "customizations": [
+     {
+      "type": "plugin",
+      "id": "p",
+      "enablement": [
+       {
+        "kind": "global",
+        "enabled": false
+       }
+      ]
+     },
+     {
+      "type": "directory",
+      "id": "d",
+      "enabled": false,
+      "children": [
+       {
+        "type": "agent",
+        "id": "k"
+       }
+      ]
+     }
+    ]
+   },
+   "actions": [
+    {
+     "type": "session/customizationToggled",
+     "id": "k",
+     "enablement": [
+      {
+       "kind": "session",
+       "enabled": null
+      }
+     ]
+    }
+   ],
+   "expected": {
+    "provider": "p",
+    "title": "T",
+    "status": 1,
+    "lifecycle": "ready",
+    "activeClients": [],
+    "chats": [],
+    "customizations": [
+     {
+      "type": "plugin",
+      "id": "p",
+      "enablement": [
+       {
+        "kind": "global",
+        "enabled": false
+       }
+      ]
+     },
+     {
+      "type": "directory",
+      "id": "d",
+      "enabled": false,
+      "children": [
+       {
+        "type": "agent",
+        "id": "k",
+        "enabled": true
+       }
+      ]
+     }
+    ]
+   }
+  },
+  {
+   "name": "sess/customizationToggled-child-object-index",
+   "reducer": "session",
+   "initial": {
+    "provider": "p",
+    "title": "T",
+    "status": 1,
+    "lifecycle": "ready",
+    "activeClients": [],
+    "chats": [],
+    "customizations": [
+     {
+      "type": "plugin",
+      "id": "p",
+      "enablement": [
+       {
+        "kind": "global",
+        "enabled": false
+       }
+      ]
+     },
+     {
+      "type": "directory",
+      "id": "d",
+      "enabled": false,
+      "children": [
+       {
+        "type": "agent",
+        "id": "k"
+       }
+      ]
+     }
+    ]
+   },
+   "actions": [
+    {
+     "type": "session/customizationToggled",
+     "id": "k",
+     "enablement": {
+      "0": {
+       "kind": "global",
+       "enabled": false
+      }
+     }
+    }
+   ],
+   "expected": {
+    "provider": "p",
+    "title": "T",
+    "status": 1,
+    "lifecycle": "ready",
+    "activeClients": [],
+    "chats": [],
+    "customizations": [
+     {
+      "type": "plugin",
+      "id": "p",
+      "enablement": [
+       {
+        "kind": "global",
+        "enabled": false
+       }
+      ]
+     },
+     {
+      "type": "directory",
+      "id": "d",
+      "enabled": false,
+      "children": [
+       {
+        "type": "agent",
+        "id": "k",
+        "enabled": false
+       }
+      ]
+     }
+    ]
+   }
+  },
+  {
+   "name": "sess/inputNeededSet-client-execution-only",
+   "reducer": "session",
+   "initial": {
+    "provider": "p",
+    "title": "T",
+    "status": 8,
+    "lifecycle": "ready",
+    "activeClients": [],
+    "chats": []
+   },
+   "actions": [
+    {
+     "type": "session/inputNeededSet",
+     "request": {
+      "id": "r",
+      "kind": "toolClientExecution"
+     }
+    }
+   ],
+   "expected": {
+    "provider": "p",
+    "title": "T",
+    "status": 8,
+    "lifecycle": "ready",
+    "activeClients": [],
+    "chats": [],
+    "inputNeeded": [
+     {
+      "id": "r",
+      "kind": "toolClientExecution"
+     }
+    ]
+   }
+  },
+  {
+   "name": "sess/inputNeededSet-kindless-raises",
+   "reducer": "session",
+   "initial": {
+    "provider": "p",
+    "title": "T",
+    "status": 8,
+    "lifecycle": "ready",
+    "activeClients": [],
+    "chats": []
+   },
+   "actions": [
+    {
+     "type": "session/inputNeededSet",
+     "request": {
+      "id": "r"
+     }
+    }
+   ],
+   "expected": {
+    "provider": "p",
+    "title": "T",
+    "status": 24,
+    "lifecycle": "ready",
+    "activeClients": [],
+    "chats": [],
+    "inputNeeded": [
+     {
+      "id": "r"
+     }
+    ]
+   }
+  },
+  {
    "name": "chat/truncated-true-vs-1",
    "reducer": "chat",
    "initial": {

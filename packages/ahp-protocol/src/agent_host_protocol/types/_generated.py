@@ -2,7 +2,7 @@
 
 Regenerate with `python scripts/generate_tables.py`.
 
-Source: spec/v0.7.0 (ea6fae670c4012721fdc02d587b3a46ecdc871c0)
+Source: spec/v0.8.0 (7153143f1c6993fa886d7d59870811cdad479d83)
 """
 
 from __future__ import annotations
@@ -11,10 +11,10 @@ from typing import Final
 
 #: The protocol version upstream's own source tree declares at the pinned tag.
 #: This is NOT what we speak -- see agent_host_protocol.types.versions.
-UPSTREAM_PROTOCOL_VERSION: Final = '0.7.0'
+UPSTREAM_PROTOCOL_VERSION: Final = '0.8.0'
 
 #: Every version the upstream client at the pinned tag will negotiate.
-UPSTREAM_SUPPORTED_PROTOCOL_VERSIONS: Final[tuple[str, ...]] = ('0.7.0', '0.6.0', '0.5.2', '0.5.1')
+UPSTREAM_SUPPORTED_PROTOCOL_VERSIONS: Final[tuple[str, ...]] = ('0.8.0', '0.7.0', '0.6.0', '0.5.2', '0.5.1')
 
 #: Every action's wire string, from `export const enum ActionType`.
 ACTION_TYPES: Final[frozenset[str]] = frozenset([
@@ -91,6 +91,7 @@ ACTION_TYPES: Final[frozenset[str]] = frozenset([
     'session/serverToolsChanged',
     'session/titleChanged',
     'session/workingDirectoryRemoved',
+    'session/workingDirectoryReplaced',
     'session/workingDirectorySet',
     'terminal/claimed',
     'terminal/cleared',
@@ -125,6 +126,7 @@ IS_CLIENT_DISPATCHABLE: Final[dict[str, bool]] = {
     'session/activeClientRemoved': True,
     'session/workingDirectorySet': True,
     'session/workingDirectoryRemoved': True,
+    'session/workingDirectoryReplaced': True,
     'session/inputNeededSet': False,
     'session/inputNeededRemoved': False,
     'session/customizationsChanged': False,
@@ -214,6 +216,7 @@ ACTION_INTRODUCED_IN: Final[dict[str, str]] = {
     'session/activeClientRemoved': '0.5.0',
     'session/workingDirectorySet': '0.7.0',
     'session/workingDirectoryRemoved': '0.7.0',
+    'session/workingDirectoryReplaced': '0.8.0',
     'session/inputNeededSet': '0.5.1',
     'session/inputNeededRemoved': '0.5.1',
     'session/customizationsChanged': '0.1.0',

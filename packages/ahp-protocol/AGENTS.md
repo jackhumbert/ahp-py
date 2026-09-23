@@ -35,8 +35,8 @@ stopped being a job anyone has;
 [`docs/decisions/0002-extraction.md`](docs/decisions/0002-extraction.md)
 records the extraction and carries a dated postscript on the migration.
 
-Current state: **all 247 upstream reducer fixtures, all 39 round-trip fixtures
-and the 43-case JS-semantics oracle pass.** `mypy --strict`, `ruff`,
+Current state: **all 256 upstream reducer fixtures, all 39 round-trip fixtures
+and the 63-case JS-semantics oracle pass.** `mypy --strict`, `ruff`,
 `ruff format` and `lint-imports` are all green and all four are gates.
 
 ## Commands

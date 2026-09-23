@@ -1,4 +1,4 @@
-"""The upstream 247-fixture reducer corpus.
+"""The upstream 256-fixture reducer corpus.
 
 This is the project's central conformance claim: our reducers produce the same
 state as the reference implementation for the same action sequence. It is the
@@ -53,13 +53,13 @@ def _ids(fixtures: list[ReducerFixture]) -> list[str]:
 
 def test_corpus_is_intact() -> None:
     """Pin the corpus shape so a pin bump that changes it is noticed."""
-    assert len(ALL_FIXTURES) == 247
+    assert len(ALL_FIXTURES) == 256
     counts: dict[str, int] = {}
     for fixture in ALL_FIXTURES:
         counts[fixture.reducer] = counts.get(fixture.reducer, 0) + 1
     assert counts == {
         "chat": 123,
-        "session": 70,
+        "session": 79,
         "terminal": 19,
         "changeset": 16,
         "annotations": 10,
@@ -70,7 +70,7 @@ def test_corpus_is_intact() -> None:
 
 def test_scope_split_is_explicit() -> None:
     """State plainly how much of the corpus we run, so it cannot drift silently."""
-    assert len(SCOPED) == 247, "the whole corpus is in scope"
+    assert len(SCOPED) == 256, "the whole corpus is in scope"
     assert len(UNSCOPED) == 0
     assert {f.reducer for f in UNSCOPED} == OUT_OF_SCOPE
 

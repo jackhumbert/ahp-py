@@ -1,6 +1,6 @@
 // The pinned sources are .ts but import each other with .js specifiers (NodeNext
 // style). Rewrite those back so `--experimental-transform-types` can load the
-// 0.7.0 tree directly, rather than falling back to the published 0.6.0 build.
+// pinned tree directly, rather than falling back to an older published build.
 import { existsSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 

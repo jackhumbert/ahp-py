@@ -44,7 +44,7 @@ __all__ = [
 Reducer = Callable[[Any, Mapping[str, Any]], Any]
 
 #: Keyed by the fixture corpus's `reducer` field so the harness can dispatch.
-#: All seven, so the whole 247-fixture corpus runs -- ADR 0004 makes the port
+#: All seven, so the whole 256-fixture corpus runs -- ADR 0004 makes the port
 #: all-or-nothing per channel, and registering a channel whose reducer does not
 #: exist would leave its client-dispatchable actions unreduced.
 REDUCERS: Final[dict[str, Reducer]] = {

@@ -8,6 +8,43 @@ the spec revision it targets.
 
 ## [Unreleased]
 
+### Changed — the spec pin moves to `spec/v0.8.0`
+
+- **The pinned upstream revision is `spec/v0.8.0` (`7153143f`), up from
+  `spec/v0.7.0` (`ea6fae67`).** The vendored corpora, schemas and TypeScript
+  inputs are re-vendored and `_generated.py` regenerated:
+  `UPSTREAM_PROTOCOL_VERSION` is `0.8.0`, there are 86 actions (39
+  client-dispatchable), and the reducer corpus grows from 247 to **256**
+  fixtures — all nine new ones in `session`, and all 256 pass.
+- **The session reducer ports every 0.8.0 change.** Only
+  `channels-session/reducer.ts` differs between the tags; the diff was read by
+  hand, per `UPSTREAM.md`:
+  - `session/workingDirectoryReplaced` (new, client-dispatchable) is an atomic
+    compare-and-swap on one working directory, deduplicating against the
+    replacement;
+  - `session/customizationToggled` now carries a complete `enablement` decision
+    list that **replaces** the previous one — plugins and MCP servers store it
+    verbatim, other customizations derive the legacy `enabled` flag from its
+    first entry. **Breaking on the wire:** a toggle carrying only `enabled`
+    (the pre-0.8.0 shape) is now a no-op. Upstream throws on it; as with
+    every other throw site, this port degrades to the branch's no-op instead;
+  - a `toolClientExecution` entry in `inputNeeded` no longer raises
+    `SessionStatus.InputNeeded` — it is work delegated to a client, not a
+    prompt, so the session stays `InProgress` while it runs.
+- **`DEFAULT_SUPPORTED_VERSIONS` is `("0.8.0", "0.7.0", "0.6.0")`.** It widens
+  because the vendored tables now cover 0.8.0, and does not narrow because
+  upstream still declares 0.7.0 and 0.6.0 supported. The reducers are 0.8.0's
+  for every negotiated version, so the `customizationToggled` shape change
+  above applies to older clients too — exactly as it does against upstream's
+  own reducer.
+- The `Customization.plugin` wire spec takes `enablement` in place of
+  `enabled`.
+- The JS-semantics oracle grew from 51 to **63** cases, regenerated from the
+  0.8.0 TypeScript reducers: the undefined-vs-null and `===` edges of
+  `workingDirectoryReplaced`, the non-throwing malformed `enablement` shapes,
+  and the client-execution exemption from `InputNeeded`. Every pre-existing
+  expectation is unchanged.
+
 ### Documentation
 
 - **The upstream watch record in `UPSTREAM.md` is re-verified as of

@@ -168,6 +168,7 @@ class TestSessionActionsWithMissingFields:
             {"type": "session/activeClientRemoved"},
             {"type": "session/workingDirectorySet"},
             {"type": "session/workingDirectoryRemoved"},
+            {"type": "session/workingDirectoryReplaced"},
             {"type": "session/customizationToggled"},
             {"type": "session/mcpServerStartRequested"},
             {"type": "session/mcpServerStopRequested"},
@@ -181,14 +182,30 @@ class TestSessionActionsWithMissingFields:
     def test_does_not_raise(self, action: dict[str, object]) -> None:
         session_reducer(_session(config={"values": {}}), action)
 
-    def test_customization_toggled_with_a_matching_id_and_no_enabled(self) -> None:
-        """`enabled: action.enabled` writes `undefined` upstream, which
-        `JSON.stringify` drops -- so the key must GO AWAY, not become null."""
-        state = _session(
-            customizations=[{"type": "plugin", "id": "p1", "enabled": True, "children": []}]
-        )
-        out = session_reducer(state, {"type": "session/customizationToggled", "id": "p1"})
-        assert "enabled" not in out["customizations"][0]
+    @pytest.mark.parametrize("enablement", [None, {"length": 1}], ids=["null", "array-like"])
+    @pytest.mark.parametrize(
+        "customization",
+        [
+            {"type": "plugin", "id": "p1", "children": []},
+            {"type": "directory", "id": "p1", "enabled": False, "children": []},
+        ],
+        ids=lambda c: str(c["type"]),
+    )
+    def test_customization_toggled_with_a_matching_id_and_unusable_enablement(
+        self, customization: dict[str, object], enablement: object
+    ) -> None:
+        """Since 0.8.0 upstream reads `enablement.length` / `enablement[0]`
+        unguarded and spreads the list, so an absent, null or non-iterable one
+        throws once an id matches. It is client-dispatchable: the port degrades
+        to the branch's no-op instead."""
+        state = _session(customizations=[customization])
+        for action in (
+            {"type": "session/customizationToggled", "id": "p1"},
+            {"type": "session/customizationToggled", "id": "p1", "enablement": enablement},
+        ):
+            if customization["type"] == "directory" and enablement is not None:
+                continue  # `{length: 1}[0]` is `undefined` -- no throw, see oracle
+            assert session_reducer(state, action) is state
 
 
 class TestNullClearsRatherThanIgnored:

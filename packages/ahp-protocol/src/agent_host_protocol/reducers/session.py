@@ -1,6 +1,6 @@
 """Session channel reducer.
 
-Ported from ``types/channels-session/reducer.ts`` (27 actions). Unlike the chat
+Ported from ``types/channels-session/reducer.ts`` (28 actions). Unlike the chat
 reducer this one is **time-free** -- it never reads the clock. It touches
 ``status`` in exactly three places: the two orthogonal metadata flags
 (``IsRead`` / ``IsArchived``) and the ``inputNeeded`` promotion, which reflects
@@ -56,6 +56,11 @@ _IS_ARCHIVED = SessionStatus.IS_ARCHIVED
 _STATUS_ACTIVITY_MASK = SessionStatus.ACTIVITY_MASK
 
 _MCP_SERVER = "mcpServer"
+_PLUGIN = "plugin"
+_TOOL_CLIENT_EXECUTION = "toolClientExecution"
+
+#: Returned by :func:`_apply_customization_enablement` where upstream throws.
+_THROWS: Any = object()
 
 
 # ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -92,17 +97,83 @@ def _with_status_flag(status: int, flag: int, on: bool) -> int:
     return session_status_flags(status | flag if on else status & ~flag)
 
 
+def _awaits_user(request: Any) -> bool:
+    """``request.kind !== SessionInputRequestKind.ToolClientExecution``.
+
+    A client-execution entry is work delegated to a client, not a prompt: the
+    call has already cleared its confirmation gate. Since 0.8.0 it does not
+    count toward `InputNeeded`. A non-object entry reads `kind` as `undefined`
+    (a `null` one would throw upstream) and so counts, as any unknown kind does.
+    """
+    return not strict_equal(get(request, "kind"), _TOOL_CLIENT_EXECUTION)
+
+
 def _with_input_needed_status(status: int, input_needed: Sequence[Any]) -> int:
     """Reflect the session-level input queue into the activity bits of `status`.
 
-    A non-empty queue promotes the activity to `InputNeeded`; emptying it clears
-    only the input-needed-specific bit (1 << 4), so an unblocked turn falls back
-    to `InProgress` and an already-idle session stays idle. The orthogonal
+    A queue holding any user-blocking entry (:func:`_awaits_user`) promotes the
+    activity to `InputNeeded`; draining those entries clears only the
+    input-needed-specific bit (1 << 4), so an unblocked turn falls back to
+    `InProgress` and an already-idle session stays idle. The orthogonal
     `IsRead` / `IsArchived` flags survive either way.
     """
-    if len(input_needed) > 0:
+    if any(_awaits_user(request) for request in input_needed):
         return session_status_flags((status & ~_STATUS_ACTIVITY_MASK) | _INPUT_NEEDED)
     return session_status_flags(status & ~(_INPUT_NEEDED & ~_IN_PROGRESS))
+
+
+def _js_length_positive(value: Any) -> bool:
+    """``value.length > 0`` for a value that is not an array or string.
+
+    Only a mapping can carry a `length` at all; `undefined > 0` is false. JS
+    relational coercion of a non-numeric `length` is approximated by parsing a
+    string as a number and treating everything else as NaN.
+    """
+    length = get(value, "length")
+    if isinstance(length, bool | int | float):
+        return length > 0
+    if isinstance(length, str):
+        try:
+            return float(length) > 0
+        except ValueError:
+            return False
+    return False
+
+
+def _apply_customization_enablement(customization: Any, enablement: Any) -> Any:
+    """Port of `applyCustomizationEnablement` (0.8.0).
+
+    Plugins and MCP servers take the decision list verbatim -- an empty one
+    deletes the key -- while every other customization keeps the legacy
+    `enabled` flag, derived as ``enablement[0]?.enabled ?? true``.
+
+    Upstream reads ``enablement.length`` / ``enablement[0]`` unguarded, so an
+    absent or null list throws; so does spreading a non-iterable. Those return
+    :data:`_THROWS` and the caller degrades to the branch's no-op.
+    """
+    base = {**customization} if isinstance(customization, Mapping) else {}
+    if enablement is UNDEFINED or enablement is None:
+        return _THROWS
+    kind = get(customization, "type")
+    if strict_equal(kind, _PLUGIN) or strict_equal(kind, _MCP_SERVER):
+        if isinstance(enablement, list | tuple | str):
+            if len(enablement) > 0:
+                # `[...enablement]` -- a string spreads into its characters.
+                return {**base, "enablement": list(enablement)}
+        elif _js_length_positive(enablement):
+            return _THROWS
+        base.pop("enablement", None)
+        return base
+    if isinstance(enablement, list | tuple):
+        first = enablement[0] if len(enablement) > 0 else UNDEFINED
+    elif isinstance(enablement, Mapping):
+        first = get(enablement, "0")
+    else:
+        # A string's first element is a character, and a number or boolean has
+        # no index; either way `.enabled` is `undefined`.
+        first = UNDEFINED
+    enabled = get(first, "enabled")
+    return {**base, "enabled": True if enabled is UNDEFINED or enabled is None else enabled}
 
 
 def _without(items: Sequence[Any], index: int) -> list[Any]:
@@ -344,6 +415,33 @@ def session_reducer(state: Any, action: Mapping[str, Any]) -> Any:
             return state
         return {**state, "workingDirectories": _without(directories, index)}
 
+    if action_type == "session/workingDirectoryReplaced":
+        # A compare-and-swap: a no-op unless `directory` is present. The result
+        # is deduplicated against `replacement`, which keeps its own position
+        # when it already sits earlier (`[A, B, C]` with `C -> A` is `[A, B]`)
+        # and otherwise lands in the target's slot (`B -> C` is `[A, C]`).
+        directories = state.get("workingDirectories")
+        if directories is None:
+            return state
+        index = index_of_value(directories, get(action, "directory"))
+        if index < 0:
+            return state
+        replacement = get(action, "replacement")
+        replacement_index = index_of_value(directories, replacement)
+        if 0 <= replacement_index < index:
+            return {**state, "workingDirectories": _without(directories, index)}
+        # An absent replacement is an `undefined` array element, which
+        # `JSON.stringify` writes as null -- and which `!==` no parsed entry.
+        image = None if replacement is UNDEFINED else replacement
+        return {
+            **state,
+            "workingDirectories": [
+                image if position == index else directory
+                for position, directory in enumerate(directories)
+                if position == index or not strict_equal(directory, replacement)
+            ],
+        }
+
     # ── Input needed ─────────────────────────────────────────────────────────
 
     if action_type == "session/inputNeededSet":
@@ -393,15 +491,17 @@ def session_reducer(state: Any, action: Mapping[str, Any]) -> Any:
         # `c.id === action.id`: an absent id is `undefined`, which matches an
         # entry with no `id` key and never one carrying an explicit null.
         target_id = get(action, "id")
-        # `enabled: action.enabled` -- an omitted flag is `undefined` upstream,
-        # i.e. the key goes away, and only once an id has matched. `action.get`
-        # would write `"enabled": null` instead. Both reads are
-        # client-dispatchable.
-        enabled = get(action, "enabled")
+        # Since 0.8.0 the action carries the complete `enablement` decision
+        # list, which replaces the previous one outright. Client-dispatchable,
+        # so a malformed list degrades to a no-op instead of raising.
+        enablement = get(action, "enablement")
         top_index = index_of(customizations, "id", target_id)
         if top_index >= 0:
+            entry = _apply_customization_enablement(customizations[top_index], enablement)
+            if entry is _THROWS:
+                return state
             updated = list(customizations)
-            updated[top_index] = assign({**customizations[top_index]}, "enabled", enabled)
+            updated[top_index] = entry
             return {**state, "customizations": updated}
         for index, container in enumerate(customizations):
             if not isinstance(container, Mapping) or container.get("type") == _MCP_SERVER:
@@ -412,8 +512,11 @@ def session_reducer(state: Any, action: Mapping[str, Any]) -> Any:
             child_index = index_of(children, "id", target_id)
             if child_index < 0:
                 continue
+            child = _apply_customization_enablement(children[child_index], enablement)
+            if child is _THROWS:
+                return state
             new_children = list(children)
-            new_children[child_index] = assign({**children[child_index]}, "enabled", enabled)
+            new_children[child_index] = child
             updated = list(customizations)
             updated[index] = {**container, "children": new_children}
             return {**state, "customizations": updated}

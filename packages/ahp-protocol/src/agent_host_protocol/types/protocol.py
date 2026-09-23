@@ -312,6 +312,17 @@ _CHAT_SOURCE = UnionSpec(
     },
 )
 
+#: One scoped decision (0.8.0). `kind` is `global`, `workspace` or `session`;
+#: only a `workspace` decision carries a `uri`.
+_CUSTOMIZATION_ENABLEMENT = ObjectSpec(
+    "CustomizationEnablement",
+    (
+        Field("kind", True, is_string),
+        Field("enabled", True, is_bool),
+        Field("uri", False, is_string),
+    ),
+)
+
 #: Customizations are an open union keyed by `type`; fixture 003 carries an
 #: unknown one that must survive verbatim.
 _CUSTOMIZATION = UnionSpec(
@@ -325,7 +336,8 @@ _CUSTOMIZATION = UnionSpec(
                 Field("id", True, is_string),
                 Field("name", False, is_string),
                 Field("uri", False, is_string),
-                Field("enabled", False, is_bool),
+                # Since 0.8.0 a plugin carries scoped decisions, not `enabled`.
+                Field("enablement", False, array_of(_CUSTOMIZATION_ENABLEMENT.validate)),
                 Field("children", False, array_of(ref("Customization"))),
             ),
         ),
