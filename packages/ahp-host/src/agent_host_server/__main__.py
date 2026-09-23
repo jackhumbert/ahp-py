@@ -23,7 +23,6 @@ from agent_host_protocol.versions import DEFAULT_SUPPORTED_VERSIONS
 
 from agent_host_server.core import Host, HostInfo, LoopbackSingleUserPolicy
 from agent_host_server.core.config import RootConfig
-from agent_host_server.core.pty_backend import PtyTerminalBackend
 from agent_host_server.core.resources import RootedFilesystemResourceProvider
 from agent_host_server.provider import EchoProvider
 from agent_host_server.provider.demo_workspace import (
@@ -33,6 +32,22 @@ from agent_host_server.provider.demo_workspace import (
 from agent_host_server.ws import serve_websocket
 
 _log = logging.getLogger(__name__)
+
+
+def _terminal_backend(args: argparse.Namespace) -> Any:
+    """The PTY backend, imported only when `--terminal` asks for it.
+
+    `pty_backend` needs `fcntl` and `termios`, which exist only on POSIX. A
+    top-level import made the whole demo host unstartable on Windows even
+    without `--terminal`, where no terminal code runs at all.
+    """
+    try:
+        from agent_host_server.core.pty_backend import PtyTerminalBackend
+    except ImportError as exc:
+        raise SystemExit(f"--terminal needs a POSIX pty, unavailable here: {exc}") from exc
+    return PtyTerminalBackend(
+        default_cwd=str(Path(args.serve_directory).resolve()) if args.serve_directory else None
+    )
 
 
 def _parse_args() -> argparse.Namespace:
@@ -189,15 +204,7 @@ async def _run() -> None:
         # is the SERVED root when there is one, and nothing when there is not.
         # A client that sends no `cwd` then gets the host's directory from the
         # OS, which is the one case this cannot prevent.
-        terminals=(
-            PtyTerminalBackend(
-                default_cwd=(
-                    str(Path(args.serve_directory).resolve()) if args.serve_directory else None
-                )
-            )
-            if args.terminal
-            else None
-        ),
+        terminals=_terminal_backend(args) if args.terminal else None,
         # Behind the same flag as the session config schema: both mean "this
         # host is configurable", and a second flag for the other half would be
         # a distinction only this file cares about.
