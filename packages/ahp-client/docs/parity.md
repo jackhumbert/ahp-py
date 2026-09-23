@@ -107,7 +107,7 @@ mirror, which binds any of them by name at registration. The TypeScript
 | `session` | ✅ | ✅ |
 | `terminal` | ✅ | ✅ |
 
-## Client-dispatchable actions (38 of 85)
+## Client-dispatchable actions (39 of 86)
 
 Enumerated from the generated `IS_CLIENT_DISPATCHABLE` table.
 
@@ -143,6 +143,7 @@ Enumerated from the generated `IS_CLIENT_DISPATCHABLE` table.
 - `session/mcpServerStopRequested`
 - `session/titleChanged`
 - `session/workingDirectoryRemoved`
+- `session/workingDirectoryReplaced`
 - `session/workingDirectorySet`
 - `terminal/claimed`
 - `terminal/cleared`

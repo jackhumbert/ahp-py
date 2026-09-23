@@ -89,8 +89,8 @@ code they justify.
 - **27** client→server requests, **2** client notifications (= the 29 the
   sibling host implements)
 - **10** server→client requests, **9** server→client notifications
-- **85** action types, **38** client-dispatchable
-- **247** reducer fixtures, **39** round-trips
+- **86** action types, **39** client-dispatchable
+- **256** reducer fixtures, **39** round-trips
 
 Every design proposal that fed this plan wrote 28 or ~30 commands. Only a
 *generated* parity matrix catches that, which is why `docs/parity.md` is

@@ -59,7 +59,7 @@ class FakeHost:
         self,
         *,
         agents: list[JsonObject] | None = None,
-        protocol_version: str = "0.7.0",
+        protocol_version: str = "0.8.0",
         server_seq: int = 0,
         terminal_command_prefix: str | None = None,
     ) -> None:

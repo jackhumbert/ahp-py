@@ -165,8 +165,8 @@ def test_the_reverse_here_column_matches_the_servers_dispatch_tables() -> None:
 
 def test_dispatchable_action_count_is_pinned() -> None:
     dispatchable = [a for a in ACTION_TYPES if IS_CLIENT_DISPATCHABLE.get(a)]
-    assert len(ACTION_TYPES) == 85
-    assert len(dispatchable) == 38
+    assert len(ACTION_TYPES) == 86
+    assert len(dispatchable) == 39
 
 
 def test_the_generated_matrix_is_not_stale() -> None:

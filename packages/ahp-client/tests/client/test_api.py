@@ -136,7 +136,7 @@ async def test_connect_over_a_supplied_transport() -> None:
     host = echo_host()
     await host.start()
     async with connect(transport=host.transport()) as client:
-        assert client.protocol_version == "0.7.0"
+        assert client.protocol_version == "0.8.0"
         assert client.client_id
         assert client.root["agents"] == [{"provider": "echo", "displayName": "Echo"}]
     await host.stop()
@@ -146,7 +146,7 @@ async def test_connect_is_awaitable_as_well_as_a_context_manager() -> None:
     host = echo_host()
     await host.start()
     client = await connect(transport=host.transport())
-    assert client.protocol_version == "0.7.0"
+    assert client.protocol_version == "0.8.0"
     await client.aclose()
     await host.stop()
 

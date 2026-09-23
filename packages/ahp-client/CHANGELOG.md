@@ -6,6 +6,19 @@ Every release states the protocol versions it speaks.
 
 ## [Unreleased]
 
+### Changed — protocol 0.8.0
+
+- **Built on `agent-host-protocol` at `spec/v0.8.0`.** The default offer
+  follows the pin's `DEFAULT_SUPPORTED_VERSIONS` and is now `0.8.0`, `0.7.0`,
+  `0.6.0`; against the sibling host this client negotiates `0.8.0`. None of the
+  0.8.0 wire changes touch a shape this client sends or reads — it has no
+  customization-toggle or working-directory helpers, and `auth/required`
+  params are surfaced raw on `AuthRequiredEvent`, so the new
+  `ProtectedResourceMetadata` object arrives intact.
+- `docs/parity.md` is regenerated: 86 action types, 39 client-dispatchable,
+  adding `session/workingDirectoryReplaced`.
+- `testing.FakeHost` answers `initialize` with `0.8.0` by default.
+
 Under construction. `docs/plan.md` is the design and its §12 is the build order.
 
 ### Added — continuous integration

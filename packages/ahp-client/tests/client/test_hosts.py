@@ -140,7 +140,7 @@ async def test_a_successful_connect_reaches_connected_and_mirrors_root() -> None
     await runtime.start()
     assert runtime.state.status == "connected"
     assert runtime.generation == 1
-    assert runtime.protocol_version == "0.7.0"
+    assert runtime.protocol_version == "0.8.0"
     assert runtime.mirror.state(ROOT_URI) is not None
     await runtime.shutdown()
     await factory.stop()
