@@ -1266,6 +1266,97 @@ class TestWorkingDirectories:
             serve.cancel()
             await host.aclose()
 
+    async def _replace_then_remove(
+        self, host: Host, uri: str, actions: list[dict[str, Any]]
+    ) -> tuple[list[Any], list[str | None]]:
+        """Dispatch *actions* in order; the final set and each echo's rejection."""
+        client, serve = await self._connect(host)
+        try:
+            await client.request(
+                "createSession",
+                {
+                    "channel": uri,
+                    "provider": "echo",
+                    "workingDirectories": ["file:///primary", "file:///peer"],
+                },
+            )
+            await client.request("subscribe", {"channel": uri})
+            for seq, action in enumerate(actions, start=1):
+                await client.notify(
+                    "dispatchAction", {"channel": uri, "clientSeq": seq, "action": action}
+                )
+            await client.collect(seconds=0.3)
+            echoes = [
+                e for e in client.actions(uri) if str(e["action"]["type"]).startswith("session/w")
+            ]
+            state = (await client.request("subscribe", {"channel": uri}))["result"]["snapshot"][
+                "state"
+            ]
+            return state["workingDirectories"], [e.get("rejectionReason") for e in echoes]
+        finally:
+            serve.cancel()
+            await host.aclose()
+
+    async def test_an_immutable_primary_cannot_be_replaced(self) -> None:
+        directories, rejections = await self._replace_then_remove(
+            self._host({"immutablePrimary": True}),
+            "echo:/wd-6",
+            [
+                {
+                    "type": "session/workingDirectoryReplaced",
+                    "directory": "file:///primary",
+                    "replacement": "file:///moved",
+                },
+                {
+                    "type": "session/workingDirectoryReplaced",
+                    "directory": "file:///peer",
+                    "replacement": "file:///peer2",
+                },
+            ],
+        )
+        assert directories == ["file:///primary", "file:///peer2"]
+        assert rejections[0] is not None
+        assert rejections[1] is None
+
+    async def test_a_replaceable_primary_is_replaced_but_never_removed(self) -> None:
+        """`primaryReplacement` wins even alongside `immutablePrimary` -- the
+        pair is how a backend stays safe for clients that predate 0.8.0."""
+        directories, rejections = await self._replace_then_remove(
+            self._host({"immutablePrimary": True, "primaryReplacement": True}),
+            "echo:/wd-7",
+            [
+                {
+                    "type": "session/workingDirectoryReplaced",
+                    "directory": "file:///primary",
+                    "replacement": "file:///moved",
+                },
+                {"type": "session/workingDirectoryRemoved", "directory": "file:///moved"},
+            ],
+        )
+        assert directories == ["file:///moved", "file:///peer"]
+        assert rejections[0] is None
+        assert rejections[1] is not None
+
+    async def test_a_replacement_answers_to_the_directory_policy(self) -> None:
+        class NoTmp(LoopbackSingleUserPolicy):
+            def may_grant_working_directory(self, info: Any, session: str, directory: str) -> bool:
+                return not directory.startswith("file:///tmp")
+
+        host = Host(EchoProvider(capabilities={"multipleWorkingDirectories": {}}), NoTmp())
+        directories, rejections = await self._replace_then_remove(
+            host,
+            "echo:/wd-8",
+            [
+                {
+                    "type": "session/workingDirectoryReplaced",
+                    "directory": "file:///peer",
+                    "replacement": "file:///tmp/secrets",
+                }
+            ],
+        )
+        assert directories == ["file:///primary", "file:///peer"]
+        assert rejections == ["rejected by policy"]
+
     async def test_a_policy_may_refuse_a_directory(self) -> None:
         class NoTmp(LoopbackSingleUserPolicy):
             def may_grant_working_directory(self, info: Any, session: str, directory: str) -> bool:

@@ -309,7 +309,7 @@ class TestCustomizationsAndProgress:
     """Session state that changes while nobody is taking a turn."""
 
     async def test_a_toggle_reaches_the_agent(self) -> None:
-        """The reducer flips `enabled` in state on its own, so clients agree
+        """The reducer applies `enablement` in state on its own, so clients agree
         without any host code. What they cannot do is stop the AGENT using a
         disabled skill -- only the provider can, and only if it is told."""
         host = Host(EchoProvider(customizations=True), LoopbackSingleUserPolicy())
@@ -328,7 +328,7 @@ class TestCustomizationsAndProgress:
                     "action": {
                         "type": "session/customizationToggled",
                         "id": "ahs-skill-hotel",
-                        "enabled": False,
+                        "enablement": [{"kind": "session", "enabled": False}],
                     },
                 },
             )
@@ -336,6 +336,43 @@ class TestCustomizationsAndProgress:
 
             agent = host._sessions[uri].agent_session
             assert getattr(agent, "toggled", {}) == {"ahs-skill-hotel": False}
+        finally:
+            await host.aclose()
+
+    async def test_a_pre_0_8_toggle_is_rejected_and_never_reaches_the_agent(self) -> None:
+        """`enabled` was the 0.7.0 shape. The 0.8.0 reducer no-ops on it, so
+        accepting it would leave the client's optimistic toggle applied and --
+        worse -- tell the provider `False` for an action that said nothing."""
+        host = Host(EchoProvider(customizations=True), LoopbackSingleUserPolicy())
+        try:
+            client = await _attach(host)
+            uri = "echo:/toggle-2"
+            await client.request("createSession", {"channel": uri, "provider": "echo"})
+            await client.collect(seconds=0.3)
+            await client.request("subscribe", {"channel": uri})
+
+            await client.notify(
+                "dispatchAction",
+                {
+                    "channel": uri,
+                    "clientSeq": 1,
+                    "action": {
+                        "type": "session/customizationToggled",
+                        "id": "ahs-skill-hotel",
+                        "enabled": False,
+                    },
+                },
+            )
+            await client.collect(seconds=0.4)
+            echoes = [
+                e
+                for e in client.actions(uri)
+                if e["action"]["type"] == "session/customizationToggled"
+            ]
+            assert echoes
+            assert "rejectionReason" in echoes[0]
+            agent = host._sessions[uri].agent_session
+            assert getattr(agent, "toggled", {}) == {}
         finally:
             await host.aclose()
 

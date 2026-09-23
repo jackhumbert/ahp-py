@@ -76,7 +76,8 @@ def demo_customizations() -> list[dict[str, Any]]:
             "uri": f"{_BASE}/.github",
             "name": "AHS Toolkit Plugin",
             "version": "0.1.0",
-            "enabled": True,
+            # No `enabled`: since 0.8.0 a plugin carries scoped `enablement`
+            # decisions, and an absent list means enabled by default.
             "children": [
                 _agent(
                     "alpha",
@@ -212,7 +213,6 @@ def demo_customizations() -> list[dict[str, Any]]:
             "id": "ahs-mcp-india",
             "uri": f"{_BASE}/.github/mcp-india",
             "name": "AHS MCP Server India",
-            "enabled": True,
             # `state` is a discriminated union on `kind`; `ready` is the
             # no-extra-fields variant.
             "state": {"kind": "ready"},

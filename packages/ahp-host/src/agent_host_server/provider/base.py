@@ -478,9 +478,11 @@ class ManagesMcpServers(Protocol):
 class HandlesCustomizations(Protocol):
     """An agent session that reacts to a client toggling a customization.
 
-    The reducer already flips `enabled` in state, so a client's toggle is
-    visible without this. What it cannot do is make the *agent* stop using a
-    disabled skill -- only the provider can, and only if it is told.
+    The reducer already applies the client's `enablement` decisions in state,
+    so a toggle is visible without this. What it cannot do is make the *agent*
+    stop using a disabled skill -- only the provider can, and only if it is
+    told. `enabled` is the effective value the host derives from those
+    decisions: the most specific one, or `True` when there are none.
     """
 
     async def customization_toggled(self, customization_id: str, enabled: bool) -> None: ...

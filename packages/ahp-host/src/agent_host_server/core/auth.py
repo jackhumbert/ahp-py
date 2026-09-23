@@ -356,15 +356,17 @@ def auth_required(resources: Iterable[ProtectedResource], message: str | None = 
 
 
 def auth_required_params(
-    resource: str,
+    resource: ProtectedResource,
     *,
     channel: str = ROOT_CHANNEL,
     reason: AuthRequiredReason = "required",
 ) -> dict[str, Any]:
     """Params for the `auth/required` notification.
 
-    `channel` defaults to the root URI because that is where `protectedResources`
-    is advertised, but the notification MAY name any channel -- a per-session
-    resource belongs to the session's.
+    Since 0.8.0 `resource` is the complete RFC 9728 `ProtectedResourceMetadata`,
+    not its identifier -- a client can start the OAuth flow from the
+    notification alone. `channel` defaults to the root URI because that is
+    where `protectedResources` is advertised, but the notification MAY name any
+    channel -- a per-session resource belongs to the session's.
     """
-    return {"channel": channel, "resource": resource, "reason": reason}
+    return {"channel": channel, "resource": resource.to_wire(), "reason": reason}

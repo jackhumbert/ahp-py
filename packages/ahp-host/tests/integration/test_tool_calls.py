@@ -494,9 +494,11 @@ class TestClientTools:
         assert entries[0]["kind"] == "toolClientExecution"
         assert entries[0]["clientId"] == "vscode"
         assert entries[0]["chat"] == chat_uri
-        # And the session status carries InputNeeded, which is what a session
-        # list renders.
-        assert state["status"] & 24 == 24
+        # But since 0.8.0 it does NOT raise InputNeeded: "work delegated to a
+        # client, not a user prompt, so a session stays InProgress while a
+        # client tool runs". Only the input-needed-specific bit is checked --
+        # this host never sets session-level InProgress on SessionState itself.
+        assert state["status"] & 16 == 0
 
     async def test_the_session_entry_is_retracted_once_answered(self, host: Host) -> None:
         client = await _attach(host, "vscode")

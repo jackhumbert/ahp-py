@@ -149,19 +149,27 @@ class TestAuthRequiredError:
 
 class TestAuthRequiredNotification:
     def test_the_params_default_to_the_root_channel(self) -> None:
-        assert auth_required_params(RESOURCE) == {
+        assert auth_required_params(ProtectedResource(RESOURCE)) == {
             "channel": ROOT_CHANNEL,
-            "resource": RESOURCE,
+            "resource": {"resource": RESOURCE, "required": True},
             "reason": "required",
         }
+
+    def test_the_resource_is_the_complete_metadata(self) -> None:
+        """0.8.0: `resource` is the whole `ProtectedResourceMetadata`, so a client
+        can start the OAuth flow from the notification alone."""
+        assert auth_required_params(GITHUB)["resource"] == GITHUB.to_wire()
 
     def test_an_expired_token_is_announced_with_its_own_reason(self) -> None:
         """`expired` and `required` mean different things to a client: one is a
         re-auth of a flow it already completed, the other a first prompt."""
-        assert auth_required_params(RESOURCE, reason="expired")["reason"] == "expired"
+        assert (
+            auth_required_params(ProtectedResource(RESOURCE), reason="expired")["reason"]
+            == "expired"
+        )
 
     def test_the_notification_may_name_a_non_root_channel(self) -> None:
-        params = auth_required_params(RESOURCE, channel="ahp-session:/abc")
+        params = auth_required_params(ProtectedResource(RESOURCE), channel="ahp-session:/abc")
         assert params["channel"] == "ahp-session:/abc"
 
     def test_the_method_name_is_the_spelling_the_client_matches_on(self) -> None:

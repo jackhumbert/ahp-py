@@ -189,7 +189,11 @@ _TITLE_LIMIT: Final = 60
 #: Client-dispatchable, and between them they name the filesystem roots the
 #: agent gets tool access to.
 _WORKING_DIRECTORY_ACTIONS: Final = frozenset(
-    {"session/workingDirectorySet", "session/workingDirectoryRemoved"}
+    {
+        "session/workingDirectorySet",
+        "session/workingDirectoryRemoved",
+        "session/workingDirectoryReplaced",
+    }
 )
 
 #: Client-dispatchable, and both name a request the host is suspended on.
@@ -483,6 +487,42 @@ def _child_customization(
         "name": _title_of(text) or name,
         "enabled": True,
     }
+
+
+#: `CustomizationEnablementKind`. Only `workspace` names a `uri`.
+_ENABLEMENT_KINDS: Final = frozenset({"global", "workspace", "session"})
+
+
+def _enablement_rejection(enablement: Any) -> str | None:
+    """Why a `session/customizationToggled` decision list is unusable, if it is.
+
+    Since 0.8.0 the action carries `enablement: CustomizationEnablement[]`
+    where it used to carry `enabled: boolean`. A toggle in the old shape --
+    what a client that negotiated 0.7.0 still sends -- would reduce to a no-op
+    (upstream's reducer throws on it) while the client's optimistic state shows
+    it applied; rejecting it tells that client to revert.
+    """
+    if not isinstance(enablement, list):
+        return "session/customizationToggled requires an enablement array"
+    for decision in enablement:
+        if not isinstance(decision, Mapping):
+            return "each enablement decision must be an object"
+        if decision.get("kind") not in _ENABLEMENT_KINDS:
+            return "enablement kind must be global, workspace or session"
+        if not isinstance(decision.get("enabled"), bool):
+            return "each enablement decision needs a boolean enabled"
+        if decision.get("kind") == "workspace" and not isinstance(decision.get("uri"), str):
+            return "a workspace enablement decision needs a uri"
+    return None
+
+
+def _effective_enabled(enablement: Any) -> bool:
+    """``enablement?.[0]?.enabled ?? true`` -- an empty list is no decision."""
+    if isinstance(enablement, list) and enablement and isinstance(enablement[0], Mapping):
+        enabled = enablement[0].get("enabled")
+        if isinstance(enabled, bool):
+            return enabled
+    return True
 
 
 def _title_of(text: str) -> str | None:
@@ -2603,13 +2643,23 @@ class Host:
             raise auth_required(outstanding)
 
     async def notify_auth_required(
-        self, resource: str, *, reason: AuthRequiredReason = "required"
+        self, resource: str | ProtectedResource, *, reason: AuthRequiredReason = "required"
     ) -> None:
         """Tell subscribers a credential is needed, or has expired.
 
         Ephemeral and explicitly not replayed, so `-32007` on the next command
         is the complete fallback -- a client that missed this still finds out.
+
+        The notification carries the resource's full metadata (0.8.0). A bare
+        identifier is resolved against what the agent advertises, so the
+        metadata a client receives is the same it saw on `AgentInfo`; one the
+        agent never advertised goes out as `{resource}` alone.
         """
+        if isinstance(resource, str):
+            resource = next(
+                (r for r in self._protected_resources() if r.resource == resource),
+                ProtectedResource(resource),
+            )
         await self.sequencer.notify(
             ROOT_URI, AUTH_REQUIRED_METHOD, auth_required_params(resource, reason=reason)
         )
@@ -3869,15 +3919,38 @@ class Host:
                 return "rejected by policy"
             return None
 
+        state = self.sequencer.state_of(channel)
+        existing = state.get("workingDirectories") if isinstance(state, Mapping) else None
+        is_primary = isinstance(existing, list) and bool(existing) and existing[0] == directory
+        # `primaryReplacement` wins over `immutablePrimary` when both are
+        # advertised: "clients that recognize this capability MUST allow a
+        # targeted replacement even when `immutablePrimary` is also `true`".
+        replaceable = bool(multiroot.get("primaryReplacement"))
+
+        if action["type"] == "session/workingDirectoryReplaced":
+            replacement = action.get("replacement")
+            if not isinstance(replacement, str):
+                return "replacement must be a string"
+            if is_primary and not replaceable:
+                # "Replacing index `0` additionally requires primaryReplacement;
+                # clients MUST NOT target an immutable primary."
+                return "the primary working directory is not replaceable"
+            # A replacement grants tool access to a directory the session did
+            # not have, exactly as a set does, so it answers to the same policy.
+            if not self.policy.may_grant_working_directory(connection.info, channel, replacement):
+                return "rejected by policy"
+            return None
+
         # session/workingDirectoryRemoved. "A host MAY decline to apply the
         # removal (e.g. the immutable primary at index 0), leaving the set
         # unchanged" -- declined loudly, so the client reverts its optimistic
-        # prediction instead of showing a directory that is still in use.
-        if multiroot.get("immutablePrimary"):
-            state = self.sequencer.state_of(channel)
-            existing = state.get("workingDirectories") if isinstance(state, Mapping) else None
-            if isinstance(existing, list) and existing and existing[0] == directory:
-                return "the primary working directory is immutable"
+        # prediction instead of showing a directory that is still in use. A
+        # replaceable primary is protected too: "the host MUST reject such a
+        # removal, leaving the protected slot intact".
+        if is_primary and replaceable:
+            return "the primary working directory can only be replaced, not removed"
+        if is_primary and multiroot.get("immutablePrimary"):
+            return "the primary working directory is immutable"
         return None
 
     def _copy_turns(self, chat_uri: str, turn_id: Any) -> list[Any]:
@@ -4484,6 +4557,9 @@ class Host:
         if action_type in _WORKING_DIRECTORY_ACTIONS:
             return self._validate_working_directory_action(connection, channel, action)
 
+        if action_type == "session/customizationToggled":
+            return _enablement_rejection(action.get("enablement"))
+
         # Asked of the bound reducer, never of the URI's scheme (invariant 15).
         # Classifying by scheme happens to work for chat URIs this host mints and
         # breaks the moment a client names one, which `createChat` will allow.
@@ -4767,9 +4843,11 @@ class Host:
     async def _react_to_toggle(self, channel: str, action: Mapping[str, Any]) -> None:
         """Tell the provider a customization was switched on or off.
 
-        The reducer has already flipped `enabled` in state, so clients agree
-        without this. What they cannot do is stop the *agent* using a disabled
-        skill -- only the provider can, and only if it is told.
+        The reducer has already applied the decisions in state, so clients
+        agree without this. What they cannot do is stop the *agent* using a
+        disabled skill -- only the provider can, and only if it is told. The
+        provider hears the *effective* value, which the spec defines as the
+        most specific decision: ``enablement?.[0]?.enabled ?? true``.
         """
         session = self._sessions.get(channel)
         if session is None or not isinstance(session.agent_session, HandlesCustomizations):
@@ -4779,7 +4857,7 @@ class Host:
             return
         with contextlib.suppress(Exception):
             await session.agent_session.customization_toggled(
-                customization_id, bool(action.get("enabled"))
+                customization_id, _effective_enabled(action.get("enablement"))
             )
 
     def _terminal_command(self, action: Mapping[str, Any]) -> str | None:

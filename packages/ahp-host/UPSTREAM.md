@@ -21,27 +21,28 @@ be able to arrive as a patch upgrade.
 | Field | Value |
 |---|---|
 | Upstream | [`microsoft/agent-host-protocol`](https://github.com/microsoft/agent-host-protocol) (MIT) |
-| Spec tag | `spec/v0.7.0` |
-| Spec commit | `ea6fae670c4012721fdc02d587b3a46ecdc871c0` |
+| Spec tag | `spec/v0.8.0` |
+| Spec commit | `7153143f1c6993fa886d7d59870811cdad479d83` |
 | Working revision read during research | `bd27d354b39c1b2090fbcc6db392d406b743280c` (2026-07-31) |
-| **Protocol version negotiated on the wire** | **`0.7.0`** (we offer `0.7.0, 0.6.0`) |
-| Conformance corpus | with the dependency, vendored there from `spec/v0.7.0` → `types/test-cases/` |
-| Reference client for interop tests | `@microsoft/agent-host-protocol@0.7.0` (npm, published 2026-08-06) |
+| **Protocol version negotiated on the wire** | **`0.8.0`** (we offer `0.8.0, 0.7.0, 0.6.0`) |
+| Conformance corpus | with the dependency, vendored there from `spec/v0.8.0` → `types/test-cases/` |
+| Reference client for interop tests | `@microsoft/agent-host-protocol@0.8.0` (npm, published 2026-08-18) |
 
-### The interop client no longer trails the wire version
+### The interop client matches the wire version
 
-Two earlier revisions of this section successively lost their premise. The
-first argued the corpus tag and the wire version must differ — `spec/v0.7.0`
-for the fixtures, `0.6.0` on the wire. The second recorded what survived:
-this host prefers **`0.7.0`**, but npm's newest client was `0.6.0`
-(`docs/research.md` §1, checked 2026-08-01), so the interop run trailed the
-preferred version by one MINOR. That gap closed on 2026-08-06 when upstream
-published `@microsoft/agent-host-protocol@0.7.0` — built from the same
-`spec/v0.7.0` tag the corpus is vendored from — so `tests/interop/` now
-drives `0.7.0` and that run negotiates `0.7.0`: the fixtures, the wire, and
-the interop counterparty finally agree on one revision. `0.6.0` stays in the
-offered list for peers built against the previous client, and the negotiation
-tests still cover the downgrade path.
+Earlier revisions of this section recorded the interop client trailing the
+preferred wire version by a MINOR, until npm caught up with `spec/v0.7.0`. The
+move to `spec/v0.8.0` kept them together from the start: this host
+prefers **`0.8.0`**, npm published `@microsoft/agent-host-protocol@0.8.0` from that
+same tag on 2026-08-18, and `tests/interop/` drives it and negotiates `0.8.0`.
+`0.7.0` and `0.6.0` stay in the offered list — upstream still declares both
+supported — and the negotiation tests still cover the downgrade path.
+
+A peer that negotiates an older version still gets 0.8.0's reducers, and one
+0.8.0 change is breaking on the wire: `session/customizationToggled` carries
+`enablement` where it carried `enabled`. This host **rejects** an old-shape
+toggle rather than letting it reduce to a silent no-op, so a pre-0.8.0 client
+reverts its optimistic state instead of showing a toggle that never happened.
 
 ## Vendoring moved out
 

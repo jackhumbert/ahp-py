@@ -10,6 +10,34 @@ versions each release speaks.
 
 ## [Unreleased]
 
+### Changed — protocol 0.8.0
+
+- **Depends on `agent-host-protocol` at `spec/v0.8.0`, and offers `0.8.0`,
+  `0.7.0` and `0.6.0`, preferring `0.8.0`.** The interop suite drives
+  `@microsoft/agent-host-protocol@0.8.0` from npm, and negotiates `0.8.0`.
+- **`session/workingDirectoryReplaced` is accepted and validated.** It needs
+  `multipleWorkingDirectories`; replacing the primary (index 0) needs
+  `primaryReplacement`, which wins over `immutablePrimary` when both are
+  advertised; the replacement answers to
+  `Policy.may_grant_working_directory` exactly as a set does. With
+  `primaryReplacement`, a generic `session/workingDirectoryRemoved` of the
+  primary is rejected — the spec's MUST.
+- **`session/customizationToggled` takes the 0.8.0 `enablement` decision
+  list.** A toggle without a well-formed one — including the 0.7.0 `enabled`
+  shape — is rejected, so the client reverts; previously-accepted old-shape
+  toggles would now reduce to a no-op while telling the provider `False`.
+  `HandlesCustomizations.customization_toggled` keeps its signature and
+  receives the effective value, `enablement?.[0]?.enabled ?? true`.
+- **`auth/required` carries the complete `ProtectedResourceMetadata`** in
+  `resource`, not its identifier. `auth_required_params` takes a
+  `ProtectedResource`; `Host.notify_auth_required` still accepts a bare
+  identifier and resolves it against the advertised resources.
+- The demo plugin and MCP server no longer publish `enabled` — both carry
+  scoped `enablement` since 0.8.0, and absent means enabled.
+- A `toolClientExecution` input entry no longer raises the session's
+  `InputNeeded` bit (a 0.8.0 reducer change, from the dependency); the test
+  that asserted the old behaviour now asserts the new.
+
 ## [0.1.0] — pending
 
 The first release, staged: **no `v0.1.0` tag exists yet**, and
