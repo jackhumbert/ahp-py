@@ -322,3 +322,28 @@ def test_session_options_gate_every_tool_through_the_hook(tmp_path: Path) -> Non
     assert options.permission_mode == "default"
     assert options.allowed_tools == []
     assert "AskUserQuestion" in options.disallowed_tools
+
+
+async def test_a_shell_call_reads_as_what_it_does_not_as_run_command(tmp_path: Path) -> None:
+    # Without a line of its own, a client shows the host's fallback "Running Run
+    # command" and then "Done" for every shell call - the command is only in the
+    # raw input. Claude's own `description` says what the call is for.
+    command = {"command": "git ls-files | wc -l", "description": "Count tracked files"}
+    harness = Harness(
+        tmp_path,
+        [
+            AssistantMessage(content=[ToolUseBlock("t4", "Bash", command)], model="m"),
+            SdkUserMessage(content=[ToolResultBlock("t4", "42", False)]),
+            AssistantMessage(
+                content=[ToolUseBlock("t5", "Read", {"file_path": "/x/a.py"})], model="m"
+            ),
+            SdkUserMessage(content=[ToolResultBlock("t5", "nope", True)]),
+            _result(),
+        ],
+    )
+    session = await harness.provider.create_session(_context(tmp_path))
+    sink = RecordingSink()
+    await session.send_user_message(UserMessage(text="count"), sink)
+
+    assert sink.invocations == {"t4": "Count tracked files", "t5": "Read file: a.py"}
+    assert sink.past_tense == {"t4": "Ran `git ls-files | wc -l`", "t5": "Failed: Read file: a.py"}

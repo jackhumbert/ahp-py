@@ -67,6 +67,9 @@ class RecordingSink:
         self.approve = approve
         self.edited_input = edited_input
         self.confirmations: list[ToolConfirmation] = []
+        #: The latest line under each call's name, and each call's past tense.
+        self.invocations: dict[str, str] = {}
+        self.past_tense: dict[str, str | None] = {}
 
     async def text_delta(self, text: str) -> None:
         self.events.append(("text", text))
@@ -94,6 +97,8 @@ class RecordingSink:
         invocation_message: str | None = None,
         meta: Mapping[str, Any] | None = None,
     ) -> None:
+        if invocation_message is not None:
+            self.invocations[call_id] = invocation_message
         self.events.append(("delta", call_id))
 
     async def tool_call_output(
@@ -124,6 +129,7 @@ class RecordingSink:
         success: bool = True,
         past_tense_message: str | None = None,
     ) -> None:
+        self.past_tense[call_id] = past_tense_message
         self.events.append(("completed", call_id, success, result))
 
     async def turn_failed(

@@ -4,6 +4,10 @@
 
 ### Added
 
+- Tool calls say what they do. The line under a running call is Claude's own
+  description for shell commands ("Count tracked files") or e.g. "Read file: a.py",
+  instead of the host's fallback "Running Run command"; a finished call reads
+  "Ran `git ls-files | wc -l`" or "Failed: Read file: a.py" instead of "Done".
 - A `continueFrom` session setting: continue any of this machine's Claude Code
   conversations (terminal, IDE, Remote Control) by forking it; searchable, and
   confined to `--root`.

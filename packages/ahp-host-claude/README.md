@@ -13,7 +13,10 @@ Status: pre-alpha.
 
 ## What a client sees
 
-- Streaming text and reasoning, tool calls as rows, token usage.
+- Streaming text and reasoning, token usage, and tool calls as rows that say
+  what they do: Claude's own description of a shell command while it runs
+  (the command itself is in the call's input), then "Ran `…`", "Read a.py",
+  "Edited core.py" and so on once it finishes.
 - **Approvals**, chosen per session when it is created (the `permissionMode`
   session setting, which VS Code draws with its own icons):
   - **Ask** (`default`, the default): reading and searching run freely; every edit, shell

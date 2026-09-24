@@ -169,3 +169,48 @@ def describe(tool_name: str, tool_input: Mapping[str, Any]) -> tuple[str, str]:
         case "ExitPlanMode":
             return "Start on the plan", "Approve the plan above to let Claude start"
     return tool_name, tool_name
+
+
+def progress_line(tool_name: str, tool_input: Mapping[str, Any]) -> str:
+    """The line under a running call's name.
+
+    Without one, the host falls back to "Running {display name}", which for
+    every shell command reads "Running Run command". Claude gives each Bash
+    call a short `description` of its purpose; that is the most useful line a
+    person can read, and the command itself is in the input beside it.
+    """
+    if tool_name == "Bash":
+        description = tool_input.get("description")
+        if isinstance(description, str) and description.strip():
+            return _short(description)
+    display, message = describe(tool_name, tool_input)
+    return message if message == display else f"{display}: {message}"
+
+
+def past_tense(tool_name: str, tool_input: Mapping[str, Any], *, failed: bool) -> str:
+    """What a finished call did, in place of a bare "Done"/"Failed"."""
+    _, message = describe(tool_name, tool_input)
+    if failed:
+        return f"Failed: {progress_line(tool_name, tool_input)}"
+    match tool_name:
+        case "Bash":
+            return f"Ran `{_short(tool_input.get('command', ''), 80)}`"
+        case "Read":
+            return f"Read {message}"
+        case "Edit" | "MultiEdit" | "NotebookEdit":
+            return f"Edited {message}"
+        case "Write":
+            return f"Wrote {message}"
+        case "Grep":
+            return f"Searched for {message}"
+        case "Glob":
+            return f"Found files matching {message}"
+        case "WebFetch":
+            return f"Fetched {message}"
+        case "WebSearch":
+            return f"Searched the web for {message}"
+        case "Task" | "Agent":
+            return f"Sub-agent finished: {message}"
+        case "TodoWrite":
+            return "Updated the task list"
+    return f"Ran {tool_name}"

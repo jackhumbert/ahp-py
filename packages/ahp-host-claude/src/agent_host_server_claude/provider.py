@@ -59,7 +59,9 @@ from agent_host_server_claude.permissions import (
     PERMISSION_MODES,
     approval_mode,
     describe,
+    past_tense,
     pre_tool_use_decision,
+    progress_line,
 )
 from agent_host_server_claude.sessions import (
     NEW,
@@ -218,6 +220,8 @@ class ClaudeSession:
         #: own task, so they find the sink here rather than as an argument.
         self._sink: TurnSink | None = None
         self._announced: set[str] = set()
+        #: Each announced call's tool and input, for its past-tense line.
+        self._inputs: dict[str, tuple[str, dict[str, Any]]] = {}
         self._streamed_messages: set[str] = set()
         self._lock = asyncio.Lock()
 
@@ -283,8 +287,12 @@ class ClaudeSession:
         if call_id in self._announced or self._sink is None:
             return
         self._announced.add(call_id)
+        self._inputs[call_id] = (name, dict(tool_input))
         display, _ = describe(name, tool_input)
         await self._sink.tool_call_started(call_id, name, dict(tool_input), display_name=display)
+        await self._sink.tool_call_delta(
+            call_id, invocation_message=progress_line(name, tool_input)
+        )
 
     async def _can_use_tool(
         self, tool_name: str, tool_input: dict[str, Any], context: ToolPermissionContext
@@ -325,6 +333,7 @@ class ClaudeSession:
         async with self._lock:
             self._sink = sink
             self._announced.clear()
+            self._inputs.clear()
             if self._recap:
                 recap, self._recap = self._recap, None
                 await sink.text_delta(recap)
@@ -413,11 +422,12 @@ class ClaudeSession:
                 continue
             failed = bool(block.is_error)
             text = _text_of(block.content)
+            name, tool_input = self._inputs.get(block.tool_use_id, ("", {}))
             await sink.tool_call_completed(
                 block.tool_use_id,
                 {"content": [{"type": "text", "text": text}]},
                 success=not failed,
-                past_tense_message="Failed" if failed else "Done",
+                past_tense_message=past_tense(name, tool_input, failed=failed),
             )
 
     async def _on_result(self, item: ResultMessage, sink: TurnSink, model: str | None) -> None:
