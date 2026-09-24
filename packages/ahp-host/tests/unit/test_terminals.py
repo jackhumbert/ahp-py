@@ -330,15 +330,19 @@ class TestClaimParsing:
         "claim",
         [
             TerminalClientClaim("client-a"),
-            TerminalSessionClaim("ahp-session:/1"),
-            TerminalSessionClaim("ahp-session:/1", "turn-2", "tool-3"),
+            TerminalSessionClaim("ahp-session:/1", "ahp-chat:/1"),
+            TerminalSessionClaim("ahp-session:/1", "ahp-chat:/1", "turn-2", "tool-3"),
         ],
     )
     def test_a_claim_round_trips_through_the_wire_shape(self, claim: TerminalClaim) -> None:
         assert claim_from_wire(claim.to_wire()) == claim
 
     def test_an_absent_turn_is_absent_on_the_wire_not_null(self) -> None:
-        assert TerminalSessionClaim("s").to_wire() == {"kind": "session", "session": "s"}
+        assert TerminalSessionClaim("s", "c").to_wire() == {
+            "kind": "session",
+            "session": "s",
+            "chat": "c",
+        }
 
     @pytest.mark.parametrize(
         "payload",
@@ -350,6 +354,8 @@ class TestClaimParsing:
             {"kind": "client", "clientId": 123},
             {"kind": "session"},
             {"kind": "session", "session": None},
+            # `chat` is required since 0.9.0.
+            {"kind": "session", "session": "ahp-session:/1"},
             {"kind": 1, "clientId": "a"},
             {"kind": "Client", "clientId": "a"},
         ],
@@ -386,22 +392,24 @@ class TestClaimOwnership:
 
     def test_no_client_holds_a_session_claim(self) -> None:
         """A session-owned terminal is the agent's, and takes input from nobody."""
-        assert not holds_claim(TerminalSessionClaim("ahp-session:/1"), "a")
+        assert not holds_claim(TerminalSessionClaim("ahp-session:/1", "ahp-chat:/1"), "a")
 
     def test_an_unparseable_claim_is_held_by_nobody(self) -> None:
         assert not holds_claim(None, "a")
 
     def test_turn_scope_does_not_change_the_owner(self) -> None:
-        assert same_owner(TerminalSessionClaim("s", "turn-1", "tool-1"), TerminalSessionClaim("s"))
+        assert same_owner(
+            TerminalSessionClaim("s", "c", "turn-1", "tool-1"), TerminalSessionClaim("s", "c")
+        )
 
     def test_two_kinds_are_never_the_same_owner(self) -> None:
-        assert not same_owner(TerminalClientClaim("a"), TerminalSessionClaim("a"))
+        assert not same_owner(TerminalClientClaim("a"), TerminalSessionClaim("a", "c"))
 
 
 class TestDispatchGating:
     HOLDER = TerminalClientClaim("client-a")
     OTHER = TerminalClientClaim("client-b")
-    SESSION = TerminalSessionClaim("ahp-session:/1", "turn-1", "tool-1")
+    SESSION = TerminalSessionClaim("ahp-session:/1", "ahp-chat:/1", "turn-1", "tool-1")
 
     @pytest.mark.parametrize(
         ("action_type", "claim", "allowed"),
@@ -466,7 +474,7 @@ class TestDispatchGating:
             terminal_dispatch_rejection(
                 {
                     "type": "terminal/claimed",
-                    "claim": TerminalSessionClaim("ahp-session:/1").to_wire(),
+                    "claim": TerminalSessionClaim("ahp-session:/1", "ahp-chat:/1").to_wire(),
                 },
                 claim=self.SESSION,
                 client_id="client-a",

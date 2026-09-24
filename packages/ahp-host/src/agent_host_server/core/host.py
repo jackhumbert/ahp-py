@@ -186,6 +186,9 @@ _CHAT_SUMMARY_FIELDS: Final = (
 #: cut where we can see the words is better than one cut where we cannot.
 _TITLE_LIMIT: Final = 60
 
+#: `TerminalLifecycleState` of a live terminal (0.9.0).
+_TERMINAL_RUNNING: Final[Mapping[str, str]] = {"status": "running"}
+
 #: Client-dispatchable, and between them they name the filesystem roots the
 #: agent gets tool access to.
 _WORKING_DIRECTORY_ACTIONS: Final = frozenset(
@@ -406,16 +409,17 @@ def _terminal_info(state: Any) -> dict[str, Any]:
     if not isinstance(state, Mapping):
         # Still valid: the caller supplies `resource`, and a title beats an
         # entry the client cannot render at all.
-        return {"title": _DEFAULT_TERMINAL_TITLE, "claim": {}}
-    info: dict[str, Any] = {
+        return {"title": _DEFAULT_TERMINAL_TITLE, "claim": {}, "lifecycle": dict(_TERMINAL_RUNNING)}
+    lifecycle = state.get("lifecycle")
+    # `lifecycle` is required on `TerminalInfo` since 0.9.0 and replaces the
+    # old top-level `exitCode`: an exit is `{status: "exited", exitCode?}`.
+    return {
         "title": state.get("title")
         if isinstance(state.get("title"), str)
         else _DEFAULT_TERMINAL_TITLE,
         "claim": state.get("claim") or {},
+        "lifecycle": dict(lifecycle if isinstance(lifecycle, Mapping) else _TERMINAL_RUNNING),
     }
-    if "exitCode" in state:
-        info["exitCode"] = state["exitCode"]
-    return info
 
 
 #: File suffix -> customization type. The explicit convention: a file that says
@@ -2297,6 +2301,8 @@ class Host:
         state: dict[str, Any] = {
             "content": [],
             "claim": claim.to_wire(),
+            # Required since 0.9.0; `terminal/exited` moves it to `exited`.
+            "lifecycle": dict(_TERMINAL_RUNNING),
             "isPty": process.is_pty,
             # `title` is REQUIRED by `TerminalState`, and `name` is OPTIONAL on
             # `CreateTerminalParams`, so the fallback is not a nicety: an
@@ -3989,6 +3995,11 @@ class Host:
     ) -> tuple[_Session, list[Any]] | None:
         """Resolve `createSession.fork`, or ``None`` when it is absent.
 
+        LEGACY: 0.9.0 removed session-level forking from `createSession` in
+        favour of chat forking (`createChat` with a `fork` source), so a 0.9.0
+        client never sends this. It stays for the 0.7.0 and 0.8.0 peers this
+        host still negotiates -- VS Code's `/fork` among them.
+
         Until this existed the parameter was read by nobody: `createSession`
         accepted a fork, answered success, and produced an EMPTY session. A
         silent no-op is the worst available outcome -- the user watches their
@@ -4583,6 +4594,11 @@ class Host:
                     return "turnId does not name the active turn"
             if action_type == "chat/turnStarted" and state.get("activeTurn") is not None:
                 return "a turn is already active"
+            if action_type == "chat/turnResume":
+                # This host never publishes a `resumable` error part, so there
+                # is no turn a resume could reopen -- the reducer would no-op.
+                # Rejected so the client drops its optimistic reopening.
+                return "this host does not resume failed turns"
             if (
                 action_type in _TOOL_RESOLVING_ACTIONS
                 and self.pending.id_for_key(action.get("toolCallId"), channel=channel) is None
@@ -4939,7 +4955,7 @@ class Host:
         # A session claim, tied to the turn and the call that produced it: this
         # terminal belongs to the command, not to a client, so it dies with the
         # session rather than with whoever happened to type the `!`.
-        claim = TerminalSessionClaim(session.uri, turn_id, call_id)
+        claim = TerminalSessionClaim(session.uri, channel, turn_id, call_id)
         chunks: list[bytes] = []
         terminal_uri = f"ahp-terminal:/{uuid.uuid4()}"
         request = TerminalRequest(

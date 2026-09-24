@@ -10,6 +10,28 @@ versions each release speaks.
 
 ## [Unreleased]
 
+### Changed — protocol 0.9.0
+
+- **Depends on `agent-host-protocol` at `spec/v0.9.0`, and offers `0.9.0`,
+  `0.8.0`, `0.7.0` and `0.6.0`, preferring `0.9.0`.** The interop suite drives
+  `@microsoft/agent-host-protocol@0.9.0` from npm, negotiates `0.9.0`, and the
+  official 0.9.0 reducers agree with the host's state.
+- **A failed turn publishes its error as an `ErrorResponsePart`**
+  (`chat/error.part`), so it stays in the transcript. It is never marked
+  `resumable`, and a client's `chat/turnResume` is rejected so the client
+  reverts rather than showing a reopened turn nothing is running.
+- **Terminals carry a lifecycle.** New terminals start `{status: "running"}`,
+  `terminal/exited` moves them to `exited`, and the root catalogue's
+  `TerminalInfo` carries `lifecycle` in place of `exitCode`.
+- **Session terminal claims name their chat.** `TerminalSessionClaim` takes a
+  required `chat` (second positional field), the `!command` terminal claims
+  its chat, and a wire claim without one is not a claim.
+- **The session's client-execution entry is a full `ToolCallRunningState`**,
+  adding the `invocationMessage` and `confirmed` it was missing.
+- `createSession`'s session-level `fork`, removed from the 0.9.0 params, is
+  still honoured for the 0.7.0 and 0.8.0 peers that send it.
+- The three automation commands are declined with `-32601`: this host does not
+  host automations.
 ### Changed — protocol 0.8.0
 
 - **Depends on `agent-host-protocol` at `spec/v0.8.0`, and offers `0.8.0`,

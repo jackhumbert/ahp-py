@@ -21,28 +21,39 @@ be able to arrive as a patch upgrade.
 | Field | Value |
 |---|---|
 | Upstream | [`microsoft/agent-host-protocol`](https://github.com/microsoft/agent-host-protocol) (MIT) |
-| Spec tag | `spec/v0.8.0` |
-| Spec commit | `7153143f1c6993fa886d7d59870811cdad479d83` |
+| Spec tag | `spec/v0.9.0` |
+| Spec commit | `60706330f2f351b09f150d9a9c3c0eaedfc8e8b9` |
 | Working revision read during research | `bd27d354b39c1b2090fbcc6db392d406b743280c` (2026-07-31) |
-| **Protocol version negotiated on the wire** | **`0.8.0`** (we offer `0.8.0, 0.7.0, 0.6.0`) |
-| Conformance corpus | with the dependency, vendored there from `spec/v0.8.0` → `types/test-cases/` |
-| Reference client for interop tests | `@microsoft/agent-host-protocol@0.8.0` (npm, published 2026-08-18) |
+| **Protocol version negotiated on the wire** | **`0.9.0`** (we offer `0.9.0, 0.8.0, 0.7.0, 0.6.0`) |
+| Conformance corpus | with the dependency, vendored there from `spec/v0.9.0` → `types/test-cases/` |
+| Reference client for interop tests | `@microsoft/agent-host-protocol@0.9.0` (npm, published 2026-08-28) |
 
 ### The interop client matches the wire version
 
 Earlier revisions of this section recorded the interop client trailing the
-preferred wire version by a MINOR, until npm caught up with `spec/v0.7.0`. The
-move to `spec/v0.8.0` kept them together from the start: this host
-prefers **`0.8.0`**, npm published `@microsoft/agent-host-protocol@0.8.0` from that
-same tag on 2026-08-18, and `tests/interop/` drives it and negotiates `0.8.0`.
-`0.7.0` and `0.6.0` stay in the offered list — upstream still declares both
-supported — and the negotiation tests still cover the downgrade path.
+preferred wire version by a MINOR, until npm caught up with `spec/v0.7.0`.
+Since then they have moved together: this host prefers **`0.9.0`**, npm
+published `@microsoft/agent-host-protocol@0.9.0` from that same tag on
+2026-08-28, and `tests/interop/` drives it and negotiates `0.9.0`. `0.8.0`,
+`0.7.0` and `0.6.0` stay in the offered list — upstream still declares all
+three supported — and the negotiation tests still cover the downgrade path.
 
-A peer that negotiates an older version still gets 0.8.0's reducers, and one
-0.8.0 change is breaking on the wire: `session/customizationToggled` carries
-`enablement` where it carried `enabled`. This host **rejects** an old-shape
-toggle rather than letting it reduce to a silent no-op, so a pre-0.8.0 client
-reverts its optimistic state instead of showing a toggle that never happened.
+A peer that negotiates an older version still gets the pinned reducers, and
+some shape changes are breaking on the wire. This host deals with the ones a
+client *sends*:
+
+- `session/customizationToggled` carries `enablement` where it carried
+  `enabled` (0.8.0). An old-shape toggle is **rejected** rather than reduced to
+  a silent no-op, so the client reverts instead of showing a toggle that never
+  happened.
+- `createSession` lost session-level `fork` in 0.9.0. The host still honours
+  it, for the 0.7.0 and 0.8.0 peers — VS Code's `/fork` among them.
+- `chat/turnResume` (0.9.0) is rejected: the host never marks an error part
+  `resumable`, so there is nothing to reopen.
+
+What the host *publishes* is 0.9.0-shaped for everyone: errors as response
+parts, terminal `lifecycle`, session claims with `chat`, and a `failed`
+session lifecycle.
 
 ## Vendoring moved out
 

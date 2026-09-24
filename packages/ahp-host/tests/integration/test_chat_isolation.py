@@ -181,7 +181,7 @@ class TestCancellingOneChatLeavesTheOtherAlone:
         )
         await _idle(slow, client, b)
 
-        assert _state(slow, b)["activeTurn"] is None, "B never finished"
+        assert _state(slow, b).get("activeTurn") is None, "B never finished"
         assert [t["id"] for t in _state(slow, b)["turns"]] == ["turn-B"]
         assert _state(slow, b)["turns"][0]["state"] == "complete"
 

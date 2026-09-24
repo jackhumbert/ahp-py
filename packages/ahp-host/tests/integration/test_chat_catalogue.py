@@ -19,6 +19,7 @@ from typing import Any
 
 import pytest
 from agent_host_protocol.channels import ROOT_URI
+from agent_host_protocol.reducers.clock import now_iso
 from agent_host_protocol.transport import memory_pair
 from agent_host_protocol.types.protocol import SessionStatus
 
@@ -94,7 +95,9 @@ async def _turn(client: FakeClient, chat: str, *, text: str = "hello", turn: str
             "action": {
                 "type": "chat/turnStarted",
                 "turnId": turn,
-                "startedAt": "1970-01-01T00:00:01.000Z",
+                # Real time, not a fixed stamp: since 0.9.0 the chat's
+                # `modifiedAt` is derived from this (plus the turn's duration).
+                "startedAt": now_iso(),
                 "message": {"text": text, "origin": {"kind": "user"}},
             },
         },
@@ -437,7 +440,7 @@ class TestTruncation:
             timeout=10.0,
         )
 
-        assert _state(slow, chat)["activeTurn"] is None
+        assert _state(slow, chat).get("activeTurn") is None
         # Cancelled and cleared: `_cancel_turn` pops the chat's slot, so the
         # session no longer counts it as running.
         assert not slow._sessions[uri].running(chat)

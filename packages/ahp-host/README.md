@@ -14,8 +14,8 @@ Microsoft's protocol for synchronized multi-client state over AI agent sessions.
 
 > ### ⚠️ Status: working, but pre-alpha.
 >
-> A real client can connect, create a session, and run a turn. **All seven
-> reducers pass upstream's whole 256-fixture corpus**, the v0.1 command set plus
+> A real client can connect, create a session, and run a turn. **All nine
+> reducers pass upstream's whole 272-fixture corpus**, the v0.1 command set plus
 > `fetchTurns` is implemented, and a WebSocket transport is in place.
 > Distributed from this repository — deliberately not on PyPI. API not stable,
 > single-trust-domain only.
@@ -24,7 +24,7 @@ Microsoft's protocol for synchronized multi-client state over AI agent sessions.
 
 ## Try it
 
-The wire types and the seven reducers live in a sibling package,
+The wire types and the nine reducers live in a sibling package,
 [`agent-host-protocol`][protocol], which a client stands on too. This family
 of packages installs from GitHub, not from PyPI, and the protocol package must
 go in first — on its own, the second line fails with
@@ -146,9 +146,9 @@ with no adapter installed.
 
 ### Implemented
 
-Protocol **0.8.0, 0.7.0 and 0.6.0** on the wire · **all seven channels** — root,
+Protocol **0.9.0, 0.8.0, 0.7.0 and 0.6.0** on the wire · **all seven channels** — root,
 session, chat, annotations, terminal, changeset and resource-watch, each
-detailed below · **all seven reducers**, gated on upstream's whole 256-fixture corpus
+detailed below · **all nine reducers**, gated on upstream's whole 272-fixture corpus
 · host-global sequencing with per-channel replay budgets · a pluggable agent
 provider with an offline echo implementation · WebSocket transport behind a
 transport abstraction.
@@ -416,9 +416,9 @@ a separate package this one depends on, so that a Python *client* can share them
 rather than fork them. Its conformance gates are listed here because they are
 what this host stands on:
 
-- Reducers are validated against **upstream's own 256-fixture corpus**, the same
+- Reducers are validated against **upstream's own 272-fixture corpus**, the same
   artifact the Rust, Go, Kotlin and Swift clients are gated on, consumed
-  unmodified. All 256, not a subset.
+  unmodified. All 272, not a subset.
 - Wire types are validated against upstream's 39-fixture round-trip corpus.
 - **The corpus's own blind spot is covered separately.** Its comparator drops
   `null`-valued keys on both sides, so it cannot express the difference between

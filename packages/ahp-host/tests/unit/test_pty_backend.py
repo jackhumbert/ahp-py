@@ -29,7 +29,7 @@ pytestmark = [
     pytest.mark.skipif(sys.platform == "win32", reason="POSIX pty"),
 ]
 
-_CLAIM = TerminalSessionClaim(session="echo:/s")
+_CLAIM = TerminalSessionClaim(session="echo:/s", chat="ahp-chat:/s")
 
 
 @pytest.fixture

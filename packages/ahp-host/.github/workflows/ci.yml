@@ -81,7 +81,7 @@ jobs:
       # 0.7.0 (published 2026-08-06) is the newest client on npm and matches
       # the vendored spec tag, so the interop run exercises the same protocol
       # surface the reducers were ported from.
-      - run: npm i --no-save @microsoft/agent-host-protocol@0.8.0 ws
+      - run: npm i --no-save @microsoft/agent-host-protocol@0.9.0 ws
       - name: Interop
         # Without this the tests skip themselves when setup breaks, and a
         # skipped interop suite looks exactly like a passing one.

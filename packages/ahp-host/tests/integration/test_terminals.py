@@ -435,7 +435,10 @@ class TestRefusal:
             client = await _client(host)
             response = await client.request(
                 "createTerminal",
-                {"channel": "agenthost-terminal:/x", "claim": {"kind": "session", "session": "s"}},
+                {
+                    "channel": "agenthost-terminal:/x",
+                    "claim": {"kind": "session", "session": "s", "chat": "ahp-chat:/s"},
+                },
             )
             assert response["error"]["code"] == -32009
             assert backend.request is None, "the backend was reached despite the policy"
@@ -530,6 +533,13 @@ class TestTheExitIsAnnounced:
         types = [a["action"]["type"] for a in client.actions(channel)]
         assert types[-1] == "terminal/exited", types[-4:]
 
+        # Since 0.9.0 the exit is state, not a stray top-level field: the
+        # terminal and its catalogue row both say `exited`, code included.
+        state = (await client.request("subscribe", {"channel": channel}))["result"]["snapshot"][
+            "state"
+        ]
+        assert state["lifecycle"] == {"status": "exited", "exitCode": 7}
+
     async def test_the_catalogue_carries_the_required_fields(self, pty_host: Host) -> None:
         """`TerminalInfo` requires `resource`, `title` and `claim`. We sent
         `{resource, isPty}` -- and `isPty` is not even a TerminalInfo field."""
@@ -596,7 +606,7 @@ class TestTheCatalogueKeepsUp:
         host, _ = wired
         client = await _client(host)
         channel = await _open(client)
-        handed = {"kind": "session", "session": "echo:/s"}
+        handed = {"kind": "session", "session": "echo:/s", "chat": "ahp-chat:/s"}
         await client.notify(
             "dispatchAction",
             {
@@ -732,7 +742,11 @@ class TestDisposalIsNotClaimGated:
         channel = "agenthost-terminal:/handed"
         await client.request(
             "createTerminal",
-            {"channel": channel, "claim": {"kind": "session", "session": "echo:/s"}, "name": "t"},
+            {
+                "channel": channel,
+                "claim": {"kind": "session", "session": "echo:/s", "chat": "ahp-chat:/s"},
+                "name": "t",
+            },
         )
         # Nobody holds a session claim, so this is the case a claim gate would
         # make unkillable.

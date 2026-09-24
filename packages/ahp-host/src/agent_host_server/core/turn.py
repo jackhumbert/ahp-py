@@ -561,13 +561,21 @@ class ActionTurnSink:
         Cancellation does NOT come through here. `chat/turnCancelled` is its
         own action, carries no ErrorInfo, and settles the turn as `cancelled`;
         routing a user's stop through `chat/error` would paint it red.
+
+        Since 0.9.0 the error is an `ErrorResponsePart` the reducer appends to
+        the ended turn, so it stays in the transcript. It is never marked
+        `resumable`: this host cannot pick a failed turn back up, and a
+        resumable part would invite a `chat/turnResume` nothing would answer.
         """
         await self._sequencer.publish(
             self._channel,
             {
                 "type": "chat/error",
                 "turnId": self._turn_id,
-                "error": {"errorType": error_type, "message": message},
+                "part": {
+                    "kind": "error",
+                    "error": {"errorType": error_type, "message": message},
+                },
                 "duration": duration_ms,
             },
         )
@@ -809,11 +817,16 @@ class ActionTurnSink:
                 "kind": "toolClientExecution",
                 "turnId": self._turn_id,
                 "clientId": call.client_id,
+                # A `ToolCallRunningState` since 0.9.0, whose required fields
+                # include the two `chat/toolCallReady` above just set.
                 "toolCall": {
                     "toolCallId": call.call_id,
                     "toolName": call.name,
                     "displayName": call.display_name or call.name,
+                    "invocationMessage": ready["invocationMessage"],
+                    "confirmed": "not-needed",
                     "status": "running",
+                    **({"toolInput": ready["toolInput"]} if "toolInput" in ready else {}),
                 },
             },
         )

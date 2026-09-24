@@ -26,7 +26,7 @@ Which revision we target, and how it is bumped, is in [UPSTREAM.md](UPSTREAM.md)
 ## 2. Every protocol claim needs a test
 
 "Conformant" without a conformance test is a lie. Reducer changes must keep
-upstream's 256-fixture corpus green, and behaviour the corpus does not pin needs
+upstream's 272-fixture corpus green, and behaviour the corpus does not pin needs
 a hand-written test — see the hazards list in `docs/research.md` §2f, which
 exists because JavaScript and Python disagree about things like whether `[]` is
 truthy.

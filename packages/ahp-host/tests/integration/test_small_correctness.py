@@ -300,7 +300,7 @@ class TestTheTerminalCommandPrefix:
         turn = _state(shell, chat)["turns"][0]
         kinds = [part.get("kind") for part in turn["responseParts"]]
         assert "markdown" not in kinds, "the echo agent answered a terminal command"
-        assert _state(shell, chat)["activeTurn"] is None, "the turn never settled"
+        assert _state(shell, chat).get("activeTurn") is None, "the turn never settled"
 
     async def test_a_bare_prefix_is_just_a_message(self, shell: Host) -> None:
         """`!` alone names no command, so it goes to the agent like any text."""

@@ -63,7 +63,11 @@ class Declining(EchoProvider):
         return session
 
 
-async def _run_turn(host: Host, uri: str) -> list[dict[str, Any]]:
+async def _run_turn(
+    host: Host, uri: str, *, then: dict[str, Any] | None = None
+) -> list[dict[str, Any]]:
+    """The chat's action stream for one turn; envelopes when *then* is given,
+    so a follow-up dispatch's `rejectionReason` can be read."""
     client_transport, server_transport = memory_pair()
     serve = asyncio.create_task(host.serve(server_transport))
     client = FakeClient(client_transport)
@@ -96,7 +100,11 @@ async def _run_turn(host: Host, uri: str) -> list[dict[str, Any]]:
             },
         )
         await client.collect(seconds=0.8)
-        return [a["action"] for a in client.actions(chat)]
+        if then is None:
+            return [a["action"] for a in client.actions(chat)]
+        await client.notify("dispatchAction", {"channel": chat, "clientSeq": 2, "action": then})
+        await client.collect(seconds=0.3)
+        return client.actions(chat)
     finally:
         serve.cancel()
         await host.aclose()
@@ -107,14 +115,18 @@ class TestAFailedTurnCarriesAnErrorType:
         actions = await _run_turn(Host(Exploding(), LoopbackSingleUserPolicy()), "echo:/e1")
         errors = [a for a in actions if a["type"] == "chat/error"]
         assert errors, "the turn raised and published no error"
-        error = errors[-1]["error"]
+        # Since 0.9.0 the error rides in an `ErrorResponsePart`, never resumable here.
+        part = errors[-1]["part"]
+        assert part["kind"] == "error"
+        assert "resumable" not in part
+        error = part["error"]
         # REQUIRED. Without it the client renders "Error: (undefined) ...".
         assert error["errorType"]
         assert "the model exploded" in error["message"]
 
     async def test_an_explicit_sink_failure(self) -> None:
         actions = await _run_turn(Host(Declining(), LoopbackSingleUserPolicy()), "echo:/e2")
-        error = [a for a in actions if a["type"] == "chat/error"][-1]["error"]
+        error = [a for a in actions if a["type"] == "chat/error"][-1]["part"]["error"]
         assert error["errorType"] == "provider.declined"
         assert error["message"] == "provider said no"
 
@@ -123,9 +135,24 @@ class TestAFailedTurnCarriesAnErrorType:
         default follows the reference host (`agent.turn`) rather than the
         `somethingFailed` style VS Code's own host emits and nothing reads."""
         actions = await _run_turn(Host(Exploding(), LoopbackSingleUserPolicy()), "echo:/e3")
-        assert [a for a in actions if a["type"] == "chat/error"][-1]["error"][
-            "errorType"
-        ] == "agent.turn"
+        part = [a for a in actions if a["type"] == "chat/error"][-1]["part"]
+        assert part["error"]["errorType"] == "agent.turn"
+
+
+class TestResumeIsRefused:
+    async def test_a_turn_resume_is_rejected_so_the_client_reverts(self) -> None:
+        """0.9.0's `chat/turnResume` is client-dispatchable. This host never
+        marks an error `resumable`, so nothing can reopen -- and a resume that
+        was silently accepted would leave the client's optimistic reopening in
+        place with no turn behind it."""
+        envelopes = await _run_turn(
+            Host(Exploding(), LoopbackSingleUserPolicy()),
+            "echo:/e4",
+            then={"type": "chat/turnResume", "turnId": "t1"},
+        )
+        resumes = [e for e in envelopes if e["action"]["type"] == "chat/turnResume"]
+        assert resumes
+        assert resumes[-1]["rejectionReason"] == "this host does not resume failed turns"
 
 
 class TestDurationIsMeasured:

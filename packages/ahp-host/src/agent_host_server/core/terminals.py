@@ -157,19 +157,21 @@ class TerminalClientClaim:
 
 @dataclass(frozen=True)
 class TerminalSessionClaim:
-    """``{ kind: 'session', session, turnId?, toolCallId? }``.
+    """``{ kind: 'session', session, chat, turnId?, toolCallId? }``.
 
-    The optional pair is the whole difference between "a tool call is using this
-    right now" and "backgrounded, still owned". Narrowing to bare ``session`` is
-    how a tool call detaches.
+    `chat` -- the chat that owns the terminal -- is required since 0.9.0. The
+    optional pair is the whole difference between "a tool call is using this
+    right now" and "backgrounded, still owned". Narrowing to bare ``session``
+    and ``chat`` is how a tool call detaches.
     """
 
     session: str
+    chat: str
     turn_id: str | None = None
     tool_call_id: str | None = None
 
     def to_wire(self) -> dict[str, Any]:
-        claim: dict[str, Any] = {"kind": "session", "session": self.session}
+        claim: dict[str, Any] = {"kind": "session", "session": self.session, "chat": self.chat}
         # Absent, not `null`: `TerminalSessionClaim` declares these optional and
         # an explicit null is a different document to a missing key.
         if self.turn_id is not None:
@@ -205,12 +207,16 @@ def claim_from_wire(value: Any) -> TerminalClaim | None:
         return TerminalClientClaim(client_id)
     if js.strict_equal(kind, "session"):
         session = js.get(value, "session")
-        if not isinstance(session, str):
+        chat = js.get(value, "chat")
+        # `chat` is required since 0.9.0; a claim without one names no owner a
+        # current client can resolve, so it is not a claim.
+        if not isinstance(session, str) or not isinstance(chat, str):
             return None
         turn_id = js.get(value, "turnId")
         tool_call_id = js.get(value, "toolCallId")
         return TerminalSessionClaim(
             session,
+            chat,
             turn_id if isinstance(turn_id, str) else None,
             tool_call_id if isinstance(tool_call_id, str) else None,
         )

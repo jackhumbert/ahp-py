@@ -206,7 +206,7 @@ class TestUnimplemented:
                 {
                     "channel": ROOT_URI,
                     "uri": "file:///x",
-                    "claim": {"kind": "session", "session": "echo:/s"},
+                    "claim": {"kind": "session", "session": "echo:/s", "chat": "ahp-chat:/s"},
                 },
             )
             if "error" not in response:
@@ -236,7 +236,7 @@ class TestUnimplemented:
             "createTerminal",
             {
                 "channel": "agenthost-terminal:/t1",
-                "claim": {"kind": "session", "session": "echo:/s"},
+                "claim": {"kind": "session", "session": "echo:/s", "chat": "ahp-chat:/s"},
             },
         )
         assert response["error"]["code"] == -32009
