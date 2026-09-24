@@ -69,11 +69,14 @@ from agent_host_broker.core.paging import (
 from agent_host_broker.core.root import merge_root, root_actions
 from agent_host_broker.core.sequence import BrokerClock, LinkSequence
 from agent_host_broker.core.uris import (
+    VIRTUAL_ROOT,
     ChannelOwners,
     ForeignUriError,
-    file_authority,
+    is_virtual_root,
     learn_owned_channels,
+    node_of,
     qualify_file_uris,
+    root_of,
     unqualify_file_uris,
 )
 from agent_host_broker.registry import NodeDirectory, NodeRecord, Principal
@@ -97,6 +100,8 @@ _REFUSED: Final = -32009
 _CHANNEL_KEYS: Final = ("channel", "resource", "session", "sessionResource", "chat")
 #: Params whose value may be a file URI naming its node.
 _FILE_KEYS: Final = ("uri", "root", "cwd", "workingDirectory", "channel", "resource")
+#: Asked before a session exists, often before its folder is chosen.
+_SESSION_CONFIG_METHODS: Final = frozenset({"resolveSessionConfig", "sessionConfigCompletions"})
 
 
 @dataclass(frozen=True)
@@ -158,6 +163,9 @@ class _Node:
     link: NodeLink
     sequence: LinkSequence
     root: dict[str, Any]
+    #: The node's own root directory (from its `defaultDirectory`), which
+    #: `ahp-file:///<node>` names; None when it advertised none.
+    path_root: str | None = None
     pump: asyncio.Task[None] | None = None
     subscribed: set[str] = field(default_factory=set)
 
@@ -326,13 +334,45 @@ class _SurfaceConnection:
             return await self._list_sessions(params)
         if method == "createSession":
             return await self._create_session(params)
+        if method.startswith("resource") and is_virtual_root(params.get("uri")):
+            return self._virtual_root(method)
         node_id = self._route(params)
+        if node_id is None and method in _SESSION_CONFIG_METHODS:
+            # Asked before a folder is chosen: the default node answers, and
+            # the client asks again once the folder names one.
+            node_id = self._default_node(params.get("provider"))
         if node_id is None:
             # Nothing in the request names a node, and more than one could
             # answer it. Guessing would run the command somewhere the surface
             # did not mean.
             raise invalid_params(f"cannot tell which node {method} is for")
         return await self._call(node_id, method, params)
+
+    def _virtual_root(self, method: str) -> Any:
+        """`ahp-file:///`: a read-only directory with one entry per node."""
+        if method == "resourceList":
+            return {
+                "entries": [
+                    {"name": node_id, "type": "directory"}
+                    for node_id in self.records
+                    if node_id in self.nodes
+                ]
+            }
+        if method == "resourceResolve":
+            return {"uri": VIRTUAL_ROOT, "type": "directory"}
+        raise AhpError(-32009, "the list of nodes is read-only")
+
+    def _default_node(self, provider: Any) -> str | None:
+        """The first connected node, in inventory order, offering `provider`.
+
+        Where a request cannot say which node it is for - a new chat with no
+        folder, or its settings asked for before one is picked - it goes here.
+        """
+        offering = set(self._nodes_offering(provider)) if isinstance(provider, str) else set()
+        for node_id in self.records:
+            if node_id in self.nodes and (not offering or node_id in offering):
+                return node_id
+        return None
 
     async def _initialize(self, params: Mapping[str, Any], after: list[dict[str, Any]]) -> Any:
         if self.initialized:
@@ -495,9 +535,10 @@ class _SurfaceConnection:
         node_seq = handshake.get("serverSeq")
         sequence = LinkSequence(self.clock, node_seq if isinstance(node_seq, int) else 0)
         root: dict[str, Any] = {}
+        path_root = root_of(handshake.get("defaultDirectory"))
         for snapshot in handshake.get("snapshots") or []:
             if isinstance(snapshot, Mapping) and snapshot.get("resource") == ROOT_URI:
-                state = qualify_file_uris(snapshot.get("state"), record.node_id)
+                state = qualify_file_uris(snapshot.get("state"), record.node_id, path_root)
                 root = state if isinstance(state, dict) else {}
         self.owners.claim(record.node_id, learn_owned_channels(root))
         node_id = record.node_id
@@ -506,7 +547,7 @@ class _SurfaceConnection:
             return await self._node_request(node_id, method, params)
 
         link.set_request_handler(answer)
-        return _Node(link=link, sequence=sequence, root=root)
+        return _Node(link=link, sequence=sequence, root=root, path_root=path_root)
 
     def _agreed_handshake_fields(self) -> dict[str, Any]:
         """Handshake extras the whole fleet agrees on, and only those.
@@ -524,10 +565,14 @@ class _SurfaceConnection:
             if values[0] is not None and all(value == values[0] for value in values):
                 agreed[key] = values[0]
         if len(self.nodes) == 1:
-            (node_id,) = self.nodes
-            directory = handshakes[0].get("defaultDirectory")
+            # One node: its root, directly.
+            ((node_id, node),) = self.nodes.items()
+            directory = node.link.handshake.get("defaultDirectory")
             if isinstance(directory, str):
-                agreed["defaultDirectory"] = qualify_file_uris(directory, node_id)
+                agreed["defaultDirectory"] = qualify_file_uris(directory, node_id, node.path_root)
+        else:
+            # Several: the list of nodes, each of which is its own root.
+            agreed["defaultDirectory"] = VIRTUAL_ROOT
         return agreed
 
     def _subscribe_root(self) -> dict[str, Any]:
@@ -673,10 +718,10 @@ class _SurfaceConnection:
                 return offering[0]
             if not offering:
                 raise provider_not_found(provider)
-            raise invalid_params(
-                f"provider {provider!r} runs on nodes {', '.join(offering)}; "
-                "pass a working directory on the node you want"
-            )
+            # Several nodes run it and nothing names one: a folder-less chat.
+            default = self._default_node(provider)
+            assert default is not None  # `offering` is non-empty and connected
+            return default
         if len(self.nodes) == 1:
             return next(iter(self.nodes))
         raise invalid_params("createSession needs a provider or a working directory")
@@ -703,9 +748,7 @@ class _SurfaceConnection:
         if isinstance(directories, list):
             candidates.extend(directories)
         authorities = {
-            authority
-            for authority in (file_authority(value) for value in candidates)
-            if authority is not None
+            authority for authority in (node_of(value) for value in candidates) if authority
         }
         if not authorities:
             return None
@@ -747,10 +790,12 @@ class _SurfaceConnection:
         if node is None:
             raise AhpError(-32603, f"node {node_id!r} is not connected")
         try:
-            outgoing = unqualify_file_uris(params, node_id)
+            outgoing = unqualify_file_uris(params, node_id, node.path_root)
         except ForeignUriError as exc:
             raise invalid_params(str(exc)) from exc
-        result = qualify_file_uris(await node.link.request(method, outgoing), node_id)
+        result = qualify_file_uris(
+            await node.link.request(method, outgoing), node_id, node.path_root
+        )
         self.owners.claim(node_id, learn_owned_channels(result))
         return result
 
@@ -781,12 +826,15 @@ class _SurfaceConnection:
             if node_id is None:
                 _log.debug("dispatchAction for an unroutable channel: %r", channel)
                 return
+            target = self.nodes.get(node_id)
+            if target is None:
+                return
             try:
-                outgoing = unqualify_file_uris(params, node_id)
+                outgoing = unqualify_file_uris(params, node_id, target.path_root)
             except ForeignUriError:
                 _log.debug("dispatchAction naming another node's file dropped")
                 return
-            self.nodes[node_id].link.notify("dispatchAction", outgoing)
+            target.link.notify("dispatchAction", outgoing)
         # Unknown notifications are ignored, per the additive-change guarantee.
 
     # ─── node -> surface ─────────────────────────────────────────────────
@@ -813,7 +861,7 @@ class _SurfaceConnection:
             # translation of a later `fromSeq` depends on every action this
             # link has carried, not only the ones the surface saw.
             stamp = node.sequence.stamp(node_seq if isinstance(node_seq, int) else None)
-            envelope = qualify_file_uris(params, node_id)
+            envelope = qualify_file_uris(params, node_id, node.path_root)
             channel = envelope.get("channel")
             if channel == ROOT_URI:
                 self._apply_root(node, envelope.get("action"))
@@ -831,7 +879,7 @@ class _SurfaceConnection:
                 self.delivered[channel] = stamp
                 self._send(forwarded)
             return
-        qualified = qualify_file_uris(params, node_id)
+        qualified = qualify_file_uris(params, node_id, node.path_root)
         self.owners.claim(node_id, learn_owned_channels(qualified))
         if qualified.get("channel") == ROOT_URI and ROOT_URI not in self.subscriptions:
             return
@@ -874,6 +922,10 @@ class _SurfaceConnection:
 
     # ─── node -> surface requests ────────────────────────────────────────
 
+    def _path_root(self, node_id: str) -> str | None:
+        node = self.nodes.get(node_id)
+        return node.path_root if node is not None else None
+
     async def _node_request(self, node_id: str, method: str, params: Mapping[str, Any]) -> Any:
         request_id = self.next_outbound_id
         self.next_outbound_id += 1
@@ -884,7 +936,7 @@ class _SurfaceConnection:
                 "jsonrpc": "2.0",
                 "id": request_id,
                 "method": method,
-                "params": qualify_file_uris(params, node_id),
+                "params": qualify_file_uris(params, node_id, self._path_root(node_id)),
             }
         )
         try:
@@ -892,7 +944,7 @@ class _SurfaceConnection:
         finally:
             self.outbound.pop(request_id, None)
         try:
-            return unqualify_file_uris(result, node_id)
+            return unqualify_file_uris(result, node_id, self._path_root(node_id))
         except ForeignUriError as exc:
             raise invalid_params(str(exc)) from exc
 

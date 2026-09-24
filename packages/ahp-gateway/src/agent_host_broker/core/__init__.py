@@ -16,13 +16,19 @@ from agent_host_broker.core.node import (
     open_node_link,
 )
 from agent_host_broker.core.uris import (
+    SCHEME,
+    VIRTUAL_ROOT,
     ForeignUriError,
-    file_authority,
+    is_virtual_root,
+    node_of,
     qualify_file_uris,
+    root_of,
     unqualify_file_uris,
 )
 
 __all__ = [
+    "SCHEME",
+    "VIRTUAL_ROOT",
     "AhpNodeLink",
     "Authenticator",
     "Broker",
@@ -32,8 +38,10 @@ __all__ = [
     "NodeLink",
     "NodeRequestHandler",
     "NodeUnavailableError",
-    "file_authority",
+    "is_virtual_root",
+    "node_of",
     "open_node_link",
     "qualify_file_uris",
+    "root_of",
     "unqualify_file_uris",
 ]

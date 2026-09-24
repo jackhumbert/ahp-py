@@ -146,17 +146,35 @@ is left out; the connection still succeeds.
 
 **Routing (fork 2 settled: aggregated namespace).** Channel URIs are opaque
 and client-chosen, so they are never rewritten. The broker learns which node
-owns each one from the node's own payloads. File URIs are the node's path
-space, so the surfaces see them as `file://<node>/path`, and the authority is
-stripped again on the way in. A request routes by, in order:
+owns each one from the node's own payloads. File URIs are each node's own path
+space, so the surfaces never see them as `file:` at all - `file:` would promise
+a file on the client's machine, and a client's genuine `file:` URI (a local
+attachment) must never be mistaken for a node's. They see the broker's own
+scheme instead, translated back to the node's `file:///` on the way in:
+
+- `ahp-file:///<node>/<rel>` - under the node's root, the `defaultDirectory`
+  it advertised. `ahp-file:///` is a directory the broker answers itself, one
+  entry per connected node, and `ahp-file:///<node>` is that node's root, so a
+  folder picker walks from "which machine" straight into its projects. It is
+  the surfaces' `defaultDirectory` whenever more than one node is connected
+  (with one, it is that node's root). `..` is refused.
+- `ahp-file://<node>/<absolute path>` - anything on the node outside its root.
+
+A request routes by, in order:
 
 1. a channel the broker knows the owner of;
-2. a file URI's authority (`workingDirectories`, `workingDirectory`, `uri`,
-   `root`, `cwd`);
+2. the node an `ahp-file` URI names (`workingDirectories`, `workingDirectory`,
+   `uri`, `root`, `cwd`);
 3. the one node offering the named provider;
 4. the only node, if there is one.
 
-Anything else is refused as ambiguous rather than guessed.
+Where several nodes run the same agent (the same provider id on two
+machines), the surface sees one agent - the first node's entry with every
+node's models - and the folder picks the machine. A request that names no
+folder yet - a plain chat's `createSession`, or the `resolveSessionConfig` /
+`sessionConfigCompletions` a client asks before a folder is chosen - goes to
+the first connected node offering it, in inventory (node id) order. Anything
+else is refused as ambiguous rather than guessed.
 
 **One `serverSeq`.** Every node action is restamped from the broker's own
 counter, and every snapshot's `fromSeq` is translated to the stamp of that

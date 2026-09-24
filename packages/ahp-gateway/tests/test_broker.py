@@ -79,11 +79,11 @@ async def test_a_working_directory_picks_the_node_and_names_it() -> None:
         async with fleet.surface() as client:
             assert [agent["provider"] for agent in client.agents()] == ["echo"]
             session = await client.create_session(
-                provider="echo", working_directories=["file://node-b/srv/repo"]
+                provider="echo", working_directories=["ahp-file:///node-b/srv/repo"]
             )
             (listed,) = (await client.sessions())["items"]
             assert listed["resource"] == session.uri
-            assert listed["workingDirectories"] == ["file://node-b/srv/repo"]
+            assert listed["workingDirectories"] == ["ahp-file:///node-b/srv/repo"]
         async with fleet.direct("node-b") as node_b:
             (on_b,) = (await node_b.sessions())["items"]
         # The node sees its own path space: the authority never reaches it.
@@ -92,23 +92,20 @@ async def test_a_working_directory_picks_the_node_and_names_it() -> None:
         await fleet.aclose()
 
 
-async def test_an_ambiguous_agent_without_a_directory_is_refused() -> None:
+async def test_a_folderless_session_goes_to_the_first_node_offering_the_agent() -> None:
+    # Two nodes, one agent, no folder: a plain chat. The inventory's first
+    # connected node takes it rather than the request being refused.
     fleet = Fleet(
         {"node-a": echo_host("echo"), "node-b": echo_host("echo")},
         [NodeRecord("node-a", "mem://a", DEV), NodeRecord("node-b", "mem://b", DEV)],
         everyone_is_a_dev,
     )
     try:
-        raw = AhpClient(fleet.surface_transport())
-        await raw.connect()
-        await raw.initialize(client_id="c1")
-        with pytest.raises(RpcError) as caught:
-            await raw.request(
-                "createSession", {"channel": ROOT_URI, "provider": "echo"} | {"channel": "echo:/1"}
-            )
-        await raw.shutdown()
-        assert caught.value.code == -32602
-        assert "node-a, node-b" in caught.value.message
+        async with fleet.surface() as client:
+            session = await client.create_session(provider="echo")
+        async with fleet.direct("node-a") as node_a:
+            on_a = {item["resource"] for item in (await node_a.sessions())["items"]}
+        assert session.uri in on_a
     finally:
         await fleet.aclose()
 
@@ -123,7 +120,7 @@ async def test_a_file_on_another_node_is_refused(fleet: Fleet) -> None:
             {
                 "channel": "alpha:/1",
                 "provider": "alpha",
-                "workingDirectories": ["file://nowhere/tmp"],
+                "workingDirectories": ["ahp-file:///nowhere/tmp"],
             },
         )
     await raw.shutdown()

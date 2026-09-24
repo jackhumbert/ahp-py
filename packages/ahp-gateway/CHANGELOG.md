@@ -8,6 +8,15 @@ Every release states the protocol versions it speaks.
 
 Under construction. `docs/plan.md` is the design and its §7 is the build order.
 
+### Changed
+
+- **File URIs reach the surfaces as `ahp-file`, not `file`.** `ahp-file:///<node>/<rel>`
+  is a path under the node's root (its `defaultDirectory`), and
+  `ahp-file://<node>/<path>` anything outside it. `file:` is left to mean the
+  client's own machine. Replaces `file://<node>/<path>`.
+- A shared provider id across nodes is one agent offering every node's models;
+  the working directory picks the node.
+
 ### Added
 
 - **The multiplexer** (`agent_host_broker.core.Broker`): one AHP endpoint for
@@ -43,3 +52,7 @@ Under construction. `docs/plan.md` is the design and its §7 is the build order.
   control plane beside it), the reachability split (dial-in vs. dial-out
   relay), the trust model (per-user node accounts; identity gates the session,
   the OS gates the filesystem), and the build order.
+- `ahp-file:///`, answered by the broker: one directory per connected node, and
+  the surfaces' `defaultDirectory` when more than one is connected.
+- Plain chats and pre-folder session settings go to the first connected node
+  offering the agent, instead of being refused as ambiguous.
