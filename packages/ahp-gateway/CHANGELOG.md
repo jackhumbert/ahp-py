@@ -52,6 +52,10 @@ Under construction. `docs/plan.md` is the design and its §7 is the build order.
   control plane beside it), the reachability split (dial-in vs. dial-out
   relay), the trust model (per-user node accounts; identity gates the session,
   the OS gates the filesystem), and the build order.
+- VS Code's spelling of the tree, `file:///<node>/...` (it browses a host as
+  `file:` from the path of its `defaultDirectory`), is accepted inbound as
+  that node's `ahp-file` URI; `file:///` is the list of nodes for resource
+  commands.
 - `ahp-file:///`, answered by the broker: one directory per connected node, and
   the surfaces' `defaultDirectory` when more than one is connected.
 - Plain chats and pre-folder session settings go to the first connected node

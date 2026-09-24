@@ -22,6 +22,13 @@ is never mistaken for a node's:
 * ``ahp-file://<node>/<absolute path>`` - anything on the node outside its root
   (a node without a root puts everything here). Routable, never browsed to.
 
+**VS Code's alias.** VS Code keeps only the *path* of a host's
+`defaultDirectory` and browses the host as `file:` from there, so from it the
+tree arrives as ``file:///<node>/<rel>`` (and ``file:///`` for the list of
+nodes). Inbound, a `file:` URI whose first path segment is a node id is read
+as that node's ``ahp-file`` URI (:func:`from_client_alias`). The cost: a
+client's genuine local path that starts with ``/<node id>/`` would be misread.
+
 The nodes keep speaking plain `file:`; the broker translates at the edge. Only
 whole string values are rewritten; a path quoted inside prose is left alone,
 because rewriting free text would corrupt what the agent said.
@@ -29,7 +36,7 @@ because rewriting free text would corrupt what the agent said.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from typing import Any, Final
 from urllib.parse import quote, unquote
 
@@ -40,6 +47,7 @@ __all__ = [
     "VIRTUAL_ROOT",
     "ChannelOwners",
     "ForeignUriError",
+    "from_client_alias",
     "is_virtual_root",
     "learn_owned_channels",
     "node_of",
@@ -92,6 +100,28 @@ def node_of(value: Any) -> str | None:
     else:
         node, _, _ = rest.partition("/")
     return node or None
+
+
+def from_client_alias(value: Any, node_ids: Collection[str], *, root_uri: bool = False) -> Any:
+    """Read VS Code's `file:///<node>/...` spelling as `ahp-file:///<node>/...`, everywhere.
+
+    With `root_uri`, a bare `file:///` is the list of nodes too; that is only
+    meant for the `uri` of a resource command, where a client browsing the
+    tree from its top would send it.
+    """
+    if isinstance(value, str):
+        if not value.startswith(_LOCAL_PREFIX):
+            return value
+        rest = value[len(_LOCAL_PREFIX) :]
+        if not rest.strip("/"):
+            return VIRTUAL_ROOT if root_uri else value
+        first, _, _ = rest.partition("/")
+        return f"{_PREFIX}/{rest}" if unquote(first) in node_ids else value
+    if isinstance(value, Mapping):
+        return {key: from_client_alias(item, node_ids) for key, item in value.items()}
+    if isinstance(value, list):
+        return [from_client_alias(item, node_ids) for item in value]
+    return value
 
 
 def _drive_folded(path: str) -> str:

@@ -72,6 +72,7 @@ from agent_host_broker.core.uris import (
     VIRTUAL_ROOT,
     ChannelOwners,
     ForeignUriError,
+    from_client_alias,
     is_virtual_root,
     learn_owned_channels,
     node_of,
@@ -328,6 +329,7 @@ class _SurfaceConnection:
             return await self._reconnect(params, after)
         if not self.initialized:
             raise invalid_params("initialize must be the first request")
+        params = self._from_client(method, params)
         if method == "subscribe":
             return await self._subscribe(params, after)
         if method == "listSessions":
@@ -347,6 +349,15 @@ class _SurfaceConnection:
             # did not mean.
             raise invalid_params(f"cannot tell which node {method} is for")
         return await self._call(node_id, method, params)
+
+    def _from_client(self, method: str, params: Mapping[str, Any]) -> Mapping[str, Any]:
+        """Read a client's `file:///<node>/...` (how VS Code browses the tree) as `ahp-file`."""
+        nodes = set(self.records)
+        aliased = from_client_alias(params, nodes)
+        if method.startswith("resource") and isinstance(aliased, Mapping):
+            uri = params.get("uri")
+            aliased = {**aliased, "uri": from_client_alias(uri, nodes, root_uri=True)}
+        return aliased if isinstance(aliased, Mapping) else params
 
     def _virtual_root(self, method: str) -> Any:
         """`ahp-file:///`: a read-only directory with one entry per node."""
@@ -817,6 +828,9 @@ class _SurfaceConnection:
                     node.subscribed.discard(channel)
                     node.link.notify("unsubscribe", {"channel": channel})
         elif method == "dispatchAction":
+            # A message's attachments and a chat's working directory arrive here.
+            aliased = from_client_alias(params, set(self.records))
+            params = aliased if isinstance(aliased, Mapping) else params
             channel = params.get("channel")
             if channel == ROOT_URI:
                 # The merged root has no config to change (see core.root), and

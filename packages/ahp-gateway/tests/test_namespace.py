@@ -181,3 +181,38 @@ def test_one_agent_on_two_machines_offers_both_machines_models() -> None:
     )
     (agent,) = merged["agents"]
     assert [model["id"] for model in agent["models"]] == ["default", "opus", "fable"]
+
+
+async def test_vscode_browses_the_tree_as_file_paths(two_machines: Fleet) -> None:
+    # VS Code keeps only the path of `defaultDirectory` and browses as `file:`.
+    try:
+        raw, _ = await _connect(two_machines)
+        top = await raw.request("resourceList", {"uri": "file:///"})
+        assert [e["name"] for e in top["entries"]] == ["box", "mac"]
+        assert await _names(raw, "file:///mac") == ["broker", "notes.txt"]
+        assert await _names(raw, "file:///box/game") == ["main.py"]
+        await raw.request(
+            "createSession",
+            {
+                "channel": "claude:/picked",
+                "provider": "claude",
+                "workingDirectories": ["file:///box/game"],
+            },
+        )
+        await raw.shutdown()
+        async with two_machines.direct("box") as box:
+            on_box = {i["resource"]: i for i in (await box.sessions())["items"]}
+        assert on_box["claude:/picked"]["workingDirectories"][0].endswith("/box/Github/game")
+    finally:
+        await two_machines.aclose()
+
+
+def test_only_a_node_named_first_segment_is_an_alias() -> None:
+    from agent_host_broker.core.uris import from_client_alias
+
+    nodes = {"mac", "box"}
+    assert from_client_alias("file:///mac/x", nodes) == "ahp-file:///mac/x"
+    assert from_client_alias("file:///Users/me/x", nodes) == "file:///Users/me/x"
+    assert from_client_alias("file:///", nodes) == "file:///"
+    assert from_client_alias("file:///", nodes, root_uri=True) == "ahp-file:///"
+    assert from_client_alias({"a": ["file:///box"]}, nodes) == {"a": ["ahp-file:///box"]}

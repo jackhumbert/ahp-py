@@ -159,6 +159,11 @@ scheme instead, translated back to the node's `file:///` on the way in:
   the surfaces' `defaultDirectory` whenever more than one node is connected
   (with one, it is that node's root). `..` is refused.
 - `ahp-file://<node>/<absolute path>` - anything on the node outside its root.
+- VS Code keeps only the *path* of a host's `defaultDirectory` and browses it
+  as `file:`, so it sends the tree as `file:///<node>/<rel>` (and `file:///` for
+  the list of nodes). Inbound, a `file:` URI whose first segment is a node id
+  is read as that node's `ahp-file` URI. A client's genuine local path that
+  starts with `/<node id>/` would be misread; node ids make that unlikely.
 
 A request routes by, in order:
 
