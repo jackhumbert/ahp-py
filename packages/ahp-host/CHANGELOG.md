@@ -10,6 +10,15 @@ versions each release speaks.
 
 ## [Unreleased]
 
+### Fixed
+
+- On Windows the host silently dropped every working directory a client picked
+  under the served root (and fell back to the root itself): its check compared
+  POSIX paths, so `G:\\llm\\proj` was never "under" `G:\\llm`. Jails now answer
+  `serves(uri)` themselves - the Windows one drive-aware and case-insensitive -
+  and the host asks them.
+
+
 ### Added — Windows
 
 - **`RootedFilesystemResourceProvider` works on Windows, read-only.** It used to

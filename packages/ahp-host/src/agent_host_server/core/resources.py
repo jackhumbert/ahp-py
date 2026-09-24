@@ -287,6 +287,21 @@ class RootedFilesystemResourceProvider:
         self.writable = writable
         self._locks: dict[str, asyncio.Lock] = {}
 
+    def serves(self, uri: str) -> bool:
+        """Whether `uri` is the root or under it - what the host may seed a
+        session's working directory with.
+
+        Stricter than "resolves": strict ancestors of the root resolve (so a
+        folder picker can walk to it) but nothing under them is served. A
+        non-`file:` URI is not this jail's business and answers True.
+        """
+        try:
+            path = PurePosixPath(path_from_file_uri(uri))
+        except errors.AhpError:
+            return True
+        root = PurePosixPath(self.root)
+        return path == root or path.is_relative_to(root)
+
     # ─── the jail ────────────────────────────────────────────────────────
 
     def _relative(self, uri: str) -> PurePosixPath:

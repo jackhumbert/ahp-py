@@ -3893,6 +3893,13 @@ class Host:
         is served. A caller asking whether it may READ needs this answer, not
         the resolvable one.
         """
+        # A jail that can answer for itself does: the Windows one compares
+        # drive-aware and case-insensitively, which the POSIX paths below
+        # cannot - `G:\\llm\\proj` would never be "under" `G:\\llm` as a
+        # PurePosixPath, and the folder a user picked was silently dropped.
+        serves = getattr(self.resources, "serves", None)
+        if callable(serves):
+            return bool(serves(uri))
         root = getattr(self.resources, "root", None)
         if root is None:
             return True

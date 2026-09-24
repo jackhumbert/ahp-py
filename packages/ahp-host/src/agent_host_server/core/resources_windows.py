@@ -96,6 +96,7 @@ __all__ = [
     "split_file_uri",
     "strict_ancestor_depth",
     "uri_from_parts",
+    "windows_serves",
 ]
 
 # ─── pure: names, paths, URIs ─────────────────────────────────────────────
@@ -155,6 +156,22 @@ def check_component(name: str) -> None:
 def _components(text: str) -> list[str]:
     """Split on both separators, dropping empty and `.` components."""
     return [part for part in re.split(r"[\\/]", text) if part not in ("", ".")]
+
+
+def windows_serves(uri: str, root_drive: str, root_parts: list[str]) -> bool:
+    """Whether a `file:` URI is the root or under it; True for a non-`file:` URI.
+
+    Pure string work over :func:`split_file_uri` and :func:`relative_to_root`,
+    so it can be tested on any platform. It decides only which directories a
+    session may be seeded with - every read still walks from the root handle.
+    """
+    try:
+        drive, parts = split_file_uri(uri)
+    except errors.AhpError:
+        return not uri.startswith("file:")
+    if ".." in parts:
+        return False
+    return relative_to_root(drive, parts, root_drive, root_parts) is not None
 
 
 def split_file_uri(uri: str) -> tuple[str, list[str]]:
@@ -708,6 +725,11 @@ class WindowsRootedFilesystemResourceProvider(RootedFilesystemResourceProvider):
         self._root_parts = parts
         self._root_open_path = "\\\\?\\" + str(PureWindowsPath(f"{drive}\\", *parts))
         self.root = Path(PureWindowsPath(f"{drive}\\", *parts))
+
+    def serves(self, uri: str) -> bool:
+        """The Windows answer to :meth:`RootedFilesystemResourceProvider.serves`:
+        drive-aware and case-insensitive, as the walk itself is."""
+        return windows_serves(uri, self._root_drive, self._root_parts)
 
     # ─── the jail ────────────────────────────────────────────────────────
 
