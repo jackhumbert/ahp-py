@@ -107,7 +107,8 @@ def load(args: argparse.Namespace) -> Settings:
     if args.config is not None:
         config_path = Path(args.config).expanduser()
         try:
-            data = tomllib.loads(config_path.read_text(encoding="utf-8"))
+            # utf-8-sig: Notepad and Windows PowerShell write a byte-order mark.
+            data = tomllib.loads(config_path.read_text(encoding="utf-8-sig"))
         except FileNotFoundError as exc:
             raise ConfigError(f"no config file at {config_path}") from exc
         except tomllib.TOMLDecodeError as exc:

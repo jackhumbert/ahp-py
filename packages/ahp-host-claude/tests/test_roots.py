@@ -192,3 +192,9 @@ def test_config_errors_say_what_is_wrong(tmp_path: Path, text: str, message: str
 def test_several_unnamed_roots_are_refused(tmp_path: Path) -> None:
     with pytest.raises(ConfigError, match="need names"):
         load(_parse_args(["--root", str(tmp_path), "--root", str(tmp_path)]))
+
+
+def test_a_byte_order_mark_is_tolerated(tmp_path: Path) -> None:
+    config = tmp_path / "node.toml"
+    config.write_bytes("\ufeff".encode() + f"root = '{tmp_path}'\n".encode())
+    assert load(_parse_args(["--config", str(config)])).roots.primary == tmp_path.resolve()
