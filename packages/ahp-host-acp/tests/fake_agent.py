@@ -11,7 +11,8 @@ The prompt text picks the behaviour:
 - ``fs``           ask the client for `fs/read_text_file`, report the error code
 
 Environment: ``FAKE_ACP_NATIVE_MODELS=1`` reports ACP session models and
-accepts `session/set_model`; ``FAKE_ACP_LOG`` names a file each received method
+accepts `session/set_model`; ``FAKE_ACP_MODEL_OPTION=1`` offers the model as a
+config option of category `model`; ``FAKE_ACP_LOG`` names a file each received method
 is appended to.
 """
 
@@ -204,6 +205,16 @@ def main() -> None:
             session_id = params.get("sessionId") or str(uuid.uuid4())
             state["session"] = session_id
             result = {"sessionId": session_id} if method == "session/new" else {}
+            if os.environ.get("FAKE_ACP_MODEL_OPTION") == "1" and method == "session/new":
+                result["configOptions"] = [
+                    {
+                        "id": "model",
+                        "category": "model",
+                        "type": "select",
+                        "currentValue": state["model"],
+                        "options": [],
+                    }
+                ]
             if native:
                 result["models"] = {
                     "currentModelId": state["model"],
@@ -213,6 +224,8 @@ def main() -> None:
                     ],
                 }
         elif method == "session/set_config_option":
+            if params["configId"] == "model":
+                state["model"] = params["value"]
             if params["configId"] == "bogus":
                 send({"id": request_id, "error": {"code": -32602, "message": "no such option"}})
                 continue

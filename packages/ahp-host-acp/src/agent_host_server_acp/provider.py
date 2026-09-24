@@ -12,8 +12,9 @@ other ACP agent), opens one ACP session in it, and translates:
 What this adapter cannot do is decide *which* calls need approval: the agent
 asks, or it does not. See the README's Security section.
 
-Models: an agent that reports ACP session models is switched with
-`session/set_model`. One that does not (OpenClaw's bridge) can be given a
+Models: an agent with a `model` session config option (opencode) is switched
+with `session/set_config_option`; one that reports ACP session models, with
+`session/set_model`. One that does neither (OpenClaw's bridge) can be given a
 `model_command`, a prompt template such as ``/model {model} -s`` sent as its
 own turn whenever the picked model changes; its reply is not shown.
 
@@ -116,6 +117,8 @@ class AcpSession:
         self.model: str | None = context.model or default_model
         self._applied_model: str | None = None
         self._native_models = False
+        #: The id of the agent's model config option (`category: "model"`), if any.
+        self._model_option: str | None = None
         self._conn: AcpConnection | None = None
         self._capabilities: Mapping[str, Any] = {}
         self._sink: TurnSink | None = None
@@ -235,7 +238,27 @@ class AcpSession:
         return True
 
     def _note_models(self, result: Mapping[str, Any]) -> None:
-        self._native_models = bool(_mapping(result.get("models")).get("availableModels"))
+        """How this agent switches models, as far as its answer says.
+
+        Newer agents (opencode) offer the model as a session config option of
+        category `model`; older ones report `models` for `session/set_model`.
+        An answer that says neither (some agents' `session/resume`) keeps what
+        was known.
+        """
+        if "models" in result:
+            self._native_models = bool(_mapping(result.get("models")).get("availableModels"))
+        options = result.get("configOptions")
+        if isinstance(options, list):
+            self._model_option = next(
+                (
+                    str(option["id"])
+                    for option in options
+                    if isinstance(option, Mapping)
+                    and option.get("category") == "model"
+                    and isinstance(option.get("id"), str)
+                ),
+                None,
+            )
 
     async def _drop_connection(self) -> None:
         conn, self._conn = self._conn, None
@@ -354,7 +377,7 @@ class AcpSession:
                     call_id=call_id,
                     name=call.name,
                     display_name=call.display_name,
-                    invocation_message=call.title or call.progress_line(),
+                    invocation_message=call.approval_line(),
                     tool_input=call.raw_input,
                     confirmation_title=call.title or None,
                 )
@@ -416,7 +439,12 @@ class AcpSession:
         wanted = self.model
         if not wanted or wanted == self._applied_model:
             return
-        if self._native_models:
+        if self._model_option is not None:
+            await conn.request(
+                "session/set_config_option",
+                {"sessionId": self.acp_session_id, "configId": self._model_option, "value": wanted},
+            )
+        elif self._native_models:
             await conn.request(
                 "session/set_model", {"sessionId": self.acp_session_id, "modelId": wanted}
             )

@@ -106,6 +106,14 @@ class ToolCall:
         """
         return _short(self._input("description") or self._input("title") or self._target())
 
+    def approval_line(self) -> str:
+        """What the approval prompt says: for a shell command, the command itself,
+        since that is what is being approved; otherwise the progress line."""
+        command = self._input("command")
+        if self.kind == "execute" and command:
+            return _short(command, 200)
+        return self.progress_line()
+
     def past_tense(self) -> str:
         if self.status == "failed":
             return f"Failed: {self.progress_line()}"

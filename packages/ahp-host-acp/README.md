@@ -11,7 +11,8 @@ other ACP agent), and any AHP client (VS Code's Agent Sessions view, the Python
 client, a broker in front of several hosts) can then start and follow sessions
 with it.
 
-Status: pre-alpha. Built and tested against OpenClaw's ACP bridge.
+Status: pre-alpha. Tested against opencode (`opencode acp`) and OpenClaw's ACP
+bridge (`openclaw acp`).
 
 ## What a client sees
 
@@ -23,10 +24,11 @@ Status: pre-alpha. Built and tested against OpenClaw's ACP bridge.
   approval prompt. Approving picks the agent's *allow once* option, never
   *allow always*, so no approval outlives the call it was given for.
 - A model picker from the config file (`[[models]]`, first is the default).
-  An agent that supports ACP session models is switched with
-  `session/set_model`; one that does not (OpenClaw) is switched with
-  `model_command`, a prompt such as `/model {model} -s` sent as its own turn,
-  whose reply is not shown.
+  An agent with a `model` session config option (opencode) is switched with
+  `session/set_config_option`, one that reports ACP session models with
+  `session/set_model`, and one with neither (OpenClaw) with `model_command`,
+  a prompt such as `/model {model} -s` sent as its own turn, whose reply is not
+  shown.
 - A context gauge, from the agent's `usage_update` (or per-turn `usage`).
 - Sessions that survive a host restart, through `session/resume` or
   `session/load` when the agent offers them.
@@ -43,7 +45,60 @@ pip install -e .
 python -m agent_host_server_acp --config ~/.config/agent-host/openclaw.toml
 ```
 
-OpenClaw on Ollama Cloud's GLM 5.3 Flash, through the local signed-in Ollama:
+### opencode
+
+opencode on Ollama Cloud's GLM 5.3 Flash, through the local signed-in Ollama.
+opencode keeps its own settings; point it at a file of its own for these
+sessions with `OPENCODE_CONFIG`:
+
+```jsonc
+// ~/.config/agent-host/opencode.json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "provider": {
+    "ollama": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "Ollama",
+      "options": { "baseURL": "http://127.0.0.1:11434/v1" },
+      "models": {
+        "glm-5.3-flash:cloud": { "name": "GLM 5.3 Flash", "tool_call": true, "reasoning": true }
+      }
+    }
+  },
+  "model": "ollama/glm-5.3-flash:cloud",
+  "permission": { "edit": "ask", "bash": "ask", "webfetch": "ask" }
+}
+```
+
+```toml
+# ~/.config/agent-host/opencode.toml
+agent_name = "opencode (GLM 5.3 Flash)"
+provider_id = "opencode"
+port = 4323
+token_file = "~/.config/agent-host/opencode.token"
+state_dir = "~/.local/state/agent-host-server-acp/opencode"
+
+command = ["opencode", "acp"]
+
+[env]
+OPENCODE_CONFIG = 'C:\Users\me\.config\agent-host\opencode.json'
+
+[[models]]
+id = "ollama/glm-5.3-flash:cloud"
+name = "GLM 5.3 Flash"
+context_window = 1048576
+vision = true
+
+[roots]
+llm = 'G:\llm'
+```
+
+opencode runs its tools in the session's folder and, with the `permission`
+block above, asks before every edit, shell command and fetch.
+
+### OpenClaw
+
+OpenClaw on the same model, through the local signed-in Ollama:
 
 ```toml
 agent_name = "OpenClaw (GLM 5.3 Flash)"
@@ -99,7 +154,8 @@ default.
 
 ## Security
 
-**The folder a session starts in does not confine the agent.** It is passed as
+**The folder a session starts in does not confine the agent** (any agent:
+opencode at least works in it; OpenClaw does not). It is passed as
 ACP's `cwd`, and it is where the agent process starts, but what the agent can
 read, write and run is decided by the agent itself. OpenClaw, for example,
 runs its tools in its own workspace (`~/.openclaw/workspace`) under its own
@@ -107,8 +163,8 @@ exec-approval policy, and asks (through `session/request_permission`) only
 when that policy says to. Commands it considers safe run without a prompt.
 
 So this host's approvals are exactly as strict as the agent's own. Configure
-the agent's policy before exposing it (OpenClaw: `openclaw approvals`, and
-`tools.exec` in its config). The agent runs as the host's OS user. Never bind
+the agent's policy before exposing it (opencode: `permission` in its config;
+OpenClaw: `openclaw approvals`, and `tools.exec` in its config). The agent runs as the host's OS user. Never bind
 this off loopback without a proxy that authenticates peers.
 
 ## Development

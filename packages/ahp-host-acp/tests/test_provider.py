@@ -38,12 +38,15 @@ def _provider(
     log: Path,
     *,
     native: bool = False,
+    model_option: bool = False,
     model_command: str | None = "/model {model} -s",
     models: tuple[ModelInfo, ...] = MODELS,
 ) -> AcpProvider:
     env = {"FAKE_ACP_LOG": str(log)}
     if native:
         env["FAKE_ACP_NATIVE_MODELS"] = "1"
+    if model_option:
+        env["FAKE_ACP_MODEL_OPTION"] = "1"
     return AcpProvider(
         root, AgentSpec(FAKE_AGENT, env=env, model_command=model_command), models=models
     )
@@ -117,6 +120,23 @@ async def test_native_acp_models_use_set_model(tmp_path: Path, log: Path) -> Non
         await session.aclose()
 
 
+async def test_model_config_option_is_preferred(tmp_path: Path, log: Path) -> None:
+    provider = _provider(tmp_path, log, native=True, model_option=True)
+    session = await provider.create_session(_context(tmp_path))
+    try:
+        assert (await _whoami(session))["model"] == "glm"
+        await session.send_user_message(
+            UserMessage(text="hello", model=ModelSelection(id="other")), RecordingSink()
+        )
+        assert (await _whoami(session))["model"] == "other"
+        methods = _methods(log)
+        assert methods.count("session/set_config_option") == 2
+        assert "session/set_model" not in methods
+        assert methods.count("session/prompt") == 3  # no /model turns
+    finally:
+        await session.aclose()
+
+
 async def test_no_models_means_no_switching(tmp_path: Path, log: Path) -> None:
     session = await _provider(tmp_path, log, models=()).create_session(_context(tmp_path))
     try:
@@ -130,6 +150,7 @@ async def test_approved_tool_call_runs_once_and_reads_well(session: AcpSession) 
     await session.send_user_message(UserMessage(text="tool"), sink)
     assert [c.call_id for c in sink.confirmations] == ["call_1"]
     assert sink.confirmations[0].tool_input == {"command": "echo hi", "title": "Run echo hi"}
+    assert sink.confirmations[0].invocation_message == "echo hi"
     started = next(e for e in sink.events if e[0] == "started")
     assert started == ("started", "call_1", "execute", "Run command")
     assert sink.invocations["call_1"] == "Run echo hi"
