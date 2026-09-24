@@ -57,3 +57,20 @@ def test_folder_browsing_is_off_where_the_jail_cannot_run(
 
     monkeypatch.setattr(os, "supports_dir_fd", set())
     assert cli._jail_supported() is False
+
+
+def test_windows_uses_the_servers_windows_jail_when_it_has_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import sys
+    import types
+
+    from agent_host_server_claude import __main__ as cli
+
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setitem(
+        sys.modules, "agent_host_server.core.resources_windows", types.ModuleType("stub")
+    )
+    assert cli._jail_supported() is True
+    monkeypatch.setitem(sys.modules, "agent_host_server.core.resources_windows", None)
+    assert cli._jail_supported() is False

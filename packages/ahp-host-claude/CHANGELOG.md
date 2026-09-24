@@ -4,6 +4,8 @@
 
 ### Added
 
+- Folder browsing on Windows, using agent-host-server's Windows jail when the
+  installed server has it.
 - Tool calls say what they do. The line under a running call is Claude's own
   description for shell commands ("Count tracked files") or e.g. "Read file: a.py",
   instead of the host's fallback "Running Run command"; a finished call reads

@@ -14,6 +14,7 @@ import contextlib
 import logging
 import os
 import signal
+import sys
 from pathlib import Path
 
 from agent_host_server.core import Host, HostInfo, LoopbackSingleUserPolicy
@@ -107,15 +108,25 @@ async def _run(args: argparse.Namespace) -> None:
 def _jail_supported() -> bool:
     """Whether the host's folder-browsing jail can run on this OS.
 
-    `RootedFilesystemResourceProvider` walks paths with `openat` and
-    `O_NOFOLLOW` so a symlink cannot be swapped in mid-check; Windows has
-    neither. There, clients cannot browse for a folder (sessions start in
-    `--root`), until agent-host-server has a jail of its own for Windows.
+    On POSIX, `RootedFilesystemResourceProvider` walks paths with `openat` and
+    `O_NOFOLLOW`. On Windows, agent-host-server has its own read-only jail
+    (`core.resources_windows`, handle-relative `NtCreateFile` opens) that the
+    same class selects there. With neither - POSIX without `openat`, or an
+    agent-host-server from before the Windows jail - clients cannot browse for
+    a folder and sessions start in `--root`.
     """
-    supported = os.open in os.supports_dir_fd and hasattr(os, "O_NOFOLLOW")
+    if sys.platform == "win32":
+        try:
+            import agent_host_server.core.resources_windows  # noqa: F401
+        except ImportError:
+            supported = False
+        else:
+            supported = True
+    else:
+        supported = os.open in os.supports_dir_fd and hasattr(os, "O_NOFOLLOW")
     if not supported:
         logging.getLogger(__name__).warning(
-            "folder browsing is off: this OS lacks openat/O_NOFOLLOW for the host's jail"
+            "folder browsing is off: no filesystem jail for this OS in this agent-host-server"
         )
     return supported
 

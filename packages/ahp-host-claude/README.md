@@ -71,10 +71,10 @@ python -m agent_host_server_claude --root ~/Github --token-file ~/.config/agent-
 
 ## Platforms
 
-macOS, Linux and Windows (CI runs all three). On Windows, clients cannot browse
-for a folder: `agent-host-server`'s folder jail relies on `openat` and
-`O_NOFOLLOW`, which Windows lacks, so the host starts without it and sessions
-begin in `--root`. Claude Code on Windows needs Git for Windows for its shell
+macOS, Linux and Windows (CI runs all three). Folder browsing on Windows
+needs an agent-host-server with its read-only Windows jail
+(`core.resources_windows`); with an older one the host starts without
+browsing and sessions begin in `--root`. Claude Code on Windows needs Git for Windows for its shell
 tool.
 
 Authentication is Claude Code's own: the SDK uses whatever login `claude` has
