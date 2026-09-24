@@ -7,6 +7,9 @@
     "claim": {
       "kind": "client",
       "clientId": "c1"
+    },
+    "lifecycle": {
+      "status": "running"
     }
   },
   "actions": [
@@ -25,7 +28,8 @@
         "kind": "session",
         "session": "copilot:/s1",
         "turnId": "t1",
-        "toolCallId": "tc1"
+        "toolCallId": "tc1",
+        "chat": "ahp-chat:/test-chat"
       }
     },
     {
@@ -36,7 +40,8 @@
       "type": "terminal/claimed",
       "claim": {
         "kind": "session",
-        "session": "copilot:/s1"
+        "session": "copilot:/s1",
+        "chat": "ahp-chat:/test-chat"
       }
     },
     {
@@ -57,8 +62,12 @@
     ],
     "claim": {
       "kind": "session",
-      "session": "copilot:/s1"
+      "session": "copilot:/s1",
+      "chat": "ahp-chat:/test-chat"
     },
-    "exitCode": 0
+    "lifecycle": {
+      "status": "exited",
+      "exitCode": 0
+    }
   }
 }

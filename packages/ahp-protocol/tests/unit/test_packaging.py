@@ -46,7 +46,7 @@ def test_wheel_ships_the_reducer_corpus(wheel: zipfile.ZipFile) -> None:
         if n.startswith("agent_host_protocol/conformance/_upstream/test-cases/reducers/")
         and n.endswith(".json")
     ]
-    assert len(fixtures) == 256
+    assert len(fixtures) == 272
 
 
 def test_wheel_ships_the_round_trip_corpus(wheel: zipfile.ZipFile) -> None:
@@ -57,7 +57,7 @@ def test_wheel_ships_the_round_trip_corpus(wheel: zipfile.ZipFile) -> None:
         if n.startswith("agent_host_protocol/conformance/_upstream/test-cases/round-trips/")
         and n.endswith(".json")
     ]
-    assert len(fixtures) == 39
+    assert len(fixtures) == 44
 
 
 def test_wheel_ships_the_pin_and_the_schemas(wheel: zipfile.ZipFile) -> None:

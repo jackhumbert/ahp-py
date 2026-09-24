@@ -213,7 +213,11 @@
     "title": "bash",
     "cols": 80,
     "rows": 24,
-    "exitCode": null
+    "exitCode": 3,
+    "lifecycle": {
+     "status": "exited",
+     "exitCode": null
+    }
    }
   },
   {
@@ -241,7 +245,11 @@
     "content": [],
     "title": "bash",
     "cols": 80,
-    "rows": 24
+    "rows": 24,
+    "exitCode": 3,
+    "lifecycle": {
+     "status": "exited"
+    }
    }
   },
   {
@@ -1170,7 +1178,9 @@
     "annotations": [
      {
       "id": "a",
-      "turnId": "t1",
+      "origin": {
+       "session": "s"
+      },
       "entries": []
      }
     ]
@@ -1179,14 +1189,47 @@
     {
      "type": "annotations/updated",
      "annotationId": "a",
-     "turnId": null
+     "origin": null
     }
    ],
    "expected": {
     "annotations": [
      {
       "id": "a",
-      "turnId": null,
+      "origin": null,
+      "entries": []
+     }
+    ]
+   }
+  },
+  {
+   "name": "ann/updated-legacy-turnId-ignored",
+   "reducer": "annotations",
+   "initial": {
+    "annotations": [
+     {
+      "id": "a",
+      "origin": {
+       "session": "s"
+      },
+      "entries": []
+     }
+    ]
+   },
+   "actions": [
+    {
+     "type": "annotations/updated",
+     "annotationId": "a",
+     "turnId": "t9"
+    }
+   ],
+   "expected": {
+    "annotations": [
+     {
+      "id": "a",
+      "origin": {
+       "session": "s"
+      },
       "entries": []
      }
     ]
@@ -2260,7 +2303,7 @@
    "expected": {
     "turns": [],
     "status": 8,
-    "modifiedAt": "1970-01-01T00:00:09.999Z",
+    "modifiedAt": "1970-01-01T00:00:00.000Z",
     "activeTurn": {
      "id": "t1",
      "startedAt": "1970-01-01T00:00:00.000Z",
@@ -2325,7 +2368,7 @@
    "expected": {
     "turns": [],
     "status": 8,
-    "modifiedAt": "1970-01-01T00:00:09.999Z",
+    "modifiedAt": "1970-01-01T00:00:00.000Z",
     "activeTurn": {
      "id": "t1",
      "startedAt": "1970-01-01T00:00:00.000Z",
@@ -2484,6 +2527,716 @@
     "turns": [],
     "status": 8,
     "modifiedAt": "1970-01-01T00:00:00.000Z"
+   }
+  },
+  {
+   "name": "auto/removed-absent-vs-null-resource",
+   "reducer": "automation",
+   "initial": {
+    "entries": [
+     {
+      "resource": null,
+      "name": "nul"
+     },
+     {
+      "resource": "ahp-automation:/a"
+     }
+    ]
+   },
+   "actions": [
+    {
+     "type": "automation/removed"
+    }
+   ],
+   "expected": {
+    "entries": [
+     {
+      "resource": null,
+      "name": "nul"
+     },
+     {
+      "resource": "ahp-automation:/a"
+     }
+    ]
+   }
+  },
+  {
+   "name": "auto/removed-null-resource",
+   "reducer": "automation",
+   "initial": {
+    "entries": [
+     {
+      "resource": null,
+      "name": "nul"
+     },
+     {
+      "resource": "ahp-automation:/a"
+     }
+    ]
+   },
+   "actions": [
+    {
+     "type": "automation/removed",
+     "resource": null
+    }
+   ],
+   "expected": {
+    "entries": [
+     {
+      "resource": "ahp-automation:/a"
+     }
+    ]
+   }
+  },
+  {
+   "name": "auto/set-object-resource-never-matches",
+   "reducer": "automation",
+   "initial": {
+    "entries": [
+     {
+      "resource": {
+       "k": 1
+      },
+      "v": "old"
+     }
+    ]
+   },
+   "actions": [
+    {
+     "type": "automation/set",
+     "automation": {
+      "resource": {
+       "k": 1
+      },
+      "v": "new"
+     }
+    }
+   ],
+   "expected": {
+    "entries": [
+     {
+      "resource": {
+       "k": 1
+      },
+      "v": "old"
+     },
+     {
+      "resource": {
+       "k": 1
+      },
+      "v": "new"
+     }
+    ]
+   }
+  },
+  {
+   "name": "run/primarySession-null-is-stored",
+   "reducer": "automationRun",
+   "initial": {
+    "resource": "ahp-automation-run:/r",
+    "automation": "ahp-automation:/a",
+    "origin": {
+     "kind": "manual"
+    },
+    "lifecycle": "running",
+    "sessions": [
+     "ahp-session:/1"
+    ],
+    "primarySession": "ahp-session:/1"
+   },
+   "actions": [
+    {
+     "type": "automationRun/primarySessionChanged",
+     "primarySession": null
+    }
+   ],
+   "expected": {
+    "resource": "ahp-automation-run:/r",
+    "automation": "ahp-automation:/a",
+    "origin": {
+     "kind": "manual"
+    },
+    "lifecycle": "running",
+    "sessions": [
+     "ahp-session:/1"
+    ],
+    "primarySession": null
+   }
+  },
+  {
+   "name": "run/primarySession-absent-deletes",
+   "reducer": "automationRun",
+   "initial": {
+    "resource": "ahp-automation-run:/r",
+    "automation": "ahp-automation:/a",
+    "origin": {
+     "kind": "manual"
+    },
+    "lifecycle": "running",
+    "sessions": [
+     "ahp-session:/1"
+    ],
+    "primarySession": "ahp-session:/1"
+   },
+   "actions": [
+    {
+     "type": "automationRun/primarySessionChanged"
+    }
+   ],
+   "expected": {
+    "resource": "ahp-automation-run:/r",
+    "automation": "ahp-automation:/a",
+    "origin": {
+     "kind": "manual"
+    },
+    "lifecycle": "running",
+    "sessions": [
+     "ahp-session:/1"
+    ]
+   }
+  },
+  {
+   "name": "run/sessionSet-absent-appends-null-image",
+   "reducer": "automationRun",
+   "initial": {
+    "resource": "ahp-automation-run:/r",
+    "automation": "ahp-automation:/a",
+    "origin": {
+     "kind": "manual"
+    },
+    "lifecycle": "running",
+    "sessions": [
+     "ahp-session:/1"
+    ],
+    "primarySession": "ahp-session:/1"
+   },
+   "actions": [
+    {
+     "type": "automationRun/sessionSet"
+    }
+   ],
+   "expected": {
+    "resource": "ahp-automation-run:/r",
+    "automation": "ahp-automation:/a",
+    "origin": {
+     "kind": "manual"
+    },
+    "lifecycle": "running",
+    "sessions": [
+     "ahp-session:/1",
+     null
+    ],
+    "primarySession": "ahp-session:/1"
+   }
+  },
+  {
+   "name": "run/sessionRemoved-primary-is-cleared",
+   "reducer": "automationRun",
+   "initial": {
+    "resource": "ahp-automation-run:/r",
+    "automation": "ahp-automation:/a",
+    "origin": {
+     "kind": "manual"
+    },
+    "lifecycle": "running",
+    "sessions": [
+     "ahp-session:/1"
+    ],
+    "primarySession": "ahp-session:/1"
+   },
+   "actions": [
+    {
+     "type": "automationRun/sessionRemoved",
+     "session": "ahp-session:/1"
+    }
+   ],
+   "expected": {
+    "resource": "ahp-automation-run:/r",
+    "automation": "ahp-automation:/a",
+    "origin": {
+     "kind": "manual"
+    },
+    "lifecycle": "running",
+    "sessions": []
+   }
+  },
+  {
+   "name": "run/lifecycle-absent-drops-key",
+   "reducer": "automationRun",
+   "initial": {
+    "resource": "ahp-automation-run:/r",
+    "automation": "ahp-automation:/a",
+    "origin": {
+     "kind": "manual"
+    },
+    "lifecycle": "running",
+    "sessions": [
+     "ahp-session:/1"
+    ],
+    "primarySession": "ahp-session:/1"
+   },
+   "actions": [
+    {
+     "type": "automationRun/lifecycleChanged"
+    }
+   ],
+   "expected": {
+    "resource": "ahp-automation-run:/r",
+    "automation": "ahp-automation:/a",
+    "origin": {
+     "kind": "manual"
+    },
+    "sessions": [
+     "ahp-session:/1"
+    ],
+    "primarySession": "ahp-session:/1"
+   }
+  },
+  {
+   "name": "chat/turnResume-without-startedAt",
+   "reducer": "chat",
+   "initial": {
+    "resource": "ahp-chat:/c",
+    "title": "t",
+    "status": 2,
+    "modifiedAt": "2024-01-01T00:00:01.000Z",
+    "turns": [
+     {
+      "id": "t1",
+      "message": {
+       "text": "hi"
+      },
+      "responseParts": [
+       {
+        "kind": "markdown",
+        "id": "m",
+        "content": "partial"
+       },
+       {
+        "kind": "error",
+        "error": {
+         "errorType": "x",
+         "message": "boom"
+        },
+        "resumable": true
+       }
+      ],
+      "state": "error",
+      "duration": 5
+     }
+    ]
+   },
+   "actions": [
+    {
+     "type": "chat/turnResume",
+     "turnId": "t1"
+    }
+   ],
+   "expected": {
+    "resource": "ahp-chat:/c",
+    "title": "t",
+    "status": 8,
+    "modifiedAt": "2024-01-01T00:00:01.000Z",
+    "turns": [],
+    "activeTurn": {
+     "id": "t1",
+     "startedAt": "2024-01-01T00:00:01.000Z",
+     "message": {
+      "text": "hi"
+     },
+     "responseParts": [
+      {
+       "kind": "markdown",
+       "id": "m",
+       "content": "partial"
+      },
+      {
+       "kind": "error",
+       "error": {
+        "errorType": "x",
+        "message": "boom"
+       },
+       "resumable": true
+      }
+     ]
+    }
+   }
+  },
+  {
+   "name": "chat/turnResume-resumable-string-is-not-true",
+   "reducer": "chat",
+   "initial": {
+    "resource": "ahp-chat:/c",
+    "title": "t",
+    "status": 2,
+    "modifiedAt": "2024-01-01T00:00:01.000Z",
+    "turns": [
+     {
+      "id": "t1",
+      "message": {
+       "text": "hi"
+      },
+      "responseParts": [
+       {
+        "kind": "error",
+        "error": {},
+        "resumable": "true"
+       }
+      ],
+      "state": "error",
+      "duration": 5
+     }
+    ]
+   },
+   "actions": [
+    {
+     "type": "chat/turnResume",
+     "turnId": "t1"
+    }
+   ],
+   "expected": {
+    "resource": "ahp-chat:/c",
+    "title": "t",
+    "status": 2,
+    "modifiedAt": "2024-01-01T00:00:01.000Z",
+    "turns": [
+     {
+      "id": "t1",
+      "message": {
+       "text": "hi"
+      },
+      "responseParts": [
+       {
+        "kind": "error",
+        "error": {},
+        "resumable": "true"
+       }
+      ],
+      "state": "error",
+      "duration": 5
+     }
+    ]
+   }
+  },
+  {
+   "name": "chat/turnResume-bool-vs-int-id",
+   "reducer": "chat",
+   "initial": {
+    "resource": "ahp-chat:/c",
+    "title": "t",
+    "status": 2,
+    "modifiedAt": "2024-01-01T00:00:01.000Z",
+    "turns": [
+     {
+      "id": 1,
+      "message": {
+       "text": "hi"
+      },
+      "responseParts": [
+       {
+        "kind": "markdown",
+        "id": "m",
+        "content": "partial"
+       },
+       {
+        "kind": "error",
+        "error": {
+         "errorType": "x",
+         "message": "boom"
+        },
+        "resumable": true
+       }
+      ],
+      "state": "error",
+      "duration": 5
+     }
+    ]
+   },
+   "actions": [
+    {
+     "type": "chat/turnResume",
+     "turnId": true
+    }
+   ],
+   "expected": {
+    "resource": "ahp-chat:/c",
+    "title": "t",
+    "status": 2,
+    "modifiedAt": "2024-01-01T00:00:01.000Z",
+    "turns": [
+     {
+      "id": 1,
+      "message": {
+       "text": "hi"
+      },
+      "responseParts": [
+       {
+        "kind": "markdown",
+        "id": "m",
+        "content": "partial"
+       },
+       {
+        "kind": "error",
+        "error": {
+         "errorType": "x",
+         "message": "boom"
+        },
+        "resumable": true
+       }
+      ],
+      "state": "error",
+      "duration": 5
+     }
+    ]
+   }
+  },
+  {
+   "name": "chat/turnStarted-absent-startedAt-drops-modifiedAt",
+   "reducer": "chat",
+   "initial": {
+    "resource": "ahp-chat:/c",
+    "title": "t",
+    "status": 8,
+    "modifiedAt": "2024-01-01T00:00:00.000Z",
+    "turns": [],
+    "activeTurn": null
+   },
+   "actions": [
+    {
+     "type": "chat/turnStarted",
+     "turnId": "t2",
+     "message": {
+      "text": "x"
+     }
+    }
+   ],
+   "expected": {
+    "resource": "ahp-chat:/c",
+    "title": "t",
+    "status": 8,
+    "turns": [],
+    "activeTurn": {
+     "id": "t2",
+     "message": {
+      "text": "x"
+     },
+     "responseParts": []
+    }
+   }
+  },
+  {
+   "name": "chat/turnComplete-null-duration-is-zero",
+   "reducer": "chat",
+   "initial": {
+    "resource": "ahp-chat:/c",
+    "title": "t",
+    "status": 8,
+    "modifiedAt": "2024-01-01T00:00:00.000Z",
+    "turns": [],
+    "activeTurn": {
+     "id": "t1",
+     "startedAt": "2024-01-01T00:00:00.000-05:00",
+     "message": {
+      "text": "hi"
+     },
+     "responseParts": []
+    }
+   },
+   "actions": [
+    {
+     "type": "chat/turnComplete",
+     "turnId": "t1",
+     "duration": null
+    }
+   ],
+   "expected": {
+    "resource": "ahp-chat:/c",
+    "title": "t",
+    "status": 1,
+    "modifiedAt": "2024-01-01T05:00:00.000Z",
+    "turns": [
+     {
+      "id": "t1",
+      "startedAt": "2024-01-01T00:00:00.000-05:00",
+      "duration": 0,
+      "message": {
+       "text": "hi"
+      },
+      "responseParts": [],
+      "state": "complete"
+     }
+    ]
+   }
+  },
+  {
+   "name": "chat/turnComplete-fractional-duration-truncates",
+   "reducer": "chat",
+   "initial": {
+    "resource": "ahp-chat:/c",
+    "title": "t",
+    "status": 8,
+    "modifiedAt": "2024-01-01T00:00:00.000Z",
+    "turns": [],
+    "activeTurn": {
+     "id": "t1",
+     "startedAt": "2024-01-01T00:00:00.000-05:00",
+     "message": {
+      "text": "hi"
+     },
+     "responseParts": []
+    }
+   },
+   "actions": [
+    {
+     "type": "chat/turnComplete",
+     "turnId": "t1",
+     "duration": 1.9
+    }
+   ],
+   "expected": {
+    "resource": "ahp-chat:/c",
+    "title": "t",
+    "status": 1,
+    "modifiedAt": "2024-01-01T05:00:00.001Z",
+    "turns": [
+     {
+      "id": "t1",
+      "startedAt": "2024-01-01T00:00:00.000-05:00",
+      "duration": 1.9,
+      "message": {
+       "text": "hi"
+      },
+      "responseParts": [],
+      "state": "complete"
+     }
+    ]
+   }
+  },
+  {
+   "name": "chat/error-null-part-appends-nothing",
+   "reducer": "chat",
+   "initial": {
+    "resource": "ahp-chat:/c",
+    "title": "t",
+    "status": 8,
+    "modifiedAt": "2024-01-01T00:00:00.000Z",
+    "turns": [],
+    "activeTurn": {
+     "id": "t1",
+     "startedAt": "2024-01-01T00:00:00.000-05:00",
+     "message": {
+      "text": "hi"
+     },
+     "responseParts": []
+    }
+   },
+   "actions": [
+    {
+     "type": "chat/error",
+     "turnId": "t1",
+     "duration": 3,
+     "part": null
+    }
+   ],
+   "expected": {
+    "resource": "ahp-chat:/c",
+    "title": "t",
+    "status": 2,
+    "modifiedAt": "2024-01-01T05:00:00.003Z",
+    "turns": [
+     {
+      "id": "t1",
+      "startedAt": "2024-01-01T00:00:00.000-05:00",
+      "duration": 3,
+      "message": {
+       "text": "hi"
+      },
+      "responseParts": [],
+      "state": "error"
+     }
+    ]
+   }
+  },
+  {
+   "name": "chat/responsePart-error-kind-dropped",
+   "reducer": "chat",
+   "initial": {
+    "resource": "ahp-chat:/c",
+    "title": "t",
+    "status": 8,
+    "modifiedAt": "2024-01-01T00:00:00.000Z",
+    "turns": [],
+    "activeTurn": {
+     "id": "t1",
+     "startedAt": "2024-01-01T00:00:00.000-05:00",
+     "message": {
+      "text": "hi"
+     },
+     "responseParts": []
+    }
+   },
+   "actions": [
+    {
+     "type": "chat/responsePart",
+     "turnId": "t1",
+     "part": {
+      "kind": "error",
+      "error": {},
+      "resumable": true
+     }
+    }
+   ],
+   "expected": {
+    "resource": "ahp-chat:/c",
+    "title": "t",
+    "status": 8,
+    "modifiedAt": "2024-01-01T00:00:00.000Z",
+    "turns": [],
+    "activeTurn": {
+     "id": "t1",
+     "startedAt": "2024-01-01T00:00:00.000-05:00",
+     "message": {
+      "text": "hi"
+     },
+     "responseParts": []
+    }
+   }
+  },
+  {
+   "name": "term/exit-keeps-legacy-exitCode",
+   "reducer": "terminal",
+   "initial": {
+    "claim": {
+     "kind": "session"
+    },
+    "content": [],
+    "title": "bash",
+    "cols": 80,
+    "rows": 24,
+    "lifecycle": {
+     "status": "running"
+    },
+    "exitCode": 3
+   },
+   "actions": [
+    {
+     "type": "terminal/exited",
+     "exitCode": 0
+    }
+   ],
+   "expected": {
+    "claim": {
+     "kind": "session"
+    },
+    "content": [],
+    "title": "bash",
+    "cols": 80,
+    "rows": 24,
+    "lifecycle": {
+     "status": "exited",
+     "exitCode": 0
+    },
+    "exitCode": 3
    }
   }
  ]

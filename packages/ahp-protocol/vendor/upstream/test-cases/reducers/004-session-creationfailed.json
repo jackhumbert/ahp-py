@@ -22,7 +22,7 @@
     "provider": "copilot",
     "title": "Test Session",
     "status": 1,
-    "lifecycle": "creationFailed",
+    "lifecycle": "failed",
     "creationError": {
       "errorType": "init",
       "message": "Failed to start"

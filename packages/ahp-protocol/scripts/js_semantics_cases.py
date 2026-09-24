@@ -230,8 +230,16 @@ case(
 case(
     "ann/updated-null-is-written",
     "annotations",
-    {"annotations": [{"id": "a", "turnId": "t1", "entries": []}]},
-    [{"type": "annotations/updated", "annotationId": "a", "turnId": None}],
+    {"annotations": [{"id": "a", "origin": {"session": "s"}, "entries": []}]},
+    [{"type": "annotations/updated", "annotationId": "a", "origin": None}],
+)
+# `turnId` stopped being copied in 0.9.0 (`origin` replaced it): a peer still
+# sending one must not rewrite anything.
+case(
+    "ann/updated-legacy-turnId-ignored",
+    "annotations",
+    {"annotations": [{"id": "a", "origin": {"session": "s"}, "entries": []}]},
+    [{"type": "annotations/updated", "annotationId": "a", "turnId": "t9"}],
 )
 
 # ── session (the pre-existing helpers) ───────────────────────────────────────
@@ -530,6 +538,183 @@ case(
             "confirmed": "not-needed",
         }
     ],
+)
+
+# ── 0.9.0: automation channels ───────────────────────────────────────────────
+
+_CATALOGUE = {"entries": [{"resource": None, "name": "nul"}, {"resource": "ahp-automation:/a"}]}
+
+case(
+    "auto/removed-absent-vs-null-resource",
+    "automation",
+    _CATALOGUE,
+    [{"type": "automation/removed"}],
+)
+case(
+    "auto/removed-null-resource",
+    "automation",
+    _CATALOGUE,
+    [{"type": "automation/removed", "resource": None}],
+)
+case(
+    "auto/set-object-resource-never-matches",
+    "automation",
+    {"entries": [{"resource": {"k": 1}, "v": "old"}]},
+    [{"type": "automation/set", "automation": {"resource": {"k": 1}, "v": "new"}}],
+)
+
+_RUN = {
+    "resource": "ahp-automation-run:/r",
+    "automation": "ahp-automation:/a",
+    "origin": {"kind": "manual"},
+    "lifecycle": "running",
+    "sessions": ["ahp-session:/1"],
+    "primarySession": "ahp-session:/1",
+}
+
+case(
+    "run/primarySession-null-is-stored",
+    "automationRun",
+    _RUN,
+    [{"type": "automationRun/primarySessionChanged", "primarySession": None}],
+)
+case(
+    "run/primarySession-absent-deletes",
+    "automationRun",
+    _RUN,
+    [{"type": "automationRun/primarySessionChanged"}],
+)
+case(
+    "run/sessionSet-absent-appends-null-image",
+    "automationRun",
+    _RUN,
+    [{"type": "automationRun/sessionSet"}],
+)
+case(
+    "run/sessionRemoved-primary-is-cleared",
+    "automationRun",
+    _RUN,
+    [{"type": "automationRun/sessionRemoved", "session": "ahp-session:/1"}],
+)
+case(
+    "run/lifecycle-absent-drops-key",
+    "automationRun",
+    _RUN,
+    [{"type": "automationRun/lifecycleChanged"}],
+)
+
+# ── 0.9.0: chat turn errors, resume and derived modifiedAt ───────────────────
+
+_ERRORED = {
+    "resource": "ahp-chat:/c",
+    "title": "t",
+    "status": 2,
+    "modifiedAt": "2024-01-01T00:00:01.000Z",
+    "turns": [
+        {
+            "id": "t1",
+            "message": {"text": "hi"},
+            "responseParts": [
+                {"kind": "markdown", "id": "m", "content": "partial"},
+                {
+                    "kind": "error",
+                    "error": {"errorType": "x", "message": "boom"},
+                    "resumable": True,
+                },
+            ],
+            "state": "error",
+            "duration": 5,
+        }
+    ],
+}
+
+# No `startedAt` on the turn: the reopened one takes the chat's `modifiedAt`.
+case(
+    "chat/turnResume-without-startedAt",
+    "chat",
+    _ERRORED,
+    [{"type": "chat/turnResume", "turnId": "t1"}],
+)
+# `resumable === true` -- the string "true" is not enough.
+case(
+    "chat/turnResume-resumable-string-is-not-true",
+    "chat",
+    {
+        **_ERRORED,
+        "turns": [
+            {
+                **_ERRORED["turns"][0],
+                "responseParts": [{"kind": "error", "error": {}, "resumable": "true"}],
+            }
+        ],
+    },
+    [{"type": "chat/turnResume", "turnId": "t1"}],
+)
+case(
+    "chat/turnResume-bool-vs-int-id",
+    "chat",
+    {**_ERRORED, "turns": [{**_ERRORED["turns"][0], "id": 1}]},
+    [{"type": "chat/turnResume", "turnId": True}],
+)
+
+_ACTIVE = {
+    "resource": "ahp-chat:/c",
+    "title": "t",
+    "status": 8,
+    "modifiedAt": "2024-01-01T00:00:00.000Z",
+    "turns": [],
+    "activeTurn": {
+        "id": "t1",
+        "startedAt": "2024-01-01T00:00:00.000-05:00",
+        "message": {"text": "hi"},
+        "responseParts": [],
+    },
+}
+
+case(
+    "chat/turnStarted-absent-startedAt-drops-modifiedAt",
+    "chat",
+    {**_ACTIVE, "activeTurn": None},
+    [{"type": "chat/turnStarted", "turnId": "t2", "message": {"text": "x"}}],
+)
+case(
+    "chat/turnComplete-null-duration-is-zero",
+    "chat",
+    _ACTIVE,
+    [{"type": "chat/turnComplete", "turnId": "t1", "duration": None}],
+)
+case(
+    "chat/turnComplete-fractional-duration-truncates",
+    "chat",
+    _ACTIVE,
+    [{"type": "chat/turnComplete", "turnId": "t1", "duration": 1.9}],
+)
+case(
+    "chat/error-null-part-appends-nothing",
+    "chat",
+    _ACTIVE,
+    [{"type": "chat/error", "turnId": "t1", "duration": 3, "part": None}],
+)
+case(
+    "chat/responsePart-error-kind-dropped",
+    "chat",
+    _ACTIVE,
+    [
+        {
+            "type": "chat/responsePart",
+            "turnId": "t1",
+            "part": {"kind": "error", "error": {}, "resumable": True},
+        }
+    ],
+)
+
+# ── 0.9.0: terminal lifecycle ────────────────────────────────────────────────
+
+case(
+    "term/exit-keeps-legacy-exitCode",
+    "terminal",
+    {**_TERM, "lifecycle": {"status": "running"}, "exitCode": 3},
+    [{"type": "terminal/exited", "exitCode": 0}],
 )
 
 if __name__ == "__main__":

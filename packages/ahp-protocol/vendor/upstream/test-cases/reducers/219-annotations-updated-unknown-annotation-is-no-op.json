@@ -5,7 +5,11 @@
     "annotations": [
       {
         "id": "t-1",
-        "turnId": "turn-1",
+        "origin": {
+          "session": "ahp-session:/test-session",
+          "chat": "ahp-chat:/test-chat",
+          "turnId": "turn-1"
+        },
         "resource": "file:///src/a.ts",
         "resolved": false,
         "entries": [
@@ -25,7 +29,11 @@
     "annotations": [
       {
         "id": "t-1",
-        "turnId": "turn-1",
+        "origin": {
+          "session": "ahp-session:/test-session",
+          "chat": "ahp-chat:/test-chat",
+          "turnId": "turn-1"
+        },
         "resource": "file:///src/a.ts",
         "resolved": false,
         "entries": [

@@ -626,7 +626,7 @@ class TestSessionOmitVersusNull:
 
     def test_creation_failed_without_an_error_stores_no_creation_error(self) -> None:
         out = session_reducer(_session(), {"type": "session/creationFailed"})
-        assert out["lifecycle"] == "creationFailed"
+        assert out["lifecycle"] == "failed"
         assert "creationError" not in out
 
     def test_chat_removed_without_a_chat_matches_absence_and_spares_a_null_default(self) -> None:

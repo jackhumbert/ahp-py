@@ -29,7 +29,7 @@ Three things about this port are load-bearing:
   matches both -- and since all five actions are client-dispatchable, that lets a
   peer remove or rewrite an annotation it never named.
 * **``annotations/updated`` tests ``!== undefined``, so a present null is a
-  written value.** Each of ``turnId`` / ``resource`` / ``range`` / ``resolved``
+  written value.** Each of ``origin`` / ``resource`` / ``range`` / ``resolved``
   is copied only when the key is *present*, and an explicit null is then stored
   verbatim. This is the one shape where ``session.py``'s ``_with_optional`` would
   be actively wrong: it drops nulls, which would silently turn "re-anchor to
@@ -111,7 +111,8 @@ def annotations_reducer(state: Any, action: Mapping[str, Any]) -> Any:
         # A present null is a value and is stored; only an absent key leaves the
         # current property alone. Do not "simplify" this to `_with_optional`,
         # which deletes on None and would drop the null.
-        for key in ("turnId", "resource", "range", "resolved"):
+        # `origin` replaced `turnId` in 0.9.0 (session, chat and turn).
+        for key in ("origin", "resource", "range", "resolved"):
             if key in action:
                 updated_annotation[key] = action[key]
         # `id`, `entries` and `_meta` are deliberately untouched -- replacing

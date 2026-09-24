@@ -2,7 +2,7 @@
 
 Regenerate with `python scripts/generate_tables.py`.
 
-Source: spec/v0.8.0 (7153143f1c6993fa886d7d59870811cdad479d83)
+Source: spec/v0.9.0 (60706330f2f351b09f150d9a9c3c0eaedfc8e8b9)
 """
 
 from __future__ import annotations
@@ -11,10 +11,10 @@ from typing import Final
 
 #: The protocol version upstream's own source tree declares at the pinned tag.
 #: This is NOT what we speak -- see agent_host_protocol.types.versions.
-UPSTREAM_PROTOCOL_VERSION: Final = '0.8.0'
+UPSTREAM_PROTOCOL_VERSION: Final = '0.9.0'
 
 #: Every version the upstream client at the pinned tag will negotiate.
-UPSTREAM_SUPPORTED_PROTOCOL_VERSIONS: Final[tuple[str, ...]] = ('0.8.0', '0.7.0', '0.6.0', '0.5.2', '0.5.1')
+UPSTREAM_SUPPORTED_PROTOCOL_VERSIONS: Final[tuple[str, ...]] = ('0.9.0', '0.8.0', '0.7.0', '0.6.0', '0.5.2', '0.5.1')
 
 #: Every action's wire string, from `export const enum ActionType`.
 ACTION_TYPES: Final[frozenset[str]] = frozenset([
@@ -23,6 +23,15 @@ ACTION_TYPES: Final[frozenset[str]] = frozenset([
     'annotations/removed',
     'annotations/set',
     'annotations/updated',
+    'automation/createRequested',
+    'automation/removed',
+    'automation/set',
+    'automation/updateRequested',
+    'automationRun/cancelRequested',
+    'automationRun/lifecycleChanged',
+    'automationRun/primarySessionChanged',
+    'automationRun/sessionRemoved',
+    'automationRun/sessionSet',
     'changeset/cleared',
     'changeset/contentChanged',
     'changeset/fileRemoved',
@@ -55,6 +64,7 @@ ACTION_TYPES: Final[frozenset[str]] = frozenset([
     'chat/truncated',
     'chat/turnCancelled',
     'chat/turnComplete',
+    'chat/turnResume',
     'chat/turnStarted',
     'chat/turnsLoaded',
     'chat/usage',
@@ -157,6 +167,7 @@ IS_CLIENT_DISPATCHABLE: Final[dict[str, bool]] = {
     'chat/turnComplete': False,
     'chat/turnCancelled': True,
     'chat/error': False,
+    'chat/turnResume': True,
     'chat/activityChanged': False,
     'chat/workingDirectorySet': True,
     'chat/workingDirectoryRemoved': True,
@@ -196,6 +207,15 @@ IS_CLIENT_DISPATCHABLE: Final[dict[str, bool]] = {
     'terminal/commandExecuted': False,
     'terminal/commandFinished': False,
     'resourceWatch/changed': False,
+    'automation/createRequested': True,
+    'automation/updateRequested': True,
+    'automation/set': False,
+    'automation/removed': True,
+    'automationRun/lifecycleChanged': False,
+    'automationRun/sessionSet': False,
+    'automationRun/sessionRemoved': False,
+    'automationRun/primarySessionChanged': False,
+    'automationRun/cancelRequested': True,
 }
 
 #: Action -> the protocol version that introduced it. Drives the outbound filter
@@ -247,6 +267,7 @@ ACTION_INTRODUCED_IN: Final[dict[str, str]] = {
     'chat/turnComplete': '0.4.0',
     'chat/turnCancelled': '0.4.0',
     'chat/error': '0.4.0',
+    'chat/turnResume': '0.9.0',
     'chat/activityChanged': '0.5.0',
     'chat/workingDirectorySet': '0.7.0',
     'chat/workingDirectoryRemoved': '0.7.0',
@@ -288,6 +309,15 @@ ACTION_INTRODUCED_IN: Final[dict[str, str]] = {
     'terminal/commandExecuted': '0.1.0',
     'terminal/commandFinished': '0.1.0',
     'resourceWatch/changed': '0.2.0',
+    'automation/createRequested': '0.8.0',
+    'automation/updateRequested': '0.8.0',
+    'automation/set': '0.8.0',
+    'automation/removed': '0.8.0',
+    'automationRun/lifecycleChanged': '0.8.0',
+    'automationRun/sessionSet': '0.8.0',
+    'automationRun/sessionRemoved': '0.8.0',
+    'automationRun/primarySessionChanged': '0.8.0',
+    'automationRun/cancelRequested': '0.8.0',
 }
 
 #: Server->client notification method -> the protocol version that introduced
@@ -324,7 +354,6 @@ AHP_ERROR_CODES: Final[dict[str, int]] = {
     'SessionAlreadyExists': -32003,
     'TurnInProgress': -32004,
     'UnsupportedProtocolVersion': -32005,
-    'ContentNotFound': -32006,
     'AuthRequired': -32007,
     'NotFound': -32008,
     'PermissionDenied': -32009,

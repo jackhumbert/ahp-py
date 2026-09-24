@@ -7,6 +7,9 @@
     "claim": {
       "kind": "client",
       "clientId": "c1"
+    },
+    "lifecycle": {
+      "status": "running"
     }
   },
   "actions": [
@@ -87,6 +90,9 @@
       "kind": "client",
       "clientId": "c1"
     },
-    "supportsCommandDetection": true
+    "supportsCommandDetection": true,
+    "lifecycle": {
+      "status": "running"
+    }
   }
 }

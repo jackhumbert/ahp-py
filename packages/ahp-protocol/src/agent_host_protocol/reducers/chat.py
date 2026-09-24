@@ -19,9 +19,15 @@ Four things about this port are load-bearing and easy to get wrong:
   whose ``x`` is an array or object is written here as ``if x is not None``.
   Using Python truthiness would silently drop an empty ``content`` or
   ``options`` array that upstream keeps. The fixture corpus does not cover it.
-* **The reducer is not pure.** ``modifiedAt`` is stamped from the wall clock in
-  six places (upstream lines 218, 253, 359, 723, 779, 812), read only through
-  :mod:`agent_host_protocol.reducers.clock`.
+* **The reducer is pure since 0.9.0.** ``modifiedAt`` used to be stamped from
+  the wall clock in six places; upstream now derives it from action data -- a
+  turn's ``startedAt`` when it starts, ``startedAt + duration`` when it ends
+  (:func:`~agent_host_protocol.reducers.clock.add_milliseconds_to_timestamp`),
+  and leaves it untouched everywhere else.
+* **A turn's error is a response part.** ``chat/error`` appends its
+  ``ErrorResponsePart`` to the ended turn instead of setting ``Turn.error``, a
+  ``chat/responsePart`` can never smuggle one in, and ``chat/turnResume`` reopens
+  the latest turn when that part says ``resumable: true``.
 """
 
 from __future__ import annotations
@@ -29,7 +35,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
-from agent_host_protocol.reducers.clock import now_iso
+from agent_host_protocol.reducers.clock import add_milliseconds_to_timestamp
 from agent_host_protocol.reducers.js import (
     UNDEFINED,
     assign,
@@ -55,6 +61,7 @@ _MARKDOWN = "markdown"
 _REASONING = "reasoning"
 _TOOL_CALL = "toolCall"
 _INPUT_REQUEST = "inputRequest"
+_ERROR_PART = "error"
 
 _STREAMING = "streaming"
 _PENDING_CONFIRMATION = "pending-confirmation"
@@ -349,11 +356,12 @@ def _end_turn(
     turn_state: str,
     duration: Any,
     terminal_status: int | None = None,
-    error: Any = None,
+    error_part: Any = UNDEFINED,
 ) -> Any:
     """Finalize the active turn into a completed turn record.
 
-    Non-terminal tool calls are force-cancelled with reason ``skipped``.
+    Non-terminal tool calls are force-cancelled with reason ``skipped``, and an
+    error part -- ``chat/error``'s, since 0.9.0 -- is appended last.
     """
     active = state.get("activeTurn")
     # `state.activeTurn.id !== turnId` -- strict: `1` must not end the turn a
@@ -390,29 +398,70 @@ def _end_turn(
                 },
             }
         )
+    # `if (errorPart)` -- JavaScript truthiness, so an absent or null part adds
+    # nothing and any object is appended verbatim.
+    if truthy(error_part):
+        response_parts.append(error_part)
 
-    turn = {
-        "id": _mget(active, "id"),
-        "startedAt": _mget(active, "startedAt"),
-        # Defensive clamp, as upstream: the duration is producer-supplied and
-        # opaque, but a negative value would be nonsensical to display.
-        # `Math.max(0, undefined)` is NaN in JS, which JSON-encodes as null and
-        # the corpus treats as absent -- so a missing duration stays absent.
-        "duration": max(0, duration) if isinstance(duration, int | float) else None,
-        "message": _mget(active, "message"),
-        "responseParts": response_parts,
-        "usage": _mget(active, "usage"),
-        "state": turn_state,
-        "error": error,
-    }
+    # Defensive clamp, as upstream: the duration is producer-supplied and
+    # opaque, but a negative value would be nonsensical to display.
+    # `Math.max(0, x)` coerces -- null is 0 -- and NaN JSON-encodes as null.
+    clamped = _js_max_zero(duration)
+    turn = _literal(
+        {
+            "id": get(active, "id"),
+            "startedAt": get(active, "startedAt"),
+            "duration": clamped,
+            "message": get(active, "message"),
+            "responseParts": response_parts,
+            "usage": get(active, "usage"),
+            "state": turn_state,
+        }
+    )
 
+    # `activeTurn: undefined` -- dropped by `JSON.stringify`, so no key at all.
     next_state = {
-        **state,
+        **{key: value for key, value in state.items() if key != "activeTurn"},
         "turns": [*_seq(state.get("turns")), turn],
-        "activeTurn": None,
-        "modifiedAt": now_iso(),
     }
+    # `addMillisecondsToTimestamp(active.startedAt, turn.duration ?? 0)`, where
+    # `turn.duration` is `Math.max(0, duration)` -- so null reads as 0 and an
+    # absent or non-numeric duration is NaN.
+    #
+    # DIVERGENCE, deliberate: where that throws upstream (an unparseable
+    # `startedAt`, a NaN duration), the reference rejects the whole action and
+    # the turn stays active forever -- no later action can end it. This port
+    # ends the turn and keeps the previous `modifiedAt` instead.
+    modified_at = add_milliseconds_to_timestamp(_mget(active, "startedAt"), clamped)
+    if modified_at is not None:
+        next_state["modifiedAt"] = modified_at
     return {**next_state, "status": _summary_status(next_state, terminal_status)}
+
+
+def _js_max_zero(value: Any) -> float | None:
+    """``Math.max(0, value)``, with ``None`` standing in for NaN."""
+    if value is None:
+        return 0
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, int | float):
+        return max(0, value) if value == value else None
+    if isinstance(value, str):
+        try:
+            number = float(value.strip()) if value.strip() else 0.0
+        except ValueError:
+            return None
+        return max(0, number) if number == number else None
+    return None
+
+
+def _has_resumable_error(turn: Any) -> bool:
+    """``turn.responseParts.at(-1)?.kind === 'error' && part.resumable === true``."""
+    parts = _mget(turn, "responseParts")
+    if not isinstance(parts, list) or not parts:
+        return False
+    last = parts[-1]
+    return _mget(last, "kind") == _ERROR_PART and _mget(last, "resumable") is True
 
 
 def _upsert_input_request_part(state: Mapping[str, Any], request: Any) -> Any:
@@ -436,7 +485,6 @@ def _upsert_input_request_part(state: Mapping[str, Any], request: Any) -> Any:
     return {
         **next_state,
         "status": _with_status_flag(_summary_status(next_state), _STATUS_IS_READ, False),
-        "modifiedAt": now_iso(),
     }
 
 
@@ -541,7 +589,7 @@ def _append_text(kind: str, content: Any) -> Callable[[Mapping[str, Any]], Any]:
 
 
 def chat_reducer(state: Any, action: Mapping[str, Any]) -> Any:
-    """Pure-except-for-the-clock reducer for chat state. 29 action variants."""
+    """Pure reducer for chat state. 30 action variants."""
     action_type = action.get("type")
 
     # ── Turn lifecycle ───────────────────────────────────────────────────────
@@ -561,11 +609,16 @@ def chat_reducer(state: Any, action: Mapping[str, Any]) -> Any:
                 }
             ),
         }
-        next_state = {
-            **next_state,
-            "status": _with_status_flag(_summary_status(next_state), _STATUS_IS_READ, False),
-            "modifiedAt": now_iso(),
-        }
+        # `modifiedAt: action.startedAt` since 0.9.0 -- an absent one is
+        # `undefined`, which drops the key.
+        next_state = assign(
+            {
+                **next_state,
+                "status": _with_status_flag(_summary_status(next_state), _STATUS_IS_READ, False),
+            },
+            "modifiedAt",
+            get(action, "startedAt"),
+        )
 
         # If this turn was auto-started from a pending message, remove it.
         queued_message_id = action.get("queuedMessageId")
@@ -608,6 +661,10 @@ def chat_reducer(state: Any, action: Mapping[str, Any]) -> Any:
         active = state.get("activeTurn")
         if active is None or not strict_equal(get(active, "id"), get(action, "turnId")):
             return state
+        # An error part is only ever appended by `chat/error`, which also ends
+        # the turn; one arriving here is dropped (0.9.0).
+        if get(get(action, "part"), "kind") == _ERROR_PART:
+            return state
         return {
             **state,
             "activeTurn": {
@@ -629,8 +686,41 @@ def chat_reducer(state: Any, action: Mapping[str, Any]) -> Any:
             _TURN_ERROR,
             action.get("duration"),
             _STATUS_ERROR,
-            action.get("error"),
+            get(action, "part"),
         )
+
+    if action_type == "chat/turnResume":
+        # Client-dispatchable. Reopens the LATEST turn, and only when it ended
+        # in an error whose last part says `resumable: true`; its response
+        # parts, the error included, carry over into the reopened turn.
+        if truthy(state.get("activeTurn")):
+            return state
+        history = _seq(state.get("turns"))
+        turn = history[-1] if history else None
+        if (
+            not truthy(turn)
+            or not strict_equal(get(turn, "id"), get(action, "turnId"))
+            or get(turn, "state") != _TURN_ERROR
+            or not _has_resumable_error(turn)
+        ):
+            return state
+        next_state = {
+            **state,
+            "turns": history[:-1],
+            "activeTurn": _literal(
+                {
+                    "id": get(turn, "id"),
+                    "startedAt": _nullish(get(turn, "startedAt"), get(state, "modifiedAt")),
+                    "message": get(turn, "message"),
+                    "responseParts": get(turn, "responseParts"),
+                    "usage": get(turn, "usage"),
+                }
+            ),
+        }
+        return {
+            **next_state,
+            "status": _with_status_flag(_summary_status(next_state), _STATUS_IS_READ, False),
+        }
 
     if action_type == "chat/activityChanged":
         return {**state, "activity": action.get("activity")}
@@ -1067,7 +1157,6 @@ def chat_reducer(state: Any, action: Mapping[str, Any]) -> Any:
             **state,
             "turns": turns,
             "activeTurn": None,
-            "modifiedAt": now_iso(),
         }
         if clear_all:
             # Upstream `delete`s the key: the window is no longer a tail, so
@@ -1131,11 +1220,7 @@ def chat_reducer(state: Any, action: Mapping[str, Any]) -> Any:
                 answers if len(answers) > 0 else UNDEFINED,
             ),
         }
-        return {
-            **state,
-            "activeTurn": {**active, "responseParts": response_parts},
-            "modifiedAt": now_iso(),
-        }
+        return {**state, "activeTurn": {**active, "responseParts": response_parts}}
 
     if action_type == "chat/inputCompleted":
         active = state.get("activeTurn")
@@ -1175,11 +1260,7 @@ def chat_reducer(state: Any, action: Mapping[str, Any]) -> Any:
             completed["response"] = action["response"]
         response_parts[index] = completed
         next_state = {**state, "activeTurn": {**active, "responseParts": response_parts}}
-        return {
-            **next_state,
-            "status": _summary_status(next_state),
-            "modifiedAt": now_iso(),
-        }
+        return {**next_state, "status": _summary_status(next_state)}
 
     # ── Pending messages ─────────────────────────────────────────────────────
 

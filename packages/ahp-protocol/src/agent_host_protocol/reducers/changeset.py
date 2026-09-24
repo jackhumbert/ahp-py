@@ -188,7 +188,9 @@ def changeset_reducer(state: Any, action: Mapping[str, Any]) -> Any:
         # null (see the module docstring).
         if "operations" in action:
             next_state["operations"] = action["operations"]
-        return _carry_optional(next_state, "error", action, "error")
+        # Since 0.9.0 the action carries no `error`: a failure is a
+        # `changeset/statusChanged`, and any `error` already in state stays.
+        return next_state
 
     # ── Operations ───────────────────────────────────────────────────────────
 

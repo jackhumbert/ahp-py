@@ -70,6 +70,14 @@ import type {
   InvokeChangesetOperationParams,
   InvokeChangesetOperationResult,
 } from '../channels-changeset/commands.js';
+import type {
+  ListAutomationTriggerDefinitionsParams,
+  ListAutomationTriggerDefinitionsResult,
+  RunAutomationParams,
+  RunAutomationResult,
+  FetchAutomationRunsParams,
+  FetchAutomationRunsResult,
+} from '../channels-automation/commands.js';
 
 import type { ActionEnvelope } from './actions.js';
 import type {
@@ -174,6 +182,9 @@ export interface CommandMap {
   'sessionConfigCompletions': { params: SessionConfigCompletionsParams; result: SessionConfigCompletionsResult };
   'completions': { params: CompletionsParams; result: CompletionsResult };
   'invokeChangesetOperation': { params: InvokeChangesetOperationParams; result: InvokeChangesetOperationResult };
+  'listAutomationTriggerDefinitions': { params: ListAutomationTriggerDefinitionsParams; result: ListAutomationTriggerDefinitionsResult };
+  'runAutomation': { params: RunAutomationParams; result: RunAutomationResult };
+  'fetchAutomationRuns': { params: FetchAutomationRunsParams; result: FetchAutomationRunsResult };
 }
 
 /**

@@ -7,8 +7,8 @@
 set -euo pipefail
 
 UPSTREAM_REPO="https://github.com/microsoft/agent-host-protocol.git"
-SPEC_TAG="spec/v0.8.0"
-SPEC_COMMIT="7153143f1c6993fa886d7d59870811cdad479d83"
+SPEC_TAG="spec/v0.9.0"
+SPEC_COMMIT="60706330f2f351b09f150d9a9c3c0eaedfc8e8b9"
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CHECKOUT="$ROOT/.research/agent-host-protocol"
@@ -47,6 +47,7 @@ git -C "$CHECKOUT" archive "$SPEC_TAG" \
   types/channels-terminal/commands.ts \
   types/channels-changeset/commands.ts \
   types/channels-resource-watch/commands.ts \
+  types/channels-automation/commands.ts \
   types/channels-session/state.ts \
   schema \
   | tar -x -C "$DEST"
@@ -67,7 +68,7 @@ mv "$DEST/types/common/messages.ts"        "$DEST/ts/messages.ts"
 # ten that are not include `completions` -- forcing that one to root silently
 # breaks every @-mention picker.
 mv "$DEST/types/common/commands.ts"        "$DEST/ts/commands.ts"
-for ch in root session chat terminal changeset resource-watch; do
+for ch in root session chat terminal changeset resource-watch automation; do
   mv "$DEST/types/channels-$ch/commands.ts" "$DEST/ts/commands-$ch.ts"
 done
 mv "$DEST/types/channels-session/state.ts"  "$DEST/ts/session-state.ts"

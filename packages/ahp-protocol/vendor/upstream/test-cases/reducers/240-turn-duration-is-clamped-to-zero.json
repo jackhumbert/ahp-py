@@ -41,14 +41,13 @@
         },
         "responseParts": [],
         "usage": null,
-        "state": "complete",
-        "error": null
+        "state": "complete"
       }
     ],
     "activeTurn": null,
     "resource": "copilot:/test-session",
     "title": "Test Session",
     "status": 1,
-    "modifiedAt": "1970-01-01T00:00:09.999Z"
+    "modifiedAt": "1970-01-01T00:00:10.000Z"
   }
 }

@@ -14,6 +14,9 @@
           "claim": {
             "kind": "client",
             "clientId": "c1"
+          },
+          "lifecycle": {
+            "status": "running"
           }
         },
         {
@@ -21,7 +24,11 @@
           "title": "zsh",
           "claim": {
             "kind": "session",
-            "session": "copilot:/s1"
+            "session": "copilot:/s1",
+            "chat": "ahp-chat:/test-chat"
+          },
+          "lifecycle": {
+            "status": "running"
           }
         }
       ]
@@ -36,6 +43,9 @@
         "claim": {
           "kind": "client",
           "clientId": "c1"
+        },
+        "lifecycle": {
+          "status": "running"
         }
       },
       {
@@ -43,7 +53,11 @@
         "title": "zsh",
         "claim": {
           "kind": "session",
-          "session": "copilot:/s1"
+          "session": "copilot:/s1",
+          "chat": "ahp-chat:/test-chat"
+        },
+        "lifecycle": {
+          "status": "running"
         }
       }
     ]

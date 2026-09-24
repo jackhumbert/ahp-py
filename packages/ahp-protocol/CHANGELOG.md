@@ -8,6 +8,41 @@ the spec revision it targets.
 
 ## [Unreleased]
 
+### Changed — the spec pin moves to `spec/v0.9.0`
+
+- **The pinned upstream revision is `spec/v0.9.0` (`60706330`).** Re-vendored
+  and regenerated: `UPSTREAM_PROTOCOL_VERSION` is `0.9.0`, 96 actions (44
+  client-dispatchable), 272 reducer fixtures and 44 round-trips — all pass.
+  `DEFAULT_SUPPORTED_VERSIONS` is `("0.9.0", "0.8.0", "0.7.0", "0.6.0")`.
+  `channels-automation/commands.ts` joins the vendored per-channel command
+  files.
+- **Two new reducers, `automation` and `automationRun`** — nine in all. The
+  shape classifier checks `claim` and `automation` before `lifecycle`, which
+  terminal and automation-run state now carry too; `classify()` knows
+  `ahp-automations://` and `ahp-automation-run:`; the schema gate maps both
+  new kinds.
+- **Chat: turn errors are response parts, and turns can resume.** `chat/error`
+  appends its `ErrorResponsePart` to the ended turn (`Turn.error` is gone),
+  `chat/responsePart` drops an error part, and `chat/turnResume` reopens the
+  latest errored turn when its last part is `resumable: true`.
+- **No reducer reads the clock.** `modifiedAt` is the action's `startedAt` at
+  turn start and `startedAt + duration` at turn end, via the new
+  `clock.add_milliseconds_to_timestamp` — a port of
+  `new Date(Date.parse(t) + d).toISOString()`, verified against V8 on 19 edge
+  cases. One deliberate divergence: where that expression throws (unparseable
+  `startedAt`), upstream rejects the action and strands the turn; this port
+  ends the turn and keeps the previous `modifiedAt`.
+- **`_end_turn` is JSON-faithful:** it no longer writes `"usage": null`,
+  `"activeTurn": null` or `"duration": null` where the reference emits no key
+  (or `0` for a null duration) — found by the new oracle cases.
+- Terminal: `terminal/exited` writes `lifecycle: {status: "exited", exitCode?}`.
+  Session: the failed lifecycle is `failed`. Changeset: `contentChanged` no
+  longer carries `error`. Annotations: `annotations/updated` copies `origin`,
+  not `turnId`. Errors: `ContentNotFound` is removed.
+- The JS-semantics oracle grows from 63 to **81** cases, covering the automation
+  reducers, turn resume, error parts, derived `modifiedAt`, and the terminal
+  lifecycle.
+
 ### Changed — the spec pin moves to `spec/v0.8.0`
 
 - **The pinned upstream revision is `spec/v0.8.0` (`7153143f`), up from

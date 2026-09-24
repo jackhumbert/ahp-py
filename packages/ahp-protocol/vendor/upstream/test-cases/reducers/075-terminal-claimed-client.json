@@ -6,7 +6,11 @@
     "content": [],
     "claim": {
       "kind": "session",
-      "session": "copilot:/s1"
+      "session": "copilot:/s1",
+      "chat": "ahp-chat:/test-chat"
+    },
+    "lifecycle": {
+      "status": "running"
     }
   },
   "actions": [
@@ -24,6 +28,9 @@
     "claim": {
       "kind": "client",
       "clientId": "vscode-1"
+    },
+    "lifecycle": {
+      "status": "running"
     }
   }
 }

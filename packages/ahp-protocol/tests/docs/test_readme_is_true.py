@@ -41,16 +41,16 @@ def test_readme_examples_execute(index: int) -> None:
 
 
 def test_readme_names_every_reducer_it_claims() -> None:
-    """'all seven' has to keep meaning seven."""
-    assert len(REDUCERS) == 7
-    assert "seven" in README
+    """'all nine' has to keep meaning nine."""
+    assert len(REDUCERS) == 9
+    assert "nine" in README
 
 
 def test_readme_fixture_counts_match_the_vendored_corpus() -> None:
     reducers = sum(1 for _ in reducer_fixtures())
     round_trips = sum(1 for _ in round_trip_fixtures())
-    assert reducers == 256
-    assert round_trips == 39
+    assert reducers == 272
+    assert round_trips == 44
     assert f"**{reducers}**" in README
     assert f"**{round_trips}**" in README
 

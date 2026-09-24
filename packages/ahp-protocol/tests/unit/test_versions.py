@@ -68,7 +68,7 @@ class TestNegotiate:
         assert negotiate(["0.6.0", "0.7.0"]) == "0.7.0"
 
     def test_no_overlap_refuses(self) -> None:
-        assert negotiate(["0.9.0"]) is None
+        assert negotiate(["0.10.0"]) is None
         assert negotiate([]) is None
 
     def test_unparseable_entries_are_skipped_not_fatal(self) -> None:

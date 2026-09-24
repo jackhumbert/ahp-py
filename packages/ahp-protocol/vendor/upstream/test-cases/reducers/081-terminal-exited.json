@@ -13,6 +13,9 @@
     "claim": {
       "kind": "client",
       "clientId": "c1"
+    },
+    "lifecycle": {
+      "status": "running"
     }
   },
   "actions": [
@@ -34,6 +37,9 @@
       "kind": "client",
       "clientId": "c1"
     },
-    "exitCode": 0
+    "lifecycle": {
+      "status": "exited",
+      "exitCode": 0
+    }
   }
 }

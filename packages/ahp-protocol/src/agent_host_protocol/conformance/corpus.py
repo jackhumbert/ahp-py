@@ -54,7 +54,17 @@ def _corpus_root() -> Path:
 CORPUS_ROOT = _corpus_root()
 
 _REDUCER_NAMES = frozenset(
-    {"root", "session", "chat", "terminal", "changeset", "annotations", "resourceWatch"}
+    {
+        "root",
+        "session",
+        "chat",
+        "terminal",
+        "changeset",
+        "annotations",
+        "resourceWatch",
+        "automation",
+        "automationRun",
+    }
 )
 
 
@@ -116,7 +126,7 @@ def _require(raw: dict[str, Any], path: Path, *keys: str) -> None:
 
 
 def reducer_fixtures() -> Iterator[ReducerFixture]:
-    """The 256-fixture reducer corpus, validated structurally as it loads.
+    """The 272-fixture reducer corpus, validated structurally as it loads.
 
     A malformed upstream fixture must fail loudly rather than be silently
     skipped -- a skipped fixture looks identical to a passing one in a summary.
@@ -140,7 +150,7 @@ def reducer_fixtures() -> Iterator[ReducerFixture]:
 
 
 def round_trip_fixtures() -> Iterator[RoundTripFixture]:
-    """The 39-fixture wire round-trip corpus."""
+    """The 44-fixture wire round-trip corpus."""
     directory = CORPUS_ROOT / "test-cases" / "round-trips"
     for path in sorted(directory.glob("*.json")):
         raw = json.loads(path.read_text(encoding="utf-8"))

@@ -25,11 +25,11 @@
         -32003,
         -32004,
         -32005,
-        -32006,
         -32007,
         -32008,
         -32009,
-        -32010
+        -32010,
+        -32011
       ]
     },
     "AuthRequiredErrorData": {
@@ -60,7 +60,7 @@
     },
     "UnsupportedProtocolVersionErrorData": {
       "type": "object",
-      "description": "Details carried in the `data` field of an `UnsupportedProtocolVersion`\n(-32005) error.",
+      "description": "Details carried in the `data` field of an `UnsupportedProtocolVersion`\n(-32005) error.\n\nThe data payload is required and always carries `supportedVersions`.",
       "properties": {
         "supportedVersions": {
           "type": "array",
@@ -507,6 +507,12 @@
             },
             {
               "$ref": "#/$defs/ChatState"
+            },
+            {
+              "$ref": "#/$defs/AutomationState"
+            },
+            {
+              "$ref": "#/$defs/AutomationRunState"
             }
           ],
           "description": "The current state of the resource"
@@ -738,6 +744,28 @@
         "values"
       ]
     },
+    "AutomationSessionOrigin": {
+      "type": "object",
+      "description": "Provenance recorded on a session created for an automation run.\n\nThe links let clients navigate from an ordinary session to the task-level\nrun and its durable definition. The session channel remains authoritative\nfor this session's transcript, tools, confirmations, and changes.",
+      "properties": {
+        "kind": {
+          "const": "automation"
+        },
+        "automation": {
+          "$ref": "#/$defs/URI",
+          "description": "Owning {@link AutomationEntry.resource}."
+        },
+        "run": {
+          "$ref": "#/$defs/URI",
+          "description": "Owning {@link AutomationRunState.resource}."
+        }
+      },
+      "required": [
+        "kind",
+        "automation",
+        "run"
+      ]
+    },
     "SessionMetadata": {
       "type": "object",
       "description": "Metadata shared between the full {@link SessionState} (delivered when a\nclient subscribes to a session's URI) and the lightweight\n{@link SessionSummary} (carried in the root-channel session catalog).\n\nThese fields describe the session at a glance and appear in both places.\n`SessionState` owns the authoritative values for a subscribed session;\n`SessionSummary` mirrors them into the catalog so clients that only render a\nsession list don't have to subscribe to every session URI. The host keeps\nthe catalog in sync via `root/sessionSummaryChanged`.",
@@ -757,6 +785,10 @@
         "activity": {
           "type": "string",
           "description": "Human-readable description of what the session is currently doing"
+        },
+        "origin": {
+          "$ref": "#/$defs/SessionOrigin",
+          "description": "Durable {@link AutomationSessionOrigin}, when an automation run created this session."
         },
         "project": {
           "$ref": "#/$defs/ProjectInfo",
@@ -799,6 +831,10 @@
         "activity": {
           "type": "string",
           "description": "Human-readable description of what the session is currently doing"
+        },
+        "origin": {
+          "$ref": "#/$defs/SessionOrigin",
+          "description": "Durable {@link AutomationSessionOrigin}, when an automation run created this session."
         },
         "project": {
           "$ref": "#/$defs/ProjectInfo",
@@ -1021,8 +1057,8 @@
           "description": "The `clientId` expected to execute the tool. Matches the `clientId` of the\ntool call's client {@link ToolCallContributor}."
         },
         "toolCall": {
-          "$ref": "#/$defs/ToolCallState",
-          "description": "The running tool call the session wants the owning client to execute. The\nhost only ever populates this with a {@link ToolCallRunningState} (i.e. a\n{@link ToolCallState} in `running` status)."
+          "$ref": "#/$defs/ToolCallRunningState",
+          "description": "The running tool call the session wants the owning client to execute. The\nhost only ever populates this with a {@link ToolCallRunningState}."
         }
       },
       "required": [
@@ -1103,6 +1139,10 @@
         "activity": {
           "type": "string",
           "description": "Human-readable description of what the session is currently doing"
+        },
+        "origin": {
+          "$ref": "#/$defs/SessionOrigin",
+          "description": "Durable {@link AutomationSessionOrigin}, when an automation run created this session."
         },
         "project": {
           "$ref": "#/$defs/ProjectInfo",
@@ -3033,10 +3073,6 @@
         "state": {
           "$ref": "#/$defs/TurnState",
           "description": "How the turn ended"
-        },
-        "error": {
-          "$ref": "#/$defs/ErrorInfo",
-          "description": "Error details if state is `'error'`"
         }
       },
       "required": [
@@ -3096,7 +3132,7 @@
     },
     "Message": {
       "type": "object",
-      "description": "A message that initiates or steers a turn. Messages can originate from the\nuser, the agent, a tool, or be system-generated (see {@link MessageOrigin}).\n\nAttachments MAY be referenced inside {@link Message.text} via their\n{@link MessageAttachmentBase.range} field. Attachments without a range are\nstill associated with the message but do not correspond to a specific span\nin the text.",
+      "description": "A message that initiates or steers a turn. Messages can originate from the\nuser, the agent, a tool, an automation, or be system-generated (see\n{@link MessageOrigin}).\n\nAttachments MAY be referenced inside {@link Message.text} via their\n{@link MessageAttachmentBase.range} field. Attachments without a range are\nstill associated with the message but do not correspond to a specific span\nin the text.",
       "properties": {
         "text": {
           "type": "string",
@@ -3486,6 +3522,28 @@
       "required": [
         "kind",
         "request"
+      ]
+    },
+    "ErrorResponsePart": {
+      "type": "object",
+      "description": "An error encountered while processing a turn.\n\nThis is the detailed source of truth for the error. {@link Turn.state}\nremains {@link TurnState.Error} while the turn is stopped at this error so\nclients can detect the terminal state without inspecting response parts.\n\nWhen {@link resumable} is `true`, a client may dispatch `chat/turnResume`\nwhile this is the latest turn and its state is {@link TurnState.Error}.\nClients decide whether and how to present that affordance.",
+      "properties": {
+        "kind": {
+          "const": "error",
+          "description": "Discriminant"
+        },
+        "error": {
+          "$ref": "#/$defs/ErrorInfo",
+          "description": "Error details."
+        },
+        "resumable": {
+          "type": "boolean",
+          "description": "Whether the host can resume the turn from this error. Only `true` enables resume."
+        }
+      },
+      "required": [
+        "kind",
+        "error"
       ]
     },
     "SystemNotificationResponsePart": {
@@ -4478,15 +4536,44 @@
           "$ref": "#/$defs/TerminalClaim",
           "description": "Who currently holds this terminal"
         },
-        "exitCode": {
-          "type": "number",
-          "description": "Process exit code, if the terminal process has exited"
+        "lifecycle": {
+          "$ref": "#/$defs/TerminalLifecycleState",
+          "description": "Current terminal process lifecycle."
         }
       },
       "required": [
         "resource",
         "title",
-        "claim"
+        "claim",
+        "lifecycle"
+      ]
+    },
+    "TerminalRunningLifecycleState": {
+      "type": "object",
+      "description": "A terminal process that is still running.",
+      "properties": {
+        "status": {
+          "const": "running"
+        }
+      },
+      "required": [
+        "status"
+      ]
+    },
+    "TerminalExitedLifecycleState": {
+      "type": "object",
+      "description": "A terminal process that has exited.",
+      "properties": {
+        "status": {
+          "const": "exited"
+        },
+        "exitCode": {
+          "type": "number",
+          "description": "Process exit code, if the runtime reported one."
+        }
+      },
+      "required": [
+        "status"
       ]
     },
     "TerminalClientClaim": {
@@ -4519,9 +4606,13 @@
           "$ref": "#/$defs/URI",
           "description": "Session URI that claimed the terminal"
         },
+        "chat": {
+          "$ref": "#/$defs/URI",
+          "description": "Chat URI that claimed the terminal."
+        },
         "turnId": {
           "type": "string",
-          "description": "Optional turn identifier within the session"
+          "description": "Optional turn identifier within the chat."
         },
         "toolCallId": {
           "type": "string",
@@ -4530,7 +4621,8 @@
       },
       "required": [
         "kind",
-        "session"
+        "session",
+        "chat"
       ]
     },
     "TerminalState": {
@@ -4560,9 +4652,9 @@
           },
           "description": "Typed content parts, replacing the flat `content: string`.\n\nNaive consumers that only need the raw VT stream can reconstruct it with:\n  `content.map(p => p.type === 'command' ? p.output : p.value).join('')`\n\nConsumers that need command boundaries can filter by part type."
         },
-        "exitCode": {
-          "type": "number",
-          "description": "Process exit code, set when the terminal process exits"
+        "lifecycle": {
+          "$ref": "#/$defs/TerminalLifecycleState",
+          "description": "Current terminal process lifecycle."
         },
         "claim": {
           "$ref": "#/$defs/TerminalClaim",
@@ -4580,6 +4672,7 @@
       "required": [
         "title",
         "content",
+        "lifecycle",
         "claim"
       ]
     },
@@ -4842,17 +4935,38 @@
         "annotations"
       ]
     },
+    "AnnotationOrigin": {
+      "type": "object",
+      "description": "Provenance of the content an annotation is anchored to.",
+      "properties": {
+        "session": {
+          "$ref": "#/$defs/URI",
+          "description": "Owning session URI."
+        },
+        "chat": {
+          "$ref": "#/$defs/URI",
+          "description": "Owning chat URI, when the annotation is scoped to a chat."
+        },
+        "turnId": {
+          "type": "string",
+          "description": "Turn identifier within {@link chat}, when the annotation is scoped to a turn."
+        }
+      },
+      "required": [
+        "session"
+      ]
+    },
     "Annotation": {
       "type": "object",
-      "description": "A conversation anchored to a specific file produced by a specific turn,\noptionally narrowed to a range within that file.\n\n{@link turnId} anchors the annotation to the file versions that turn\nproduced, so a later turn that rewrites the same file does not silently\ninvalidate the annotation's anchor — clients can resolve {@link resource}\nand {@link range} against the turn's changeset. When {@link range} is\nomitted the annotation is anchored to the entire file.\n\nEvery annotation MUST contain at least one {@link AnnotationEntry}. An\n{@link AnnotationsSetAction} that creates an annotation therefore carries\nits mandatory first entry, and removing the last remaining entry collapses\nthe annotation via {@link AnnotationsRemovedAction} rather than leaving an\nempty annotation behind.",
+      "description": "A conversation anchored to a specific file in a session, optionally scoped\nto a chat and turn and narrowed to a range within that file.\n\n{@link origin} identifies the owning session and, when available, the chat\nand turn that produced the file version. When {@link range} is omitted the\nannotation is anchored to the entire file.\n\nEvery annotation MUST contain at least one {@link AnnotationEntry}. An\n{@link AnnotationsSetAction} that creates an annotation therefore carries\nits mandatory first entry, and removing the last remaining entry collapses\nthe annotation via {@link AnnotationsRemovedAction} rather than leaving an\nempty annotation behind.",
       "properties": {
         "id": {
           "type": "string",
           "description": "Stable identifier within the annotations channel. Assigned by the client\nthat dispatches the creating {@link AnnotationsSetAction}."
         },
-        "turnId": {
-          "type": "string",
-          "description": "Turn that produced the file versions this annotation is anchored to.\nMatches a {@link Turn.id} on the owning session."
+        "origin": {
+          "$ref": "#/$defs/AnnotationOrigin",
+          "description": "Provenance of the content this annotation is anchored to."
         },
         "resource": {
           "$ref": "#/$defs/URI",
@@ -4881,7 +4995,7 @@
       },
       "required": [
         "id",
-        "turnId",
+        "origin",
         "resource",
         "resolved",
         "entries"
@@ -4994,6 +5108,555 @@
         "type"
       ]
     },
+    "AutomationSchedule": {
+      "type": "object",
+      "description": "A portable recurring schedule evaluated in a named time zone.\n\nThe expression uses exactly five whitespace-separated fields, in this\norder:\n\n| Field | Values |\n| --- | --- |\n| minute | `0`–`59` |\n| hour | `0`–`23` |\n| day of month | `1`–`31` |\n| month | `1`–`12` or `JAN`–`DEC` |\n| day of week | `0`–`7` or `SUN`–`SAT`; both `0` and `7` mean Sunday |\n\nMonth and weekday names are ASCII and case-insensitive. Each field accepts\n`*`, a single value, an inclusive range (`1-5`), a comma-separated list of\nvalues or ranges (`1,3,8-10`), or a step applied to `*` or a range (for\nexample, &#42;/15 or `1-30/2`). A step MUST be a positive integer. AHP does\nnot support seconds, years, macros such as `@daily`, or Quartz extensions\nsuch as `?`, `L`, `W`, and `#`.\n\nMinute, hour, and month must all match. When both day-of-month and\nday-of-week are restricted (not `*`), an occurrence matches when either day\nfield matches, following Unix cron semantics.",
+      "properties": {
+        "expression": {
+          "type": "string",
+          "description": "Five-field AHP cron expression described by {@link AutomationSchedule}."
+        },
+        "timeZone": {
+          "type": "string",
+          "description": "IANA Time Zone Database identifier used to interpret the expression, for\nexample `\"UTC\"` or `\"Europe/Berlin\"`."
+        }
+      },
+      "required": [
+        "expression",
+        "timeZone"
+      ]
+    },
+    "AutomationScheduleTrigger": {
+      "type": "object",
+      "description": "Starts runs from a recurring cron schedule evaluated by the host.",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Identifier unique and stable within this automation definition. Recorded in\n{@link AutomationTriggeredRunOrigin.triggerId} when this trigger creates a\nrun."
+        },
+        "kind": {
+          "const": "schedule"
+        },
+        "schedule": {
+          "$ref": "#/$defs/AutomationSchedule",
+          "description": "Recurrence and time zone evaluated by the host."
+        },
+        "misfirePolicy": {
+          "$ref": "#/$defs/AutomationMisfirePolicy",
+          "description": "Policy for missed occurrences. Omission is equivalent to\n{@link AutomationMisfirePolicy.RunOnce}."
+        }
+      },
+      "required": [
+        "id",
+        "kind",
+        "schedule"
+      ]
+    },
+    "AutomationEventTrigger": {
+      "type": "object",
+      "description": "Starts runs from events understood by the owning host.\n\nEvent trigger types, events, and configuration are discovered through\n{@link ListAutomationTriggerDefinitionsParams |\nlistAutomationTriggerDefinitions}. The saved trigger includes the matching\nhuman-readable metadata so it remains displayable without repeating\ndiscovery.",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Identifier unique and stable within this automation definition. Recorded in\n{@link AutomationTriggeredRunOrigin.triggerId} when this trigger creates a\nrun."
+        },
+        "kind": {
+          "const": "event"
+        },
+        "type": {
+          "type": "string",
+          "description": "Matches {@link AutomationTriggerDefinition.type}."
+        },
+        "title": {
+          "type": "string",
+          "description": "Host-normalized human-readable trigger type name."
+        },
+        "description": {
+          "type": "string",
+          "description": "Optional host-normalized explanation of the trigger source."
+        },
+        "events": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/AutomationTriggerEventDefinition"
+          },
+          "description": "Selected events for this trigger type.\n\nEvent ids carry the trigger semantics. Titles and descriptions are\nlast-known display metadata and do not indicate current availability."
+        },
+        "config": {
+          "type": "object",
+          "additionalProperties": {},
+          "description": "Values described by {@link AutomationTriggerDefinition.configSchema}.\nClients MUST preserve unknown entries when editing other fields."
+        }
+      },
+      "required": [
+        "id",
+        "kind",
+        "type",
+        "title",
+        "events"
+      ]
+    },
+    "AutomationTriggerEventDefinition": {
+      "type": "object",
+      "description": "Describes one host-defined trigger event.",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Stable event id."
+        },
+        "title": {
+          "type": "string",
+          "description": "Human-readable event name."
+        },
+        "description": {
+          "type": "string",
+          "description": "Optional longer explanation of when this event fires."
+        }
+      },
+      "required": [
+        "id",
+        "title"
+      ]
+    },
+    "AutomationTriggerDefinition": {
+      "type": "object",
+      "description": "Describes one host-defined event trigger type available for a prospective\nautomation session template.\n\nTrigger definitions are discovery metadata, not durable automation state.\nHosts may return different definitions for different providers, working\ndirectories, or session configuration.",
+      "properties": {
+        "type": {
+          "type": "string",
+          "description": "Stable type id stored in {@link AutomationEventTrigger.type}."
+        },
+        "title": {
+          "type": "string",
+          "description": "Human-readable trigger type name."
+        },
+        "description": {
+          "type": "string",
+          "description": "Optional longer explanation of the trigger source."
+        },
+        "events": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/AutomationTriggerEventDefinition"
+          },
+          "description": "Events available for selection. Saved triggers retain their selected event descriptors."
+        },
+        "configSchema": {
+          "$ref": "#/$defs/ConfigSchema",
+          "description": "Optional schema for {@link AutomationEventTrigger.config}."
+        }
+      },
+      "required": [
+        "type",
+        "title",
+        "events"
+      ]
+    },
+    "AutomationSessionTemplate": {
+      "type": "object",
+      "description": "Template from which the host creates a fresh session for each automation run.\n\nThe host revalidates every selection when the run starts. Definitions never\ncarry credentials, confirmation decisions, or durable permission grants.",
+      "properties": {
+        "provider": {
+          "type": "string",
+          "description": "Provider id matching {@link AgentInfo.provider}. Omit to use the host's default provider."
+        },
+        "model": {
+          "$ref": "#/$defs/ModelSelection",
+          "description": "Optional model selection resolved when a run starts. Its\n{@link ModelSelection.id} matches a {@link SessionModelInfo.id} advertised\nby the selected provider."
+        },
+        "agent": {
+          "$ref": "#/$defs/AgentSelection",
+          "description": "Optional custom agent selection identified by {@link AgentSelection.uri}."
+        },
+        "workingDirectories": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/URI"
+          },
+          "description": "Ordered working-directory URIs for each created session, equivalent to\n{@link CreateSessionParams.workingDirectories}. Absence means a\nworkspace-less session."
+        },
+        "config": {
+          "type": "object",
+          "additionalProperties": {},
+          "description": "Session configuration values equivalent to\n{@link CreateSessionParams.config}, normally obtained from\n{@link ResolveSessionConfigResult.values}."
+        }
+      }
+    },
+    "AutomationDefinition": {
+      "type": "object",
+      "description": "Durable, client-editable definition of an automation.\n\nA definition combines the initial automation message, the session template\nused for each run, and zero or more automatic triggers. Run history,\ntimestamps, and currently allowed operations live on\n{@link AutomationEntry} rather than in the definition.",
+      "properties": {
+        "title": {
+          "type": "string",
+          "description": "Human-readable automation name."
+        },
+        "message": {
+          "$ref": "#/$defs/Message",
+          "description": "Initial message sent to every newly created run session. Its\n{@link Message.origin} kind MUST be {@link MessageKind.Automation}."
+        },
+        "session": {
+          "$ref": "#/$defs/AutomationSessionTemplate",
+          "description": "Template used to create fresh sessions for each run."
+        },
+        "enabled": {
+          "type": "boolean",
+          "description": "Whether automatic triggers may create runs. Manual runs remain available\nwhenever {@link AutomationOperation.Run} is advertised."
+        },
+        "triggers": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/AutomationTrigger"
+          },
+          "description": "Automatic triggers. An empty list means manual-only."
+        },
+        "_meta": {
+          "type": "object",
+          "additionalProperties": {},
+          "description": "Opaque implementation-defined metadata. Clients MUST preserve unknown\nentries when updating the definition."
+        }
+      },
+      "required": [
+        "title",
+        "message",
+        "session",
+        "enabled",
+        "triggers"
+      ]
+    },
+    "AutomationEntry": {
+      "type": "object",
+      "description": "Authoritative state of one automation in {@link AutomationState.entries}.\n\nThe host owns trigger evaluation, run claims, run retention, and operation\navailability. Clients render this state and submit actions or commands; they\nnever run a fallback scheduler for a host-owned definition.",
+      "properties": {
+        "resource": {
+          "$ref": "#/$defs/URI",
+          "description": "Stable `ahp-automation:/<id>` resource identifier."
+        },
+        "definition": {
+          "$ref": "#/$defs/AutomationDefinition",
+          "description": "Current durable definition."
+        },
+        "nextRunAt": {
+          "type": "string",
+          "description": "Earliest schedule occurrence awaiting evaluation, as an ISO 8601 timestamp. It may be in the past while catch-up is pending."
+        },
+        "runs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/AutomationRunSummary"
+          },
+          "description": "Newest-first retained run summaries. This is a bounded window; use\n{@link FetchAutomationRunsParams | fetchAutomationRuns} when\n{@link AutomationEntry.runsNextCursor} is present."
+        },
+        "runsNextCursor": {
+          "type": "string",
+          "description": "Opaque cursor passed as {@link FetchAutomationRunsParams.cursor} for the next older run-history page."
+        },
+        "operations": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/AutomationOperation"
+          },
+          "description": "Operations currently permitted for this automation."
+        },
+        "createdAt": {
+          "type": "string",
+          "description": "Creation timestamp in ISO 8601 format."
+        },
+        "modifiedAt": {
+          "type": "string",
+          "description": "Last definition modification timestamp in ISO 8601 format."
+        },
+        "_meta": {
+          "type": "object",
+          "additionalProperties": {},
+          "description": "Opaque host-defined state metadata."
+        }
+      },
+      "required": [
+        "resource",
+        "definition",
+        "runs",
+        "operations",
+        "createdAt",
+        "modifiedAt"
+      ]
+    },
+    "AutomationState": {
+      "type": "object",
+      "description": "Authoritative automation catalogue exposed on the `ahp-automations://`\nchannel.\n\nA subscription snapshot contains every automation visible to the client.\nSubsequent {@link AutomationSetAction | `automation/set`} and\n{@link AutomationRemovedAction | `automation/removed`} actions keep the\ncatalogue synchronized and participate in normal reconnect replay.",
+      "properties": {
+        "entries": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/AutomationEntry"
+          },
+          "description": "Full automation entries keyed by {@link AutomationEntry.resource}."
+        },
+        "_meta": {
+          "type": "object",
+          "additionalProperties": {},
+          "description": "Opaque host-defined catalogue metadata."
+        }
+      },
+      "required": [
+        "entries"
+      ]
+    },
+    "AutomationManualRunOrigin": {
+      "type": "object",
+      "description": "Origin recorded for a client-requested manual run.",
+      "properties": {
+        "kind": {
+          "const": "manual"
+        }
+      },
+      "required": [
+        "kind"
+      ]
+    },
+    "AutomationTriggeredRunOrigin": {
+      "type": "object",
+      "description": "Origin recorded for a run created by one of the automation's triggers.",
+      "properties": {
+        "kind": {
+          "const": "trigger"
+        },
+        "triggerId": {
+          "type": "string",
+          "description": "Matches the stable {@link AutomationScheduleTrigger.id} or\n{@link AutomationEventTrigger.id} in the definition."
+        },
+        "scheduledFor": {
+          "type": "string",
+          "description": "Intended schedule occurrence as an ISO 8601 timestamp. Present for\nschedule triggers and normally absent for event triggers."
+        },
+        "catchUp": {
+          "type": "boolean",
+          "description": "`true` when this is a catch-up run created by\n{@link AutomationMisfirePolicy.RunOnce}."
+        },
+        "event": {
+          "type": "object",
+          "additionalProperties": {},
+          "description": "Host-defined, non-secret event provenance suitable for display or audit.\nThis is descriptive context, not an input that clients replay."
+        }
+      },
+      "required": [
+        "kind",
+        "triggerId"
+      ]
+    },
+    "AutomationPendingRunLifecycle": {
+      "type": "object",
+      "description": "A durable run exists but has not begun external execution.",
+      "properties": {
+        "status": {
+          "const": "pending"
+        },
+        "createdAt": {
+          "type": "string",
+          "description": "Run creation timestamp in ISO 8601 format."
+        }
+      },
+      "required": [
+        "status",
+        "createdAt"
+      ]
+    },
+    "AutomationRunningRunLifecycle": {
+      "type": "object",
+      "description": "The run is executing linked sessions or awaiting interaction on them.\n\nLinked {@link SessionState.status} and {@link SessionState.inputNeeded}\nremain authoritative for whether user attention or client-side work is\nrequired.",
+      "properties": {
+        "status": {
+          "const": "running"
+        },
+        "createdAt": {
+          "type": "string",
+          "description": "Run creation timestamp in ISO 8601 format."
+        },
+        "startedAt": {
+          "type": "string",
+          "description": "First execution start timestamp in ISO 8601 format."
+        }
+      },
+      "required": [
+        "status",
+        "createdAt",
+        "startedAt"
+      ]
+    },
+    "AutomationCompletedRunLifecycle": {
+      "type": "object",
+      "description": "Terminal lifecycle for a successfully completed run.",
+      "properties": {
+        "status": {
+          "const": "completed"
+        },
+        "createdAt": {
+          "type": "string",
+          "description": "Run creation timestamp in ISO 8601 format."
+        },
+        "startedAt": {
+          "type": "string",
+          "description": "First execution start timestamp in ISO 8601 format."
+        },
+        "completedAt": {
+          "type": "string",
+          "description": "Completion timestamp in ISO 8601 format."
+        },
+        "usage": {
+          "$ref": "#/$defs/UsageInfo",
+          "description": "Optional aggregate model usage across all linked sessions."
+        }
+      },
+      "required": [
+        "status",
+        "createdAt",
+        "startedAt",
+        "completedAt"
+      ]
+    },
+    "AutomationFailedRunLifecycle": {
+      "type": "object",
+      "description": "Terminal lifecycle for a run that ended with an error.\n\n`startedAt` is absent when failure occurred before execution began, such as\nsession-template validation or workspace preparation.",
+      "properties": {
+        "status": {
+          "const": "failed"
+        },
+        "createdAt": {
+          "type": "string",
+          "description": "Run creation timestamp in ISO 8601 format."
+        },
+        "startedAt": {
+          "type": "string",
+          "description": "First execution start timestamp in ISO 8601 format, when execution began."
+        },
+        "completedAt": {
+          "type": "string",
+          "description": "Failure timestamp in ISO 8601 format."
+        },
+        "error": {
+          "$ref": "#/$defs/ErrorInfo",
+          "description": "Stable machine-readable and human-readable failure information."
+        }
+      },
+      "required": [
+        "status",
+        "createdAt",
+        "completedAt",
+        "error"
+      ]
+    },
+    "AutomationCancelledRunLifecycle": {
+      "type": "object",
+      "description": "Terminal lifecycle for a cancelled run.\n\n`startedAt` is absent when cancellation completed while the run was still\npending.",
+      "properties": {
+        "status": {
+          "const": "cancelled"
+        },
+        "createdAt": {
+          "type": "string",
+          "description": "Run creation timestamp in ISO 8601 format."
+        },
+        "startedAt": {
+          "type": "string",
+          "description": "First execution start timestamp in ISO 8601 format, when execution began."
+        },
+        "completedAt": {
+          "type": "string",
+          "description": "Cancellation completion timestamp in ISO 8601 format."
+        }
+      },
+      "required": [
+        "status",
+        "createdAt",
+        "completedAt"
+      ]
+    },
+    "AutomationRunSummary": {
+      "type": "object",
+      "description": "Lightweight projection of a run retained in its automation's history.\n\nA summary contains enough information to render run history without\nsubscribing to every `ahp-automation-run:` resource.",
+      "properties": {
+        "resource": {
+          "$ref": "#/$defs/URI",
+          "description": "Subscribable `ahp-automation-run:` URI matching {@link AutomationRunState.resource}."
+        },
+        "automation": {
+          "$ref": "#/$defs/URI",
+          "description": "Owning `ahp-automation:` URI matching {@link AutomationRunState.automation}."
+        },
+        "origin": {
+          "$ref": "#/$defs/AutomationRunOrigin",
+          "description": "Immutable provenance matching {@link AutomationRunState.origin}."
+        },
+        "lifecycle": {
+          "$ref": "#/$defs/AutomationRunLifecycle",
+          "description": "Current or terminal lifecycle snapshot matching {@link AutomationRunState.lifecycle}."
+        },
+        "primarySession": {
+          "$ref": "#/$defs/URI",
+          "description": "Session matching {@link AutomationRunState.primarySession}, when selected."
+        },
+        "sessionCount": {
+          "type": "number",
+          "description": "Number of entries in {@link AutomationRunState.sessions}."
+        },
+        "_meta": {
+          "type": "object",
+          "additionalProperties": {},
+          "description": "Opaque host-defined summary metadata."
+        }
+      },
+      "required": [
+        "resource",
+        "automation",
+        "origin",
+        "lifecycle",
+        "sessionCount"
+      ]
+    },
+    "AutomationRunState": {
+      "type": "object",
+      "description": "Authoritative state of one subscribed `ahp-automation-run:` resource.\n\nThe run channel owns task-level lifecycle, provenance, and linked-session\nmembership. Linked session and chat channels remain authoritative for\ntranscripts, tools, interaction requirements, changesets, and per-session\nlifecycle.",
+      "properties": {
+        "resource": {
+          "$ref": "#/$defs/URI",
+          "description": "URI of this automation-run channel."
+        },
+        "automation": {
+          "$ref": "#/$defs/URI",
+          "description": "Owning `ahp-automation:` URI matching {@link AutomationEntry.resource}."
+        },
+        "origin": {
+          "$ref": "#/$defs/AutomationRunOrigin",
+          "description": "Immutable provenance describing how this run was created."
+        },
+        "lifecycle": {
+          "$ref": "#/$defs/AutomationRunLifecycle",
+          "description": "Current or terminal lifecycle."
+        },
+        "sessions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/URI"
+          },
+          "description": "Ordered, unique session URIs belonging to this run, each matching\n{@link SessionState.resource}. Entries may represent retries, parallel\nworkers, or delegated attempts."
+        },
+        "primarySession": {
+          "$ref": "#/$defs/URI",
+          "description": "Member of {@link AutomationRunState.sessions} that the host recommends opening first."
+        },
+        "_meta": {
+          "type": "object",
+          "additionalProperties": {},
+          "description": "Opaque host-defined run metadata."
+        }
+      },
+      "required": [
+        "resource",
+        "automation",
+        "origin",
+        "lifecycle",
+        "sessions"
+      ]
+    },
     "BaseParams": {
       "type": "object",
       "description": "Base shape every command's params extends.\n\n`channel` identifies the channel the command targets, mirroring the\n`channel` field on every protocol notification. For commands that operate\non a specific channel (a session, terminal, or changeset), `channel` is\nthat channel's URI. For commands that are connection-level rather than\nchannel-scoped (e.g. {@link InitializeParams | `initialize`},\n{@link PingParams | `ping`}, {@link ListSessionsParams | `listSessions`},\nthe `resource*` filesystem commands, and {@link AuthenticateParams |\n`authenticate`}), the params type narrows `channel` to the literal\nroot URI `'ahp-root://'`.\n\nThis invariant lets implementations route every incoming message —\nrequest, response, or notification — by inspecting `params.channel`\nwithout needing to know the per-method param shape.",
@@ -5077,7 +5740,7 @@
           "items": {
             "type": "string"
           },
-          "description": "Protocol versions the client is willing to speak, ordered from most\npreferred to least preferred. Each entry is a [SemVer](https://semver.org)\n`MAJOR.MINOR.PATCH` string (e.g. `\"0.1.0\"`).\n\nThe server selects one entry and returns it as `InitializeResult.protocolVersion`.\nIf the server cannot speak any of the offered versions, it MUST return\nerror code `-32005` (`UnsupportedProtocolVersion`)."
+          "description": "Protocol versions the client is willing to speak, ordered from most\npreferred to least preferred. Each entry is a [SemVer](https://semver.org)\n`MAJOR.MINOR.PATCH` string (e.g. `\"0.1.0\"`).\n\nThe server selects one entry and returns it as `InitializeResult.protocolVersion`.\nIf the server cannot speak any of the offered versions, it MUST return\nerror code `-32005` (`UnsupportedProtocolVersion`) with required\n`UnsupportedProtocolVersionErrorData` containing `supportedVersions`."
         },
         "clientId": {
           "type": "string",
@@ -5122,7 +5785,7 @@
     },
     "InitializeResult": {
       "type": "object",
-      "description": "Result of the `initialize` command.\n\n`protocolVersion` is the version the server has selected from the client's\n`protocolVersions` list. The client and server MUST use this version for\nthe rest of the connection. If the server cannot speak any of the offered\nversions it MUST return error code `-32005` (`UnsupportedProtocolVersion`)\ninstead of a result.",
+      "description": "Result of the `initialize` command.\n\n`protocolVersion` is the version the server has selected from the client's\n`protocolVersions` list. The client and server MUST use this version for\nthe rest of the connection. If the server cannot speak any of the offered\nversions it MUST return error code `-32005` (`UnsupportedProtocolVersion`)\nwith required `UnsupportedProtocolVersionErrorData` containing\n`supportedVersions`, instead of a result.",
       "properties": {
         "protocolVersion": {
           "type": "string",
@@ -5135,6 +5798,11 @@
         "serverInfo": {
           "$ref": "#/$defs/Implementation",
           "description": "Optional identity of the server implementation (name and version).\nInformational only — see {@link Implementation} for how it may and may not\nbe used. Whereas {@link InitializeResult.protocolVersion | `protocolVersion`}\nidentifies the negotiated protocol, `serverInfo` identifies the host\nsoftware behind it."
+        },
+        "_meta": {
+          "type": "object",
+          "additionalProperties": {},
+          "description": "Optional implementation-specific extension metadata advertised by the host.\n\nHosts and clients MAY agree on namespaced keys for capabilities that are not\npart of the standardized protocol. Clients MUST ignore keys they do not\nunderstand. Capabilities needed for interoperable behavior SHOULD use typed\nfields on {@link InitializeResult} instead."
         },
         "snapshots": {
           "type": "array",
@@ -5161,6 +5829,10 @@
         "telemetry": {
           "$ref": "#/$defs/TelemetryCapabilities",
           "description": "OTLP telemetry channels the host emits, if any. Each populated field is\neither a literal `ahp-otlp:` channel URI or an RFC 6570 URI template a\nclient expands before subscribing (currently only the `logs` channel\ndefines a template variable, `{level}`, for subscriber-side severity\nfiltering). Clients MAY ignore signals they cannot process."
+        },
+        "automations": {
+          "$ref": "#/$defs/AutomationCapabilities",
+          "description": "Host-owned automation support. Presence means clients may subscribe to\n`ahp-automations://` for {@link AutomationState}; absence means the\nhost does not expose an automation catalogue or automation commands."
         }
       },
       "required": [
@@ -5168,6 +5840,48 @@
         "serverSeq",
         "snapshots"
       ]
+    },
+    "AutomationCapabilities": {
+      "type": "object",
+      "description": "Automation features supported by this host authority.\n\nThe presence of this object advertises the baseline `ahp-automations://`\ncatalogue. Optional fields describe additional host features and\nrestrictions.\n\nCapabilities describe implementation support.\n{@link AutomationEntry.operations} remains authoritative for which\ndefinition mutations are currently allowed on a particular automation.",
+      "properties": {
+        "create": {
+          "$ref": "#/$defs/AutomationCreateCapability",
+          "description": "Present when clients may dispatch {@link AutomationCreateRequestedAction}."
+        },
+        "schedules": {
+          "$ref": "#/$defs/AutomationScheduleCapabilities",
+          "description": "Present when definitions may contain {@link AutomationScheduleTrigger | schedule triggers}."
+        },
+        "runCancellation": {
+          "$ref": "#/$defs/AutomationRunCancellationCapability",
+          "description": "Present when clients may request cancellation of `pending` or `running`\nautomation runs."
+        },
+        "runHistoryLimit": {
+          "type": "number",
+          "description": "Maximum terminal entries retained in {@link AutomationEntry.runs}. Active\nruns are not counted toward the limit. Absence means the retention limit is\nimplementation-defined."
+        }
+      }
+    },
+    "AutomationCreateCapability": {
+      "type": "object",
+      "description": "Presence capability for {@link AutomationCreateRequestedAction |\n`automation/createRequested`}.\n\nThe empty object means \"supported\"; fields are reserved for future\ncreate-specific options.",
+      "properties": {}
+    },
+    "AutomationScheduleCapabilities": {
+      "type": "object",
+      "description": "Host restrictions on portable {@link AutomationSchedule} triggers.\n\nThe cron grammar itself is fixed by AHP. Hosts MUST accept every expression\nin that grammar unless it violates an advertised interval restriction.",
+      "properties": {
+        "minIntervalMinutes": {
+          "type": "number",
+          "description": "Smallest permitted interval between consecutive occurrences produced by\n{@link AutomationSchedule.expression}. Omission means no restriction beyond\nthe cron format's one-minute resolution."
+        }
+      }
+    },
+    "AutomationRunCancellationCapability": {
+      "type": "object",
+      "description": "Presence capability for {@link AutomationRunCancelRequestedAction |\n`automationRun/cancelRequested`}.\n\nThe empty object means \"supported.\" Clients may dispatch the action for\n`pending` or `running` runs; terminal runs cannot be cancelled.",
+      "properties": {}
     },
     "PingParams": {
       "type": "object",
@@ -6012,26 +6726,9 @@
         "items"
       ]
     },
-    "SessionForkSource": {
-      "type": "object",
-      "description": "Creates a new session with the specified agent provider.\n\nIf the session URI already exists, the server MUST return an error with code\n`-32003` (`SessionAlreadyExists`).\n\nAfter creation, the client should subscribe to the session URI to receive state\nupdates. The server also broadcasts a `root/sessionAdded` notification to all\nclients.",
-      "properties": {
-        "session": {
-          "$ref": "#/$defs/URI",
-          "description": "URI of the existing session to fork from"
-        },
-        "turnId": {
-          "type": "string",
-          "description": "Turn ID in the source session; content up to and including this turn's response is copied"
-        }
-      },
-      "required": [
-        "session",
-        "turnId"
-      ]
-    },
     "CreateSessionParams": {
       "type": "object",
+      "description": "Creates a new session with the specified agent provider.\n\nIf the session URI already exists, the server MUST return an error with code\n`-32003` (`SessionAlreadyExists`).\n\nAfter creation, the client should subscribe to the session URI to receive state\nupdates. The server also broadcasts a `root/sessionAdded` notification to all\nclients.",
       "properties": {
         "channel": {
           "$ref": "#/$defs/URI",
@@ -6051,11 +6748,7 @@
           "items": {
             "$ref": "#/$defs/URI"
           },
-          "description": "The working directories the session's agent is granted tool access to.\nA session may span multiple directories; they are equal peers except when\nthe agent advertises a protected-primary capability. An\n{@link MultipleWorkingDirectoriesCapability.immutablePrimary | immutable\nprimary} is fixed, while a\n{@link MultipleWorkingDirectoriesCapability.primaryReplacement | replaceable\nprimary} is changed only with `session/workingDirectoryReplaced`.\n\nA client MUST NOT supply more than one entry unless the agent advertises\n{@link AgentCapabilities.multipleWorkingDirectories}; a server without that\ncapability treats only the first entry as the session's working directory\nand ignores the rest. Dispatch working-directory actions to change the set\nafter the session has started.\n\nIgnored for forked sessions — a fork inherits its working directories\nfrom the source session identified by `fork`."
-        },
-        "fork": {
-          "$ref": "#/$defs/SessionForkSource",
-          "description": "Fork from an existing session. The new session is populated with content\nfrom the source session up to and including the specified turn's response."
+          "description": "The working directories the session's agent is granted tool access to.\nA session may span multiple directories; they are equal peers except when\nthe agent advertises a protected-primary capability. An\n{@link MultipleWorkingDirectoriesCapability.immutablePrimary | immutable\nprimary} is fixed, while a\n{@link MultipleWorkingDirectoriesCapability.primaryReplacement | replaceable\nprimary} is changed only with `session/workingDirectoryReplaced`.\n\nA client MUST NOT supply more than one entry unless the agent advertises\n{@link AgentCapabilities.multipleWorkingDirectories}; a server without that\ncapability treats only the first entry as the session's working directory\nand ignores the rest. Dispatch working-directory actions to change the set\nafter the session has started."
         },
         "config": {
           "type": "object",
@@ -6417,7 +7110,7 @@
     },
     "CreateResourceWatchParams": {
       "type": "object",
-      "description": "Creates a resource watcher on the receiver's filesystem.\n\nThe receiver allocates an `ahp-resource-watch:/<id>` channel URI and\nreturns it on {@link CreateResourceWatchResult.channel}. The caller then\n[`subscribe`](./subscriptions)s to that channel to receive\n`resourceWatch/changed` actions over the standard action envelope.\n\nThe watch lifecycle is tied to subscription: when every subscriber has\nunsubscribed (or the underlying connection drops), the receiver MUST\nrelease the watcher. There is no explicit dispose command — `unsubscribe`\nis the only handle the caller needs.\n\nLike the rest of the `resource*` family, `createResourceWatch` is\nsymmetrical and MAY be sent in either direction. Access is gated through\nthe same permission flow as `resourceRead`/`resourceWrite`.",
+      "description": "Creates a resource watcher on the receiver's filesystem.\n\nThe receiver allocates an `ahp-resource-watch:/<id>` channel URI and\nreturns it on {@link CreateResourceWatchResult.channel}. The caller then\n[`subscribe`](/specification/subscriptions#subscribe-request)s to that channel to receive\n`resourceWatch/changed` actions over the standard action envelope.\n\nThe watch lifecycle is tied to subscription: when every subscriber has\nunsubscribed (or the underlying connection drops), the receiver MUST\nrelease the watcher. There is no explicit dispose command — `unsubscribe`\nis the only handle the caller needs.\n\nLike the rest of the `resource*` family, `createResourceWatch` is\nsymmetrical and MAY be sent in either direction. Access is gated through\nthe same permission flow as `resourceRead`/`resourceWrite`.",
       "properties": {
         "channel": {
           "type": "string",
@@ -6487,6 +7180,138 @@
         "channel"
       ]
     },
+    "ListAutomationTriggerDefinitionsParams": {
+      "type": "object",
+      "description": "Discover event-trigger types available for a prospective session template.\n\nHosts may vary definitions by provider, workspace, and session\nconfiguration. Schedule triggers are protocol-defined and therefore do not\nappear in this result. The result describes current authoring and validation\nchoices. Saved {@link AutomationEventTrigger} values retain their selected\nevent descriptors for display but do not establish current availability.",
+      "properties": {
+        "channel": {
+          "type": "string",
+          "enum": [
+            "ahp-root://"
+          ],
+          "description": "Trigger definitions are discovered from the root channel."
+        },
+        "_meta": {
+          "type": "object",
+          "additionalProperties": {},
+          "description": "Optional JSON-serializable metadata associated with this request.\nReceivers MUST ignore keys they do not understand."
+        },
+        "provider": {
+          "type": "string",
+          "description": "Prospective provider id matching {@link AgentInfo.provider}, or omitted for the host default."
+        },
+        "workingDirectories": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/URI"
+          },
+          "description": "Prospective {@link AutomationSessionTemplate.workingDirectories}."
+        },
+        "sessionConfig": {
+          "type": "object",
+          "additionalProperties": {},
+          "description": "Prospective resolved {@link AutomationSessionTemplate.config}."
+        }
+      },
+      "required": [
+        "channel"
+      ]
+    },
+    "ListAutomationTriggerDefinitionsResult": {
+      "type": "object",
+      "description": "Host-defined event trigger types available for the supplied context.",
+      "properties": {
+        "items": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/AutomationTriggerDefinition"
+          },
+          "description": "Available event trigger definitions."
+        }
+      },
+      "required": [
+        "items"
+      ]
+    },
+    "RunAutomationParams": {
+      "type": "object",
+      "description": "Start a manual run of an automation.\n\nManual execution is independent of {@link AutomationDefinition.enabled}.\nThe host persists the run before beginning session side effects.",
+      "properties": {
+        "channel": {
+          "type": "string",
+          "enum": [
+            "ahp-automations://"
+          ],
+          "description": "Manual runs are scoped to the catalogue channel."
+        },
+        "_meta": {
+          "type": "object",
+          "additionalProperties": {},
+          "description": "Optional JSON-serializable metadata associated with this request.\nReceivers MUST ignore keys they do not understand."
+        },
+        "automation": {
+          "$ref": "#/$defs/URI",
+          "description": "Target {@link AutomationEntry.resource}."
+        },
+        "requestId": {
+          "type": "string",
+          "description": "Durable client-generated idempotency key. Retrying with the same key and\nautomation MUST return the original run URI rather than create another\nrun."
+        }
+      },
+      "required": [
+        "channel",
+        "automation",
+        "requestId"
+      ]
+    },
+    "RunAutomationResult": {
+      "type": "object",
+      "description": "Result identifying the existing or newly created run.",
+      "properties": {
+        "resource": {
+          "$ref": "#/$defs/URI",
+          "description": "Subscribable `ahp-automation-run:` URI matching {@link AutomationRunState.resource}."
+        }
+      },
+      "required": [
+        "resource"
+      ]
+    },
+    "FetchAutomationRunsParams": {
+      "type": "object",
+      "description": "Load one older page into a catalogued automation's run-history state.\n\nThe response only acknowledges the request. The updated full state arrives\nthrough {@link AutomationSetAction | `automation/set`} on the\n`ahp-automations://` channel, keeping all catalogue subscribers synchronized\nthrough the normal action stream.",
+      "properties": {
+        "channel": {
+          "type": "string",
+          "enum": [
+            "ahp-automations://"
+          ],
+          "description": "Run-history loading is scoped to the catalogue channel."
+        },
+        "_meta": {
+          "type": "object",
+          "additionalProperties": {},
+          "description": "Optional JSON-serializable metadata associated with this request.\nReceivers MUST ignore keys they do not understand."
+        },
+        "automation": {
+          "$ref": "#/$defs/URI",
+          "description": "Target {@link AutomationEntry.resource}."
+        },
+        "cursor": {
+          "type": "string",
+          "description": "Cursor previously received as {@link AutomationEntry.runsNextCursor}.\nOmit to request the first page not already included by the snapshot."
+        }
+      },
+      "required": [
+        "channel",
+        "automation"
+      ]
+    },
+    "FetchAutomationRunsResult": {
+      "type": "object",
+      "description": "Empty acknowledgement; the updated automation state is delivered by action.",
+      "properties": {}
+    },
     "URI": {
       "type": "string",
       "description": "A URI string (e.g. `ahp-root://`, `ahp-session:/<uuid>`, or `ahp-chat:/<uuid>`)."
@@ -6543,11 +7368,15 @@
       "type": "number",
       "description": "Bitset of summary-level session status flags.\n\nUse bitwise checks instead of equality for non-terminal activity. For example,\n`status & SessionStatus.InProgress` matches both ordinary in-progress turns\nand turns that are paused waiting for input."
     },
+    "SessionOrigin": {
+      "$ref": "#/$defs/AutomationSessionOrigin",
+      "description": "Durable provenance for sessions created by a higher-level AHP workflow."
+    },
     "SessionLifecycle": {
       "enum": [
         "creating",
         "ready",
-        "creationFailed"
+        "failed"
       ],
       "type": "string",
       "description": "Session initialization state."
@@ -6579,32 +7408,6 @@
         }
       ],
       "description": "The two tool-call states that block on a client confirmation: parameter\nconfirmation before execution ({@link ToolCallPendingConfirmationState}) and\nresult confirmation after execution\n({@link ToolCallPendingResultConfirmationState}).\n\n{@link ToolCallAuthRequiredState} is intentionally **not** part of this\nunion: it doesn't block on a `chat/toolCallConfirmed`-style client\ndecision, it blocks on the client completing an OAuth flow and calling\n`authenticate`. See {@link SessionToolAuthenticationRequest} for its\nsession-level surfacing.\n\nSurfaced at the session level by {@link SessionToolConfirmationRequest}."
-    },
-    "ToolCallState": {
-      "oneOf": [
-        {
-          "$ref": "#/$defs/ToolCallStreamingState"
-        },
-        {
-          "$ref": "#/$defs/ToolCallPendingConfirmationState"
-        },
-        {
-          "$ref": "#/$defs/ToolCallRunningState"
-        },
-        {
-          "$ref": "#/$defs/ToolCallAuthRequiredState"
-        },
-        {
-          "$ref": "#/$defs/ToolCallPendingResultConfirmationState"
-        },
-        {
-          "$ref": "#/$defs/ToolCallCompletedState"
-        },
-        {
-          "$ref": "#/$defs/ToolCallCancelledState"
-        }
-      ],
-      "description": "Discriminated union of all tool call lifecycle states.\n\nSee the [state model guide](/guide/state-model.html#tool-call-lifecycle)\nfor the full state machine diagram."
     },
     "CustomizationLoadState": {
       "oneOf": [
@@ -6906,6 +7709,9 @@
         },
         {
           "$ref": "#/$defs/InputRequestResponsePart"
+        },
+        {
+          "$ref": "#/$defs/ErrorResponsePart"
         }
       ]
     },
@@ -6923,6 +7729,7 @@
         "user",
         "agent",
         "tool",
+        "automation",
         "systemNotification"
       ],
       "type": "string",
@@ -6947,6 +7754,32 @@
         }
       ],
       "description": "An attachment associated with a {@link Message}."
+    },
+    "ToolCallState": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/ToolCallStreamingState"
+        },
+        {
+          "$ref": "#/$defs/ToolCallPendingConfirmationState"
+        },
+        {
+          "$ref": "#/$defs/ToolCallRunningState"
+        },
+        {
+          "$ref": "#/$defs/ToolCallAuthRequiredState"
+        },
+        {
+          "$ref": "#/$defs/ToolCallPendingResultConfirmationState"
+        },
+        {
+          "$ref": "#/$defs/ToolCallCompletedState"
+        },
+        {
+          "$ref": "#/$defs/ToolCallCancelledState"
+        }
+      ],
+      "description": "Discriminated union of all tool call lifecycle states.\n\nSee the [state model guide](/guide/state-model.html#tool-call-lifecycle)\nfor the full state machine diagram."
     },
     "ChatInputResponseKind": {
       "enum": [
@@ -7074,6 +7907,17 @@
       ],
       "description": "Describes who currently holds a terminal. A terminal may be claimed by\neither a connected client or a session (e.g. during a tool call)."
     },
+    "TerminalLifecycleState": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/TerminalRunningLifecycleState"
+        },
+        {
+          "$ref": "#/$defs/TerminalExitedLifecycleState"
+        }
+      ],
+      "description": "Current lifecycle of a terminal process."
+    },
     "TerminalContentPart": {
       "oneOf": [
         {
@@ -7121,6 +7965,65 @@
       ],
       "type": "string",
       "description": "Discriminant for {@link ResourceChange.type}."
+    },
+    "AutomationMisfirePolicy": {
+      "enum": [
+        "skip",
+        "runOnce"
+      ],
+      "type": "string",
+      "description": "How a host handles schedule occurrences missed while automatic execution was\nunavailable."
+    },
+    "AutomationTrigger": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/AutomationScheduleTrigger"
+        },
+        {
+          "$ref": "#/$defs/AutomationEventTrigger"
+        }
+      ],
+      "description": "An automatic trigger that can create runs for an enabled automation.\n\nManual execution is not represented as a trigger. An empty trigger list\ntherefore means the automation is manual-only."
+    },
+    "AutomationOperation": {
+      "enum": [
+        "update",
+        "remove",
+        "run"
+      ],
+      "type": "string",
+      "description": "Operations the host currently permits for an automation.\n\nThe list on {@link AutomationEntry.operations} is authoritative and may\nchange over time. Clients MUST NOT infer permission from capabilities alone:\ncapabilities describe what the host implementation can support, while\noperations describe what is allowed for this particular automation now."
+    },
+    "AutomationRunOrigin": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/AutomationManualRunOrigin"
+        },
+        {
+          "$ref": "#/$defs/AutomationTriggeredRunOrigin"
+        }
+      ],
+      "description": "Immutable provenance describing why a run was created."
+    },
+    "AutomationRunLifecycle": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/AutomationPendingRunLifecycle"
+        },
+        {
+          "$ref": "#/$defs/AutomationRunningRunLifecycle"
+        },
+        {
+          "$ref": "#/$defs/AutomationCompletedRunLifecycle"
+        },
+        {
+          "$ref": "#/$defs/AutomationFailedRunLifecycle"
+        },
+        {
+          "$ref": "#/$defs/AutomationCancelledRunLifecycle"
+        }
+      ],
+      "description": "Discriminated lifecycle of an automation run."
     },
     "ActionEnvelope": {
       "type": "object",
@@ -7293,6 +8196,9 @@
           "$ref": "#/$defs/ChatErrorAction"
         },
         {
+          "$ref": "#/$defs/ChatTurnResumeAction"
+        },
+        {
           "$ref": "#/$defs/ChatActivityChangedAction"
         },
         {
@@ -7408,6 +8314,33 @@
         },
         {
           "$ref": "#/$defs/ResourceWatchChangedAction"
+        },
+        {
+          "$ref": "#/$defs/AutomationCreateRequestedAction"
+        },
+        {
+          "$ref": "#/$defs/AutomationUpdateRequestedAction"
+        },
+        {
+          "$ref": "#/$defs/AutomationSetAction"
+        },
+        {
+          "$ref": "#/$defs/AutomationRemovedAction"
+        },
+        {
+          "$ref": "#/$defs/AutomationRunLifecycleChangedAction"
+        },
+        {
+          "$ref": "#/$defs/AutomationRunSessionSetAction"
+        },
+        {
+          "$ref": "#/$defs/AutomationRunSessionRemovedAction"
+        },
+        {
+          "$ref": "#/$defs/AutomationRunPrimarySessionChangedAction"
+        },
+        {
+          "$ref": "#/$defs/AutomationRunCancelRequestedAction"
         }
       ],
       "description": "Discriminated union of all state actions."
@@ -8188,7 +9121,7 @@
     },
     "ChatDeltaAction": {
       "type": "object",
-      "description": "Streaming text chunk from the assistant, appended to a specific response part.\n\nThe server MUST first emit a `chat/responsePart` to create the target\npart (markdown or reasoning), then use this action to append text to it.",
+      "description": "Streaming text chunk from the assistant, appended to a specific response part.\n\nThe server MUST first emit a `chat/responsePart` to create the target\nmarkdown part, then use this action to append text to it.",
       "properties": {
         "type": {
           "const": "chat/delta"
@@ -8220,7 +9153,7 @@
     },
     "ChatResponsePartAction": {
       "type": "object",
-      "description": "Structured content appended to the response.",
+      "description": "Structured content appended to the response.\n\nAn {@link ErrorResponsePart} MUST be appended with {@link ChatErrorAction}\ninstead so adding the part and ending the turn are one atomic transition.",
       "properties": {
         "type": {
           "const": "chat/responsePart"
@@ -8231,7 +9164,7 @@
         },
         "part": {
           "$ref": "#/$defs/ResponsePart",
-          "description": "Response part (markdown or content ref)"
+          "description": "Response part to append; error parts are ignored."
         },
         "_meta": {
           "type": "object",
@@ -8649,9 +9582,9 @@
           "type": "number",
           "description": "Elapsed turn duration in milliseconds, measured by the producer's own\nclock. Clients MUST NOT derive this by subtracting timestamps — cross-\nclient clocks may differ — and MUST treat it as opaque, producer-supplied\ndata."
         },
-        "error": {
-          "$ref": "#/$defs/ErrorInfo",
-          "description": "Error details"
+        "part": {
+          "$ref": "#/$defs/ErrorResponsePart",
+          "description": "Error part to append to the response stream before finalizing the turn.\nIts optional `resumable` flag indicates whether the turn can be resumed."
         },
         "_meta": {
           "type": "object",
@@ -8663,7 +9596,24 @@
         "type",
         "turnId",
         "duration",
-        "error"
+        "part"
+      ]
+    },
+    "ChatTurnResumeAction": {
+      "type": "object",
+      "description": "Resumes the latest errored turn without adding another message.\n\nThe turn MUST be the latest turn, its state MUST be `error`, and its final\nresponse part MUST be a resumable error. The reducer reopens the same turn\nwith its existing message, response parts, and usage intact. The host then\nresumes the provider's execution for that turn.",
+      "properties": {
+        "type": {
+          "const": "chat/turnResume"
+        },
+        "turnId": {
+          "type": "string",
+          "description": "Identifier of the errored turn."
+        }
+      },
+      "required": [
+        "type",
+        "turnId"
       ]
     },
     "ChatActivityChangedAction": {
@@ -9072,10 +10022,6 @@
             "$ref": "#/$defs/ChangesetOperation"
           },
           "description": "Full replacement operation list. Omit when operations are unchanged."
-        },
-        "error": {
-          "$ref": "#/$defs/ErrorInfo",
-          "description": "Error information, if the changeset content change failed."
         }
       },
       "required": [
@@ -9168,9 +10114,9 @@
           "type": "string",
           "description": "The {@link Annotation.id} of the annotation to update."
         },
-        "turnId": {
-          "type": "string",
-          "description": "Re-anchors the annotation to the file versions this turn produced.\nMatches a {@link Turn.id} on the owning session. Omit to leave the\ncurrent {@link Annotation.turnId} unchanged."
+        "origin": {
+          "$ref": "#/$defs/AnnotationOrigin",
+          "description": "Replaces the annotation's provenance. Omit to leave it unchanged."
         },
         "resource": {
           "$ref": "#/$defs/URI",
@@ -9478,6 +10424,163 @@
         "changes"
       ]
     },
+    "AutomationCreateRequestedAction": {
+      "type": "object",
+      "description": "Ask the host to create a durable automation at a client-chosen resource.\n\nClients may dispatch this action only when the host advertises its `create`\nautomation capability. {@link AutomationCreateRequestedAction.resource |\n`resource`} MUST use the `ahp-automation:` scheme and MUST NOT already\nidentify an unrelated automation.\n\nThis side-effect request leaves optimistic catalogue state unchanged. The\nhost validates trigger ids and configuration, normalizes event-trigger\ntitles and descriptions, persists the definition, then publishes the\nauthoritative result with {@link AutomationSetAction | `automation/set`}.\nRejections leave the catalogue unchanged.",
+      "properties": {
+        "type": {
+          "const": "automation/createRequested"
+        },
+        "resource": {
+          "$ref": "#/$defs/URI",
+          "description": "Client-chosen `ahp-automation:` URI that becomes {@link AutomationEntry.resource}."
+        },
+        "definition": {
+          "$ref": "#/$defs/AutomationDefinition",
+          "description": "Complete initial {@link AutomationEntry.definition}."
+        }
+      },
+      "required": [
+        "type",
+        "resource",
+        "definition"
+      ]
+    },
+    "AutomationUpdateRequestedAction": {
+      "type": "object",
+      "description": "Ask the host to update editable fields of an existing automation.\n\nClients may dispatch this action only while the target advertises\n{@link AutomationOperation.Update}. The host revalidates that operation and\nthe client's authorization.\n\nThis side-effect request leaves optimistic catalogue state unchanged. The\nhost applies accepted patches to its current authoritative definition in\naction order, revalidates and normalizes affected event triggers, then\npublishes the result with\n{@link AutomationSetAction | `automation/set`}. Omitted fields remain\nunchanged; when accepted actions replace the same field, the later action in\nserver order wins.",
+      "properties": {
+        "type": {
+          "const": "automation/updateRequested"
+        },
+        "resource": {
+          "$ref": "#/$defs/URI",
+          "description": "Target {@link AutomationEntry.resource}."
+        },
+        "changes": {
+          "$ref": "#/$defs/AutomationDefinitionPatch",
+          "description": "Editable {@link AutomationDefinition} fields to replace."
+        }
+      },
+      "required": [
+        "type",
+        "resource",
+        "changes"
+      ]
+    },
+    "AutomationSetAction": {
+      "type": "object",
+      "description": "Add or replace one full automation state in\n{@link AutomationState.entries}.\n\nExisting entries are matched by {@link AutomationEntry.resource} and\nreplaced in place. A previously unseen resource is appended.",
+      "properties": {
+        "type": {
+          "const": "automation/set"
+        },
+        "automation": {
+          "$ref": "#/$defs/AutomationEntry",
+          "description": "Full new or replacement automation state."
+        }
+      },
+      "required": [
+        "type",
+        "automation"
+      ]
+    },
+    "AutomationRemovedAction": {
+      "type": "object",
+      "description": "Remove one automation from {@link AutomationState.entries}.\n\nClients may dispatch this action only while the target advertises\n{@link AutomationOperation.Remove}. The host revalidates that operation\nbefore permanently deleting the automation. A rejected action leaves the\nauthoritative catalogue and durable definition unchanged.\n\nRemoving an unknown resource is a no-op.",
+      "properties": {
+        "type": {
+          "const": "automation/removed"
+        },
+        "resource": {
+          "$ref": "#/$defs/URI",
+          "description": "{@link AutomationEntry.resource} to remove."
+        }
+      },
+      "required": [
+        "type",
+        "resource"
+      ]
+    },
+    "AutomationRunLifecycleChangedAction": {
+      "type": "object",
+      "description": "Replace the run lifecycle.\n\nThe host dispatches this action for every lifecycle transition.",
+      "properties": {
+        "type": {
+          "const": "automationRun/lifecycleChanged"
+        },
+        "lifecycle": {
+          "$ref": "#/$defs/AutomationRunLifecycle",
+          "description": "Complete replacement {@link AutomationRunState.lifecycle}."
+        }
+      },
+      "required": [
+        "type",
+        "lifecycle"
+      ]
+    },
+    "AutomationRunSessionSetAction": {
+      "type": "object",
+      "description": "Add a session to {@link AutomationRunState.sessions}.\n\nSession URIs are unique. Setting an existing URI is a no-op.",
+      "properties": {
+        "type": {
+          "const": "automationRun/sessionSet"
+        },
+        "session": {
+          "$ref": "#/$defs/URI",
+          "description": "Session URI to append to {@link AutomationRunState.sessions} when not already linked."
+        }
+      },
+      "required": [
+        "type",
+        "session"
+      ]
+    },
+    "AutomationRunSessionRemovedAction": {
+      "type": "object",
+      "description": "Remove a linked session from the run.\n\nRemoving the current primary session also clears\n{@link AutomationRunState.primarySession}. An unknown URI is a no-op.",
+      "properties": {
+        "type": {
+          "const": "automationRun/sessionRemoved"
+        },
+        "session": {
+          "$ref": "#/$defs/URI",
+          "description": "Entry in {@link AutomationRunState.sessions} to remove."
+        }
+      },
+      "required": [
+        "type",
+        "session"
+      ]
+    },
+    "AutomationRunPrimarySessionChangedAction": {
+      "type": "object",
+      "description": "Select or clear the session clients should open first for this run.",
+      "properties": {
+        "type": {
+          "const": "automationRun/primarySessionChanged"
+        },
+        "primarySession": {
+          "$ref": "#/$defs/URI",
+          "description": "New {@link AutomationRunState.primarySession}, or omitted to clear the selection."
+        }
+      },
+      "required": [
+        "type"
+      ]
+    },
+    "AutomationRunCancelRequestedAction": {
+      "type": "object",
+      "description": "Ask the host to cancel this run.\n\nThis is the only client-dispatchable automation-run action. It is a\nside-effect request and deliberately leaves optimistic state unchanged. The\nclient may dispatch it only when the host advertises its `runCancellation`\ncapability and the current lifecycle is `pending` or `running`. The host\nrevalidates that the run is non-terminal. The authoritative outcome arrives\nlater through\n{@link AutomationRunLifecycleChangedAction}: cancellation may transition to\n`cancelled`, or the run may complete or fail before cancellation takes\neffect.",
+      "properties": {
+        "type": {
+          "const": "automationRun/cancelRequested"
+        }
+      },
+      "required": [
+        "type"
+      ]
+    },
     "ChatToolCallApprovedAction": {
       "type": "object",
       "description": "Client approves a pending tool call. The tool transitions to `running`.",
@@ -9584,6 +10687,40 @@
       ],
       "type": "string",
       "description": "Discriminant for pending message kinds."
+    },
+    "AutomationDefinitionPatch": {
+      "type": "object",
+      "description": "Partial replacement of editable {@link AutomationDefinition} fields.\n\nOmitted fields are unchanged. Supplied arrays and objects replace their\ncorresponding values in full; they are not merged recursively.",
+      "properties": {
+        "title": {
+          "type": "string",
+          "description": "Replacement {@link AutomationDefinition.title}."
+        },
+        "message": {
+          "$ref": "#/$defs/Message",
+          "description": "Replacement {@link AutomationDefinition.message}."
+        },
+        "session": {
+          "$ref": "#/$defs/AutomationSessionTemplate",
+          "description": "Replacement {@link AutomationDefinition.session}. The host revalidates\naffected event triggers when their discovery context changes."
+        },
+        "enabled": {
+          "type": "boolean",
+          "description": "Replacement {@link AutomationDefinition.enabled}."
+        },
+        "triggers": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/AutomationTrigger"
+          },
+          "description": "Complete replacement {@link AutomationDefinition.triggers}. The host\nvalidates event ids and normalizes event-trigger titles and descriptions."
+        },
+        "_meta": {
+          "type": "object",
+          "additionalProperties": {},
+          "description": "Complete replacement {@link AutomationDefinition._meta}."
+        }
+      }
     }
   }
 }

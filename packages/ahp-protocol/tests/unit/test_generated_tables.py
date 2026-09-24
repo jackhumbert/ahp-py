@@ -25,16 +25,16 @@ ROOT = Path(__file__).resolve().parents[2]
 
 def test_action_tables_cover_every_action() -> None:
     """A missing entry would silently make an action non-dispatchable or unversioned."""
-    assert len(ACTION_TYPES) == 86
+    assert len(ACTION_TYPES) == 96
     assert set(IS_CLIENT_DISPATCHABLE) == set(ACTION_TYPES)
     assert set(ACTION_INTRODUCED_IN) == set(ACTION_TYPES)
 
 
 def test_client_dispatchable_count() -> None:
-    """39 of 86. Upstream has 41 `@clientDispatchable` JSDoc annotations, but its
+    """44 of 96. Upstream has 46 `@clientDispatchable` JSDoc annotations, but its
     own generator only counts declarations carrying `type: ActionType.X`, so the
     generated map -- which `isClientDispatchable` reads -- is authoritative."""
-    assert sum(IS_CLIENT_DISPATCHABLE.values()) == 39
+    assert sum(IS_CLIENT_DISPATCHABLE.values()) == 44
 
 
 def test_unknown_actions_are_not_client_dispatchable() -> None:
@@ -75,13 +75,23 @@ def test_error_codes_match_the_spec() -> None:
     # (the generator hardcodes the enum); we read types/common/errors.ts, which
     # has it. See UPSTREAM.md.
     assert AHP_ERROR_CODES["Conflict"] == -32011
-    assert len(AHP_ERROR_CODES) == 11
+    # 0.9.0 removed `ContentNotFound`; -32006 "remains reserved and unassigned".
+    assert "ContentNotFound" not in AHP_ERROR_CODES
+    assert -32006 not in AHP_ERROR_CODES.values()
+    assert len(AHP_ERROR_CODES) == 10
 
 
 def test_upstream_version_constants() -> None:
-    assert UPSTREAM_PROTOCOL_VERSION == "0.8.0"
+    assert UPSTREAM_PROTOCOL_VERSION == "0.9.0"
     assert UPSTREAM_SUPPORTED_PROTOCOL_VERSIONS[0] == UPSTREAM_PROTOCOL_VERSION
-    assert UPSTREAM_SUPPORTED_PROTOCOL_VERSIONS == ("0.8.0", "0.7.0", "0.6.0", "0.5.2", "0.5.1")
+    assert UPSTREAM_SUPPORTED_PROTOCOL_VERSIONS == (
+        "0.9.0",
+        "0.8.0",
+        "0.7.0",
+        "0.6.0",
+        "0.5.2",
+        "0.5.1",
+    )
 
 
 def test_vendored_pin_matches_upstream_md() -> None:
@@ -129,8 +139,8 @@ def test_root_session_chat_action_counts() -> None:
         counts[action.split("/")[0]] = counts.get(action.split("/")[0], 0) + 1
     assert counts["root"] == 4
     assert counts["session"] == 28
-    assert counts["chat"] == 29
-    assert counts["root"] + counts["session"] + counts["chat"] == 61
+    assert counts["chat"] == 30
+    assert counts["root"] + counts["session"] + counts["chat"] == 62
 
 
 def test_schemas_are_vendored_but_not_trusted() -> None:

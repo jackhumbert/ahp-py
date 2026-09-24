@@ -14,6 +14,8 @@ const { annotationsReducer } = await import(`${T}/channels-annotations/reducer.t
 const { sessionReducer } = await import(`${T}/channels-session/reducer.ts`);
 const { chatReducer } = await import(`${T}/channels-chat/reducer.ts`);
 const { rootReducer } = await import(`${T}/channels-root/reducer.ts`);
+const { automationReducer } = await import(`${T}/channels-automation/reducer.ts`);
+const { automationRunReducer } = await import(`${T}/channels-automation-run/reducer.ts`);
 
 const REDUCERS = {
   terminal: terminalReducer,
@@ -22,10 +24,12 @@ const REDUCERS = {
   session: sessionReducer,
   chat: chatReducer,
   root: rootReducer,
+  automation: automationReducer,
+  automationRun: automationRunReducer,
 };
 
-// The reducers are not pure: chatReducer stamps modifiedAt from the clock.
-// Pin it exactly as the conformance corpora do.
+// Since 0.9.0 no reducer reads the clock; it stays pinned so an older pin's
+// chatReducer, which stamped modifiedAt from it, still reproduces.
 Date.now = () => 9999;
 
 const rl = createInterface({ input: process.stdin });

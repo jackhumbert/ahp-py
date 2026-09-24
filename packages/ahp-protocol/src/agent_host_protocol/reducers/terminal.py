@@ -7,11 +7,11 @@ completes the part carrying the matching ``commandId``.
 
 Three things about this port are load-bearing:
 
-* **Every assignment here is an unconditional JS spread.** ``{...state, exitCode:
-  action.exitCode}`` on an action with no ``exitCode`` leaves the property
-  present-but-``undefined``, which ``JSON.stringify`` drops -- so an exit code
-  already in the state is *cleared*. On an action carrying an explicit ``null``
-  it writes ``"exitCode": null`` through. Those are different documents, and
+* **Every assignment here is an unconditional JS spread.** ``{...state, cwd:
+  action.cwd}`` on an action with no ``cwd`` leaves the property
+  present-but-``undefined``, which ``JSON.stringify`` drops -- so a cwd already
+  in the state is *cleared*. On an action carrying an explicit ``null`` it
+  writes ``"cwd": null`` through. Those are different documents, and
   :func:`~agent_host_protocol.reducers.js.assign` is what keeps them apart. No
   fixture in the corpus carries a ``null`` for any of these fields, so nothing
   but this comment and the hazard tests defends it.
@@ -109,9 +109,15 @@ def terminal_reducer(state: Any, action: Mapping[str, Any]) -> Any:
         return assign({**state}, "cwd", get(action, "cwd"))
 
     if action_type == "terminal/exited":
-        # A process killed without an exit code omits the field, and the
-        # assignment then clears whatever code the state was holding.
-        return assign({**state}, "exitCode", get(action, "exitCode"))
+        # Since 0.9.0 an exit is an explicit lifecycle, so an exit without a
+        # code is still an exit. A process killed without one omits
+        # `exitCode`, which `JSON.stringify` then drops from the lifecycle
+        # object; any top-level `exitCode` a replayed pre-0.9.0 snapshot
+        # carries is left as it was, exactly as the spread leaves it upstream.
+        return {
+            **state,
+            "lifecycle": assign({"status": "exited"}, "exitCode", get(action, "exitCode")),
+        }
 
     if action_type == "terminal/cleared":
         return {**state, "content": []}

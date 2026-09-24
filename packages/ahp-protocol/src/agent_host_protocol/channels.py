@@ -32,6 +32,7 @@ from enum import Enum
 from typing import Any, Final
 
 __all__ = [
+    "AUTOMATIONS_URI",
     "ROOT_URI",
     "ChannelKind",
     "chat_uri",
@@ -48,6 +49,9 @@ _TERMINAL_PREFIX: Final = "ahp-terminal:"
 _CHANGESET_PREFIX: Final = "ahp-changeset:"
 _RESOURCE_WATCH_PREFIX: Final = "ahp-resource-watch:"
 _OTLP_PREFIX: Final = "ahp-otlp:"
+#: The automation catalogue is a singleton, like root (0.9.0).
+AUTOMATIONS_URI: Final = "ahp-automations://"
+_AUTOMATION_RUN_PREFIX: Final = "ahp-automation-run:"
 
 
 class ChannelKind(Enum):
@@ -59,6 +63,8 @@ class ChannelKind(Enum):
     RESOURCE_WATCH = "resourceWatch"
     ANNOTATIONS = "annotations"
     OTLP = "otlp"
+    AUTOMATION = "automation"
+    AUTOMATION_RUN = "automationRun"
     #: A scheme we do not know. Clients MUST NOT subscribe to one, but a peer
     #: must still answer rather than crash.
     UNKNOWN = "unknown"
@@ -85,6 +91,10 @@ def classify(uri: str) -> ChannelKind:
         return ChannelKind.RESOURCE_WATCH
     if uri.startswith(_OTLP_PREFIX):
         return ChannelKind.OTLP
+    if uri == AUTOMATIONS_URI:
+        return ChannelKind.AUTOMATION
+    if uri.startswith(_AUTOMATION_RUN_PREFIX):
+        return ChannelKind.AUTOMATION_RUN
     return ChannelKind.UNKNOWN
 
 
@@ -93,23 +103,28 @@ def classify(uri: str) -> ChannelKind:
 #: The order is load-bearing, not cosmetic. ``SessionState`` inlines
 #: ``annotations`` and ``changesets`` onto itself, so an annotations-first table
 #: would classify every session as an annotations channel; ``lifecycle`` is
-#: checked before both for exactly that reason. ``agents`` comes first because
-#: ``RootState`` is the only state carrying it, and ``root`` -- the watched
-#: directory of a ``ResourceWatchState`` -- is checked after it so the two
-#: cannot collide.
+#: checked before both for exactly that reason. Since 0.9.0 ``lifecycle`` is no
+#: longer the session's alone -- ``TerminalState`` and ``AutomationRunState``
+#: carry one too -- so ``claim`` and ``automation``, which only those two have,
+#: are checked before it. ``agents`` comes first because ``RootState`` is the
+#: only state carrying it, and ``root`` -- the watched directory of a
+#: ``ResourceWatchState`` -- is checked after it so the two cannot collide.
 #:
-#: Verified against all 256 upstream reducer fixtures by
+#: Verified against all 272 upstream reducer fixtures by
 #: ``tests/conformance/test_state_shapes.py``: every one of them classifies to
 #: the reducer the fixture itself declares, with no unclassifiable case --
-#: root 7, session 79, chat 123, terminal 19, changeset 16, resourceWatch 2,
-#: annotations 10. That is 256 correctness cases from data neither peer wrote.
+#: root 7, session 79, chat 132, terminal 19, changeset 16, resourceWatch 2,
+#: annotations 10, automation 5, automationRun 2. That is 272 correctness cases
+#: from data neither peer wrote.
 _SHAPE_ORDER: Final[tuple[tuple[str, str], ...]] = (
     ("agents", "root"),
+    ("claim", "terminal"),
+    ("automation", "automationRun"),
     ("lifecycle", "session"),
     ("turns", "chat"),
-    ("claim", "terminal"),
     ("files", "changeset"),
     ("root", "resourceWatch"),
+    ("entries", "automation"),
     ("annotations", "annotations"),
 )
 

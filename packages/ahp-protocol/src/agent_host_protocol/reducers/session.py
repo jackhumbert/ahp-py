@@ -259,9 +259,8 @@ def session_reducer(state: Any, action: Mapping[str, Any]) -> Any:
         # `creationError: action.error` -- an omitted error is `undefined`
         # upstream, so the key stays ABSENT. `action.get` would hand `assign`
         # a `None` it writes through as `"creationError": null`.
-        return assign(
-            {**state, "lifecycle": "creationFailed"}, "creationError", get(action, "error")
-        )
+        # The lifecycle value is `failed` since 0.9.0 (was `creationFailed`).
+        return assign({**state, "lifecycle": "failed"}, "creationError", get(action, "error"))
 
     # ── Chat catalog ─────────────────────────────────────────────────────────
 

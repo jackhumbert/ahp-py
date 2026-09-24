@@ -20,6 +20,15 @@ class TestStateGateCoversEverySnapshotKind:
         gating a resource-watch snapshot raised `KeyError('resourceWatch')`."""
         assert_valid_state("resourceWatch", {"root": "file:///tmp/w", "recursive": True})
 
+    def test_the_automation_kinds_resolve_to_their_definitions(self) -> None:
+        """0.9.0 added two channels; a snapshot of either must be gated, not
+        `KeyError`."""
+        from agent_host_protocol.conformance.corpus import reducer_fixtures
+
+        initial = {f.id: f.initial for f in reducer_fixtures()}
+        assert_valid_state("automation", initial["264-automation-set-replaces"])
+        assert_valid_state("automationRun", initial["265-automation-run-session-lifecycle"])
+
     def test_resource_watch_state_reports_shape_problems(self) -> None:
         with pytest.raises(AssertionError, match="ResourceWatchState"):
             # `recursive` is required and `root` must be a URI string.

@@ -25,9 +25,12 @@
       "type": "chat/error",
       "turnId": "turn-1",
       "duration": 8999,
-      "error": {
-        "errorType": "runtime",
-        "message": "Something broke"
+      "part": {
+        "kind": "error",
+        "error": {
+          "errorType": "runtime",
+          "message": "Something broke"
+        }
       }
     }
   ],
@@ -43,13 +46,17 @@
             "kind": "user"
           }
         },
-        "responseParts": [],
+        "responseParts": [
+          {
+            "kind": "error",
+            "error": {
+              "errorType": "runtime",
+              "message": "Something broke"
+            }
+          }
+        ],
         "usage": null,
-        "state": "error",
-        "error": {
-          "errorType": "runtime",
-          "message": "Something broke"
-        }
+        "state": "error"
       }
     ],
     "activeTurn": null,

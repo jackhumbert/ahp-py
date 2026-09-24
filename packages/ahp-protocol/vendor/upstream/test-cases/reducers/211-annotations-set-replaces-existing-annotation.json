@@ -5,7 +5,11 @@
     "annotations": [
       {
         "id": "t-1",
-        "turnId": "turn-1",
+        "origin": {
+          "session": "ahp-session:/test-session",
+          "chat": "ahp-chat:/test-chat",
+          "turnId": "turn-1"
+        },
         "resource": "file:///src/a.ts",
         "range": {
           "start": { "line": 0, "character": 0 },
@@ -23,7 +27,11 @@
       "type": "annotations/set",
       "annotation": {
         "id": "t-1",
-        "turnId": "turn-2",
+        "origin": {
+          "session": "ahp-session:/test-session",
+          "chat": "ahp-chat:/test-chat",
+          "turnId": "turn-2"
+        },
         "resource": "file:///src/a.ts",
         "resolved": true,
         "entries": [
@@ -37,7 +45,11 @@
     "annotations": [
       {
         "id": "t-1",
-        "turnId": "turn-2",
+        "origin": {
+          "session": "ahp-session:/test-session",
+          "chat": "ahp-chat:/test-chat",
+          "turnId": "turn-2"
+        },
         "resource": "file:///src/a.ts",
         "resolved": true,
         "entries": [
