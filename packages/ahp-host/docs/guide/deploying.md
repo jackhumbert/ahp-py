@@ -81,6 +81,36 @@ the one command whose policy check runs against the name the peer sent (a file
 that does not exist yet has nothing to canonicalise), so following the link
 would land the write on a path `may_access_resource` never saw.
 
+#### On Windows
+
+Windows' Python has no `dir_fd` and no `O_NOFOLLOW`, so on Windows
+`RootedFilesystemResourceProvider(path)` builds a separate, **read-only** jail
+(`core/resources_windows.py`) — the same class name, selected by platform.
+`writable=True` raises `ValueError` there rather than serving an unsafe write
+path. Read-only is what a client needs to browse for a folder.
+
+It opens each component relative to its parent's *handle* with `NtCreateFile`
+and `FILE_OPEN_REPARSE_POINT` — `openat` and `O_NOFOLLOW` in NT terms — so no
+path string is ever re-parsed after it was checked. Handles are opened without
+`FILE_SHARE_DELETE`, so a component held by the walk cannot be renamed or
+swapped, and each one is checked with `GetFinalPathNameByHandleW` to be the
+direct child of the one before it. Symlinks and junctions that stay inside the
+root are followed by re-walking from the root; one that leaves it is refused.
+The served root is re-opened and compared *by file identity* on every walk, so
+replacing it with a junction does not move the jail.
+
+Accepted: `file:///C:/Users/me/proj` and VS Code's `file:///c%3A/Users/me/proj`,
+case-insensitively. Results always come back as `file:///C:/…` in the stored
+case and long (never 8.3) names. Refused: `..`, alternate data streams
+(`file.txt:stream`), device names (`CON`, `NUL`, `COM1`…), names ending in a dot
+or space, `\\?\` and UNC spellings, and any authority but `localhost`.
+
+Limits, each of which fails closed: roots must be on a local drive letter (not
+a network share or mapped network drive); an 8.3 spelling of the *root* is not
+recognised; files whose content a filesystem filter supplies (OneDrive
+placeholders, dedup, WOF compression) list and resolve but are not read; and
+resource watches are POSIX-only.
+
 ### Reads are bounded
 
 `resourceRead` has no offset or length in the protocol, so a file that is too

@@ -10,6 +10,24 @@ versions each release speaks.
 
 ## [Unreleased]
 
+### Added — Windows
+
+- **`RootedFilesystemResourceProvider` works on Windows, read-only.** It used to
+  construct and then fail at first use, because Windows' Python has no `dir_fd`
+  and no `O_NOFOLLOW`. On `win32` the same class now builds a separate jail
+  (`core/resources_windows.py`) that walks NT handles with `NtCreateFile`
+  relative opens and `FILE_OPEN_REPARSE_POINT`, holds components without
+  `FILE_SHARE_DELETE`, verifies every handle with `GetFinalPathNameByHandleW`,
+  and checks the root by file identity. `resourceList`, `resourceRead`,
+  `resourceResolve` and the strict-ancestor chain are served; symlinks and
+  junctions are followed only while they stay inside the root; `..`, alternate
+  data streams, device names, trailing dots/spaces, `\\?\` and UNC spellings
+  are refused. It accepts and produces `file:///C:/…` URIs. `writable=True`
+  raises `ValueError` on Windows. POSIX behaviour is unchanged. Limits are in
+  `SECURITY.md`.
+- A `windows-jail` CI job attacks it on `windows-latest` with real junctions,
+  symlinks and a racing swapper; the rest of the suite runs there informationally.
+
 ### Changed — protocol 0.9.0
 
 - **Depends on `agent-host-protocol` at `spec/v0.9.0`, and offers `0.9.0`,

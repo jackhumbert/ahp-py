@@ -50,6 +50,34 @@ race.
 If you enable writes, the jail is the **entire** boundary between a peer and
 your filesystem.
 
+#### On Windows
+
+Windows' Python has no `dir_fd` and no `O_NOFOLLOW`, so Windows gets a separate,
+**read-only** implementation of the same jail, selected automatically. It opens
+each component *relative to its parent's handle* with `NtCreateFile` (the NT
+equivalent of `openat`) and `FILE_OPEN_REPARSE_POINT` (the equivalent of
+`O_NOFOLLOW`), without `FILE_SHARE_DELETE` so a held component cannot be renamed
+or replaced, and checks every opened handle with `GetFinalPathNameByHandleW`.
+Symlinks and junctions are resolved by the jail and re-walked from the root,
+like POSIX symlinks; any other kind of link is refused. `..`, alternate data
+streams (`file.txt:stream`), device names (`CON`, `NUL`, `COM1`…), trailing dots
+and spaces, `\\?\` spellings and UNC paths are refused, and containment is
+case-insensitive and per drive. `writable=True` raises `ValueError` on Windows.
+
+Its limits, all of which fail closed:
+
+- **Read-only.** Writes are not implemented on Windows at all.
+- **Local drive-letter roots only.** A root on a network share or a mapped
+  network drive is refused at construction.
+- **Files whose content comes from a filesystem filter are not read**: OneDrive
+  Files On-Demand placeholders, deduplicated and WOF-compressed files. They still
+  list and resolve. Reading them safely would need a second open by name.
+- **An 8.3 short spelling of the root is not the root.** Short names *below* the
+  root are accepted and canonicalised to their long names.
+- **Resource watches are not supported** on Windows (the watch path is POSIX-only).
+- **Hard links** inside the root are the same file wherever else they are linked
+  from, exactly as on POSIX.
+
 ## Scope
 
 In scope, and treated as vulnerabilities:

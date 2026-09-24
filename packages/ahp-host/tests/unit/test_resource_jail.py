@@ -18,6 +18,7 @@ beat a naive implementation:
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -31,7 +32,13 @@ from agent_host_server.core.resources import (
     is_writable,
 )
 
-pytestmark = pytest.mark.anyio
+pytestmark = [
+    pytest.mark.anyio,
+    # The POSIX walk, attacked with POSIX tools (fifos, writes, `symlink_to`).
+    # Windows gets its own jail and its own attack suite:
+    # `test_resource_jail_windows.py`, plus the pure half in `..._paths.py`.
+    pytest.mark.skipif(sys.platform == "win32", reason="POSIX jail; see the Windows suite"),
+]
 
 
 @pytest.fixture

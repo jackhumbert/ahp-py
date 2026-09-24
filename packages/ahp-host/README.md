@@ -272,6 +272,11 @@ passed, the read escaped. There is a test for exactly that race. Reads follow
 symlinks; a write whose final component is one is refused rather than followed,
 because a write's policy check runs against the name the peer sent.
 
+On Windows the same class builds a separate, **read-only** jail over NT handles
+(relative `NtCreateFile` opens with `FILE_OPEN_REPARSE_POINT`, no
+`FILE_SHARE_DELETE`), and `writable=True` is refused there. Its guarantees and
+limits are in [`SECURITY.md`](SECURITY.md).
+
 Reads are bounded — 16 MiB by default, `Host(max_read_bytes=…)` to raise it and
 `None` to remove it. The protocol has no partial read (`resourceRead` takes no
 offset or length), so a file above the bound is refused rather than truncated:

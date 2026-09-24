@@ -38,6 +38,7 @@ import mimetypes
 import os
 import shutil
 import stat
+import sys
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -257,6 +258,23 @@ class RootedFilesystemResourceProvider:
     the window because there is no window: the path is never re-interpreted from
     a string after it has been checked.
     """
+
+    def __new__(cls, *args: Any, **kwargs: Any) -> RootedFilesystemResourceProvider:
+        """On Windows, the Windows jail; everywhere else, exactly this class.
+
+        Windows' Python has no `dir_fd` and no `O_NOFOLLOW`, so the walk below
+        cannot run there -- it constructed fine and then failed at first use.
+        The Windows implementation is a separate walk over NT handles, in
+        :mod:`agent_host_server.core.resources_windows`, and it is read-only.
+        Selected here so every embedder keeps naming this one class.
+        """
+        if cls is RootedFilesystemResourceProvider and sys.platform == "win32":
+            from agent_host_server.core.resources_windows import (
+                WindowsRootedFilesystemResourceProvider,
+            )
+
+            return object.__new__(WindowsRootedFilesystemResourceProvider)
+        return object.__new__(cls)
 
     def __init__(self, root: Path, *, follow_symlinks: bool = True, writable: bool = False) -> None:
         self.root = Path(root).resolve()
