@@ -1,8 +1,9 @@
 """The WebSocket transport, over a real loopback socket.
 
 Only the behaviours that are easy to get wrong and expensive to get wrong: token
-handling, clean-versus-abnormal close, and the malformed-frame path that the
-sibling host implemented with unbounded recursion.
+handling, clean-versus-abnormal close, the malformed-frame path that the
+sibling host implemented with unbounded recursion, and wss:// with and without
+a caller-supplied TLS context.
 """
 
 from __future__ import annotations
@@ -10,7 +11,10 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import ssl
 from collections.abc import AsyncIterator, Awaitable, Callable
+from pathlib import Path
+from typing import Any
 
 import pytest
 import websockets
@@ -348,3 +352,114 @@ async def test_a_healthy_close_is_immediate() -> None:
         elapsed = asyncio.get_running_loop().time() - started
 
     assert elapsed < 0.5, f"a clean close took {elapsed:.2f}s"
+
+
+# --- TLS -------------------------------------------------------------------
+#
+# `tls/cert.pem` is a self-signed certificate for `localhost` and `127.0.0.1`,
+# valid until 2126, with its key beside it. It is a test fixture and trusts
+# nothing but itself; it exists so the suite speaks real TLS offline, because
+# the wss:// defect below shipped precisely because nothing here ever did.
+
+_TLS_DIR = Path(__file__).parent / "tls"
+_CERT = _TLS_DIR / "cert.pem"
+_KEY = _TLS_DIR / "key.pem"
+
+
+def _trusting_context() -> ssl.SSLContext:
+    """A client context that trusts the fixture certificate and nothing else."""
+    return ssl.create_default_context(cafile=str(_CERT))
+
+
+@contextlib.asynccontextmanager
+async def _tls_echo_server() -> AsyncIterator[str]:
+    """`_echo_server`, over TLS, for the wss:// paths."""
+
+    async def handler(connection: ServerConnection) -> None:
+        async for message in connection:
+            await connection.send(message)
+
+    server_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    server_context.load_cert_chain(_CERT, _KEY)
+    async with serve(handler, "127.0.0.1", 0, ssl=server_context) as server:
+        port = next(iter(server.sockets)).getsockname()[1]
+        yield f"wss://127.0.0.1:{port}"
+
+
+async def _echo_once(transport: Any) -> None:
+    message = {"jsonrpc": "2.0", "id": 1, "method": "ping", "params": {}}
+    await transport.send(message)
+    assert await asyncio.wait_for(transport.receive(), 2) == message
+    await transport.close()
+
+
+async def test_an_absent_ssl_is_omitted_not_forwarded_as_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``websockets`` rejects an explicit ``ssl=None`` for every wss:// URI.
+
+    It reads the key's *presence*: absent means "build the default verifying
+    context", ``None`` means "no TLS", which for wss:// is a ``ValueError``
+    before any socket opens. Every caller that leaves ``ssl`` at its default --
+    ``connect()``'s dial closure, the broker's node connector -- lands here,
+    so the check is on the kwargs that actually reach ``websockets.connect``.
+    """
+    from agent_host_client.ws import transport as module
+
+    seen: list[dict[str, Any]] = []
+
+    async def fake_connect(uri: str, **kwargs: Any) -> Any:
+        seen.append(kwargs)
+        return object()
+
+    monkeypatch.setattr(websockets, "connect", fake_connect)
+
+    await module.WebSocketClientTransport.connect("wss://broker.example/")
+    assert "ssl" not in seen[-1]
+
+    context = _trusting_context()
+    await module.WebSocketClientTransport.connect("wss://broker.example/", ssl=context)
+    assert seen[-1]["ssl"] is context
+
+
+async def test_wss_with_an_explicit_context_round_trips() -> None:
+    """A private CA's context is honoured end to end, not just accepted."""
+    from agent_host_client.ws.transport import WebSocketClientTransport
+
+    async with _tls_echo_server() as url:
+        transport = await WebSocketClientTransport.connect(url, ssl=_trusting_context())
+        await _echo_once(transport)
+
+
+async def test_wss_without_a_context_uses_the_default_trust_store(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Omitting *ssl* on wss:// must mean "verify against the system store".
+
+    ``SSL_CERT_FILE`` is how OpenSSL's default verify paths -- the ones
+    ``ssl.create_default_context()`` loads -- are pointed at the fixture, so
+    this is the default context doing the verifying, not one the test built.
+    Before the fix this raised ``ssl=None is incompatible with a wss:// URI``.
+    """
+    from agent_host_client.ws.transport import WebSocketClientTransport
+
+    monkeypatch.setenv("SSL_CERT_FILE", str(_CERT))
+    async with _tls_echo_server() as url:
+        transport = await WebSocketClientTransport.connect(url)
+        await _echo_once(transport)
+
+
+async def test_wss_without_a_context_still_verifies() -> None:
+    """The default context is a *verifying* one: an untrusted cert is refused.
+
+    Guards the fix against the tempting wrong version of it -- an unverified
+    context would also have made the error go away.
+    """
+    from agent_host_client.ws.transport import WebSocketClientTransport
+
+    async with _tls_echo_server() as url:
+        with pytest.raises(TransportError) as caught:
+            await WebSocketClientTransport.connect(url, open_timeout=2.0)
+    assert caught.value.kind == "io"
+    assert "CERTIFICATE_VERIFY_FAILED" in str(caught.value)
+    assert "incompatible" not in str(caught.value)

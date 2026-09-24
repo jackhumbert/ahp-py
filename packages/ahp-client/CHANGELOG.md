@@ -6,6 +6,20 @@ Every release states the protocol versions it speaks.
 
 ## [Unreleased]
 
+### Fixed — wss:// hosts were unreachable without a hand-built SSL context
+
+- **`connect("wss://…")` failed before opening a socket** with
+  `ssl=None is incompatible with a wss:// URI`. `WebSocketClientTransport.connect`
+  forwarded its `ssl=None` default to `websockets.connect`, which reads an
+  explicit `None` as "no TLS" and refuses it for `wss://`; only an *absent*
+  `ssl` makes it build the default verifying context. `ssl` is now omitted
+  when it is `None`, and an explicit context is still passed through. Every
+  caller that leaves `ssl` at its default is covered by the one change:
+  `connect()`'s dial closure and `agent-host-broker`'s `WebSocketNodeConnector`.
+  Found against a real deployed broker; the suite now speaks real TLS offline,
+  over a checked-in self-signed fixture certificate (`tests/client/tls/`), and
+  pins that the default context both connects and still verifies.
+
 ### Changed — protocol 0.9.0
 
 - **Built on `agent-host-protocol` at `spec/v0.9.0`.** The default offer is

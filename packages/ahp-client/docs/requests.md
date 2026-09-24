@@ -260,8 +260,14 @@ Client certificates fall out of the same parameter for free, which is the other
 half of the deployments that need it.
 
 **Implemented, as proposed.** `ssl: SSLContext | None` on both
-`WebSocketClientTransport.connect` and `connect()`, passed straight through. No
-`verify=False`, no CA-bundle path parsing.
+`WebSocketClientTransport.connect` and `connect()`, passed through when given.
+No `verify=False`, no CA-bundle path parsing.
+
+"Straight through" was wrong at first: forwarding the `None` default made
+`websockets` refuse every `wss://` URI (`ssl=None is incompatible with a wss://
+URI`), because it reads an explicit `None` as "no TLS". `None` is now omitted,
+so `websockets` builds its default verifying context, and
+`tests/client/test_ws_transport.py` pins it over real TLS.
 
 ---
 

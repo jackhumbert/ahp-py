@@ -86,22 +86,33 @@ class WebSocketClientTransport:
         exception message: ``websockets`` puts the URI in connection errors, so
         the failure path is exactly where a credential would leak.
 
-        *ssl* is passed straight through. An ``SSLContext`` is the standard
+        *ssl*, when given, is passed through. An ``SSLContext`` is the standard
         currency for a private CA or a client certificate, and it is the whole
         interface -- no ``verify=False`` convenience flag, no CA-bundle path
         parsing. Either would be this library taking a position on certificate
         trust, which is the embedder's to hold.
+
+        When *ssl* is ``None`` it is **omitted**, not forwarded. ``websockets``
+        reads an explicit ``ssl=None`` as "no TLS", which it accepts for
+        ``ws://`` and rejects outright for ``wss://`` (``ssl=None is
+        incompatible with a wss:// URI``); only an absent key makes it build
+        the default verifying context. Forwarding the default made every
+        ``wss://`` host unreachable without a hand-built context -- found
+        against a real deployed broker, since nothing in the suite spoke TLS.
         """
         target = _with_token(url, token)
+        # Absent, not None: see the docstring. The ws:// case is unchanged,
+        # because websockets defaults an absent ssl to "no TLS" there too.
+        tls: dict[str, Any] = {} if ssl is None else {"ssl": ssl}
         try:
             socket = await websockets.connect(
                 target,
                 additional_headers=dict(headers) if headers else None,
                 subprotocols=list(subprotocols) if subprotocols else None,  # type: ignore[arg-type]
-                ssl=ssl,
                 open_timeout=open_timeout,
                 close_timeout=_CLOSE_TIMEOUT,
                 max_size=max_size,
+                **tls,
             )
         except websockets.InvalidStatus as exc:
             # The handshake was answered, and the answer was no. Flattening this
