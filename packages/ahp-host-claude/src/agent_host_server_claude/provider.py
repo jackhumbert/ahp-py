@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from collections.abc import AsyncIterable, AsyncIterator, Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any, Protocol
@@ -55,6 +56,13 @@ from agent_host_server_claude.permissions import (
 log = logging.getLogger(__name__)
 
 PROVIDER_ID = "claude"
+_PROVIDER_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}")
+
+
+def is_valid_provider_id(value: str) -> bool:
+    """A provider id is how `createSession` names an agent; keep it plain."""
+    return _PROVIDER_ID.fullmatch(value) is not None
+
 
 #: Claude Code's value for "whatever the account's default is".
 DEFAULT_MODEL = "default"
@@ -388,7 +396,11 @@ class ClaudeProvider:
         display_name: str = "Claude",
         client_factory: ClientFactory = _default_client,
         models: Sequence[ModelInfo] = (),
+        provider_id: str = PROVIDER_ID,
     ) -> None:
+        if not is_valid_provider_id(provider_id):
+            raise ValueError(f"invalid provider id: {provider_id!r}")
+        self.provider_id = provider_id
         self.root = Path(root).resolve()
         self._display_name = display_name
         self._client_factory = client_factory
@@ -397,7 +409,7 @@ class ClaudeProvider:
     @property
     def agent(self) -> AgentInfo:
         return AgentInfo(
-            provider=PROVIDER_ID,
+            provider=self.provider_id,
             display_name=self._display_name,
             description="Claude Code, running on this machine as its user.",
             models=self._models,

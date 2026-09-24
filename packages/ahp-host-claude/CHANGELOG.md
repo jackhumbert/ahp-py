@@ -14,3 +14,7 @@
   (with selections), images and PDFs as content blocks, text inline.
 - The model picker is read from Claude Code's own list at start-up instead of
   being hard-coded; picking `default` means the account's default.
+- `--provider-id`, so several machines can sit behind one broker as distinct agents.
+- Windows support: `file:///C:/...` URIs map to drive paths, start-up no longer
+  needs POSIX signal handlers, and folder browsing is disabled (with a warning)
+  where the host's jail cannot run. CI covers Linux, macOS and Windows.

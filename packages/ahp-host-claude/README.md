@@ -43,6 +43,15 @@ python -m agent_host_server_claude --root ~/Github --token-file ~/.config/agent-
 | `--port`, `--bind` | Default `127.0.0.1:4321`. Loopback only. |
 | `--state-dir DIR` | Persisted sessions and sequence counter. Default `~/.local/state/agent-host-server-claude`. |
 | `--agent-name NAME` | What clients call the agent. |
+| `--provider-id ID` | The agent's id (default `claude`). Behind a broker, give each machine its own, e.g. `claude-laptop`: a broker keeps only the first agent per id. |
+
+## Platforms
+
+macOS, Linux and Windows (CI runs all three). On Windows, clients cannot browse
+for a folder: `agent-host-server`'s folder jail relies on `openat` and
+`O_NOFOLLOW`, which Windows lacks, so the host starts without it and sessions
+begin in `--root`. Claude Code on Windows needs Git for Windows for its shell
+tool.
 
 Authentication is Claude Code's own: the SDK uses whatever login `claude` has
 on this machine (or `ANTHROPIC_API_KEY` if set).

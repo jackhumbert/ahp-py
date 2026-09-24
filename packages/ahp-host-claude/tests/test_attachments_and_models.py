@@ -63,7 +63,7 @@ def test_a_local_file_is_handed_over_as_its_path_with_the_selection(tmp_path: Pa
     content = prompt_content("explain", raw, tmp_path)
     assert content == [
         {"type": "text", "text": "explain"},
-        {"type": "text", "text": f"[Attached file app.py: {target}, lines 10-20]"},
+        {"type": "text", "text": f"[Attached file app.py: {target.resolve()}, lines 10-20]"},
     ]
 
 

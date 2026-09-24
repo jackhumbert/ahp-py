@@ -12,6 +12,7 @@ import argparse
 import asyncio
 import contextlib
 import logging
+import os
 import signal
 from pathlib import Path
 
@@ -21,7 +22,12 @@ from agent_host_server.core.store import FileSessionStore
 from agent_host_server.ws import serve_websocket
 
 from agent_host_server_claude import __version__
-from agent_host_server_claude.provider import ClaudeProvider, discover_models
+from agent_host_server_claude.provider import (
+    PROVIDER_ID,
+    ClaudeProvider,
+    discover_models,
+    is_valid_provider_id,
+)
 
 DEFAULT_STATE = Path.home() / ".local/state/agent-host-server-claude"
 
@@ -44,6 +50,11 @@ def _parse_args() -> argparse.Namespace:
         help="where sessions and the sequence counter persist across restarts",
     )
     parser.add_argument("--agent-name", default="Claude")
+    parser.add_argument(
+        "--provider-id",
+        default=PROVIDER_ID,
+        help="the agent's id; give each machine behind one broker its own (e.g. claude-laptop)",
+    )
     parser.add_argument("-v", "--verbose", action="store_true")
     return parser.parse_args()
 
@@ -56,16 +67,21 @@ async def _run(args: argparse.Namespace) -> None:
     state = args.state_dir.expanduser()
     state.mkdir(parents=True, exist_ok=True, mode=0o700)
 
+    if not is_valid_provider_id(args.provider_id):
+        raise SystemExit(f"--provider-id {args.provider_id!r}: use letters, digits, '-' and '_'")
+
     # Once, at start-up: the picker offers what Claude Code offers this account.
     models = await discover_models(root)
     logging.getLogger(__name__).info("models: %s", ", ".join(m.id for m in models) or "none")
     host = Host(
-        ClaudeProvider(root, display_name=args.agent_name, models=models),
+        ClaudeProvider(
+            root, display_name=args.agent_name, models=models, provider_id=args.provider_id
+        ),
         LoopbackSingleUserPolicy(),
         info=HostInfo(name="agent-host-server-claude", version=__version__),
         # Read-only: clients browse to pick a folder. The agent's own edits go
         # through Claude Code's tools, each approved by a human first.
-        resources=RootedFilesystemResourceProvider(root),
+        resources=RootedFilesystemResourceProvider(root) if _jail_supported() else None,
         default_directory=root.as_uri(),
         store=FileSessionStore(state / "sessions"),
         sequence_file=state / "sequence",
@@ -73,7 +89,10 @@ async def _run(args: argparse.Namespace) -> None:
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGTERM, signal.SIGINT):
-        loop.add_signal_handler(sig, stop.set)
+        # Windows' event loops have no signal handlers; there Ctrl-C arrives
+        # as KeyboardInterrupt and a service manager simply ends the process.
+        with contextlib.suppress(NotImplementedError):
+            loop.add_signal_handler(sig, stop.set)
     async with serve_websocket(
         host, bind=args.bind, port=args.port, connection_token=token
     ) as server:
@@ -85,13 +104,30 @@ async def _run(args: argparse.Namespace) -> None:
     await host.aclose()
 
 
+def _jail_supported() -> bool:
+    """Whether the host's folder-browsing jail can run on this OS.
+
+    `RootedFilesystemResourceProvider` walks paths with `openat` and
+    `O_NOFOLLOW` so a symlink cannot be swapped in mid-check; Windows has
+    neither. There, clients cannot browse for a folder (sessions start in
+    `--root`), until agent-host-server has a jail of its own for Windows.
+    """
+    supported = os.open in os.supports_dir_fd and hasattr(os, "O_NOFOLLOW")
+    if not supported:
+        logging.getLogger(__name__).warning(
+            "folder browsing is off: this OS lacks openat/O_NOFOLLOW for the host's jail"
+        )
+    return supported
+
+
 def main() -> None:
     args = _parse_args()
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.INFO,
         format="%(asctime)s %(levelname)-7s %(name)s: %(message)s",
     )
-    asyncio.run(_run(args))
+    with contextlib.suppress(KeyboardInterrupt):
+        asyncio.run(_run(args))
 
 
 if __name__ == "__main__":
