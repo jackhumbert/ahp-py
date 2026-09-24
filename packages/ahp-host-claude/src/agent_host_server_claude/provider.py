@@ -61,10 +61,20 @@ from agent_host_server_claude.permissions import (
     describe,
     pre_tool_use_decision,
 )
+from agent_host_server_claude.sessions import (
+    NEW,
+    SEARCH_LIMIT,
+    ClaudeCodeSessions,
+    describe_session,
+    is_session_id,
+    title_of,
+)
 
 log = logging.getLogger(__name__)
 
 PROVIDER_ID = "claude"
+#: The session config property naming a Claude Code conversation to continue.
+CONTINUE_KEY = "continueFrom"
 _PROVIDER_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}")
 
 
@@ -184,8 +194,15 @@ class ClaudeSession:
         client_factory: ClientFactory,
         claude_session_id: str | None = None,
         approvals: str | None = None,
+        directory: Path | None = None,
+        recap: str | None = None,
     ) -> None:
         self.context = context
+        #: Set when continuing another Claude Code conversation: its folder,
+        #: which is what that conversation's context refers to.
+        self.directory = directory
+        #: Posted once, at the start of the first reply.
+        self._recap = recap
         #: Fixed for the session's life: chosen at creation (or restored on
         #: resume), because the host tells a provider its config only then.
         self.approvals = approval_mode(
@@ -208,6 +225,11 @@ class ClaudeSession:
 
     def working_directory(self) -> Path:
         """The session's directory, which must lie inside the served root."""
+        if self.directory is not None:
+            resolved = self.directory.resolve()
+            if resolved != self._root and self._root not in resolved.parents:
+                raise PermissionError(f"{resolved} is outside this host's root {self._root}")
+            return resolved
         for uri in self.context.working_directories:
             path = directory_of(uri)
             if path is not None:
@@ -303,6 +325,9 @@ class ClaudeSession:
         async with self._lock:
             self._sink = sink
             self._announced.clear()
+            if self._recap:
+                recap, self._recap = self._recap, None
+                await sink.text_delta(recap)
             try:
                 await self._run_turn(message, sink)
             finally:
@@ -421,6 +446,7 @@ class ClaudeProvider:
         client_factory: ClientFactory = _default_client,
         models: Sequence[ModelInfo] = (),
         provider_id: str = PROVIDER_ID,
+        sessions: ClaudeCodeSessions | None = None,
     ) -> None:
         if not is_valid_provider_id(provider_id):
             raise ValueError(f"invalid provider id: {provider_id!r}")
@@ -429,6 +455,7 @@ class ClaudeProvider:
         self._display_name = display_name
         self._client_factory = client_factory
         self._models = tuple(models)
+        self.sessions = sessions if sessions is not None else ClaudeCodeSessions(self.root)
 
     @property
     def agent(self) -> AgentInfo:
@@ -440,17 +467,44 @@ class ClaudeProvider:
         )
 
     async def resolve_config(self, request: ConfigRequest) -> ConfigResolution:
-        """The one setting a session takes: how tool calls are approved."""
+        """How tool calls are approved, and which conversation (if any) to continue."""
+        chosen = request.values.get(CONTINUE_KEY)
         return ConfigResolution(
-            properties={CONFIG_KEY: APPROVALS_PROPERTY},
-            values={CONFIG_KEY: approval_mode(request.values.get(CONFIG_KEY))},
+            properties={
+                CONFIG_KEY: APPROVALS_PROPERTY,
+                CONTINUE_KEY: self.sessions.picker_property(await self.sessions.recent()),
+            },
+            values={
+                CONFIG_KEY: approval_mode(request.values.get(CONFIG_KEY)),
+                CONTINUE_KEY: chosen if is_session_id(chosen) else NEW,
+            },
         )
 
     async def complete_config(self, request: ConfigRequest) -> Sequence[ConfigValue]:
-        return ()  # nothing here is `enumDynamic`
+        """Search this machine's Claude Code conversations as the user types."""
+        if request.property != CONTINUE_KEY:
+            return ()
+        found = await self.sessions.recent(request.query, limit=SEARCH_LIMIT)
+        return [
+            ConfigValue(
+                value=info.session_id, label=title_of(info), description=describe_session(info)
+            )
+            for info in found
+        ]
 
     async def create_session(self, context: AgentSessionContext) -> ClaudeSession:
-        return ClaudeSession(context, root=self.root, client_factory=self._client_factory)
+        chosen = context.config.get(CONTINUE_KEY)
+        if not is_session_id(chosen):
+            return ClaudeSession(context, root=self.root, client_factory=self._client_factory)
+        continuation = await self.sessions.continue_from(chosen)
+        return ClaudeSession(
+            context,
+            root=self.root,
+            client_factory=self._client_factory,
+            claude_session_id=continuation.session_id,
+            directory=continuation.directory,
+            recap=continuation.recap,
+        )
 
     async def resume_session(self, context: AgentSessionContext) -> ClaudeSession:
         state = context.resume_state or {}
@@ -464,9 +518,16 @@ class ClaudeProvider:
             # provider, so the mode travels in the resume state instead. A
             # state from before approvals existed resumes in `ask`.
             approvals=approval_mode(state.get(CONFIG_KEY, state.get("approvals", ASK))),
+            directory=Path(cwd) if isinstance(cwd := state.get("cwd"), str) else None,
         )
 
     async def resume_state_of(self, session: Any) -> Mapping[str, Any] | None:
         if isinstance(session, ClaudeSession) and session.claude_session_id:
-            return {"claudeSessionId": session.claude_session_id, CONFIG_KEY: session.approvals}
+            state: dict[str, Any] = {
+                "claudeSessionId": session.claude_session_id,
+                CONFIG_KEY: session.approvals,
+            }
+            if session.directory is not None:
+                state["cwd"] = str(session.directory)
+            return state
         return None

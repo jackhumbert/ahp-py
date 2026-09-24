@@ -33,6 +33,13 @@ Status: pre-alpha.
 
   The mode is fixed for the session's life (the host passes a provider its
   config only at creation) and survives a host restart.
+- **Continue from** another Claude Code conversation on this machine - one
+  started in a terminal, the IDE, or driven from a phone through Remote
+  Control - picked from a searchable list (the `continueFrom` session setting,
+  limited to conversations whose folder is inside `--root`). The original is
+  forked, never resumed directly, so it is untouched even if it is still open
+  elsewhere; the new session runs in its folder with the full context, and the
+  first reply opens with a short recap.
 - A model picker populated from Claude Code itself at start-up (the same list
   `/model` shows for the logged-in account, its default first), so new models
   appear without a release of this adapter.

@@ -30,7 +30,9 @@ def _session(tmp_path: Path, config: dict[str, Any] | None = None) -> ClaudeSess
 
 
 async def test_the_provider_offers_an_approvals_setting(tmp_path: Path) -> None:
-    provider = ClaudeProvider(tmp_path)
+    from agent_host_server_claude.sessions import ClaudeCodeSessions
+
+    provider = ClaudeProvider(tmp_path, sessions=ClaudeCodeSessions(tmp_path, list_fn=lambda: []))
     assert isinstance(provider, ConfiguresSessions)
     resolution = await provider.resolve_config(ConfigRequest())
     prop = resolution.properties["permissionMode"]
@@ -38,9 +40,9 @@ async def test_the_provider_offers_an_approvals_setting(tmp_path: Path) -> None:
     assert prop["enumLabels"] == ["Ask", "Accept edits", "Auto", "Plan"]
     assert prop["default"] == "default"
     assert not prop.get("sessionMutable")  # the host tells a provider only at creation
-    assert resolution.values == {"permissionMode": "default"}
+    assert resolution.values["permissionMode"] == "default"
     chosen = await provider.resolve_config(ConfigRequest(values={"permissionMode": "auto"}))
-    assert chosen.values == {"permissionMode": "auto"}
+    assert chosen.values["permissionMode"] == "auto"
 
 
 @pytest.mark.parametrize(

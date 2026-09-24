@@ -4,6 +4,9 @@
 
 ### Added
 
+- A `continueFrom` session setting: continue any of this machine's Claude Code
+  conversations (terminal, IDE, Remote Control) by forking it; searchable, and
+  confined to `--root`.
 - A `permissionMode` session setting: Ask (`default`), Accept edits, Auto
   (Claude Code's auto mode) or Plan (plan first; approving drops to Ask), named as Claude Code names them so VS Code shows
   its icons. Kept across host restarts in the resume state.
