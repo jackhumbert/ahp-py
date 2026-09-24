@@ -4,6 +4,11 @@
 
 ### Added
 
+- A TOML config file (`--config`); flags override it, unknown settings are an
+  error.
+- Several named folders per host (`[roots]` / `--root NAME=PATH`), served as a
+  small tree - each through agent-host-server's jail - with sessions allowed in
+  any of them.
 - Folder browsing on Windows, using agent-host-server's Windows jail when the
   installed server has it.
 - Tool calls say what they do. The line under a running call is Claude's own

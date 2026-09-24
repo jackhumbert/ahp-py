@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any
 
 from agent_host_server_claude.paths import directory_of
+from agent_host_server_claude.roots import Roots, as_roots
 
 log = logging.getLogger(__name__)
 
@@ -58,16 +59,16 @@ def _label(attachment: Mapping[str, Any]) -> str:
     return label if isinstance(label, str) and label else "attachment"
 
 
-def _resource(attachment: Mapping[str, Any], root: Path) -> str:
+def _resource(attachment: Mapping[str, Any], roots: Roots) -> str:
     uri = attachment.get("uri")
-    path = directory_of(uri) if isinstance(uri, str) else None
     label = _label(attachment)
-    if path is None:
-        return f"[Attached {label}: {uri} (not a local file; not fetched)]"
-    resolved = path.resolve()
-    if resolved != root and root not in resolved.parents:
-        # Same boundary as the working directory: this host serves one root.
-        return f"[Attached {label}: {resolved} is outside this host's root; not read]"
+    resolved = roots.real_path(uri) if isinstance(uri, str) else None
+    if resolved is None:
+        path = directory_of(uri) if isinstance(uri, str) else None
+        if path is None:
+            return f"[Attached {label}: {uri} (not a local file; not fetched)]"
+        # Same boundary as the working directory: only the served folders.
+        return f"[Attached {label}: {path.resolve()} is outside this host's root; not read]"
     kind = "folder" if attachment.get("displayKind") == "directory" else "file"
     return f"[Attached {kind} {label}: {resolved}{_selection(attachment)}]"
 
@@ -109,7 +110,7 @@ def _embedded(attachment: Mapping[str, Any]) -> list[Block]:
     ]
 
 
-def attachment_blocks(attachments: Sequence[Any], root: Path) -> list[Block]:
+def attachment_blocks(attachments: Sequence[Any], root: Path | Roots) -> list[Block]:
     """Content blocks for every attachment, in order. Never raises."""
     blocks: list[Block] = []
     for attachment in attachments:
@@ -117,7 +118,7 @@ def attachment_blocks(attachments: Sequence[Any], root: Path) -> list[Block]:
             continue
         kind = attachment.get("type")
         if kind == "resource":
-            blocks.append({"type": "text", "text": _resource(attachment, root)})
+            blocks.append({"type": "text", "text": _resource(attachment, as_roots(root))})
         elif kind == "embeddedResource":
             blocks.extend(_embedded(attachment))
         elif kind == "simple":
@@ -137,7 +138,7 @@ def attachment_blocks(attachments: Sequence[Any], root: Path) -> list[Block]:
     return blocks
 
 
-def prompt_content(text: str, raw: Mapping[str, Any], root: Path) -> str | list[Block]:
+def prompt_content(text: str, raw: Mapping[str, Any], root: Path | Roots) -> str | list[Block]:
     """The prompt for Claude: plain text, or content blocks when there are attachments."""
     attachments = raw.get("attachments")
     if not isinstance(attachments, Sequence) or isinstance(attachments, str) or not attachments:

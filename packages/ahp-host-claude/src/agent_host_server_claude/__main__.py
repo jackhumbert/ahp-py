@@ -1,9 +1,12 @@
 """Serve Claude as an AHP host.
 
+    python -m agent_host_server_claude --config ~/.config/agent-host/node.toml
     python -m agent_host_server_claude --root ~/Github --token-file ~/.config/agent-host/node.token
 
-Binds loopback only. The token is read from a file, never taken on the command
-line, so it stays out of process listings and logs.
+Settings come from the config file (see `agent_host_server_claude.config`),
+with flags taking precedence. Binds loopback only. The token is read from a
+file, never taken on the command line, so it stays out of process listings
+and logs.
 """
 
 from __future__ import annotations
@@ -18,72 +21,74 @@ import sys
 from pathlib import Path
 
 from agent_host_server.core import Host, HostInfo, LoopbackSingleUserPolicy
-from agent_host_server.core.resources import RootedFilesystemResourceProvider
+from agent_host_server.core.resources import ResourceProvider, RootedFilesystemResourceProvider
 from agent_host_server.core.store import FileSessionStore
 from agent_host_server.ws import serve_websocket
 
 from agent_host_server_claude import __version__
+from agent_host_server_claude.config import ConfigError, Settings, load
 from agent_host_server_claude.provider import (
-    PROVIDER_ID,
     ClaudeProvider,
     discover_models,
     is_valid_provider_id,
 )
+from agent_host_server_claude.roots import NamedRootsResourceProvider
 
-DEFAULT_STATE = Path.home() / ".local/state/agent-host-server-claude"
 
-
-def _parse_args() -> argparse.Namespace:
+def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(prog="agent-host-server-claude")
+    parser.add_argument("--config", type=Path, help="a TOML settings file; flags override it")
     parser.add_argument(
         "--root",
-        type=Path,
-        required=True,
-        help="the directory sessions may work in; browsable (read-only) by clients",
+        action="append",
+        metavar="[NAME=]PATH",
+        help="a folder sessions may work in, browsable read-only by clients; repeat as "
+        "NAME=PATH to serve several named folders",
     )
-    parser.add_argument("--port", type=int, default=4321)
-    parser.add_argument("--bind", default="127.0.0.1")
+    parser.add_argument("--port", type=int)
+    parser.add_argument("--bind")
     parser.add_argument("--token-file", type=Path, help="require this connection token")
     parser.add_argument(
-        "--state-dir",
-        type=Path,
-        default=DEFAULT_STATE,
-        help="where sessions and the sequence counter persist across restarts",
+        "--state-dir", type=Path, help="where sessions and the sequence counter persist"
     )
-    parser.add_argument("--agent-name", default="Claude")
-    parser.add_argument(
-        "--provider-id",
-        default=PROVIDER_ID,
-        help="the agent's id; give each machine behind one broker its own (e.g. claude-laptop)",
-    )
-    parser.add_argument("-v", "--verbose", action="store_true")
-    return parser.parse_args()
+    parser.add_argument("--agent-name")
+    parser.add_argument("--provider-id", help="the agent's id (default: claude)")
+    parser.add_argument("-v", "--verbose", action="store_true", default=None)
+    return parser.parse_args(argv)
 
 
-async def _run(args: argparse.Namespace) -> None:
-    root = args.root.expanduser().resolve()
-    if not root.is_dir():
-        raise SystemExit(f"--root {root} is not a directory")
-    token = args.token_file.read_text().strip() if args.token_file else None
-    state = args.state_dir.expanduser()
+def _resources(settings: Settings) -> ResourceProvider | None:
+    """Read-only browsing: clients pick a folder. The agent's own edits go
+    through Claude Code's tools, each approved by a human first."""
+    if not _jail_supported():
+        return None
+    if settings.roots.is_named:
+        return NamedRootsResourceProvider(settings.roots)
+    return RootedFilesystemResourceProvider(settings.roots.primary)
+
+
+async def _run(settings: Settings) -> None:
+    if not is_valid_provider_id(settings.provider_id):
+        raise SystemExit(f"provider id {settings.provider_id!r}: use letters, digits, '-' and '_'")
+    token = settings.token_file.read_text().strip() if settings.token_file else None
+    state = settings.state_dir
     state.mkdir(parents=True, exist_ok=True, mode=0o700)
-
-    if not is_valid_provider_id(args.provider_id):
-        raise SystemExit(f"--provider-id {args.provider_id!r}: use letters, digits, '-' and '_'")
+    log = logging.getLogger(__name__)
 
     # Once, at start-up: the picker offers what Claude Code offers this account.
-    models = await discover_models(root)
-    logging.getLogger(__name__).info("models: %s", ", ".join(m.id for m in models) or "none")
+    models = await discover_models(settings.roots.primary)
+    log.info("models: %s", ", ".join(m.id for m in models) or "none")
     host = Host(
         ClaudeProvider(
-            root, display_name=args.agent_name, models=models, provider_id=args.provider_id
+            settings.roots,
+            display_name=settings.agent_name,
+            models=models,
+            provider_id=settings.provider_id,
         ),
         LoopbackSingleUserPolicy(),
         info=HostInfo(name="agent-host-server-claude", version=__version__),
-        # Read-only: clients browse to pick a folder. The agent's own edits go
-        # through Claude Code's tools, each approved by a human first.
-        resources=RootedFilesystemResourceProvider(root) if _jail_supported() else None,
-        default_directory=root.as_uri(),
+        resources=_resources(settings),
+        default_directory=settings.roots.default_directory(),
         store=FileSessionStore(state / "sessions"),
         sequence_file=state / "sequence",
     )
@@ -95,11 +100,15 @@ async def _run(args: argparse.Namespace) -> None:
         with contextlib.suppress(NotImplementedError):
             loop.add_signal_handler(sig, stop.set)
     async with serve_websocket(
-        host, bind=args.bind, port=args.port, connection_token=token
+        host, bind=settings.bind, port=settings.port, connection_token=token
     ) as server:
-        logging.getLogger(__name__).info(
-            "serving Claude on %s:%s, root %s", args.bind, server.bound_port, root
+        roots = settings.roots
+        served = (
+            ", ".join(f"{n}={p}" for n, p in zip(roots.names, roots.paths, strict=True))
+            if roots.is_named
+            else str(roots.primary)
         )
+        log.info("serving Claude on %s:%s, root %s", settings.bind, server.bound_port, served)
         with contextlib.suppress(asyncio.CancelledError):
             await stop.wait()
     await host.aclose()
@@ -131,14 +140,17 @@ def _jail_supported() -> bool:
     return supported
 
 
-def main() -> None:
-    args = _parse_args()
+def main(argv: list[str] | None = None) -> None:
+    try:
+        settings = load(_parse_args(argv))
+    except ConfigError as exc:
+        raise SystemExit(f"agent-host-server-claude: {exc}") from None
     logging.basicConfig(
-        level=logging.DEBUG if args.verbose else logging.INFO,
+        level=logging.DEBUG if settings.verbose else logging.INFO,
         format="%(asctime)s %(levelname)-7s %(name)s: %(message)s",
     )
     with contextlib.suppress(KeyboardInterrupt):
-        asyncio.run(_run(args))
+        asyncio.run(_run(settings))
 
 
 if __name__ == "__main__":

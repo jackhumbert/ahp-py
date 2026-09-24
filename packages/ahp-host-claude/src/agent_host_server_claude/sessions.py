@@ -30,6 +30,8 @@ from claude_agent_sdk import (
     list_sessions,
 )
 
+from agent_host_server_claude.roots import Roots, as_roots
+
 #: The `continueFrom` value meaning "a fresh conversation".
 NEW: Final = "new"
 #: How many recent sessions the picker shows before the user types a query.
@@ -71,11 +73,8 @@ def describe_session(info: SDKSessionInfo, now: float | None = None) -> str:
     return " · ".join(parts)
 
 
-def _inside(path: str | None, root: Path) -> bool:
-    if not path:
-        return False
-    resolved = Path(path).resolve()
-    return resolved == root or root in resolved.parents
+def _inside(path: str | None, roots: Roots) -> bool:
+    return path is not None and path != "" and roots.contains(Path(path))
 
 
 def _matches(info: SDKSessionInfo, query: str) -> bool:
@@ -115,18 +114,19 @@ class Continuation:
 
 
 class ClaudeCodeSessions:
-    """The catalogue, confined to one root. SDK calls are injectable for tests."""
+    """The catalogue, confined to the served folders. SDK calls are injectable for tests."""
 
     def __init__(
         self,
-        root: Path,
+        root: Path | Roots,
         *,
         list_fn: Callable[..., list[SDKSessionInfo]] = list_sessions,
         info_fn: Callable[..., SDKSessionInfo | None] = get_session_info,
         fork_fn: Callable[..., Any] = fork_session,
         messages_fn: Callable[..., list[Any]] = get_session_messages,
     ) -> None:
-        self.root = root.resolve()
+        self.roots = as_roots(root)
+        self.root = self.roots.primary
         self._list = list_fn
         self._info = info_fn
         self._fork = fork_fn
@@ -136,7 +136,7 @@ class ClaudeCodeSessions:
         """Newest first, only those whose folder is inside the root."""
         # Reading the catalogue stats files and reads their heads: off the loop.
         found = await asyncio.to_thread(self._list)
-        inside = [info for info in found if _inside(info.cwd, self.root)]
+        inside = [info for info in found if _inside(info.cwd, self.roots)]
         if query.strip():
             inside = [info for info in inside if _matches(info, query)]
         inside.sort(key=lambda info: info.last_modified, reverse=True)
@@ -149,7 +149,7 @@ class ClaudeCodeSessions:
         info = await asyncio.to_thread(self._info, session_id)
         if info is None:
             raise FileNotFoundError(f"no Claude Code session {session_id} on this machine")
-        if not _inside(info.cwd, self.root):
+        if not _inside(info.cwd, self.roots):
             raise PermissionError(f"session {session_id} ran outside this host's root {self.root}")
         assert info.cwd is not None  # _inside is False without one
         forked = await asyncio.to_thread(

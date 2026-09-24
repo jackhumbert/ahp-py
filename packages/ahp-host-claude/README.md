@@ -57,25 +57,37 @@ Status: pre-alpha.
 
 ```bash
 pip install -e .
-python -m agent_host_server_claude --root ~/Github --token-file ~/.config/agent-host/node.token
+python -m agent_host_server_claude --config ~/.config/agent-host/node.toml
 ```
 
-| Flag | Meaning |
+The config file (TOML; flags override it):
+
+```toml
+agent_name = "Claude"
+token_file = "~/.config/agent-host/node.token"
+
+# Several named folders: clients see file:///llm/..., file:///projects/...
+# (behind a broker: <machine>/llm/..., <machine>/projects/...)
+[roots]
+llm = 'G:\llm'
+projects = 'C:\Users\me\projects'
+
+# ...or one unnamed folder, served as itself:
+# root = "~/Github"
+```
+
+Use single-quoted TOML strings for Windows paths. Unknown settings are an
+error, so a typo cannot silently fall back to a default.
+
+| Setting / flag | Meaning |
 |---|---|
-| `--root DIR` | Required. Sessions must work inside it; clients may browse it (read-only) to pick a folder. |
-| `--token-file PATH` | Require this connection token. Read from a file so it never appears in `ps` or logs. |
-| `--port`, `--bind` | Default `127.0.0.1:4321`. Loopback only. |
-| `--state-dir DIR` | Persisted sessions and sequence counter. Default `~/.local/state/agent-host-server-claude`. |
-| `--agent-name NAME` | What clients call the agent. |
-| `--provider-id ID` | The agent's id (default `claude`). Behind a broker, give each machine its own, e.g. `claude-laptop`: a broker keeps only the first agent per id. |
-
-## Platforms
-
-macOS, Linux and Windows (CI runs all three). Folder browsing on Windows
-needs an agent-host-server with its read-only Windows jail
-(`core.resources_windows`); with an older one the host starts without
-browsing and sessions begin in `--root`. Claude Code on Windows needs Git for Windows for its shell
-tool.
+| `[roots]` / `--root NAME=PATH` (repeatable) | Named folders. Clients browse (read-only) a small tree of them; sessions may work in any. Nothing else on the machine is reachable. A folderless session starts in the first. |
+| `root` / `--root PATH` | One unnamed folder, served as itself. |
+| `token_file` / `--token-file` | Require this connection token. Read from a file so it never appears in `ps` or logs. |
+| `port`, `bind` / `--port`, `--bind` | Default `127.0.0.1:4321`. Loopback only. |
+| `state_dir` / `--state-dir` | Persisted sessions and sequence counter. Default `~/.local/state/agent-host-server-claude`. |
+| `agent_name` / `--agent-name` | What clients call the agent. |
+| `provider_id` / `--provider-id` | The agent's id (default `claude`). Machines behind one broker share it: the broker merges them into one agent and the folder picks the machine. |
 
 Authentication is Claude Code's own: the SDK uses whatever login `claude` has
 on this machine (or `ANTHROPIC_API_KEY` if set).

@@ -63,6 +63,7 @@ from agent_host_server_claude.permissions import (
     pre_tool_use_decision,
     progress_line,
 )
+from agent_host_server_claude.roots import Roots, as_roots
 from agent_host_server_claude.sessions import (
     NEW,
     SEARCH_LIMIT,
@@ -192,7 +193,7 @@ class ClaudeSession:
         self,
         context: AgentSessionContext,
         *,
-        root: Path,
+        root: Path | Roots,
         client_factory: ClientFactory,
         claude_session_id: str | None = None,
         approvals: str | None = None,
@@ -210,7 +211,8 @@ class ClaudeSession:
         self.approvals = approval_mode(
             approvals if approvals is not None else context.config.get(CONFIG_KEY)
         )
-        self._root = root.resolve()
+        self._roots = as_roots(root)
+        self._root = self._roots.primary
         self._client_factory = client_factory
         self._client: SdkClient | None = None
         self._model: str | None = context.model
@@ -228,19 +230,19 @@ class ClaudeSession:
     # -- lifecycle -----------------------------------------------------------
 
     def working_directory(self) -> Path:
-        """The session's directory, which must lie inside the served root."""
+        """The session's directory, which must lie inside a served folder."""
         if self.directory is not None:
             resolved = self.directory.resolve()
-            if resolved != self._root and self._root not in resolved.parents:
+            if not self._roots.contains(resolved):
                 raise PermissionError(f"{resolved} is outside this host's root {self._root}")
             return resolved
         for uri in self.context.working_directories:
+            real = self._roots.real_path(uri)
+            if real is not None:
+                return real
             path = directory_of(uri)
             if path is not None:
-                resolved = path.resolve()
-                if resolved != self._root and self._root not in resolved.parents:
-                    raise PermissionError(f"{resolved} is outside this host's root {self._root}")
-                return resolved
+                raise PermissionError(f"{path.resolve()} is outside this host's root {self._root}")
         return self._root
 
     def _options(self) -> ClaudeAgentOptions:
@@ -354,7 +356,7 @@ class ClaudeSession:
             # spells that as no model at all.
             await client.set_model(None if picked == DEFAULT_MODEL else picked)
             self._model = picked
-        content = prompt_content(message.text, message.raw, self._root)
+        content = prompt_content(message.text, message.raw, self._roots)
         await client.query(content if isinstance(content, str) else _as_stream(content))
         model: str | None = self._model
         async for item in client.receive_response():
@@ -450,7 +452,7 @@ class ClaudeProvider:
 
     def __init__(
         self,
-        root: Path,
+        root: Path | Roots,
         *,
         display_name: str = "Claude",
         client_factory: ClientFactory = _default_client,
@@ -461,11 +463,12 @@ class ClaudeProvider:
         if not is_valid_provider_id(provider_id):
             raise ValueError(f"invalid provider id: {provider_id!r}")
         self.provider_id = provider_id
-        self.root = Path(root).resolve()
+        self.roots = as_roots(root)
+        self.root = self.roots.primary
         self._display_name = display_name
         self._client_factory = client_factory
         self._models = tuple(models)
-        self.sessions = sessions if sessions is not None else ClaudeCodeSessions(self.root)
+        self.sessions = sessions if sessions is not None else ClaudeCodeSessions(self.roots)
 
     @property
     def agent(self) -> AgentInfo:
@@ -505,11 +508,11 @@ class ClaudeProvider:
     async def create_session(self, context: AgentSessionContext) -> ClaudeSession:
         chosen = context.config.get(CONTINUE_KEY)
         if not is_session_id(chosen):
-            return ClaudeSession(context, root=self.root, client_factory=self._client_factory)
+            return ClaudeSession(context, root=self.roots, client_factory=self._client_factory)
         continuation = await self.sessions.continue_from(chosen)
         return ClaudeSession(
             context,
-            root=self.root,
+            root=self.roots,
             client_factory=self._client_factory,
             claude_session_id=continuation.session_id,
             directory=continuation.directory,
@@ -521,7 +524,7 @@ class ClaudeProvider:
         session_id = state.get("claudeSessionId")
         return ClaudeSession(
             context,
-            root=self.root,
+            root=self.roots,
             client_factory=self._client_factory,
             claude_session_id=session_id if isinstance(session_id, str) else None,
             # The host does not replay a resumed session's config to the
