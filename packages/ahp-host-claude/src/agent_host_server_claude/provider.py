@@ -22,6 +22,9 @@ from typing import Any, Protocol
 from agent_host_server.provider.base import (
     AgentInfo,
     AgentSessionContext,
+    ConfigRequest,
+    ConfigResolution,
+    ConfigValue,
     ModelInfo,
     ToolConfirmation,
     TurnSink,
@@ -48,7 +51,13 @@ from claude_agent_sdk.types import StreamEvent
 from agent_host_server_claude.attachments import prompt_content
 from agent_host_server_claude.paths import directory_of
 from agent_host_server_claude.permissions import (
+    APPROVALS_PROPERTY,
+    ASK,
+    CONFIG_KEY,
     DISALLOWED_TOOLS,
+    EXIT_PLAN_TOOL,
+    PERMISSION_MODES,
+    approval_mode,
     describe,
     pre_tool_use_decision,
 )
@@ -174,8 +183,14 @@ class ClaudeSession:
         root: Path,
         client_factory: ClientFactory,
         claude_session_id: str | None = None,
+        approvals: str | None = None,
     ) -> None:
         self.context = context
+        #: Fixed for the session's life: chosen at creation (or restored on
+        #: resume), because the host tells a provider its config only then.
+        self.approvals = approval_mode(
+            approvals if approvals is not None else context.config.get(CONFIG_KEY)
+        )
         self._root = root.resolve()
         self._client_factory = client_factory
         self._client: SdkClient | None = None
@@ -207,7 +222,7 @@ class ClaudeSession:
             cwd=str(self.working_directory()),
             resume=self.claude_session_id,
             model=None if self._model == DEFAULT_MODEL else self._model,
-            permission_mode="default",
+            permission_mode=PERMISSION_MODES[self.approvals],  # type: ignore[arg-type]
             disallowed_tools=list(DISALLOWED_TOOLS),
             can_use_tool=self._can_use_tool,
             hooks={"PreToolUse": [HookMatcher(matcher=None, hooks=[self._pre_tool_use])]},
@@ -240,7 +255,7 @@ class ClaudeSession:
     # -- permissions ---------------------------------------------------------
 
     async def _pre_tool_use(self, hook_input: Any, tool_use_id: str | None, context: Any) -> Any:
-        return pre_tool_use_decision(str(hook_input.get("tool_name", "")))
+        return pre_tool_use_decision(str(hook_input.get("tool_name", "")), self.approvals)
 
     async def _announce(self, call_id: str, name: str, tool_input: Mapping[str, Any]) -> None:
         if call_id in self._announced or self._sink is None:
@@ -257,6 +272,11 @@ class ClaudeSession:
         if sink is None or not call_id:
             return PermissionResultDeny(message="No client is attached to approve this.")
         await self._announce(call_id, tool_name, tool_input)
+        plan = tool_input.get("plan") if tool_name == EXIT_PLAN_TOOL else None
+        if isinstance(plan, str) and plan.strip():
+            # The plan lives in the tool's input, which a client may not render
+            # readably; the user must be able to read what they are approving.
+            await sink.text_delta(f"\n\n{plan.strip()}\n")
         display, message = describe(tool_name, tool_input)
         outcome = await sink.confirm_tool_call(
             ToolConfirmation(
@@ -270,6 +290,10 @@ class ClaudeSession:
         )
         if not outcome.approved:
             return PermissionResultDeny(message="The user declined this tool call.")
+        if tool_name == EXIT_PLAN_TOOL:
+            # Leaving plan mode must not leave the session looser than Ask: in
+            # Claude Code's own default mode the user's allow rules would apply.
+            self.approvals = ASK
         approved = outcome.tool_input if isinstance(outcome.tool_input, dict) else tool_input
         return PermissionResultAllow(updated_input=approved)
 
@@ -415,6 +439,16 @@ class ClaudeProvider:
             models=self._models,
         )
 
+    async def resolve_config(self, request: ConfigRequest) -> ConfigResolution:
+        """The one setting a session takes: how tool calls are approved."""
+        return ConfigResolution(
+            properties={CONFIG_KEY: APPROVALS_PROPERTY},
+            values={CONFIG_KEY: approval_mode(request.values.get(CONFIG_KEY))},
+        )
+
+    async def complete_config(self, request: ConfigRequest) -> Sequence[ConfigValue]:
+        return ()  # nothing here is `enumDynamic`
+
     async def create_session(self, context: AgentSessionContext) -> ClaudeSession:
         return ClaudeSession(context, root=self.root, client_factory=self._client_factory)
 
@@ -426,9 +460,13 @@ class ClaudeProvider:
             root=self.root,
             client_factory=self._client_factory,
             claude_session_id=session_id if isinstance(session_id, str) else None,
+            # The host does not replay a resumed session's config to the
+            # provider, so the mode travels in the resume state instead. A
+            # state from before approvals existed resumes in `ask`.
+            approvals=approval_mode(state.get(CONFIG_KEY, state.get("approvals", ASK))),
         )
 
     async def resume_state_of(self, session: Any) -> Mapping[str, Any] | None:
         if isinstance(session, ClaudeSession) and session.claude_session_id:
-            return {"claudeSessionId": session.claude_session_id}
+            return {"claudeSessionId": session.claude_session_id, CONFIG_KEY: session.approvals}
         return None

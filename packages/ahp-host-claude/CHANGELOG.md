@@ -4,6 +4,9 @@
 
 ### Added
 
+- A `permissionMode` session setting: Ask (`default`), Accept edits, Auto
+  (Claude Code's auto mode) or Plan (plan first; approving drops to Ask), named as Claude Code names them so VS Code shows
+  its icons. Kept across host restarts in the resume state.
 - `ClaudeProvider`: Claude Code (via the Claude Agent SDK) as an AHP provider,
   with streamed text and reasoning, tool calls, usage, and resumable sessions.
 - Approval policy: read-only tools run freely; edits, shell and web tools are

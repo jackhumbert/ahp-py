@@ -14,11 +14,25 @@ Status: pre-alpha.
 ## What a client sees
 
 - Streaming text and reasoning, tool calls as rows, token usage.
-- **Approvals.** Reading and searching run freely. Every edit, shell command
-  and web request is put to the user first, through the protocol's tool
-  confirmation (an approval prompt in VS Code). This holds even if the user's
-  own Claude Code settings allow a tool: the gate is a `PreToolUse` hook, which
-  runs before those settings are consulted.
+- **Approvals**, chosen per session when it is created (the `permissionMode`
+  session setting, which VS Code draws with its own icons):
+  - **Ask** (`default`, the default): reading and searching run freely; every edit, shell
+    command and web request is put to the user first, through the protocol's
+    tool confirmation (an approval prompt in VS Code). This holds even if the
+    user's own Claude Code settings allow a tool: the gate is a `PreToolUse`
+    hook, which runs before those settings are consulted.
+  - **Accept edits**: Claude Code's `acceptEdits` mode; file edits in the
+    working directory run without asking, shell and web still ask.
+  - **Auto**: Claude Code's auto mode; its classifier approves what it judges
+    safe and blocks what it judges risky, and only asks when it cannot decide.
+    Commands can run on this machine with nobody seeing them first.
+  - **Plan**: Claude Code's plan mode; Claude researches without changing
+    anything (apart from Claude Code's own plan file under `~/.claude/plans`),
+    then shows its plan and asks to start. Approving drops the session to Ask,
+    so the work itself is still approved call by call.
+
+  The mode is fixed for the session's life (the host passes a provider its
+  config only at creation) and survives a host restart.
 - A model picker populated from Claude Code itself at start-up (the same list
   `/model` shows for the logged-in account, its default first), so new models
   appear without a release of this adapter.

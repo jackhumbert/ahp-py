@@ -256,7 +256,7 @@ async def test_sessions_resume_with_the_sdk_session_id(tmp_path: Path) -> None:
     session = await harness.provider.create_session(_context(tmp_path))
     await session.send_user_message(UserMessage(text="x"), RecordingSink())
     state = await harness.provider.resume_state_of(session)
-    assert state == {"claudeSessionId": "abc"}
+    assert state == {"claudeSessionId": "abc", "permissionMode": "default"}
 
     context = _context(tmp_path)
     resumed_context = AgentSessionContext(

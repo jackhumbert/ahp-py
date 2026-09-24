@@ -1,16 +1,32 @@
 """Which tool calls run freely, and which a human approves first.
 
-The policy is "read freely, ask to change": tools that only look at the
-workspace run without asking; anything that edits, executes, or reaches the
-network is put to the user through the host's `confirm_tool_call`, which a
-client such as VS Code renders as an approval prompt.
+A session picks one of four approval modes when it is created, as the
+`permissionMode` session config property. The name and values are Claude
+Code's own, which is also what makes VS Code draw its icons for them (shield,
+pencil, sparkle, lightbulb); the labels a person reads are Ask, Accept
+edits, Auto and Plan.
 
-It is enforced with a ``PreToolUse`` hook, not with ``allowed_tools``, because
-the Agent SDK consults the user's own Claude Code settings first: an
+- ``default``, labelled Ask: "read freely, ask to change". Tools that only look at
+  the workspace run without asking; anything that edits, executes, or reaches
+  the network is put to the user through the host's `confirm_tool_call`, which
+  a client such as VS Code renders as an approval prompt.
+- ``acceptEdits``, labelled Accept edits: Claude Code's own mode of that name. File edits in the
+  working directory run without asking; shell and web still ask.
+- ``auto``, labelled Auto: Claude Code's auto mode. Its classifier approves actions it judges
+  safe and refuses risky ones; only what it cannot decide reaches the user.
+- ``plan``, labelled Plan: Claude Code's plan mode. Claude researches without
+  changing anything, then presents a plan (the ``ExitPlanMode`` tool), which
+  the user approves or rejects. Approving it drops the session to ``default``,
+  so the work that follows is still approved call by call.
+
+``default`` is enforced with a ``PreToolUse`` hook, not with ``allowed_tools``,
+because the Agent SDK consults the user's own Claude Code settings first: an
 ``allow`` rule in ``~/.claude/settings.json`` would otherwise run a command
-without ever reaching the approval prompt. The hook answers ``ask`` for every
-tool outside the read-only set, which sends the call to ``can_use_tool`` no
-matter what the settings files allow.
+without ever reaching the approval prompt. In ``default`` the hook answers ``ask``
+for every tool outside the read-only set, which sends the call to
+``can_use_tool`` no matter what the settings files allow. In the other two
+modes the hook has no opinion on those tools, so Claude Code's mode - and the
+user's settings - decide, and anything still undecided comes to the client.
 """
 
 from __future__ import annotations
@@ -40,12 +56,62 @@ READ_ONLY_TOOLS: Final = frozenset(
 DISALLOWED_TOOLS: Final = ("AskUserQuestion",)
 
 
+#: The session config property. VS Code recognises this name and its values.
+CONFIG_KEY: Final = "permissionMode"
+
+ASK: Final = "default"
+#: What the setting was called before it took Claude Code's names.
+_LEGACY_ASK: Final = "ask"
+ACCEPT_EDITS: Final = "acceptEdits"
+AUTO: Final = "auto"
+PLAN: Final = "plan"
+#: Claude Code's tool for "here is my plan; may I start?".
+EXIT_PLAN_TOOL: Final = "ExitPlanMode"
+
+#: Approval mode -> Claude Code permission mode.
+PERMISSION_MODES: Final[Mapping[str, str]] = {
+    ASK: "default",
+    ACCEPT_EDITS: "acceptEdits",
+    AUTO: "auto",
+    PLAN: "plan",
+}
+
+#: The `approvals` property of the session config schema a client renders.
+APPROVALS_PROPERTY: Final[Mapping[str, Any]] = {
+    "type": "string",
+    "title": "Approvals",
+    "description": (
+        "Ask: reads run freely, everything else asks you. "
+        "Accept edits: file edits in the workspace run without asking. "
+        "Auto: Claude Code's classifier approves safe actions and blocks risky ones. "
+        "Plan: Claude plans without changing anything, then asks to start."
+    ),
+    "enum": [ASK, ACCEPT_EDITS, AUTO, PLAN],
+    "enumLabels": ["Ask", "Accept edits", "Auto", "Plan"],
+    "default": ASK,
+}
+
+
+def approval_mode(value: Any) -> str:
+    """A client's `permissionMode` value, or the strict default for anything else."""
+    if value == _LEGACY_ASK:
+        return ASK
+    return value if isinstance(value, str) and value in PERMISSION_MODES else ASK
+
+
 def needs_approval(tool_name: str) -> bool:
     return tool_name not in READ_ONLY_TOOLS
 
 
-def pre_tool_use_decision(tool_name: str) -> dict[str, Any]:
-    """The hook's answer: allow the read-only set, send the rest to a human."""
+def pre_tool_use_decision(tool_name: str, mode: str = ASK) -> dict[str, Any]:
+    """The hook's answer.
+
+    The read-only set is always allowed. In ``default`` everything else goes to a
+    human; in the looser modes the hook stays out of it and Claude Code's
+    permission mode decides.
+    """
+    if needs_approval(tool_name) and mode != ASK:
+        return {}
     if needs_approval(tool_name):
         return {
             "hookSpecificOutput": {
@@ -100,4 +166,6 @@ def describe(tool_name: str, tool_input: Mapping[str, Any]) -> tuple[str, str]:
             return "Sub-agent", _short(tool_input.get("description", ""))
         case "TodoWrite":
             return "Update plan", "Update the task list"
+        case "ExitPlanMode":
+            return "Start on the plan", "Approve the plan above to let Claude start"
     return tool_name, tool_name
