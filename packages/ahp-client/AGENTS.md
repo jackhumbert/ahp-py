@@ -86,11 +86,12 @@ code they justify.
 
 ## Verified surface (count from the code, never from prose)
 
-- **27** client→server requests, **2** client notifications (= the 29 the
-  sibling host implements)
+- **30** client→server requests, **2** client notifications. The sibling host
+  implements 29 of the 32: it does not host automations, so it declines
+  `listAutomationTriggerDefinitions`, `runAutomation` and `fetchAutomationRuns`
 - **10** server→client requests, **9** server→client notifications
-- **86** action types, **39** client-dispatchable
-- **256** reducer fixtures, **39** round-trips
+- **96** action types, **44** client-dispatchable
+- **272** reducer fixtures, **44** round-trips
 
 Every design proposal that fed this plan wrote 28 or ~30 commands. Only a
 *generated* parity matrix catches that, which is why `docs/parity.md` is

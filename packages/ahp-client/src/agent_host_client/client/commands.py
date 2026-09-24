@@ -1,16 +1,18 @@
 """Typed wrappers for the client→server commands.
 
-23 of the 27 live here; `initialize`, `ping`, `reconnect` and `subscribe` are
+26 of the 30 live here; `initialize`, `ping`, `reconnect` and `subscribe` are
 connection machinery and live on `AhpClient` itself. Generated from one table
 rather than hand-written, so the parity matrix is *derived* from the code and
 cannot drift from it. The TypeScript client ships wrappers for twelve; the rest
 it leaves to `request()`.
 
-**Channel scoping is the thing to get right.** Seventeen commands are declared
+**Channel scoping is the thing to get right.** Eighteen commands are declared
 ``channel: 'ahp-root://'`` in the protocol's own types and are forced to it here
-regardless of what a caller passes. Ten carry a caller-chosen URI. The
-membership below is not remembered -- it is asserted against the vendored
-``ts/messages.ts`` by ``tests/docs/test_parity_matrix_is_true.py``.
+regardless of what a caller passes. Two (0.9.0) are declared
+``channel: 'ahp-automations://'`` and are forced to the catalogue the same way.
+Ten carry a caller-chosen URI. The membership below is not remembered -- it is
+asserted against the vendored ``ts/messages.ts`` by
+``tests/docs/test_parity_matrix_is_true.py``.
 
 The one that catches people: ``completions`` is **caller-scoped**. Forcing it to
 root silently breaks every @-mention picker, and it is the exception all three
@@ -23,10 +25,16 @@ from collections.abc import Mapping, Sequence
 from types import EllipsisType
 from typing import Any, Final
 
-from agent_host_protocol.channels import ROOT_URI
+from agent_host_protocol.channels import AUTOMATIONS_URI, ROOT_URI
 from agent_host_protocol.types import JsonObject
 
-__all__ = ["CALLER_SCOPED", "COMMANDS", "ROOT_SCOPED", "CommandsMixin"]
+__all__ = [
+    "AUTOMATIONS_SCOPED",
+    "CALLER_SCOPED",
+    "COMMANDS",
+    "ROOT_SCOPED",
+    "CommandsMixin",
+]
 
 #: Declared ``channel: 'ahp-root://'`` upstream. The wrapper overwrites whatever
 #: the caller passed, because sending anything else is a protocol error the host
@@ -50,8 +58,13 @@ ROOT_SCOPED: Final[frozenset[str]] = frozenset(
         "authenticate",
         "resolveSessionConfig",
         "sessionConfigCompletions",
+        "listAutomationTriggerDefinitions",
     }
 )
+
+#: Declared ``channel: 'ahp-automations://'`` upstream (0.9.0): scoped to the
+#: automation catalogue, and forced to it exactly as the root set is to root.
+AUTOMATIONS_SCOPED: Final[frozenset[str]] = frozenset({"runAutomation", "fetchAutomationRuns"})
 
 #: Carry a caller-chosen URI. `completions` is here, and that is the point.
 CALLER_SCOPED: Final[frozenset[str]] = frozenset(
@@ -69,9 +82,9 @@ CALLER_SCOPED: Final[frozenset[str]] = frozenset(
     }
 )
 
-#: Every client→server request. 27 of them; `unsubscribe` and `dispatchAction`
+#: Every client→server request. 30 of them; `unsubscribe` and `dispatchAction`
 #: are notifications and live on the client itself.
-COMMANDS: Final[frozenset[str]] = ROOT_SCOPED | CALLER_SCOPED
+COMMANDS: Final[frozenset[str]] = ROOT_SCOPED | AUTOMATIONS_SCOPED | CALLER_SCOPED
 
 
 def _omit_none(params: Mapping[str, Any]) -> JsonObject:
@@ -85,9 +98,9 @@ def _omit_none(params: Mapping[str, Any]) -> JsonObject:
 
 
 class CommandsMixin:
-    """23 wrappers, mixed into :class:`~agent_host_client.client.AhpClient`.
+    """26 wrappers, mixed into :class:`~agent_host_client.client.AhpClient`.
 
-    The other four of the 27 commands -- `initialize`, `ping`, `reconnect`,
+    The other four of the 30 commands -- `initialize`, `ping`, `reconnect`,
     `subscribe` -- are connection machinery and live on `AhpClient` itself.
     Kept in its own module so the command surface can be read, counted and
     tested without wading through that machinery.
@@ -349,4 +362,38 @@ class CommandsMixin:
                 "token": token,
                 "scopes": list(scopes) if scopes is not None else None,
             },
+        )
+
+    # ── automations (0.9.0) ──────────────────────────────────────────────────
+
+    async def list_automation_trigger_definitions(self, **extra: Any) -> JsonObject:
+        """Host-defined trigger definitions, optionally for a ``provider``,
+        ``workingDirectories`` and ``sessionConfig``. Root-scoped."""
+        return await self._root("listAutomationTriggerDefinitions", extra)
+
+    async def run_automation(self, automation: str, request_id: str, **extra: Any) -> JsonObject:
+        """Start a manual run of an ``ahp-automation:`` entry.
+
+        ``requestId`` is client-chosen and makes a retry idempotent: the host
+        answers the same run rather than starting a second. The result's
+        ``resource`` is the ``ahp-automation-run:`` channel to subscribe to.
+        """
+        return await self._scoped(
+            "runAutomation",
+            AUTOMATIONS_URI,
+            {"automation": automation, "requestId": request_id, **extra},
+        )
+
+    async def fetch_automation_runs(
+        self, automation: str, cursor: str | None = None, **extra: Any
+    ) -> JsonObject:
+        """Load older run history for one automation into the catalogue.
+
+        The result is empty: the runs arrive as catalogue actions, and
+        ``cursor`` pages further back.
+        """
+        return await self._scoped(
+            "fetchAutomationRuns",
+            AUTOMATIONS_URI,
+            {"automation": automation, "cursor": cursor, **extra},
         )

@@ -18,6 +18,7 @@ from collections.abc import Callable, Mapping
 from typing import Any, Final
 
 from agent_host_protocol.channels import ROOT_URI
+from agent_host_protocol.reducers.clock import now_iso
 from agent_host_protocol.transport import Transport, memory_pair
 from agent_host_protocol.types import JsonObject
 
@@ -59,7 +60,7 @@ class FakeHost:
         self,
         *,
         agents: list[JsonObject] | None = None,
-        protocol_version: str = "0.8.0",
+        protocol_version: str = "0.9.0",
         server_seq: int = 0,
         terminal_command_prefix: str | None = None,
     ) -> None:
@@ -187,7 +188,13 @@ class FakeHost:
         # The fold: the opening character arrives inside the response part, and
         # only the remainder is ever emitted as a delta.
         folded, body = (text[:1], text[1:]) if fold_first_delta else ("", text)
-        await self.push(chat, {"type": "chat/turnStarted", "turnId": turn_id})
+        # `startedAt` and `duration` are required, and since 0.9.0 the chat's
+        # `modifiedAt` is derived from them, so a fake that omits them leaves
+        # the mirror's timestamps behind a real host's.
+        started_at = now_iso()
+        await self.push(
+            chat, {"type": "chat/turnStarted", "turnId": turn_id, "startedAt": started_at}
+        )
         await self.push(
             chat,
             {
@@ -203,7 +210,7 @@ class FakeHost:
             )
         for tool in tools or []:
             await self._emit_tool(chat, turn_id, tool)
-        await self.push(chat, {"type": "chat/turnComplete", "turnId": turn_id})
+        await self.push(chat, {"type": "chat/turnComplete", "turnId": turn_id, "duration": 0})
 
     async def _emit_tool(self, chat: str, turn_id: str, tool: FakeToolCall) -> None:
         start: JsonObject = {

@@ -19,10 +19,11 @@ from agent_host_client.client.client import ClientConfig
 
 def test_the_pin_is_the_spec_revision_this_client_was_written_against() -> None:
     """Every wire shape here was read out of `spec/v0.7.0` (plan §2.3) and
-    re-checked against `spec/v0.8.0`, whose delta touches none of them. A
+    re-checked against `spec/v0.8.0` and `spec/v0.9.0`; the 0.9.0 ones it
+    reads (turn errors, terminal lifecycle, session claims) accept both. A
     dependency that vendors a different tag invalidates that evidence, and the
     place it must fail is a test rather than a field report."""
-    assert UPSTREAM_PROTOCOL_VERSION == "0.8.0"
+    assert UPSTREAM_PROTOCOL_VERSION == "0.9.0"
 
 
 def test_the_default_offer_is_the_pins_list_not_upstreams() -> None:

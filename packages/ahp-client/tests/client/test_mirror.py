@@ -318,8 +318,8 @@ def test_a_foreign_terminal_action_promotes_the_pending_turn_start() -> None:
     assert mirror.pending(CHAT) == ()
     confirmed = mirror.confirmed(CHAT)
     assert [turn["id"] for turn in confirmed["turns"]] == ["t1"]
-    assert confirmed["activeTurn"] is None
-    assert mirror.state(CHAT)["activeTurn"] is None
+    assert confirmed.get("activeTurn") is None
+    assert mirror.state(CHAT).get("activeTurn") is None
 
 
 def test_the_promotion_only_retires_the_turn_the_terminal_action_names() -> None:

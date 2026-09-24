@@ -11,7 +11,7 @@ protocol for synchronized multi-client state over AI agent sessions.
 
 > ### ⚠️ Status: working, pre-alpha.
 >
-> M1–M8 of [`docs/plan.md`](docs/plan.md) §12 are done: the client core, all 27
+> M1–M8 of [`docs/plan.md`](docs/plan.md) §12 are done: the client core, all 30
 > commands, the state mirror with write-ahead reconciliation, the front door,
 > the per-host supervisor, the reverse direction, wire logs and `doctor`. A full
 > turn runs against the sibling Python host. Distributed from this repository —

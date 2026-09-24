@@ -275,7 +275,7 @@ async def test_a_full_turn_against_the_sibling_python_host() -> None:
 
     try:
         async with connect(transport=client_side) as client:
-            assert client.protocol_version == "0.8.0"
+            assert client.protocol_version == "0.9.0"
             assert client.agents(), "the host published no agents"
 
             # `AgentInfo.provider`, not `.id` -- and the FakeHost's placeholder

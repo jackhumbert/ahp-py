@@ -31,7 +31,7 @@ from agent_host_protocol.conformance.corpus import CORPUS_ROOT
 from agent_host_protocol.reducers import REDUCERS
 from agent_host_protocol.types import ACTION_TYPES, IS_CLIENT_DISPATCHABLE
 
-from agent_host_client.client.commands import COMMANDS, ROOT_SCOPED
+from agent_host_client.client.commands import AUTOMATIONS_SCOPED, COMMANDS, ROOT_SCOPED
 from agent_host_client.client.events import NOTIFICATION_METHODS
 from agent_host_client.client.mirror import REDUCER_NAMES
 from agent_host_client.serve.resources import _SNAKE, _VIRTUAL_METHODS
@@ -114,7 +114,11 @@ def render() -> str:
             f"`{method}`",
             tick if method in _TS_WRAPPERS else cross,
             tick if method in COMMANDS else cross,
-            "root" if method in ROOT_SCOPED else "caller",
+            "root"
+            if method in ROOT_SCOPED
+            else "automations"
+            if method in AUTOMATIONS_SCOPED
+            else "caller",
         )
         for method in forward
     ]
@@ -180,7 +184,7 @@ server stays absent.
 
 ## Channels ({len(channels)})
 
-Reducers come from `agent-host-protocol`, so all seven are available to the
+Reducers come from `agent-host-protocol`, so all nine are available to the
 mirror, which binds any of them by name at registration. The TypeScript
 `AhpStateMirror` wires four and silently ignores every `ahp-chat:` snapshot.
 

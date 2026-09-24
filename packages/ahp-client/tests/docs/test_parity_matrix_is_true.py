@@ -18,7 +18,12 @@ from agent_host_protocol.conformance.corpus import CORPUS_ROOT
 from agent_host_protocol.reducers import REDUCERS
 from agent_host_protocol.types import ACTION_TYPES, IS_CLIENT_DISPATCHABLE
 
-from agent_host_client.client.commands import CALLER_SCOPED, COMMANDS, ROOT_SCOPED
+from agent_host_client.client.commands import (
+    AUTOMATIONS_SCOPED,
+    CALLER_SCOPED,
+    COMMANDS,
+    ROOT_SCOPED,
+)
 from agent_host_client.client.events import NOTIFICATION_METHODS
 from agent_host_client.client.mirror import REDUCER_NAMES
 from agent_host_client.serve.resources import _SNAKE, _VIRTUAL_METHODS
@@ -46,17 +51,28 @@ def test_every_upstream_command_has_a_wrapper() -> None:
     )
 
 
-def test_there_are_twenty_seven_of_them() -> None:
+def test_there_are_thirty_of_them() -> None:
     """Pinned because every prose description of this protocol gets it wrong."""
-    assert len(COMMANDS) == 27
+    assert len(COMMANDS) == 30
     assert len(_map_entries("ClientNotificationMap")) == 2
     assert len(_map_entries("ServerCommandMap")) == 10
     assert len(_map_entries("ServerNotificationMap")) == 9
 
 
-def test_root_and_caller_scoping_partition_the_command_set() -> None:
+def test_the_three_scopes_partition_the_command_set() -> None:
     assert set() == ROOT_SCOPED & CALLER_SCOPED
-    assert ROOT_SCOPED | CALLER_SCOPED == COMMANDS
+    assert set() == ROOT_SCOPED & AUTOMATIONS_SCOPED
+    assert set() == AUTOMATIONS_SCOPED & CALLER_SCOPED
+    assert ROOT_SCOPED | AUTOMATIONS_SCOPED | CALLER_SCOPED == COMMANDS
+
+
+@pytest.mark.parametrize("method", sorted(AUTOMATIONS_SCOPED))
+def test_automations_scoped_commands_are_declared_on_the_catalogue(method: str) -> None:
+    iface = _params_interface(method)
+    assert _channel_declaration(iface) == "'ahp-automations://'", (
+        f"{method} is in AUTOMATIONS_SCOPED but {iface} does not declare "
+        "channel: 'ahp-automations://'"
+    )
 
 
 @pytest.mark.parametrize("method", sorted(ROOT_SCOPED))
@@ -75,7 +91,7 @@ def test_root_scoped_commands_are_declared_root_upstream(method: str) -> None:
 @pytest.mark.parametrize("method", sorted(CALLER_SCOPED))
 def test_caller_scoped_commands_are_not_declared_root_upstream(method: str) -> None:
     iface = _params_interface(method)
-    assert _channel_declaration(iface) != "'ahp-root://'", (
+    assert _channel_declaration(iface) not in ("'ahp-root://'", "'ahp-automations://'"), (
         f"{method} is in CALLER_SCOPED but {iface} declares channel: 'ahp-root://'"
     )
 
@@ -123,13 +139,13 @@ def test_all_nine_server_notifications_are_surfaced() -> None:
     assert len(NOTIFICATION_METHODS) == 9
 
 
-def test_all_seven_reducers_are_available() -> None:
-    assert len(REDUCERS) == 7
+def test_all_nine_reducers_are_available() -> None:
+    assert len(REDUCERS) == 9
 
 
 def test_the_mirror_can_bind_every_reducer() -> None:
     """The matrix's "Mirrored here" column derives from `REDUCER_NAMES`, the set
-    `StateMirror.bind` accepts. It must be all seven: the TS mirror wires four,
+    `StateMirror.bind` accepts. It must be all nine: the TS mirror wires four,
     and matching that would inherit its `ahp-chat:`-snapshots-ignored gap."""
     assert frozenset(REDUCERS) == REDUCER_NAMES
 
@@ -165,8 +181,8 @@ def test_the_reverse_here_column_matches_the_servers_dispatch_tables() -> None:
 
 def test_dispatchable_action_count_is_pinned() -> None:
     dispatchable = [a for a in ACTION_TYPES if IS_CLIENT_DISPATCHABLE.get(a)]
-    assert len(ACTION_TYPES) == 86
-    assert len(dispatchable) == 39
+    assert len(ACTION_TYPES) == 96
+    assert len(dispatchable) == 44
 
 
 def test_the_generated_matrix_is_not_stale() -> None:

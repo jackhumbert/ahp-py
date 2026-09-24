@@ -11,7 +11,7 @@ matrix is self-updating and also self-congratulatory — a wrapper that exists b
 has never been exercised shows green. Treat the ticks as *implemented*, and the
 interop suite as the evidence.
 
-## Client → server requests (27)
+## Client → server requests (30)
 
 | Method | TS client wrapper | Here | Channel |
 |---|---|---|---|
@@ -42,6 +42,9 @@ interop suite as the evidence.
 | `sessionConfigCompletions` | ✅ | ✅ | root |
 | `completions` | ✅ | ✅ | caller |
 | `invokeChangesetOperation` | — | ✅ | caller |
+| `listAutomationTriggerDefinitions` | — | ✅ | root |
+| `runAutomation` | — | ✅ | automations |
+| `fetchAutomationRuns` | — | ✅ | automations |
 
 ## Client → server notifications (2)
 
@@ -91,15 +94,17 @@ server stays absent.
 | `resourceRequest` | — | ✅ |
 | `createResourceWatch` | — | — |
 
-## Channels (7)
+## Channels (9)
 
-Reducers come from `agent-host-protocol`, so all seven are available to the
+Reducers come from `agent-host-protocol`, so all nine are available to the
 mirror, which binds any of them by name at registration. The TypeScript
 `AhpStateMirror` wires four and silently ignores every `ahp-chat:` snapshot.
 
 | Reducer | Available | Mirrored here |
 |---|---|---|
 | `annotations` | ✅ | ✅ |
+| `automation` | ✅ | ✅ |
+| `automationRun` | ✅ | ✅ |
 | `changeset` | ✅ | ✅ |
 | `chat` | ✅ | ✅ |
 | `resourceWatch` | ✅ | ✅ |
@@ -107,7 +112,7 @@ mirror, which binds any of them by name at registration. The TypeScript
 | `session` | ✅ | ✅ |
 | `terminal` | ✅ | ✅ |
 
-## Client-dispatchable actions (39 of 86)
+## Client-dispatchable actions (44 of 96)
 
 Enumerated from the generated `IS_CLIENT_DISPATCHABLE` table.
 
@@ -116,6 +121,10 @@ Enumerated from the generated `IS_CLIENT_DISPATCHABLE` table.
 - `annotations/removed`
 - `annotations/set`
 - `annotations/updated`
+- `automation/createRequested`
+- `automation/removed`
+- `automation/updateRequested`
+- `automationRun/cancelRequested`
 - `changeset/filesReviewChanged`
 - `chat/draftChanged`
 - `chat/inputAnswerChanged`
@@ -129,6 +138,7 @@ Enumerated from the generated `IS_CLIENT_DISPATCHABLE` table.
 - `chat/toolCallResultConfirmed`
 - `chat/truncated`
 - `chat/turnCancelled`
+- `chat/turnResume`
 - `chat/turnStarted`
 - `chat/workingDirectoryRemoved`
 - `chat/workingDirectorySet`

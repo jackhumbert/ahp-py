@@ -6,6 +6,30 @@ Every release states the protocol versions it speaks.
 
 ## [Unreleased]
 
+### Changed — protocol 0.9.0
+
+- **Built on `agent-host-protocol` at `spec/v0.9.0`.** The default offer is
+  `0.9.0`, `0.8.0`, `0.7.0`, `0.6.0`; against the sibling host this client
+  negotiates `0.9.0`. Where 0.9.0 moved a shape this client reads, it reads
+  both, because it still negotiates older hosts:
+  - `TurnFailed.reason` / `.error_type` read `chat/error`'s `part.error`
+    (0.9.0) and fall back to the legacy `error`.
+  - `Terminal.exit_code` / `.exit_reported` read `lifecycle` (0.9.0) and fall
+    back to the top-level `exitCode`. A codeless exit is now visible in state
+    against a 0.9.0 host.
+  - `SessionClaim` gains `chat`, which a 0.9.0 host requires on a session
+    claim; it is optional here so claims from older hosts still parse.
+- **Three automation command wrappers:** `list_automation_trigger_definitions`
+  (root-scoped), `run_automation` and `fetch_automation_runs` (forced to
+  `ahp-automations://`, a new `AUTOMATIONS_SCOPED` set). 30 commands, all
+  wrapped.
+- `ContentNotFound` is removed — 0.9.0 dropped the code, and `-32006` stays
+  reserved. `chat/turnResume` is deliberately not modelled as an event.
+- `testing.FakeHost` negotiates `0.9.0` and sends `startedAt` / `duration` on
+  its turns, since the chat's `modifiedAt` now derives from them.
+- `docs/parity.md` regenerated: 96 action types, 44 client-dispatchable, nine
+  reducers.
+
 ### Changed — protocol 0.8.0
 
 - **Built on `agent-host-protocol` at `spec/v0.8.0`.** The default offer

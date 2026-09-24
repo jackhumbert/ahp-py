@@ -154,7 +154,7 @@ async def test_cancel_names_the_turn_so_the_reducer_can_settle_it() -> None:
     assert action["duration"] == 0
 
     settled = chat_reducer(_chat_with_tool_call("running"), action)
-    assert settled["activeTurn"] is None
+    assert settled.get("activeTurn") is None
     assert settled["turns"][-1]["state"] == "cancelled"
 
 

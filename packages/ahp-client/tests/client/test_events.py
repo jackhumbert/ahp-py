@@ -91,6 +91,28 @@ def test_chat_error_is_the_terminal_failure() -> None:
     assert event.error_type == "agent.turn"
 
 
+def test_a_0_9_chat_error_carries_its_error_in_the_part() -> None:
+    """0.9.0 moved `ErrorInfo` into an `ErrorResponsePart`. The legacy shape
+    above still arrives from a host that negotiated an earlier version, so both
+    must read the same."""
+    event = event_for(
+        _envelope(
+            {
+                "type": "chat/error",
+                "turnId": "t1",
+                "duration": 12,
+                "part": {
+                    "kind": "error",
+                    "error": {"errorType": "agent.turn", "message": "RuntimeError: kaboom"},
+                },
+            }
+        )
+    )
+    assert isinstance(event, TurnFailed)
+    assert event.reason == "RuntimeError: kaboom"
+    assert event.error_type == "agent.turn"
+
+
 def test_reasoning_carries_its_part_id() -> None:
     """The action is `chat/reasoning`, and it targets a part the host created
     with an earlier `chat/responsePart`."""

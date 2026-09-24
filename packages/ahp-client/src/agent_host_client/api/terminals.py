@@ -117,7 +117,12 @@ class ClientClaim:
 
 @dataclass(frozen=True, slots=True)
 class SessionClaim:
-    """``{kind: 'session', session, turnId?, toolCallId?}``.
+    """``{kind: 'session', session, chat, turnId?, toolCallId?}``.
+
+    ``chat`` -- the chat that owns the terminal -- is required on the wire since
+    0.9.0, and a 0.9.0 host refuses a session claim without one. It is optional
+    here only because a host on an earlier version sends claims that lack it,
+    and this client still has to read those.
 
     The optional pair is the entire difference between "a tool call is using
     this right now" and "backgrounded, still owned by the session". Narrowing to
@@ -131,6 +136,7 @@ class SessionClaim:
     session: str
     turn_id: str | None = None
     tool_call_id: str | None = None
+    chat: str | None = None
 
     def __post_init__(self) -> None:
         # Same trap as `ClientClaim`, and the same permanence: a terminal handed
@@ -143,6 +149,8 @@ class SessionClaim:
 
     def to_wire(self) -> JsonObject:
         claim: JsonObject = {"kind": "session", "session": self.session}
+        if self.chat is not None:
+            claim["chat"] = self.chat
         # Absent, not `null`: both are declared optional, and an explicit null is
         # a different document -- one an unconditional JS spread writes through.
         if self.turn_id is not None:
@@ -182,10 +190,12 @@ def claim_from_wire(value: Any) -> TerminalClaim | None:
             return None
         turn_id = value.get("turnId")
         tool_call_id = value.get("toolCallId")
+        chat = value.get("chat")
         return SessionClaim(
             session,
             turn_id if isinstance(turn_id, str) else None,
             tool_call_id if isinstance(tool_call_id, str) else None,
+            chat if isinstance(chat, str) and chat else None,
         )
     return None
 
@@ -211,7 +221,11 @@ def describe_claim(claim: TerminalClaim | None) -> str:
     if isinstance(claim, SessionClaim):
         scope = "".join(
             f", {name}={value!r}"
-            for name, value in (("turnId", claim.turn_id), ("toolCallId", claim.tool_call_id))
+            for name, value in (
+                ("chat", claim.chat),
+                ("turnId", claim.turn_id),
+                ("toolCallId", claim.tool_call_id),
+            )
             if value is not None
         )
         return f"session {claim.session!r}{scope}"
@@ -845,24 +859,30 @@ class Terminal:
         ``None`` is three situations at once -- still running, killed without a
         code, or a host that sent an explicit null -- so it is not a liveness
         test. :attr:`exit_reported` separates the first from the others.
+
+        Read from ``lifecycle`` (0.9.0), falling back to the top-level
+        ``exitCode`` a host on an earlier version writes.
         """
+        lifecycle = self.state.get("lifecycle")
+        if isinstance(lifecycle, Mapping) and lifecycle.get("status") == "exited":
+            return _as_exit_code(lifecycle.get("exitCode"))
         return _as_exit_code(self.state.get("exitCode"))
 
     @property
     def exit_reported(self) -> bool:
-        """Whether ``TerminalState`` carries an ``exitCode`` at all.
+        """Whether the state says the process exited.
 
-        **Not "has the process exited".** ``terminal/exited`` is an unconditional
-        JS spread of a field the action may omit -- "`undefined` if the process
-        was killed without an exit code" -- and ``undefined`` deletes the key, so
-        a codeless exit leaves ``TerminalState`` byte-identical to a running
-        terminal. There is nothing in the state to read, and this reports what is
-        there rather than guessing.
-
-        The action itself is unambiguous, which is why :meth:`wait_for_exit`
-        watches the stream instead: a caller that must know needs to be watching
-        *before* the process ends.
+        Since 0.9.0 that is exact: ``TerminalState.lifecycle`` is
+        ``{status: "exited", exitCode?}``, so an exit without a code is still an
+        exit. A host on an earlier version only writes a top-level ``exitCode``,
+        which a codeless exit omits -- leaving the state byte-identical to a
+        running terminal -- so against such a host this is "an exit that
+        reported a code", and :meth:`wait_for_exit` watching the stream is the
+        only way to catch the rest.
         """
+        lifecycle = self.state.get("lifecycle")
+        if isinstance(lifecycle, Mapping):
+            return lifecycle.get("status") == "exited"
         return "exitCode" in self.state
 
     def output(self) -> str:
@@ -1054,10 +1074,11 @@ class Terminal:
         that would read as "killed without a code".
 
         The reader is attached **before** the state is checked, so an exit
-        landing between the two is caught rather than lost in the gap. The state
-        check itself only catches an exit that reported a *code*: see
-        :attr:`exit_reported` for why a codeless one that already happened is
-        unrecoverable, and start watching earlier if that matters.
+        landing between the two is caught rather than lost in the gap. Against a
+        pre-0.9.0 host the state check only catches an exit that reported a
+        *code*: see :attr:`exit_reported` for why a codeless one that already
+        happened is unrecoverable there, and start watching earlier if that
+        matters.
         """
         reader = self._client._runtime.events()
         # Only meaningful if we ever saw it listed: a host that publishes no

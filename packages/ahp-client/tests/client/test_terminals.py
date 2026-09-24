@@ -441,16 +441,11 @@ def test_a_missing_duration_is_not_a_zero_duration() -> None:
     assert finished.exit_code is None
 
 
-async def test_a_codeless_exit_leaves_nothing_in_the_state_to_read() -> None:
-    """A protocol property, not a client defect, and the reason `exit_reported`
-    is not spelled `exited`.
-
-    "`undefined` if the process was killed without an exit code" -- the action
-    omits the field, `terminal/exited` is an unconditional JS spread, and
-    `undefined` deletes the key. So the state after a codeless exit is identical
-    to the state of a running terminal, and the only unambiguous notice is the
-    action, which is why `wait_for_exit` watches the stream.
-    """
+async def test_a_codeless_exit_is_in_the_state_since_0_9() -> None:
+    """Before 0.9.0 this was a protocol hole: `terminal/exited` spread an
+    omitted `exitCode` onto the state, `undefined` deleted the key, and a
+    codeless exit left the state identical to a running terminal. 0.9.0 made
+    the exit a `lifecycle`, so it is readable with or without a code."""
     host = _terminal_host()
     await host.start()
     async with connect(transport=host.transport(), client_id="me") as client:
@@ -463,13 +458,12 @@ async def test_a_codeless_exit_leaves_nothing_in_the_state_to_read() -> None:
             event = await asyncio.wait_for(stream.__anext__(), 2)
         assert isinstance(event, TerminalExited)
         assert event.exit_code is None
-        assert not terminal.exit_reported
-        assert "exitCode" not in terminal.state
-
-        # A reported code IS visible, which is what makes the gap specific.
-        await host.push(TERMINAL, {"type": "terminal/exited", "exitCode": 0})
         await _settle(lambda: terminal.exit_reported)
-        assert terminal.exit_code == 0
+        assert terminal.state["lifecycle"] == {"status": "exited"}
+        assert terminal.exit_code is None
+
+        await host.push(TERMINAL, {"type": "terminal/exited", "exitCode": 0})
+        await _settle(lambda: terminal.exit_code == 0)
     await host.stop()
 
 
@@ -666,7 +660,9 @@ async def test_a_real_terminal_against_the_sibling_host() -> None:
 
                 stream = terminal.events()
                 async with stream:
-                    terminal.hand_to(SessionClaim("echo:/probe", "turn-1", "call-1"))
+                    terminal.hand_to(
+                        SessionClaim("echo:/probe", "turn-1", "call-1", chat="ahp-chat:/probe")
+                    )
                     await _settle(lambda: not terminal.held_by_us, timeout=10)
                     with pytest.raises(TerminalNotHeld):
                         terminal.write("whoami\n")
@@ -677,7 +673,9 @@ async def test_a_real_terminal_against_the_sibling_host() -> None:
                     terminal.take()
                     refusal = await asyncio.wait_for(_first_refusal(stream), 10)
                 assert refusal.mine is True
-                assert terminal.claim == SessionClaim("echo:/probe", "turn-1", "call-1")
+                assert terminal.claim == SessionClaim(
+                    "echo:/probe", "turn-1", "call-1", chat="ahp-chat:/probe"
+                )
             finally:
                 # Not claim-gated, deliberately: this is the disposal that a gate
                 # would have made impossible, and the shell would outlive us.

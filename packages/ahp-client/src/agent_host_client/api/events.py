@@ -495,8 +495,8 @@ class TurnFailed(_Base):
     def error_type(self) -> str:
         """``ErrorInfo.errorType`` -- the machine-readable half, e.g.
         ``agent.turn``. Empty for a failure this client synthesised."""
-        raw = self.action.get("error")
-        return str(raw.get("errorType", "")) if isinstance(raw, Mapping) else ""
+        raw = _error_info(self.action)
+        return str(raw.get("errorType", "")) if raw is not None else ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -592,6 +592,10 @@ _NOT_MODELLED: frozenset[str] = frozenset(
         # handle that does nothing.
         "chat/toolCallAuthRequired",
         "chat/toolCallAuthResolved",
+        # 0.9.0: a client asking the host to reopen a failed turn. When a host
+        # accepts, the turn is simply active again; a new `chat/turnComplete` or
+        # `chat/error` settles it, and those are what an observer reads.
+        "chat/turnResume",
     }
 )
 
@@ -666,10 +670,25 @@ def _tool_info(
     return tools(str(envelope.get("channel", "")), str(action.get("toolCallId", "")))
 
 
+def _error_info(action: Any) -> Mapping[str, Any] | None:
+    """A ``chat/error``'s ``ErrorInfo``, wherever the host's version put it.
+
+    0.9.0 moved it into an ``ErrorResponsePart`` (``action.part.error``); a
+    host that negotiated an earlier version still sends ``action.error``. This
+    client offers both, so it reads both -- the newer shape first.
+    """
+    if not isinstance(action, Mapping):
+        return None
+    part = action.get("part")
+    error = part.get("error") if isinstance(part, Mapping) else None
+    if not isinstance(error, Mapping):
+        error = action.get("error")
+    return error if isinstance(error, Mapping) else None
+
+
 def _error_message(envelope: Mapping[str, Any]) -> str:
-    action = envelope.get("action")
-    error = action.get("error") if isinstance(action, Mapping) else None
-    return str(error.get("message", "")) if isinstance(error, Mapping) else ""
+    error = _error_info(envelope.get("action"))
+    return str(error.get("message", "")) if error is not None else ""
 
 
 def _flatten_markdown(raw: Any) -> str:

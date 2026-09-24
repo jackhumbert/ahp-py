@@ -32,7 +32,6 @@ __all__ = [
     "AuthRequired",
     "ClientClosed",
     "Conflict",
-    "ContentNotFound",
     "InvalidArgument",
     "InvalidParams",
     "MethodNotFound",
@@ -210,10 +209,6 @@ class UnsupportedProtocolVersion(RpcError):
         return ()
 
 
-class ContentNotFound(RpcError):
-    """-32006."""
-
-
 class AuthRequired(RpcError):
     """-32007. MAY be returned from **any** command, not just session creation."""
 
@@ -271,7 +266,6 @@ _BY_CODE: Final[dict[int, type[RpcError]]] = {
     AHP_ERROR_CODES["SessionAlreadyExists"]: SessionAlreadyExists,
     AHP_ERROR_CODES["TurnInProgress"]: TurnInProgress,
     AHP_ERROR_CODES["UnsupportedProtocolVersion"]: UnsupportedProtocolVersion,
-    AHP_ERROR_CODES["ContentNotFound"]: ContentNotFound,
     AHP_ERROR_CODES["AuthRequired"]: AuthRequired,
     AHP_ERROR_CODES["NotFound"]: NotFound,
     AHP_ERROR_CODES["PermissionDenied"]: PermissionDenied,

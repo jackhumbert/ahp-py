@@ -138,7 +138,7 @@ async def test_offered_versions_default_to_what_the_pin_covers() -> None:
     offered = next(m for m in host.received if m.get("method") == "initialize")["params"][
         "protocolVersions"
     ]
-    assert offered == ["0.8.0", "0.7.0", "0.6.0"]
+    assert offered == ["0.9.0", "0.8.0", "0.7.0", "0.6.0"]
     assert set(offered) < set(UPSTREAM_SUPPORTED_PROTOCOL_VERSIONS)
     await client.shutdown()
     await host.stop()
