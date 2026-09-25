@@ -193,6 +193,9 @@ async def test_the_nodes_see_the_surfaces_own_client_id(fleet: Fleet) -> None:
 async def test_the_root_lists_each_machine_and_the_agents_it_runs(fleet: Fleet) -> None:
     async with fleet.surface() as client:
         nodes = client.root["_meta"]["agent-host-broker/nodes"]
+    # Each machine's own serverInfo rides along verbatim; the rest is the broker's.
+    for node in nodes:
+        assert node.pop("serverInfo")["name"] == "agent-host-server"
     assert nodes == [
         {
             "id": "node-a",
@@ -221,5 +224,34 @@ async def test_a_machine_label_comes_from_its_record() -> None:
         async with fleet.surface() as client:
             (node,) = client.root["_meta"]["agent-host-broker/nodes"]
         assert node["label"] == "Studio's PC"
+    finally:
+        await fleet.aclose()
+
+
+async def test_a_machines_own_config_and_server_info_ride_in_its_entry_not_the_root() -> None:
+    from agent_host_server import Host, HostInfo, LoopbackSingleUserPolicy
+    from agent_host_server.core.config import RootConfig
+    from agent_host_server.provider.echo import EchoProvider
+
+    config = RootConfig(
+        properties={"hostName": {"type": "string", "title": "Host name"}},
+        values={"hostName": "studio-box"},
+    )
+    host = Host(
+        EchoProvider(provider_id="echo"),
+        LoopbackSingleUserPolicy(),
+        info=HostInfo(name="copilotd", version="0.9.1"),
+        root_config=config,
+    )
+    fleet = Fleet({"studio": host}, [NodeRecord("studio", "mem://j", DEV)], everyone_is_a_dev)
+    try:
+        async with fleet.surface() as client:
+            (node,) = client.root["_meta"]["agent-host-broker/nodes"]
+            # The fleet advertises no settings it could not dispatch (invariant 4)...
+            assert "config" not in client.root
+        # ...but the machine's own view survives, verbatim.
+        assert node["serverInfo"] == {"name": "copilotd", "version": "0.9.1"}
+        assert node["config"] == config.to_wire()
+        assert "meta" not in node  # the sibling host sets no root _meta
     finally:
         await fleet.aclose()

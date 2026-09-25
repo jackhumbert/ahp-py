@@ -12,9 +12,12 @@ protocol's own root reducer) and derives the surface's from them:
   by its working directory (see `agent_host_broker.core.uris`).
 * `activeSessions` - the sum.
 * `terminals` - the concatenation.
-* `config` - never advertised. It is a per-host settings schema, and merging
-  two hosts' schemas into one that a `root/configChanged` could be dispatched
-  against is a capability this broker does not have (invariant 4).
+* `config` - never advertised at the root. It is a per-host settings schema,
+  and merging two hosts' schemas into one that a `root/configChanged` could be
+  dispatched against is a capability this broker does not have (invariant 4).
+  Each node's own `config` rides verbatim in its entry of the node list
+  instead (`node_details`), as information about that machine, not as a
+  capability of the fleet.
 """
 
 from __future__ import annotations
@@ -22,7 +25,30 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-__all__ = ["merge_root", "root_actions"]
+__all__ = ["merge_root", "node_details", "root_actions"]
+
+
+def node_details(handshake: Mapping[str, Any], root: Mapping[str, Any]) -> dict[str, Any]:
+    """What one node says about itself, verbatim, for its entry in the node list.
+
+    The merge keeps only what the fleet can honour as one host, so everything
+    host-specific - `serverInfo`, the root's `_meta`, its `config` - would
+    otherwise vanish behind the broker. A client that needs one machine's
+    view (a host's advertised sealing keys, its display name, its settings)
+    reads it here, and the broker implements none of it: carried, not
+    interpreted, so a node's extensions never become the broker's (invariant 3).
+    """
+    details: dict[str, Any] = {}
+    info = handshake.get("serverInfo")
+    if isinstance(info, Mapping):
+        details["serverInfo"] = dict(info)
+    meta = root.get("_meta")
+    if isinstance(meta, Mapping) and meta:
+        details["meta"] = dict(meta)
+    config = root.get("config")
+    if isinstance(config, Mapping):
+        details["config"] = dict(config)
+    return details
 
 
 def merge_root(states: Sequence[Mapping[str, Any]]) -> dict[str, Any]:

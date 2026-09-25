@@ -3,7 +3,8 @@
 import pytest
 from agent_host_protocol import REDUCERS
 
-from agent_host_broker.core.root import merge_root, root_actions
+from agent_host_broker.core.broker import Broker, jittered
+from agent_host_broker.core.root import merge_root, node_details, root_actions
 from agent_host_broker.registry import NodeRecord, Principal, StaticInventory, is_valid_node_id
 
 
@@ -24,6 +25,48 @@ def test_agents_merge_with_the_first_node_winning_a_shared_provider() -> None:
 def test_config_is_never_advertised() -> None:
     merged = merge_root([{"agents": [], "activeSessions": 0, "config": {"schema": {}}}])
     assert "config" not in merged
+
+
+def test_node_details_carry_a_hosts_extensions_verbatim() -> None:
+    # The shape copilotd 0.9.1 was observed to send: sealing keys and project
+    # management in root `_meta`, its own settings in `config`.
+    keys = [
+        {"keyId": "k1", "use": "auth-token", "algorithm": "x25519-sealedbox", "publicKey": "AA"}
+    ]
+    root = {
+        "agents": [],
+        "_meta": {"copilot.encryptionKeys": keys, "copilot.projectManagement": {"available": True}},
+        "config": {"schema": {"type": "object", "properties": {}}, "values": {"copilot": {}}},
+    }
+    handshake = {
+        "serverInfo": {"name": "copilotd", "version": "0.9.1", "title": "Copilot Host Daemon"}
+    }
+    details = node_details(handshake, root)
+    assert details == {
+        "serverInfo": handshake["serverInfo"],
+        "meta": root["_meta"],
+        "config": root["config"],
+    }
+    # Copies: a later change to the node's state must not reach a sent snapshot.
+    details["meta"]["extra"] = 1
+    assert "extra" not in root["_meta"]
+
+
+def test_node_details_leave_out_what_a_host_did_not_say() -> None:
+    assert node_details({}, {"agents": [], "_meta": {}}) == {}
+
+
+def test_redial_delay_is_spread_by_the_jitter() -> None:
+    assert jittered(10.0, 0.25, draw=lambda: 0.0) == pytest.approx(7.5)
+    assert jittered(10.0, 0.25, draw=lambda: 0.5) == pytest.approx(10.0)
+    assert jittered(10.0, 0.25, draw=lambda: 1.0) == pytest.approx(12.5)
+    assert jittered(10.0, 0.0) == 10.0
+
+
+@pytest.mark.parametrize("jitter", [-0.1, 1.0, 1.5])
+def test_a_jitter_outside_zero_to_one_is_refused(jitter: float) -> None:
+    with pytest.raises(ValueError, match="redial_jitter"):
+        Broker(StaticInventory([]), None, lambda info: None, redial_jitter=jitter)  # type: ignore[arg-type]
 
 
 def test_root_actions_reduce_the_surface_to_the_merged_state() -> None:

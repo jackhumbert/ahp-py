@@ -35,6 +35,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import random
 import uuid
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -66,7 +67,7 @@ from agent_host_broker.core.paging import (
     has_more,
     merge_pages,
 )
-from agent_host_broker.core.root import merge_root, root_actions
+from agent_host_broker.core.root import merge_root, node_details, root_actions
 from agent_host_broker.core.sequence import BrokerClock, LinkSequence
 from agent_host_broker.core.uris import (
     VIRTUAL_ROOT,
@@ -87,6 +88,18 @@ __all__ = ["Authenticator", "Broker", "BrokerInfo"]
 #: `RootState._meta` key listing the machines behind the broker (namespaced, as
 #: the spec asks of `_meta` keys; clients that do not know it ignore it).
 NODES_META_KEY = "agent-host-broker/nodes"
+
+
+def jittered(delay: float, jitter: float, draw: Callable[[], float] = random.random) -> float:
+    """`delay` spread uniformly across `delay * (1 +/- jitter)`.
+
+    A node coming back bounces every surface connected to it, and each
+    surface's reconnect re-dials every node - so without a spread, one
+    recovery lines up a reconnect from every surface at once, against the
+    whole fleet rather than only the node that recovered.
+    """
+    return delay * (1.0 + jitter * (2.0 * draw() - 1.0))
+
 
 _log = logging.getLogger(__name__)
 
@@ -135,7 +148,10 @@ class Broker:
         supported_versions: Sequence[str] = DEFAULT_SUPPORTED_VERSIONS,
         connect_timeout: float = 10.0,
         redial_backoff: tuple[float, float] = (0.5, 30.0),
+        redial_jitter: float = 0.25,
     ) -> None:
+        if not 0.0 <= redial_jitter < 1.0:
+            raise ValueError(f"redial_jitter must be in [0, 1), got {redial_jitter}")
         self.directory = directory
         self.connector = connector
         self.authenticate = authenticate
@@ -144,6 +160,8 @@ class Broker:
         self.connect_timeout = connect_timeout
         #: (first delay, ceiling) in seconds, doubling, for redialing a node.
         self.redial_backoff = redial_backoff
+        #: Each redial delay is spread across +/- this fraction (`jittered`).
+        self.redial_jitter = redial_jitter
 
     async def serve(
         self,
@@ -507,7 +525,7 @@ class _SurfaceConnection:
         record = self.records[node_id]
         delay, ceiling = self.broker.redial_backoff
         while not self.closing:
-            await asyncio.sleep(delay)
+            await asyncio.sleep(jittered(delay, self.broker.redial_jitter))
             if self.closing:
                 return
             node = await self._open(record, quiet=True)
@@ -608,6 +626,12 @@ class _SurfaceConnection:
         reads this list; `RootState._meta` is the spec's place for metadata
         about the host itself, and clients ignore keys they do not know.
 
+        A connected node's entry also carries what it says about itself -
+        `serverInfo`, its root `_meta` and `config` - verbatim (`node_details`),
+        since the merge keeps none of it. A copilotd's sealing keys are per
+        process, so they are only right if a node that restarts is re-read,
+        which the bounce below guarantees.
+
         A snapshot only: there is no root action for `_meta`. That holds
         because the list is fixed for a connection's life - admission decides
         it - and a node coming back closes the connection so it resyncs.
@@ -627,6 +651,7 @@ class _SurfaceConnection:
                     for agent in node.root.get("agents") or []
                     if isinstance(agent, Mapping) and isinstance(agent.get("provider"), str)
                 ]
+                entry.update(node_details(node.link.handshake, node.root))
             listed.append(entry)
         return listed
 

@@ -19,6 +19,17 @@ Under construction. `docs/plan.md` is the design and its §7 is the build order.
 
 ### Added
 
+- **Each machine's own view, in its node-list entry.** A connected node's
+  entry under `agent-host-broker/nodes` now also carries its `serverInfo`,
+  its root `_meta` (as `meta`) and its root `config`, verbatim. The merge
+  keeps none of these - `config` is still never advertised at the root
+  (invariant 4) - so a host's extensions (a copilotd's per-process sealing
+  keys in `_meta.copilot.encryptionKeys`, its host name and projects in
+  `config.values.copilot`) previously vanished behind the broker. Carried,
+  not interpreted.
+- **Jitter on node redial.** `Broker(redial_jitter=0.25)` spreads each redial
+  delay across +/- that fraction, so one node's recovery does not bounce
+  every surface into reconnecting against every node at the same instant.
 - **The machines behind the broker, in `RootState._meta`.** Under
   `agent-host-broker/nodes`, one entry per admitted node: `id`, `label` (the
   record's `metadata["label"]`, else the id), `folder` (`ahp-file:///<id>/`),

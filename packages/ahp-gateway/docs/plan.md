@@ -210,7 +210,9 @@ state, and a surface can reconnect to a different broker instance.
 
 **Node recovery: redial, then bounce.** A node whose link drops, or that was
 unreachable at the handshake, is redialed in the background with doubling
-backoff (`Broker(redial_backoff=(first, ceiling))`). While it is gone its
+backoff (`Broker(redial_backoff=(first, ceiling))`), each delay spread by
++/-25% (`redial_jitter`) so one recovery does not line up every surface's
+reconnect against the whole fleet at once. While it is gone its
 agents leave the merged root and requests for its channels are refused as
 "not connected", never rerouted to another node. When it answers again, the
 broker closes the surface's connection on purpose. The surface's own
