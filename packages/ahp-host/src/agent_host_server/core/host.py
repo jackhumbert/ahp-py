@@ -1229,6 +1229,8 @@ class Host:
                 # because a turn nothing is running is not active.
                 restored_state.pop("activeTurn", None)
                 session.chat_uris.add(uri)
+            elif uri == stored.uri:
+                await self._refresh_config_schema(stored.provider, restored_state)
             await self.sequencer.register_channel(uri, restored_state, reducer)
 
         session.publisher = _Publisher(self, session, None)
@@ -1240,6 +1242,37 @@ class Host:
         )
         session.published_summary = self._project_summary(session)
         return session
+
+    async def _refresh_config_schema(self, provider_id: str, state: dict[str, Any]) -> None:
+        """Describe a restored session's config as the provider does now.
+
+        The schema is stored with the session, so a provider that has since
+        made a property `sessionMutable` (or relabelled it) would otherwise
+        never be believed for sessions that existed before. Only properties
+        the session already has are updated; the values are kept.
+        """
+        config = state.get("config")
+        if not isinstance(self.provider, ConfiguresSessions) or not isinstance(config, Mapping):
+            return
+        schema = config.get("schema")
+        if not isinstance(schema, Mapping):
+            return
+        properties = schema.get("properties")
+        values = config.get("values")
+        if not isinstance(properties, Mapping):
+            return
+        try:
+            fresh = await self.provider.resolve_config(
+                ConfigRequest(
+                    provider=provider_id,
+                    values=dict(values) if isinstance(values, Mapping) else {},
+                )
+            )
+        except Exception:
+            _log.exception("could not refresh the config schema of a restored session")
+            return
+        updated = {key: dict(fresh.properties.get(key, prop)) for key, prop in properties.items()}
+        state["config"] = {**config, "schema": {**schema, "properties": updated}}
 
     async def _persist(self, session: _Session) -> None:
         """Write a session's channels to the store, debounced.

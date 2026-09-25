@@ -26,6 +26,9 @@ versions each release speaks.
   and resumes a restored session's agent on its first turn with its stored
   resume state and the config values its state holds now. The echo agent is
   resumable.
+- A restored session's config schema is refreshed from the provider, keeping
+  its values, so a property made `sessionMutable` (or relabelled) since the
+  session was created becomes changeable on old sessions too.
 - On Windows the host silently dropped every working directory a client picked
   under the served root (and fell back to the root itself): its check compared
   POSIX paths, so `G:\llm\proj` was never "under" `G:\llm`. Jails now answer

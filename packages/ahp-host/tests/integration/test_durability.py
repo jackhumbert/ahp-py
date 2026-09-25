@@ -10,6 +10,7 @@ leaves it permanently ahead and unable to replay for the life of the host.
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
 from typing import Any
 
@@ -315,3 +316,43 @@ class TestRestart:
             assert not list(tmp_path.iterdir())
         finally:
             await host.aclose()
+
+
+class TestRestoredConfigSchema:
+    async def test_a_restored_session_is_described_by_the_provider_as_it_is_now(
+        self, tmp_path: Path
+    ) -> None:
+        """A property the provider has since made `sessionMutable` must become
+        changeable on sessions created before, while keeping their values."""
+        first = _host(tmp_path, configurable=True)
+        uri = "echo:/durable-schema"
+        try:
+            client = await _client(first)
+            await client.request(
+                "createSession",
+                {"channel": uri, "provider": "echo", "config": {"style": "shout"}},
+            )
+            await client.collect(seconds=0.3)
+        finally:
+            await first.aclose()
+
+        # Simulate an older provider having stored `prefix` as creation-time only.
+        stored = next((tmp_path / "sessions").glob("*.json"))
+        data = json.loads(stored.read_text())
+        for channel in data["channels"].values():
+            props = channel.get("config", {}).get("schema", {}).get("properties", {})
+            if "prefix" in props:
+                props["prefix"].pop("sessionMutable", None)
+        stored.write_text(json.dumps(data))
+
+        second = _host(tmp_path, configurable=True)
+        try:
+            assert await second.restore() == 1
+            client = await _client(second)
+            state = (await client.request("subscribe", {"channel": uri}))["result"]["snapshot"][
+                "state"
+            ]
+            assert state["config"]["schema"]["properties"]["prefix"]["sessionMutable"] is True
+            assert state["config"]["values"]["style"] == "shout"
+        finally:
+            await second.aclose()
