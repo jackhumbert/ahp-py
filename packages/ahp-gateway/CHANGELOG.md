@@ -17,6 +17,14 @@ Under construction. `docs/plan.md` is the design and its §7 is the build order.
 - A shared provider id across nodes is one agent offering every node's models;
   the working directory picks the node.
 
+### Fixed
+
+- **`authenticate` works with more than one node.** It names only a resource,
+  so the broker refused it ("cannot tell which node authenticate is for"),
+  leaving an agent that signs in through it (VS Code's Copilot) unusable in a
+  fleet. It now goes to every node whose agents advertise that resource, or to
+  every node when none does, and succeeds if any accepts.
+
 ### Added
 
 - **The multiplexer** (`agent_host_broker.core.Broker`): one AHP endpoint for

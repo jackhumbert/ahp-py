@@ -207,3 +207,55 @@ async def test_what_the_owner_streams_while_being_probed_is_not_lost() -> None:
     # Only the node that does not have the channel is unsubscribed.
     assert owner.notified == []
     assert other.notified == [("unsubscribe", {"channel": "ch"})]
+
+
+class AnsweringLink(ScriptedLink):
+    """A node link that answers `authenticate` at once, taking only `accepts`."""
+
+    def __init__(self, node_id: str, accepts: str | None = None) -> None:
+        super().__init__(node_id)
+        self.accepts = accepts
+        self.asked: list[str] = []
+
+    async def request(self, method: str, params: Mapping[str, Any]) -> Any:
+        self.asked.append(method)
+        if params.get("resource") != self.accepts:
+            raise AhpError(-32602, f"{self.node_id} does not protect {params.get('resource')}")
+        return {}
+
+
+def protecting(resource: str) -> dict[str, Any]:
+    return {"agents": [{"provider": "copilot", "protectedResources": [{"resource": resource}]}]}
+
+
+async def test_a_token_goes_only_to_the_nodes_whose_agents_ask_for_it() -> None:
+    conn = connection()
+    wants, other = AnsweringLink("vscode", accepts="https://api.github.com"), AnsweringLink("mac")
+    attach(conn, wants, set()).root = protecting("https://api.github.com")
+    attach(conn, other, set())
+    params = {"channel": "ahp-root://", "resource": "https://api.github.com", "token": "t"}
+    assert await conn._dispatch("authenticate", params, []) == {}
+    assert wants.asked == ["authenticate"]
+    assert other.asked == [], "a node that never asked for the token must not be handed it"
+
+
+async def test_a_token_no_agent_advertises_is_offered_to_every_node() -> None:
+    # A challenge raised live (an MCP server, a tool call) is not in any
+    # agent's advertised resources; only the node that raised it takes it.
+    conn = connection()
+    raised, other = AnsweringLink("a", accepts="mcp:server"), AnsweringLink("b")
+    attach(conn, raised, set())
+    attach(conn, other, set())
+    params = {"channel": "ahp-root://", "resource": "mcp:server", "token": "t"}
+    assert await conn._dispatch("authenticate", params, []) == {}
+    assert raised.asked == ["authenticate"]
+    assert other.asked == ["authenticate"]
+
+
+async def test_a_token_every_node_refuses_is_refused() -> None:
+    conn = connection()
+    attach(conn, AnsweringLink("a"), set())
+    attach(conn, AnsweringLink("b"), set())
+    params = {"channel": "ahp-root://", "resource": "nobody", "token": "t"}
+    with pytest.raises(AhpError, match="does not protect"):
+        await conn._dispatch("authenticate", params, [])

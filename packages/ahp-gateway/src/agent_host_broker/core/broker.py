@@ -338,6 +338,8 @@ class _SurfaceConnection:
             return await self._create_session(params)
         if method.startswith("resource") and is_virtual_root(params.get("uri")):
             return self._virtual_root(method)
+        if method == "authenticate":
+            return await self._authenticate(params)
         node_id = self._route(params)
         if node_id is None and method in _SESSION_CONFIG_METHODS:
             # Asked before a folder is chosen: the default node answers, and
@@ -736,6 +738,42 @@ class _SurfaceConnection:
         if len(self.nodes) == 1:
             return next(iter(self.nodes))
         raise invalid_params("createSession needs a provider or a working directory")
+
+    async def _authenticate(self, params: Mapping[str, Any]) -> Any:
+        """Hand a token to every node that could want it.
+
+        `authenticate` rides the root channel and names only a resource, so
+        nothing in it picks a node. It goes to each node whose agents
+        advertise that resource; when none does (a challenge raised live, by
+        an MCP server or a tool call), to every connected node, since the one
+        that raised it will take the token and the rest refuse it. It succeeds
+        if any node accepts, and fails with the first refusal if none does.
+        """
+        resource = params.get("resource")
+        targets = [
+            node_id
+            for node_id, node in self.nodes.items()
+            if any(
+                isinstance(agent, Mapping)
+                and any(
+                    isinstance(meta, Mapping) and meta.get("resource") == resource
+                    for meta in agent.get("protectedResources") or []
+                )
+                for agent in node.root.get("agents") or []
+            )
+        ] or list(self.nodes)
+        if not targets:
+            raise AhpError(-32603, "no node is connected")
+        outcomes = await asyncio.gather(
+            *(self._call(node_id, "authenticate", params) for node_id in targets),
+            return_exceptions=True,
+        )
+        for outcome in outcomes:
+            if not isinstance(outcome, BaseException):
+                return outcome
+        first = outcomes[0]
+        assert isinstance(first, BaseException)
+        raise first
 
     def _nodes_offering(self, provider: str) -> list[str]:
         return [
