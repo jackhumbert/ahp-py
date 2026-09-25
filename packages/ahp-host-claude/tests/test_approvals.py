@@ -203,7 +203,8 @@ async def test_the_mode_can_change_mid_session(tmp_path: Path) -> None:
     assert session.approvals == "auto"
     assert clients[0].permission_modes == ["auto"]
     saved = await provider.resume_state_of(session)
-    assert saved is not None and saved["permissionMode"] == "auto"
+    assert saved is not None
+    assert saved["permissionMode"] == "auto"
 
     # Back to Ask: the gate asks for everything again.
     await session.config_changed({"permissionMode": "default"})
