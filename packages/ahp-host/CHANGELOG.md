@@ -12,6 +12,14 @@ versions each release speaks.
 
 ### Added
 
+- `TurnSink.tool_call_confirmed(call_id, approved=, reason_message=)`: for an
+  agent that puts the same approval to this host and to somewhere else (Claude
+  Code under Remote Control asks a phone too). When the other side answers
+  first, the provider cancels its `confirm_tool_call` and reports the answer
+  here; the host withdraws the prompt and its `session/inputNeeded` entry and
+  publishes `chat/toolCallConfirmed`. Before, every client kept an approval
+  prompt for a call that was already running until the turn ended. A no-op if
+  a client here answered first.
 - One host can serve several agents: `Host` takes a list of providers as well
   as one. `RootState.agents` lists them all, in order; each session is served
   by the agent it was created with; the first is the default, both for a

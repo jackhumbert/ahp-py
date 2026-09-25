@@ -13,6 +13,7 @@ the client reports the result. That gives an agent the editor's own tools with
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -22,7 +23,7 @@ from agent_host_protocol.transport import memory_pair
 
 from agent_host_server.core import Host, LoopbackSingleUserPolicy
 from agent_host_server.provider import EchoProvider
-from agent_host_server.provider.base import TurnSink, UserMessage
+from agent_host_server.provider.base import ToolConfirmation, TurnSink, UserMessage
 
 from .test_host_end_to_end import FakeClient
 
@@ -803,3 +804,129 @@ class TestMalformedToolCallActions:
         # back, which is the whole damage this check exists to prevent.
         assert len(host.pending) == 1
         assert _tool_call(host, chat_uri)["status"] == "pending-confirmation"
+
+
+class _AskedTwice(EchoProvider):
+    """An agent that asks here AND somewhere this host cannot see.
+
+    Claude Code under Remote Control is the real one: it puts the same
+    approval to the host and to a phone, and whichever answers first wins.
+    `elsewhere` is the phone; setting it means the other side answered.
+    """
+
+    def __init__(self, elsewhere: asyncio.Event, *, approved: bool = True) -> None:
+        super().__init__()
+        self.elsewhere = elsewhere
+        self.approved = approved
+
+    async def create_session(self, context: Any) -> Any:
+        session = await super().create_session(context)
+        provider = self
+
+        async def run(message: UserMessage, sink: TurnSink) -> None:
+            await sink.tool_call_started("call-1", "write", {"path": "a"}, display_name="Write")
+            ask = asyncio.create_task(
+                sink.confirm_tool_call(
+                    ToolConfirmation(
+                        call_id="call-1",
+                        name="write",
+                        display_name="Write",
+                        invocation_message="Write a",
+                        tool_input={"path": "a"},
+                    )
+                )
+            )
+            other = asyncio.create_task(provider.elsewhere.wait())
+            await asyncio.wait({ask, other}, return_when=asyncio.FIRST_COMPLETED)
+            other.cancel()
+            if not ask.done():
+                ask.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await ask
+            await sink.tool_call_confirmed(
+                "call-1", approved=provider.approved, reason_message="Declined on a phone"
+            )
+            if provider.approved:
+                await sink.tool_call_completed("call-1", past_tense_message="Wrote a")
+
+        session.send_user_message = run  # type: ignore[method-assign]
+        return session
+
+
+class TestConfirmedElsewhere:
+    """`tool_call_confirmed`: the prompt is withdrawn when another place answers."""
+
+    async def _run(self, provider: _AskedTwice, uri: str) -> tuple[Host, FakeClient, str, str]:
+        host = Host(provider, LoopbackSingleUserPolicy())
+        client = await _attach(host, "solo")
+        session_uri, chat_uri = await _session(host, client, uri)
+        await _send(client, chat_uri)
+        await _parked_for_confirmation(host, client, chat_uri)
+        return host, client, session_uri, chat_uri
+
+    async def test_an_approval_elsewhere_withdraws_the_prompt(self) -> None:
+        elsewhere = asyncio.Event()
+        host, client, session_uri, chat_uri = await self._run(
+            _AskedTwice(elsewhere), "echo:/elsewhere-1"
+        )
+        try:
+            assert _input_needed(host, session_uri), "the prompt was never shown"
+            elsewhere.set()
+            await _turn_over(client, chat_uri)
+
+            assert _input_needed(host, session_uri) == [], "clients still show the prompt"
+            assert len(host.pending) == 0
+            call = _tool_call(host, chat_uri)
+            assert call["status"] == "completed"
+            assert call["confirmed"] == "user-action"
+        finally:
+            await host.aclose()
+
+    async def test_a_denial_elsewhere_cancels_the_call(self) -> None:
+        elsewhere = asyncio.Event()
+        host, client, session_uri, chat_uri = await self._run(
+            _AskedTwice(elsewhere, approved=False), "echo:/elsewhere-2"
+        )
+        try:
+            elsewhere.set()
+            await _turn_over(client, chat_uri)
+
+            assert _input_needed(host, session_uri) == []
+            call = _tool_call(host, chat_uri)
+            assert call["status"] == "cancelled"
+            assert call["reason"] == "denied"
+            assert call["reasonMessage"] == "Declined on a phone"
+        finally:
+            await host.aclose()
+
+    async def test_a_client_answering_first_is_not_overwritten(self) -> None:
+        """The provider reports regardless; the host must not publish a second answer."""
+        host, client, _, chat_uri = await self._run(
+            _AskedTwice(asyncio.Event(), approved=False), "echo:/elsewhere-3"
+        )
+        try:
+            await client.notify(
+                "dispatchAction",
+                {
+                    "channel": chat_uri,
+                    "clientSeq": 2,
+                    "action": {
+                        "type": "chat/toolCallConfirmed",
+                        "turnId": "t1",
+                        "toolCallId": "call-1",
+                        "approved": True,
+                        "confirmed": "user-action",
+                    },
+                },
+            )
+            await _turn_over(client, chat_uri)
+
+            confirmations = [
+                envelope
+                for envelope in client.actions(chat_uri)
+                if envelope["action"]["type"] == "chat/toolCallConfirmed"
+            ]
+            assert len(confirmations) == 1
+            assert confirmations[0]["action"]["approved"] is True, "the client's answer was lost"
+        finally:
+            await host.aclose()

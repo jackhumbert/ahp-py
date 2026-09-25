@@ -22,7 +22,7 @@ from typing import Any, Final
 
 from agent_host_protocol.types import IS_CLIENT_DISPATCHABLE
 
-from agent_host_server.core.pending import PendingRequest, PendingRequests
+from agent_host_server.core.pending import PendingRequest, PendingRequests, RequestOutcome
 from agent_host_server.core.sequencer import Sequencer
 from agent_host_server.provider.base import (
     AgentSession,
@@ -45,6 +45,9 @@ __all__ = ["ActionTurnSink", "TurnRunner", "tool_call_dispatch_rejection", "turn
 #: activity changes at most once per tool call, and the session list is the only
 #: place it renders.
 SessionChanged = Callable[[], Awaitable[None]]
+
+#: A reduced tool call's status while it waits for approval.
+_PENDING_CONFIRMATION: Final = "pending-confirmation"
 
 
 #: The tool-call actions a client may originate. DERIVED from the generated
@@ -721,6 +724,50 @@ class ActionTurnSink:
         edited = _decoded_tool_input(payload.get("toolInput", call.tool_input))
         return ToolConfirmationOutcome(approved=outcome.response == "accept", tool_input=edited)
 
+    async def tool_call_confirmed(
+        self, call_id: str, *, approved: bool, reason_message: str | None = None
+    ) -> None:
+        """A confirmation was answered somewhere clients here cannot see.
+
+        An agent driven from two places at once (Claude Code under Remote
+        Control) asks both, and withdraws the question here when the other one
+        answers -- by cancelling its own `confirm_tool_call`. That cancellation
+        leaves the park in place on purpose: a cancelled *turn* goes through
+        the same `CancelledError`, and only the provider knows which it was.
+        This is the provider saying so, and what the other side answered.
+
+        Without it every client keeps showing an approval prompt for a call
+        that is already running, and the session stays `InputNeeded` until the
+        turn ends.
+        """
+        request_id = self._pending.id_for_key(call_id, channel=self._channel)
+        request = self._pending.get(request_id) if request_id is not None else None
+        if request is not None and request.kind == "confirm":
+            # The provider's await is already gone; resolving only discards the
+            # park, so a client answering the stale prompt finds nothing to hit.
+            self._pending.resolve(
+                request.id, RequestOutcome(response="accept" if approved else "decline")
+            )
+            await self._retract_input_needed(request.id)
+        tool_call = self._tool_call_state(call_id)
+        if tool_call is None or tool_call.get("status") != _PENDING_CONFIRMATION:
+            # A client answered first, or the call never asked: the reducer
+            # would drop the frame, and a dropped frame still costs a serverSeq.
+            return
+        action: dict[str, Any] = {
+            "type": "chat/toolCallConfirmed",
+            "turnId": self._turn_id,
+            "toolCallId": call_id,
+            "approved": approved,
+        }
+        if approved:
+            action["confirmed"] = "user-action"
+        else:
+            action["reason"] = "denied"
+            if reason_message is not None:
+                action["reasonMessage"] = reason_message
+        await self._sequencer.publish(self._channel, action)
+
     async def request_authentication(self, call_id: str, challenge: AuthChallenge) -> None:
         """Pause a tool call on an auth challenge, and suspend until it clears.
 
@@ -925,6 +972,16 @@ class ActionTurnSink:
                 "request": {**request, "id": request_id, "chat": self._channel},
             },
         )
+
+    async def _retract_input_needed(self, request_id: str) -> None:
+        """Take back one `session/inputNeeded` entry, and re-mirror the summary."""
+        if self._session_uri is None:
+            return
+        await self._sequencer.publish(
+            self._session_uri, {"type": "session/inputNeededRemoved", "id": request_id}
+        )
+        if self._session_changed is not None:
+            await self._session_changed()
 
 
 def _elapsed_ms(started_at: float) -> int:

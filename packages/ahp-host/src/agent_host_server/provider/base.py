@@ -706,6 +706,18 @@ class TurnSink(Protocol):
         """
         ...
 
+    async def tool_call_confirmed(
+        self, call_id: str, *, approved: bool, reason_message: str | None = None
+    ) -> None:
+        """Report that a confirmation was answered outside this host.
+
+        For an agent that is also driven from somewhere else: it asked both
+        places, the other one answered, and it cancelled its own
+        `confirm_tool_call`. This withdraws the prompt from every client and
+        records the answer. A no-op if a client here answered first.
+        """
+        ...
+
     async def request_authentication(self, call_id: str, challenge: AuthChallenge) -> None:
         """Pause a running tool call until a client pushes a credential. Suspends.
 
