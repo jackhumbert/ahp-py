@@ -40,6 +40,16 @@ async def host() -> AsyncIterator[Host]:
 
 
 @pytest.fixture
+async def slow() -> AsyncIterator[Host]:
+    """Replies slowly enough that a client can steer mid-turn."""
+    made = Host(EchoProvider(delay=0.3), LoopbackSingleUserPolicy())
+    try:
+        yield made
+    finally:
+        await made.aclose()
+
+
+@pytest.fixture
 async def tooled() -> AsyncIterator[Host]:
     made = Host(EchoProvider(confirm_tools=True), LoopbackSingleUserPolicy())
     try:
@@ -320,32 +330,58 @@ class TestQueuedMessages:
         assert "alpha" in str(ran[0])
         assert "bravo" in str(ran[1])
 
-    async def test_a_steering_message_is_left_alone(self, host: Host) -> None:
-        """Steering is injected into the RUNNING turn, which needs a provider
-        that can take it mid-flight. Consuming it as if it were queued would
-        run it as its own turn, which is not what the user asked for."""
-        client = await _client(host)
-        chat = await _session(host, client, "echo:/q-5")
-
+    async def _steer(self, client: FakeClient, chat: str, id_: str, text: str, seq: int) -> None:
         await client.notify(
             "dispatchAction",
             {
                 "channel": chat,
-                "clientSeq": 1,
+                "clientSeq": seq,
                 "action": {
                     "type": "chat/pendingMessageSet",
                     "kind": "steering",
-                    "id": "s1",
-                    "message": {"text": "actually, stop", "origin": {"kind": "user"}},
+                    "id": id_,
+                    "message": {"text": text, "origin": {"kind": "user"}},
                 },
             },
         )
-        # Fixed on purpose: "left alone" is a negative claim. Returning as soon
-        # as the steering message appears would pass even against the bug this
-        # guards -- consuming it a moment later and running it as its own turn.
-        await client.collect(seconds=0.5)
 
-        assert _state(host, chat)["steeringMessage"]["id"] == "s1"
+    async def test_a_steering_message_joins_the_running_turn(self, slow: Host) -> None:
+        """Steering is injected into the RUNNING turn: answered there, noted in
+        the transcript, and removed from the chat's pending slot -- not run as
+        a turn of its own."""
+        client = await _client(slow)
+        chat = await _session(slow, client, "echo:/q-5")
+
+        await _turn(client, chat, text="first")
+        await client.collect(seconds=0.05)
+        await self._steer(client, chat, "s1", "and bananas", 2)
+        await _completed(client, chat)
+
+        state = _state(slow, chat)
+        assert state.get("steeringMessage") is None, "the steering message was never consumed"
+        assert len(state["turns"]) == 1, "steering ran as a turn of its own"
+        parts = state["turns"][0]["responseParts"]
+        notes = [p for p in parts if p.get("kind") == "systemNotification"]
+        assert notes, parts
+        assert notes[0]["content"] == "and bananas"
+        assert notes[0]["_meta"] == {"steering": True}
+        assert "You also said: and bananas" in str(parts)
+        removals = [a for a in _actions(client, chat) if a["type"] == "chat/pendingMessageRemoved"]
+        assert [(a["kind"], a["id"]) for a in removals] == [("steering", "s1")]
+
+    async def test_a_steering_message_on_an_idle_chat_runs_next(self, host: Host) -> None:
+        """No turn to join (it ended first, or the agent cannot be steered):
+        it is still the user's message, so it runs rather than sitting in the
+        chat forever."""
+        client = await _client(host)
+        chat = await _session(host, client, "echo:/q-6")
+
+        await self._steer(client, chat, "s1", "actually, this", 1)
+        await _completed(client, chat)
+
+        state = _state(host, chat)
+        assert state.get("steeringMessage") is None
+        assert any("actually, this" in str(turn) for turn in state["turns"])
 
 
 class TestUsage:

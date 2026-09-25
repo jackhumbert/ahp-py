@@ -506,6 +506,22 @@ class HandlesCustomizations(Protocol):
 
 
 @runtime_checkable
+class SteersTurns(Protocol):
+    """An agent session that can take a message into a turn already running.
+
+    A client "steers" by setting a chat's steering message
+    (`chat/pendingMessageSet` with kind `steering`) while a turn is active.
+    The host offers it here; returning ``True`` means the agent took it and
+    will answer it within the current turn, and the host then removes it from
+    the chat and notes it in the transcript. ``False`` (not mid-turn, not
+    possible right now) leaves it pending, and the host runs it as the next
+    turn once the chat is idle.
+    """
+
+    async def steer(self, chat_uri: str, message: UserMessage) -> bool: ...
+
+
+@runtime_checkable
 class ReconfiguresSessions(Protocol):
     """An agent session that follows its config changing after creation.
 

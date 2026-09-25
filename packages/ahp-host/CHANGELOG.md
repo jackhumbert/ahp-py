@@ -12,6 +12,12 @@ versions each release speaks.
 
 ### Added
 
+- Steering: `SteersTurns.steer(chat_uri, message) -> bool` offers a chat's
+  steering message to the turn already running. Taken, it is removed from the
+  chat and noted in the transcript as a `systemNotification` part with
+  `_meta.steering`; not taken, or set while idle, it runs as the next turn
+  (ahead of queued messages) instead of sitting in the chat forever. The echo
+  agent can be steered while it streams.
 - Sessions that live somewhere else can be mirrored here. `Host.open_session`
   lists and serves a session no client created (its agent comes from
   `resume_session`, and it persists and restores like any other);

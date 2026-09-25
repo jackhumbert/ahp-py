@@ -113,6 +113,7 @@ from agent_host_server.provider.base import (
     ReconfiguresSessions,
     ResumableAgentProvider,
     SessionPublisher,
+    SteersTurns,
     TruncatesHistory,
     TurnSink,
     UserMessage,
@@ -883,6 +884,8 @@ class _Session:
     #: `duration` is required on every terminal chat action, and the hardcoded
     #: zero it would otherwise carry renders as an instantaneous turn.
     turn_started: dict[str, float] = field(default_factory=dict)
+    #: The runner of each chat's turn in flight, for steering into it.
+    runners: dict[str, TurnRunner] = field(default_factory=dict)
     meta: dict[str, Any] = field(default_factory=dict)
     #: The summary the root channel was last told about. `root/sessionSummaryChanged`
     #: carries only fields that changed, so the host has to remember what it sent.
@@ -5260,6 +5263,7 @@ class Host:
                 lambda: self._mirror_summary(session),
                 self._advertise_resource,
             )
+            session.runners[channel] = runner
             task = asyncio.create_task(self._run_turn(session, runner, action, agent))
         session.turns[channel] = task
         session.turn_started[channel] = time.monotonic()
@@ -5386,9 +5390,18 @@ class Host:
         finishes -- because "idle" is a race either way round.
         """
         state = self.sequencer.state_of(channel)
-        if not isinstance(state, Mapping) or state.get("activeTurn") is not None:
+        if not isinstance(state, Mapping):
             return
+        steering = state.get("steeringMessage")
+        if state.get("activeTurn") is not None:
+            if isinstance(steering, Mapping):
+                await self._steer(session, channel, steering)
+            return
+        # Idle: a steering message the turn never took (it ended first, or the
+        # agent can't be steered) runs next, ahead of the queue.
         queued = state.get("queuedMessages")
+        if isinstance(steering, Mapping):
+            queued = [{**steering, "_kind": "steering"}]
         if not isinstance(queued, list) or not queued:
             return
         entry = queued[0]
@@ -5404,7 +5417,11 @@ class Host:
         # turn ended would race the next drain and run it twice.
         await self.sequencer.publish(
             channel,
-            {"type": "chat/pendingMessageRemoved", "kind": "queued", "id": entry.get("id")},
+            {
+                "type": "chat/pendingMessageRemoved",
+                "kind": "steering" if entry.get("_kind") == "steering" else "queued",
+                "id": entry.get("id"),
+            },
         )
         started = {
             "type": "chat/turnStarted",
@@ -5420,6 +5437,36 @@ class Host:
         # it a second time.
         await self.sequencer.publish(channel, started)
         await self._start_turn(session, channel, started)
+
+    async def _steer(self, session: _Session, channel: str, entry: Mapping[str, Any]) -> None:
+        """Offer a steering message to the turn running on *channel*.
+
+        Taken, it leaves the chat's pending slot and is noted in the transcript;
+        not taken, it stays, and `_drain_queue` runs it once the chat is idle.
+        """
+        message = entry.get("message")
+        runner = session.runners.get(channel)
+        if (
+            not isinstance(message, Mapping)
+            or not isinstance(session.agent_session, SteersTurns)
+            or runner is None
+            or runner.sink is None
+        ):
+            return
+        text = message.get("text")
+        text = text if isinstance(text, str) else ""
+        try:
+            taken = await session.agent_session.steer(channel, UserMessage(text=text, raw=message))
+        except Exception:
+            _log.exception("steering %s failed", channel)
+            return
+        if not taken:
+            return
+        await self.sequencer.publish(
+            channel,
+            {"type": "chat/pendingMessageRemoved", "kind": "steering", "id": entry.get("id")},
+        )
+        await runner.sink.steered(text)
 
     async def _seed_title(self, session: _Session, channel: str, action: Mapping[str, Any]) -> None:
         """Name a still-unnamed session after the message that started it.
@@ -5563,6 +5610,8 @@ class Host:
             # starts the NEXT turn, and starting it from inside the finally of
             # the turn it follows would make this chat's slot overwrite itself
             # while this frame still owns it.
+            if session.runners.get(runner.channel) is runner:
+                del session.runners[runner.channel]
             self._spawn(self._drain_queue(session, runner.channel))
             with contextlib.suppress(Exception):
                 await self._mirror_summary(session)

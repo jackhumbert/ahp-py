@@ -182,6 +182,31 @@ class ActionTurnSink:
         #: `_ensure_runnable`.
         self._streaming: dict[str, _StreamingCall] = {}
 
+    async def steered(self, text: str) -> None:
+        """Note in the transcript that the user steered this turn.
+
+        A `systemNotification` part marked ``_meta.steering`` (clients that
+        don't know the key still show the text), and a segment boundary, so
+        whatever the agent says next starts below it rather than continuing a
+        part above.
+        """
+        await self._sequencer.publish(
+            self._channel,
+            {
+                "type": "chat/responsePart",
+                "turnId": self._turn_id,
+                "part": {
+                    "kind": "systemNotification",
+                    "id": str(uuid.uuid4()),
+                    "content": text,
+                    "_meta": {"steering": True},
+                },
+            },
+        )
+        self._segment = None
+        self._markdown_part_id = None
+        self._reasoning_part_id = None
+
     def _open_segment(self, kind: str) -> None:
         """Start a new response part when the kind of output changes.
 

@@ -147,8 +147,22 @@ class EchoSession:
         #: `sessionMutable` values changed after creation (`prefix`), which
         #: win over the creation-time config.
         self.config_overrides: dict[str, Any] = {}
+        #: Messages steered into the running turn, echoed before it ends.
+        self.steered: list[str] = []
+        self._turn_running = False
         #: `(chat, turnId)` for every truncation, same purpose.
         self.truncated: list[tuple[str, str | None]] = []
+
+    async def steer(self, chat_uri: str, message: UserMessage) -> bool:
+        """Take a message into a running turn: its text is echoed at the end.
+
+        Only while a turn is streaming (``--delay``), which is when a client
+        can steer at all.
+        """
+        if not self._turn_running:
+            return False
+        self.steered.append(message.text)
+        return True
 
     async def config_changed(self, values: Mapping[str, Any]) -> None:
         """A client changed `prefix` mid-session; later replies use it."""
@@ -168,7 +182,14 @@ class EchoSession:
 
     async def send_user_message(self, message: UserMessage, sink: TurnSink) -> None:
         self._cancelled = False
-        await self._reply(message, sink)
+        self._turn_running = True
+        try:
+            await self._reply(message, sink)
+            # Anything steered in while replying is answered in the same turn.
+            while self.steered and not self._cancelled:
+                await sink.text_delta(f" You also said: {self.steered.pop(0)}")
+        finally:
+            self._turn_running = False
         # After a normal return, deliberately NOT in a `finally`: a cancelled
         # turn cannot be relied on to finish another await, and usage for a turn
         # the user stopped is a nicety.
