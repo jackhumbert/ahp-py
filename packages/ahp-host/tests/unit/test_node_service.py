@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import plistlib
 import sys
-import time
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
