@@ -10,8 +10,22 @@ versions each release speaks.
 
 ## [Unreleased]
 
+### Added
+
+- `ReconfiguresSessions.config_changed(values)`: a session hears about a
+  `sessionMutable` property a client changed mid-session
+  (`session/configChanged`), after the host validated and applied it. The
+  echo agent's `prefix` now actually changes its replies.
+
 ### Fixed
 
+- Restored sessions could never take a turn: the host did not resume their
+  agents (every turn failed `provider.resumeSession`) and never asked a
+  `ResumableAgentProvider` for its resume state, so nothing was stored to
+  resume from. It now captures `resume_state_of` whenever it saves a session,
+  and resumes a restored session's agent on its first turn with its stored
+  resume state and the config values its state holds now. The echo agent is
+  resumable.
 - On Windows the host silently dropped every working directory a client picked
   under the served root (and fell back to the root itself): its check compared
   POSIX paths, so `G:\llm\proj` was never "under" `G:\llm`. Jails now answer

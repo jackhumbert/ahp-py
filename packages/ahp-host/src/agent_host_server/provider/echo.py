@@ -14,6 +14,7 @@ from typing import Any, Final
 
 from agent_host_server.provider.base import (
     AgentInfo,
+    AgentSession,
     AgentSessionContext,
     ClientToolCall,
     CompletionItem,
@@ -143,8 +144,15 @@ class EchoSession:
         self._cancelled = False
         #: What a client has toggled, for tests and for the demo host's log.
         self.toggled: dict[str, bool] = {}
+        #: `sessionMutable` values changed after creation (`prefix`), which
+        #: win over the creation-time config.
+        self.config_overrides: dict[str, Any] = {}
         #: `(chat, turnId)` for every truncation, same purpose.
         self.truncated: list[tuple[str, str | None]] = []
+
+    async def config_changed(self, values: Mapping[str, Any]) -> None:
+        """A client changed `prefix` mid-session; later replies use it."""
+        self.config_overrides.update(values)
 
     async def describe(self) -> SessionDescription:
         """Contribute a fully-populated customization tree, when asked to.
@@ -222,7 +230,7 @@ class EchoSession:
         # Whatever the client settled on during `resolveSessionConfig` arrives
         # here, so the configuration is observably load-bearing rather than
         # decorative.
-        prefix = self.context.config.get("prefix")
+        prefix = self.config_overrides.get("prefix", self.context.config.get("prefix"))
         prefix = prefix if isinstance(prefix, str) else "You said:"
         text = message.text.upper() if self.context.config.get("style") == "shout" else message.text
         for chunk in (f"{prefix} ", text):
@@ -506,6 +514,14 @@ class EchoProvider:
             for name in ("readme.md", "recipe.txt")
             if name.startswith(typed)
         ]
+
+    async def resume_session(self, context: AgentSessionContext) -> EchoSession:
+        """A restored session: echo keeps nothing but its config, which the
+        host passes back from the session's state."""
+        return await self.create_session(context)
+
+    async def resume_state_of(self, session: AgentSession) -> Mapping[str, Any] | None:
+        return {}
 
     async def create_session(self, context: AgentSessionContext) -> EchoSession:
         return EchoSession(

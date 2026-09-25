@@ -31,9 +31,9 @@ def anyio_backend() -> str:
     return "asyncio"
 
 
-def _host(tmp_path: Path, **extra: Any) -> Host:
+def _host(tmp_path: Path, *, configurable: bool = False, **extra: Any) -> Host:
     return Host(
-        EchoProvider(),
+        EchoProvider(configurable=configurable),
         LoopbackSingleUserPolicy(),
         store=FileSessionStore(tmp_path / "sessions", debounce=0.05),
         sequence_file=tmp_path / "seq",
@@ -103,6 +103,64 @@ class TestRestart:
                 "snapshot"
             ]["state"]
             assert transcript["turns"], "the transcript did not survive"
+        finally:
+            await second.aclose()
+
+    async def test_a_restored_session_takes_a_turn_with_its_current_config(
+        self, tmp_path: Path
+    ) -> None:
+        """Restored sessions resume their agent on the first turn -- with the
+        config the state holds now, including a mid-session change."""
+        first = _host(tmp_path, configurable=True)
+        uri = "echo:/durable-resume"
+        try:
+            client = await _client(first)
+            await client.request("createSession", {"channel": uri, "provider": "echo"})
+            await client.collect(seconds=0.3)
+            await client.request("subscribe", {"channel": uri})
+            await client.notify(
+                "dispatchAction",
+                {
+                    "channel": uri,
+                    "clientSeq": 1,
+                    "action": {"type": "session/configChanged", "config": {"prefix": "Heard:"}},
+                },
+            )
+            await client.collect(seconds=0.3)
+        finally:
+            await first.aclose()
+
+        second = _host(tmp_path, configurable=True)
+        try:
+            assert await second.restore() == 1
+            client = await _client(second)
+            state = (await client.request("subscribe", {"channel": uri}))["result"]["snapshot"][
+                "state"
+            ]
+            chat = state["chats"][0]["resource"]
+            await client.request("subscribe", {"channel": chat})
+            await client.notify(
+                "dispatchAction",
+                {
+                    "channel": chat,
+                    "clientSeq": 1,
+                    "action": {
+                        "type": "chat/turnStarted",
+                        "turnId": "t2",
+                        "startedAt": "1970-01-01T00:00:02.000Z",
+                        "message": {"text": "again", "origin": {"kind": "user"}},
+                    },
+                },
+            )
+            await client.collect(seconds=0.5)
+            kinds = [e["action"]["type"] for e in client.actions(chat)]
+            assert "chat/turnFailed" not in kinds, "a restored session could not take a turn"
+            deltas = "".join(
+                e["action"].get("content", "")
+                for e in client.actions(chat)
+                if e["action"]["type"] == "chat/delta"
+            )
+            assert deltas.startswith("Heard:"), deltas
         finally:
             await second.aclose()
 

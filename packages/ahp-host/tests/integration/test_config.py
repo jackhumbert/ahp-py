@@ -441,3 +441,49 @@ class TestCustomizationsAndProgress:
             assert not [n for n in client.notifications if n.get("method") == "root/progress"]
         finally:
             await host.aclose()
+
+
+class TestChangingConfigMidSession(TestSessionConfig):
+    """A `sessionMutable` change must reach the agent, not only the state.
+
+    Inherits the configurable echo host fixture (and so re-runs that class's
+    tests too, which is cheap).
+    """
+
+    async def test_a_changed_property_reaches_the_running_agent(self, host: Host) -> None:
+        client = await _attach(host)
+        uri = "echo:/cfg-live"
+        await client.request("createSession", {"channel": uri, "provider": "echo"})
+        await client.collect(seconds=0.3)
+        state = (await client.request("subscribe", {"channel": uri}))["result"]["snapshot"]["state"]
+        chat_uri = state["chats"][0]["resource"]
+        await client.request("subscribe", {"channel": chat_uri})
+        await client.notify(
+            "dispatchAction",
+            {
+                "channel": uri,
+                "clientSeq": 1,
+                "action": {"type": "session/configChanged", "config": {"prefix": "Heard:"}},
+            },
+        )
+        await client.collect(seconds=0.2)
+        await client.notify(
+            "dispatchAction",
+            {
+                "channel": chat_uri,
+                "clientSeq": 2,
+                "action": {
+                    "type": "chat/turnStarted",
+                    "turnId": "t1",
+                    "startedAt": "1970-01-01T00:00:01.000Z",
+                    "message": {"text": "hello", "origin": {"kind": "user"}},
+                },
+            },
+        )
+        await client.collect(seconds=0.5)
+        deltas = "".join(
+            e["action"].get("content", "")
+            for e in client.actions(chat_uri)
+            if e["action"]["type"] == "chat/delta"
+        )
+        assert deltas.startswith("Heard:"), f"the agent kept its creation-time prefix: {deltas!r}"

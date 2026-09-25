@@ -489,6 +489,24 @@ class HandlesCustomizations(Protocol):
 
 
 @runtime_checkable
+class ReconfiguresSessions(Protocol):
+    """An agent session that follows its config changing after creation.
+
+    A client may change a property the provider marked ``sessionMutable``
+    (`session/configChanged`); the host validates it, the reducer applies it to
+    state, and then this is called with the properties that changed. Without
+    it the state would say one thing and the agent do another, so a provider
+    should only mark a property ``sessionMutable`` if it implements this.
+
+    Raising is reported and logged; it does not undo the state change, so a
+    provider should apply the safer half of a change first (e.g. tighten a
+    permission gate before loosening anything).
+    """
+
+    async def config_changed(self, values: Mapping[str, Any]) -> None: ...
+
+
+@runtime_checkable
 class TruncatesHistory(Protocol):
     """An agent session that can forget part of its own conversation.
 

@@ -110,6 +110,8 @@ from agent_host_server.provider.base import (
     ForkedFrom,
     HandlesCustomizations,
     ManagesMcpServers,
+    ReconfiguresSessions,
+    ResumableAgentProvider,
     SessionPublisher,
     TruncatesHistory,
 )
@@ -1240,7 +1242,20 @@ class Host:
         return session
 
     async def _persist(self, session: _Session) -> None:
-        """Write a session's channels to the store, debounced."""
+        """Write a session's channels to the store, debounced.
+
+        A resumable provider is asked for its resume state each time, so what
+        is stored is what it would need *now* -- its own session id once the
+        first turn has minted one, a mode changed mid-session.
+        """
+        if isinstance(self.provider, ResumableAgentProvider) and session.agent_session is not None:
+            try:
+                captured = await self.provider.resume_state_of(session.agent_session)
+            except Exception:
+                _log.exception("resume_state_of failed for %s", session.uri)
+            else:
+                if captured is not None:
+                    session.resume_state = dict(captured)
         channels: dict[str, Mapping[str, Any]] = {}
         for uri in [session.uri, session.annotations_uri, *session.chat_uris]:
             state = self.sequencer.state_of(uri)
@@ -4646,6 +4661,9 @@ class Host:
         if action_type == "session/customizationToggled":
             await self._react_to_toggle(channel, action)
             return
+        if action_type == "session/configChanged":
+            await self._react_to_config(channel, action)
+            return
         if action_type in _MCP_LIFECYCLE_ACTIONS:
             await self._react_to_mcp(channel, action)
             return
@@ -5272,6 +5290,57 @@ class Host:
             )
             await self._mirror_summary(session)
 
+    async def _resume_if_restored(self, session: _Session) -> None:
+        """Give a restored session its agent back, on its first turn.
+
+        Restored sessions start without one (see :meth:`restore`) so a host
+        with many stored sessions doesn't start many agents. The provider gets
+        what it persisted plus what the session's state says now: its folders
+        and its config *values*, which a client may have changed since.
+        Failing leaves the session without an agent, and the turn then fails
+        as `provider.resumeSession` -- which is what it is.
+        """
+        if session.agent_session is not None or not isinstance(
+            self.provider, ResumableAgentProvider
+        ):
+            return
+        state = self.sequencer.state_of(session.uri)
+        state = state if isinstance(state, Mapping) else {}
+        config = state.get("config")
+        values = config.get("values") if isinstance(config, Mapping) else None
+        folders = state.get("workingDirectories")
+        context = AgentSessionContext(
+            publisher=session.publisher,
+            session_uri=session.uri,
+            chat_uri=session.chat_uri,
+            provider_id=session.provider_id,
+            working_directories=tuple(f for f in folders or () if isinstance(f, str)),
+            config=dict(values) if isinstance(values, Mapping) else {},
+            resume_state=session.resume_state,
+        )
+        try:
+            session.agent_session = await self.provider.resume_session(context)
+        except Exception:
+            _log.exception("could not resume %s", session.uri)
+
+    async def _react_to_config(self, channel: str, action: Mapping[str, Any]) -> None:
+        """Tell the agent a `sessionMutable` property changed, then save it.
+
+        Validation already limited the change to properties the provider
+        declared mutable. A restored session with no agent yet gets nothing to
+        call: the new values are in state, and resuming reads them from there.
+        """
+        session = self._sessions.get(channel)
+        values = action.get("config")
+        if session is None or not isinstance(values, Mapping):
+            return
+        if isinstance(session.agent_session, ReconfiguresSessions):
+            try:
+                await session.agent_session.config_changed(dict(values))
+            except Exception:
+                _log.exception("config_changed failed for %s", channel)
+        await self._persist(session)
+
     async def _run_turn(
         self, session: _Session, runner: TurnRunner, action: Mapping[str, Any]
     ) -> None:
@@ -5284,6 +5353,7 @@ class Host:
         to every connected client, to move a timestamp nobody is watching.
         """
         try:
+            await self._resume_if_restored(session)
             await runner.run(session.agent_session, action)
         finally:
             # Retracted in a DETACHED task on purpose. This one is frequently
