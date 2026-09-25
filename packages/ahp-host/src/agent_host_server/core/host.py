@@ -19,7 +19,7 @@ import logging
 import math
 import time
 import uuid
-from collections.abc import Collection, Coroutine, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Collection, Coroutine, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Any, Final
@@ -114,6 +114,8 @@ from agent_host_server.provider.base import (
     ResumableAgentProvider,
     SessionPublisher,
     TruncatesHistory,
+    TurnSink,
+    UserMessage,
 )
 
 __all__ = ["Host", "HostInfo"]
@@ -800,6 +802,52 @@ class _Publisher:
             params["message"] = message
         await self._host.sequencer.notify(ROOT_URI, "root/progress", params)
 
+    async def title_changed(self, title: str) -> None:
+        await self._host.sequencer.publish(
+            self._session.uri, {"type": "session/titleChanged", "title": title}
+        )
+        await self._host._mirror_summary(self._session)
+
+    async def external_turn(self, text: str, run: Callable[[TurnSink], Awaitable[None]]) -> bool:
+        host, session = self._host, self._session
+        channel = session.chat_uri
+        state = host.sequencer.state_of(channel)
+        if not isinstance(state, Mapping) or state.get("activeTurn") is not None:
+            return False
+        started = {
+            "type": "chat/turnStarted",
+            "turnId": f"external-{uuid.uuid4()}",
+            "startedAt": now_iso(),
+            "message": {"text": text},
+        }
+        # Published, then run -- the same order as a queued message, for the
+        # same reason: there is no client dispatch to have published it.
+        await host.sequencer.publish(channel, started)
+        await host._start_turn(session, channel, started, _ExternalTurn(run))
+        return True
+
+
+class _ExternalTurn:
+    """An `AgentSession` whose only turn is one the provider is already running.
+
+    `TurnRunner` hands the message to `send_user_message`; for an external turn
+    there is nothing to hand it to, so the provider's callback runs instead.
+    Cancelling still reaches the real agent session: `_cancel_turn` calls the
+    session's own `cancel`, not this one's.
+    """
+
+    def __init__(self, run: Callable[[TurnSink], Awaitable[None]]) -> None:
+        self._run = run
+
+    async def send_user_message(self, message: UserMessage, sink: TurnSink) -> None:
+        await self._run(sink)
+
+    async def cancel(self, reason: str | None = None) -> None:
+        return
+
+    async def aclose(self) -> None:
+        return
+
 
 @dataclass(frozen=True)
 class HostInfo:
@@ -1200,6 +1248,98 @@ class Host:
                 {"type": "root/activeSessionsChanged", "activeSessions": len(self._sessions)},
             )
         return count
+
+    async def open_session(
+        self,
+        uri: str,
+        *,
+        title: str,
+        resume_state: Mapping[str, Any],
+        working_directories: Sequence[str] = (),
+    ) -> bool:
+        """Open a session no client created, for a conversation that exists elsewhere.
+
+        For an embedder whose agent's sessions are started outside this host --
+        on another machine, in another app -- and should still be listed and
+        driven here. The provider must be a `ResumableAgentProvider`: the
+        session's agent comes from `resume_session` with *resume_state*, which
+        is how the provider learns which conversation it is. It is persisted
+        like any other session, so after a restart `restore()` brings it back
+        and calling this again only makes sure its agent is running.
+
+        Returns whether a session was created. Raises `AhpError` if the agent
+        could not be started, and `ValueError` if *uri* names some other channel.
+        """
+        if not isinstance(self.provider, ResumableAgentProvider):
+            raise TypeError("open_session needs a ResumableAgentProvider")
+        await self._ensure_root()
+        existing = self._sessions.get(uri)
+        if existing is not None:
+            await self._resume_if_restored(existing)
+            return False
+        if self.sequencer.has_channel(uri):
+            raise ValueError(f"{uri} is already a channel of another kind")
+
+        chat_uri = f"ahp-chat:/{uuid.uuid4()}"
+        created_at = now_iso()
+        session = _Session(
+            uri=uri,
+            chat_uri=chat_uri,
+            provider_id=self.provider.agent.provider,
+            title=title,
+            created_at=created_at,
+            resume_state=dict(resume_state),
+        )
+        session.chat_uris.add(chat_uri)
+        session.publisher = _Publisher(self, session, None)
+        session_state: dict[str, Any] = {
+            "provider": session.provider_id,
+            "title": title,
+            "status": _STATUS_IDLE,
+            "lifecycle": "creating",
+            "activeClients": [],
+            "chats": [],
+        }
+        if working_directories:
+            session_state["workingDirectories"] = list(working_directories)
+        await self.sequencer.register_channel(uri, session_state, "session")
+        await self.sequencer.register_channel(
+            chat_uri,
+            {
+                "resource": chat_uri,
+                "title": _DEFAULT_CHAT_TITLE,
+                "status": _STATUS_IDLE,
+                "modifiedAt": created_at,
+                "turns": [],
+            },
+            "chat",
+        )
+        await self.sequencer.register_channel(
+            session.annotations_uri, {"annotations": []}, "annotations"
+        )
+        self._sessions[uri] = session
+        await self._resume_if_restored(session)
+        if session.agent_session is None:
+            await self._teardown(session)
+            raise errors.AhpError(-32002, f"the agent for {uri} could not be started")
+        await self._announce(session)
+        return True
+
+    async def close_session(self, uri: str) -> bool:
+        """Dispose a session from the host's side, as `disposeSession` would.
+
+        The counterpart of `open_session`, for when the conversation it mirrors
+        has ended elsewhere. Returns whether there was such a session.
+        """
+        session = self._sessions.get(uri)
+        if session is None:
+            return False
+        await self._teardown(session)
+        return True
+
+    def session_uris(self) -> list[str]:
+        """Every session this host currently serves."""
+        return list(self._sessions)
 
     async def _restore_one(self, stored: StoredSession) -> _Session | None:
         chat_uri: str | None = None
@@ -4305,7 +4445,10 @@ class Host:
                 },
             )
             return
+        await self._announce(session)
 
+    async def _announce(self, session: _Session) -> None:
+        """Tell root about a session whose agent is up, and make it ready."""
         summary = self._full_summary(session)
         # Remember what root was told, so the first `root/sessionSummaryChanged`
         # carries a real difference rather than restating the whole summary.
@@ -4381,7 +4524,10 @@ class Host:
             raise errors.session_not_found(channel)
         if not self.policy.may_see_channel(connection.info, channel):
             raise errors.AhpError(-32009, f"Not permitted to dispose {channel}")
+        await self._teardown(session)
 
+    async def _teardown(self, session: _Session) -> None:
+        channel = session.uri
         for task in session.running():
             task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
@@ -5087,8 +5233,15 @@ class Host:
         with contextlib.suppress(Exception):
             await self._mirror_summary(session)
 
-    async def _start_turn(self, session: _Session, channel: str, action: Mapping[str, Any]) -> None:
-        """Run *action* as a turn on *channel*."""
+    async def _start_turn(
+        self,
+        session: _Session,
+        channel: str,
+        action: Mapping[str, Any],
+        agent: AgentSession | None = None,
+    ) -> None:
+        """Run *action* as a turn on *channel*, by *agent* if given (an external
+        turn) or else the session's own agent."""
         command = self._terminal_command(action)
         if command is not None:
             # Never reaches the provider. The user asked the HOST to run a
@@ -5107,7 +5260,7 @@ class Host:
                 lambda: self._mirror_summary(session),
                 self._advertise_resource,
             )
-            task = asyncio.create_task(self._run_turn(session, runner, action))
+            task = asyncio.create_task(self._run_turn(session, runner, action, agent))
         session.turns[channel] = task
         session.turn_started[channel] = time.monotonic()
         # Both ends of the turn, from ONE place each. A changeset operation is
@@ -5375,7 +5528,11 @@ class Host:
         await self._persist(session)
 
     async def _run_turn(
-        self, session: _Session, runner: TurnRunner, action: Mapping[str, Any]
+        self,
+        session: _Session,
+        runner: TurnRunner,
+        action: Mapping[str, Any],
+        agent: AgentSession | None = None,
     ) -> None:
         """Run one turn, then bring the root catalogue back in step.
 
@@ -5387,7 +5544,7 @@ class Host:
         """
         try:
             await self._resume_if_restored(session)
-            await runner.run(session.agent_session, action)
+            await runner.run(agent or session.agent_session, action)
         finally:
             # Retracted in a DETACHED task on purpose. This one is frequently
             # the task being cancelled, and a cancelled task cannot be relied on

@@ -13,7 +13,7 @@ against it is wire-dead today. Nothing about the agent runtimes changed.
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Protocol, runtime_checkable
 
@@ -424,6 +424,23 @@ class SessionPublisher(Protocol):
 
         Ephemeral and never replayed. A no-op when the client supplied no token,
         which is most of them -- so a provider can call it unconditionally.
+        """
+        ...
+
+    async def title_changed(self, title: str) -> None:
+        """Rename the session, for an agent whose sessions are named elsewhere."""
+        ...
+
+    async def external_turn(self, text: str, run: Callable[[TurnSink], Awaitable[None]]) -> bool:
+        """Start a turn on the default chat that no client asked for.
+
+        For an agent that is also driven from somewhere else -- a message typed
+        on another device -- so the conversation here does not silently skip
+        the turns that happened there. The host publishes `chat/turnStarted`
+        carrying `text` as the user's message, then runs `run(sink)` exactly as
+        it runs `send_user_message`: a client can cancel it, and it ends as a
+        client's turn does. Returns once the turn has started, not when it
+        ends; ``False`` if the chat already has a turn running.
         """
         ...
 

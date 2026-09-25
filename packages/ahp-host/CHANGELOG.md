@@ -12,6 +12,13 @@ versions each release speaks.
 
 ### Added
 
+- Sessions that live somewhere else can be mirrored here. `Host.open_session`
+  lists and serves a session no client created (its agent comes from
+  `resume_session`, and it persists and restores like any other);
+  `Host.close_session` removes it. `SessionPublisher.external_turn` shows a
+  turn that started elsewhere -- say, typed on another device -- as a turn in
+  the chat, cancellable like any other, and `SessionPublisher.title_changed`
+  renames the session.
 - `ReconfiguresSessions.config_changed(values)`: a session hears about a
   `sessionMutable` property a client changed mid-session
   (`session/configChanged`), after the host validated and applied it. The
