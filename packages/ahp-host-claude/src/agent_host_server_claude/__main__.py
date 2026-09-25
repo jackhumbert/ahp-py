@@ -92,6 +92,11 @@ async def _run(settings: Settings) -> None:
         store=FileSessionStore(state / "sessions"),
         sequence_file=state / "sequence",
     )
+    # Bring back the sessions saved before the last stop. Without this they
+    # were written to `state/sessions` and never read again, so every restart
+    # emptied the session list. Their Claude clients start on their first turn.
+    restored = await host.restore()
+    log.info("restored %d session(s)", restored)
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGTERM, signal.SIGINT):

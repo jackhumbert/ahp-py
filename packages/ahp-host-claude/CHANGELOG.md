@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Sessions survive a restart: `python -m agent_host_server_claude` now calls
+  `Host.restore()` at start-up. They were saved to `--state-dir` but never read
+  back, so every restart emptied the session list.
+
 ### Added
 
 - The approval mode (`permissionMode`) can change mid-session: it is now
