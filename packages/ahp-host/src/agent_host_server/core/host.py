@@ -1068,7 +1068,7 @@ class Host:
 
     def __init__(
         self,
-        provider: AgentProvider,
+        provider: AgentProvider | Sequence[AgentProvider],
         policy: Policy,
         *,
         info: HostInfo | None = None,
@@ -1091,7 +1091,23 @@ class Host:
     ) -> None:
         if policy is None:  # pragma: no cover - defensive; typing already forbids it
             raise ValueError("a Policy is required; there is no default")
-        self.provider = provider
+        providers: list[AgentProvider] = (
+            list(provider) if isinstance(provider, (list, tuple)) else [provider]  # type: ignore[list-item]
+        )
+        if not providers:
+            raise ValueError("a Host needs at least one provider")
+        #: Every agent this host serves, by provider id, in the order given --
+        #: the order `RootState.agents` lists them in.
+        self.providers: dict[str, AgentProvider] = {}
+        for each in providers:
+            provider_id = each.agent.provider
+            if provider_id in self.providers:
+                raise ValueError(f"two providers share the id {provider_id!r}")
+            self.providers[provider_id] = each
+        #: The default agent: the first given. It serves a `createSession` that
+        #: names no provider, and any restored session whose provider this host
+        #: no longer serves (an id renamed since it was stored).
+        self.provider: AgentProvider = providers[0]
         self.policy = policy
         self.info = info or HostInfo()
         self.supported_versions = tuple(supported_versions)
@@ -1259,6 +1275,7 @@ class Host:
         title: str,
         resume_state: Mapping[str, Any],
         working_directories: Sequence[str] = (),
+        provider_id: str | None = None,
     ) -> bool:
         """Open a session no client created, for a conversation that exists elsewhere.
 
@@ -1273,7 +1290,10 @@ class Host:
         Returns whether a session was created. Raises `AhpError` if the agent
         could not be started, and `ValueError` if *uri* names some other channel.
         """
-        if not isinstance(self.provider, ResumableAgentProvider):
+        provider_id = provider_id or self.provider.agent.provider
+        if provider_id not in self.providers:
+            raise ValueError(f"no provider {provider_id!r} on this host")
+        if not isinstance(self.providers[provider_id], ResumableAgentProvider):
             raise TypeError("open_session needs a ResumableAgentProvider")
         await self._ensure_root()
         existing = self._sessions.get(uri)
@@ -1288,7 +1308,7 @@ class Host:
         session = _Session(
             uri=uri,
             chat_uri=chat_uri,
-            provider_id=self.provider.agent.provider,
+            provider_id=provider_id,
             title=title,
             created_at=created_at,
             resume_state=dict(resume_state),
@@ -1395,7 +1415,8 @@ class Host:
         the session already has are updated; the values are kept.
         """
         config = state.get("config")
-        if not isinstance(self.provider, ConfiguresSessions) or not isinstance(config, Mapping):
+        provider = self._provider_named(provider_id)
+        if not isinstance(provider, ConfiguresSessions) or not isinstance(config, Mapping):
             return
         schema = config.get("schema")
         if not isinstance(schema, Mapping):
@@ -1405,7 +1426,7 @@ class Host:
         if not isinstance(properties, Mapping):
             return
         try:
-            fresh = await self.provider.resolve_config(
+            fresh = await provider.resolve_config(
                 ConfigRequest(
                     provider=provider_id,
                     values=dict(values) if isinstance(values, Mapping) else {},
@@ -1424,9 +1445,10 @@ class Host:
         is stored is what it would need *now* -- its own session id once the
         first turn has minted one, a mode changed mid-session.
         """
-        if isinstance(self.provider, ResumableAgentProvider) and session.agent_session is not None:
+        provider = self._provider_of(session)
+        if isinstance(provider, ResumableAgentProvider) and session.agent_session is not None:
             try:
-                captured = await self.provider.resume_state_of(session.agent_session)
+                captured = await provider.resume_state_of(session.agent_session)
             except Exception:
                 _log.exception("resume_state_of failed for %s", session.uri)
             else:
@@ -1454,10 +1476,34 @@ class Host:
                 )
             )
 
+    def _provider_named(self, provider_id: Any) -> AgentProvider:
+        """The provider a request names, or the default when it names none.
+
+        A named id no agent here answers to falls back to the default too: the
+        commands that take `provider` (config resolution, completions) answer
+        for *some* agent rather than failing, which is what a single-agent host
+        always did. `createSession`, which must not serve a session with an
+        agent the client did not ask for, checks the id itself.
+        """
+        if isinstance(provider_id, str):
+            return self.providers.get(provider_id, self.provider)
+        return self.provider
+
+    def _provider_of(self, session: _Session) -> AgentProvider:
+        """The agent serving *session*: its own, or the default if gone."""
+        return self.providers.get(session.provider_id, self.provider)
+
+    def _provider_of_channel(self, channel: str) -> AgentProvider:
+        """The agent serving the session that owns *channel* (session or chat)."""
+        session = self._sessions.get(channel)
+        if session is None:
+            session = next((s for s in self._sessions.values() if channel in s.chat_uris), None)
+        return self._provider_of(session) if session is not None else self.provider
+
     async def _ensure_root(self) -> None:
         if not self._root_ready:
             root_state: dict[str, Any] = {
-                "agents": [self.provider.agent.to_wire()],
+                "agents": [each.agent.to_wire() for each in self.providers.values()],
                 "activeSessions": 0,
             }
             if self.root_config is not None:
@@ -1706,7 +1752,9 @@ class Host:
             result["telemetry"] = dict(self.telemetry)
         if self.default_directory is not None:
             result["defaultDirectory"] = self.default_directory
-        if self.completion_trigger_characters and isinstance(self.provider, Completes):
+        if self.completion_trigger_characters and any(
+            isinstance(each, Completes) for each in self.providers.values()
+        ):
             # Without this the `completions` command is fully implemented and
             # never called: the client only issues it for a character the host
             # named, so an unadvertised trigger means the picker never opens.
@@ -2731,7 +2779,13 @@ class Host:
     # ─── authentication ──────────────────────────────────────────────────
 
     def _protected_resources(self) -> list[ProtectedResource]:
-        return [ProtectedResource.from_wire(r) for r in self.provider.agent.protected_resources]
+        """Every resource any agent here advertises, each once."""
+        seen: dict[str, ProtectedResource] = {}
+        for each in self.providers.values():
+            for wire in each.agent.protected_resources:
+                resource = ProtectedResource.from_wire(wire)
+                seen.setdefault(resource.resource, resource)
+        return list(seen.values())
 
     async def _authenticate(
         self, connection: Connection, params: Mapping[str, Any]
@@ -2909,12 +2963,13 @@ class Host:
         elif not any(channel in s.chat_uris for s in self._sessions.values()):
             raise errors.invalid_params(f"{channel} is neither a session nor a chat")
 
-        if not isinstance(self.provider, Completes):
+        provider = self._provider_of_channel(chat)
+        if not isinstance(provider, Completes):
             return {"items": []}
 
         offset = params.get("offset")
         kind = params.get("kind")
-        items = await self.provider.complete(
+        items = await provider.complete(
             CompletionRequest(
                 kind=kind if isinstance(kind, str) else "",
                 chat=chat,
@@ -2926,7 +2981,7 @@ class Host:
 
     # ─── multi-chat ──────────────────────────────────────────────────────
 
-    def _multichat(self) -> Mapping[str, Any] | None:
+    def _multichat(self, provider: AgentProvider) -> Mapping[str, Any] | None:
         """`AgentCapabilities.multipleChats`, or ``None``.
 
         Absent means "clients MUST NOT call `createChat` to open chats beyond
@@ -2934,7 +2989,7 @@ class Host:
         only the host can enforce, since a client that ignores it just sends the
         command anyway.
         """
-        capability = self.provider.agent.capabilities.get("multipleChats")
+        capability = provider.agent.capabilities.get("multipleChats")
         return capability if isinstance(capability, Mapping) else None
 
     async def _create_chat(self, connection: Connection, params: Mapping[str, Any]) -> None:
@@ -2960,7 +3015,7 @@ class Host:
         if not self.policy.may_see_channel(connection.info, session_uri):
             raise errors.AhpError(-32009, f"Not permitted to modify {session_uri}")
 
-        capability = self._multichat()
+        capability = self._multichat(self._provider_of(session))
         if capability is None:
             raise errors.invalid_params("this agent does not advertise multipleChats")
         if self.sequencer.has_channel(chat_uri):
@@ -3109,7 +3164,7 @@ class Host:
         requested = params.get("workingDirectories")
         if requested is None:
             return None
-        if self._multiroot() is None:
+        if self._multiroot(self._provider_of(session)) is None:
             raise errors.invalid_params("this agent does not advertise multipleWorkingDirectories")
         state = self.sequencer.state_of(session.uri)
         owned = state.get("workingDirectories") if isinstance(state, Mapping) else None
@@ -3727,10 +3782,11 @@ class Host:
         configure" is a real answer; a refusal is indistinguishable from a
         broken host.
         """
-        if not isinstance(self.provider, ConfiguresSessions):
+        provider = self._provider_named(params.get("provider"))
+        if not isinstance(provider, ConfiguresSessions):
             return {"schema": {"type": "object", "properties": {}}, "values": {}}
 
-        resolved = await self.provider.resolve_config(self._config_request(params))
+        resolved = await provider.resolve_config(self._config_request(params))
         schema: dict[str, Any] = {
             "type": "object",
             "properties": dict(resolved.properties),
@@ -3749,10 +3805,11 @@ class Host:
         request = self._config_request(params)
         if request.property is None:
             raise errors.invalid_params("property is required")
-        if not isinstance(self.provider, ConfiguresSessions):
+        provider = self._provider_named(params.get("provider"))
+        if not isinstance(provider, ConfiguresSessions):
             return {"items": []}
 
-        items = await self.provider.complete_config(request)
+        items = await provider.complete_config(request)
         return {
             "items": [
                 {
@@ -3773,9 +3830,10 @@ class Host:
         reason a `root/configChanged` is: a value with no property is invisible
         to a client and unsettable, so publishing it only misleads.
         """
-        if not isinstance(self.provider, ConfiguresSessions):
+        provider = self._provider_named(params.get("provider"))
+        if not isinstance(provider, ConfiguresSessions):
             return None
-        resolved = await self.provider.resolve_config(self._config_request(params))
+        resolved = await provider.resolve_config(self._config_request(params))
         if not resolved.properties:
             return None
         chosen = params.get("config")
@@ -4010,14 +4068,14 @@ class Host:
 
     # ─── working directories ─────────────────────────────────────────────
 
-    def _multiroot(self) -> Mapping[str, Any] | None:
+    def _multiroot(self, provider: AgentProvider) -> Mapping[str, Any] | None:
         """`AgentCapabilities.multipleWorkingDirectories`, or ``None``.
 
         Absent means "clients MUST NOT mutate a session's or chat's
         working-directory set and MUST NOT set more than one entry" -- a client
         MUST that only the host can actually enforce.
         """
-        capability = self.provider.agent.capabilities.get("multipleWorkingDirectories")
+        capability = provider.agent.capabilities.get("multipleWorkingDirectories")
         return capability if isinstance(capability, Mapping) else None
 
     def _admit_working_directories(
@@ -4060,7 +4118,7 @@ class Host:
             # has no better answer, the jail correctly refuses it, and the
             # session ends up with nothing.
             requested = [self.default_directory]
-        if self._multiroot() is None:
+        if self._multiroot(self._provider_named(params.get("provider"))) is None:
             # "Servers without that capability treat only the first entry as the
             # session's working directory and ignore the rest." Truncate rather
             # than refuse: the spec makes this the server's defined behaviour,
@@ -4110,7 +4168,7 @@ class Host:
         mutations verbatim ... the `immutablePrimary` guarantee therefore lives
         at the dispatch-validation / host-acceptance layer, not in the reducer".
         """
-        multiroot = self._multiroot()
+        multiroot = self._multiroot(self._provider_of_channel(channel))
         if multiroot is None:
             return "this agent does not advertise multipleWorkingDirectories"
 
@@ -4278,7 +4336,7 @@ class Host:
         provider_id = (
             requested_provider if requested_provider is not None else self.provider.agent.provider
         )
-        if provider_id != self.provider.agent.provider:
+        if provider_id not in self.providers:
             # Checked rather than copied through. Unvalidated, a client could
             # name any string and the host would publish the session under it
             # while actually serving it with the default provider -- and the
@@ -4438,7 +4496,7 @@ class Host:
                 active_client_id=active_client[0]["clientId"] if active_client else None,
                 client_tools=tuple(active_client[0]["tools"]) if active_client else (),
             )
-            session.agent_session = await self.provider.create_session(context)
+            session.agent_session = await self._provider_of(session).create_session(context)
         except Exception as exc:
             await self.sequencer.publish(
                 session.uri,
@@ -5533,9 +5591,8 @@ class Host:
         Failing leaves the session without an agent, and the turn then fails
         as `provider.resumeSession` -- which is what it is.
         """
-        if session.agent_session is not None or not isinstance(
-            self.provider, ResumableAgentProvider
-        ):
+        provider = self._provider_of(session)
+        if session.agent_session is not None or not isinstance(provider, ResumableAgentProvider):
             return
         state = self.sequencer.state_of(session.uri)
         state = state if isinstance(state, Mapping) else {}
@@ -5552,7 +5609,7 @@ class Host:
             resume_state=session.resume_state,
         )
         try:
-            session.agent_session = await self.provider.resume_session(context)
+            session.agent_session = await provider.resume_session(context)
         except Exception:
             _log.exception("could not resume %s", session.uri)
 

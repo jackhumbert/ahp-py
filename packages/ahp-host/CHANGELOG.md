@@ -12,6 +12,19 @@ versions each release speaks.
 
 ### Added
 
+- One host can serve several agents: `Host` takes a list of providers as well
+  as one. `RootState.agents` lists them all, in order; each session is served
+  by the agent it was created with; the first is the default, both for a
+  `createSession` that names no provider and for a restored session whose
+  provider id this host no longer serves (so renaming an agent keeps its old
+  sessions working). `Host.providers` maps id to provider; `Host.provider` is
+  still the default. `open_session` takes `provider_id`.
+- `agent-host-node` (`python -m agent_host_server.node`): a machine's node --
+  one port, folder tree, session store and token -- serving every agent listed
+  in its config's `[[agents]]` tables. Agent packages plug in through the
+  `agent_host_server.agents` entry-point group (`create(options, NodeContext)`);
+  `type = "echo"` is built in. The folder tree (`[roots]`, named or single)
+  moved here from agent-host-server-claude as `agent_host_server.node.roots`.
 - Steering: `SteersTurns.steer(chat_uri, message) -> bool` offers a chat's
   steering message to the turn already running. Taken, it is removed from the
   chat and noted in the transcript as a `systemNotification` part with

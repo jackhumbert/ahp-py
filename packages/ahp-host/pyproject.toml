@@ -54,6 +54,10 @@ dev = [
 
 [project.scripts]
 agent-host-server = "agent_host_server.__main__:main"
+agent-host-node = "agent_host_server.node.runner:main"
+
+[project.entry-points."agent_host_server.agents"]
+echo = "agent_host_server.node.builtin:echo"
 
 [project.urls]
 Homepage = "https://github.com/jackhumbert/agent-host-server-py"
@@ -117,6 +121,7 @@ type = "layers"
 # accepts one) and `ws` supplies a concrete implementation; the abstraction now
 # arrives from the dependency, so the core still never imports a concrete one.
 layers = [
+  "(agent_host_server.node)",
   "(agent_host_server.ws)",
   "agent_host_server.core",
   "agent_host_server.provider",
