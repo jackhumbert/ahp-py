@@ -30,6 +30,9 @@ dependencies = [
 [project.scripts]
 agent-host-server-claude = "agent_host_server_claude.__main__:main"
 
+[project.entry-points."agent_host_server.agents"]
+claude = "agent_host_server_claude.agent:create"
+
 [dependency-groups]
 dev = [
   "pytest>=8",

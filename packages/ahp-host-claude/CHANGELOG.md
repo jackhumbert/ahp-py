@@ -4,6 +4,19 @@
 
 ### Added
 
+- `type = "claude"` for `agent-host-node` (agent-host-server): the package
+  registers a `claude` entry in the `agent_host_server.agents` group, so one
+  node can serve Claude beside other agents (goose, opencode) from one host,
+  port and folder tree. Options: `provider_id` (default `claude` -- keep it the
+  same on every machine; the broker merges them and the folder picks the
+  machine) and `agent_name`.
+
+### Changed
+
+- The folder tree (`roots`, `paths`) moved to `agent_host_server.node`; the
+  modules here re-export it. `python -m agent_host_server_claude` still runs a
+  Claude-only host as before.
+
 - Steering: a message sent while Claude works joins the running turn
   (`ClaudeSession.steer`, sent with Claude Code's `next` priority, so it
   arrives at the next tool boundary). The CLI's `--replay-user-messages` echo
