@@ -1,7 +1,7 @@
 """Serve every agent a machine runs from one AHP host.
 
     python -m agent_host_server.node --config ~/.config/agent-host/node.toml
-    agent-host-node --config ~/.config/agent-host/node.toml
+    agent-host-node [run|supervise|install|uninstall] --config ~/.config/agent-host/node.toml
 
 One process, one port, one folder tree and one session store for the machine;
 the agents are listed in the config's `[[agents]]` tables (see
@@ -30,6 +30,7 @@ import signal
 import sys
 from dataclasses import dataclass
 from importlib.metadata import entry_points
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Any
 
@@ -38,6 +39,18 @@ from agent_host_server.core.resources import ResourceProvider, RootedFilesystemR
 from agent_host_server.core.store import FileSessionStore
 from agent_host_server.node.config import ConfigError, NodeSettings, load
 from agent_host_server.node.roots import NamedRootsResourceProvider, Roots
+from agent_host_server.node.service import (
+    DEFAULT_LAUNCHD_LABEL,
+    DEFAULT_TASK_NAME,
+    Supervisor,
+    install_macos,
+    install_windows,
+    node_command,
+    python_for_service,
+    supervisor_log,
+    uninstall_macos,
+    uninstall_windows,
+)
 from agent_host_server.provider.base import AgentProvider
 from agent_host_server.ws import serve_websocket
 
@@ -56,9 +69,24 @@ class NodeContext:
     state_dir: Path
 
 
+COMMANDS = ("run", "supervise", "install", "uninstall")
+
+
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(prog="agent-host-node")
-    parser.add_argument("--config", type=Path, required=True, help="the node's TOML settings")
+    parser = argparse.ArgumentParser(
+        prog="agent-host-node",
+        description="run: serve the agents (the default). supervise: run it, restarting it "
+        "(and the config's tunnel) when it exits. install / uninstall: start the supervisor "
+        "at login (a Scheduled Task on Windows, a launchd agent on macOS).",
+    )
+    parser.add_argument("command", nargs="?", choices=COMMANDS, default="run")
+    parser.add_argument("--config", type=Path, help="the node's TOML settings")
+    parser.add_argument("--log-file", type=Path, help="log here, rotated (overrides the config's)")
+    parser.add_argument(
+        "--name",
+        help=f"install/uninstall: the Scheduled Task name (default {DEFAULT_TASK_NAME}) "
+        f"or launchd label (default {DEFAULT_LAUNCHD_LABEL})",
+    )
     parser.add_argument(
         "--root",
         action="append",
@@ -174,20 +202,76 @@ async def run(settings: NodeSettings, info: HostInfo | None = None) -> None:
     await host.aclose()
 
 
+def configure_logging(settings: NodeSettings) -> None:
+    """To `log_file`, rotated, when there is one; else stderr.
+
+    Under `pythonw.exe` there is no stderr at all, so without a log file the
+    node would log nowhere.
+    """
+    level = logging.DEBUG if settings.verbose else logging.INFO
+    fmt = "%(asctime)s %(levelname)-7s %(name)s: %(message)s"
+    if settings.log_file is None:
+        logging.basicConfig(level=level, format=fmt)
+        return
+    settings.log_file.parent.mkdir(parents=True, exist_ok=True)
+    handler = RotatingFileHandler(
+        settings.log_file, maxBytes=5_000_000, backupCount=3, encoding="utf-8"
+    )
+    handler.setFormatter(logging.Formatter(fmt))
+    logging.basicConfig(level=level, handlers=[handler])
+
+
 def main(argv: list[str] | None = None) -> None:
+    args = _parse_args(argv)
+    if args.command == "uninstall":
+        print(_uninstall(args.name))
+        return
+    if args.config is None:
+        raise SystemExit(f"agent-host-node {args.command}: --config is required")
     try:
-        settings = load(_parse_args(argv))
+        settings = load(args)
     except ConfigError as exc:
         raise SystemExit(f"agent-host-node: {exc}") from None
-    logging.basicConfig(
-        level=logging.DEBUG if settings.verbose else logging.INFO,
-        format="%(asctime)s %(levelname)-7s %(name)s: %(message)s",
-    )
+    config = args.config.expanduser().resolve()
+
+    if args.command == "install":
+        print(_install(config, settings, args.name))
+        return
+    if args.command == "supervise":
+        children = [("node", node_command(config, settings.log_file))]
+        if settings.tunnel:
+            children.append(("tunnel", list(settings.tunnel)))
+        raise SystemExit(Supervisor(children, supervisor_log(settings.log_file)).run())
+
+    configure_logging(settings)
     try:
         with contextlib.suppress(KeyboardInterrupt):
             asyncio.run(run(settings))
     except ConfigError as exc:
+        _log.error("%s", exc)
         raise SystemExit(f"agent-host-node: {exc}") from None
+    except Exception:
+        _log.exception("the node stopped")
+        raise
+
+
+def _install(config: Path, settings: NodeSettings, name: str | None) -> str:
+    command = node_command(config, settings.log_file, python=python_for_service(), verb="supervise")
+    if sys.platform == "win32":
+        return install_windows(command, name or DEFAULT_TASK_NAME, settings.state_dir)
+    if sys.platform == "darwin":
+        return install_macos(
+            command, name or DEFAULT_LAUNCHD_LABEL, supervisor_log(settings.log_file)
+        )
+    raise SystemExit("agent-host-node install: Windows and macOS only (use a systemd unit)")
+
+
+def _uninstall(name: str | None) -> str:
+    if sys.platform == "win32":
+        return uninstall_windows(name or DEFAULT_TASK_NAME)
+    if sys.platform == "darwin":
+        return uninstall_macos(name or DEFAULT_LAUNCHD_LABEL)
+    raise SystemExit("agent-host-node uninstall: Windows and macOS only")
 
 
 __all__ = ["AGENTS_GROUP", "NodeContext", "create_agents", "main", "resources_for", "run"]

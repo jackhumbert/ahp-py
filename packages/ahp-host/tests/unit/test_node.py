@@ -24,6 +24,7 @@ def _args(config: Path, **overrides: object) -> argparse.Namespace:
         "bind": None,
         "token_file": None,
         "state_dir": None,
+        "log_file": None,
         "verbose": None,
     }
     values.update(overrides)
@@ -95,3 +96,19 @@ async def test_an_agent_type_no_package_provides_is_named(tmp_path: Path) -> Non
     settings = load(_args(_write(tmp_path, '[[agents]]\ntype = "nonesuch"\n')))
     with pytest.raises(ConfigError, match="nonesuch"):
         await create_agents(settings)
+
+
+def test_log_file_and_tunnel_are_read(tmp_path: Path) -> None:
+    body = """log_file = '~/node.log'
+tunnel = ["ssh", "-N", "-R", "127.0.0.1:4402:127.0.0.1:4321", "ahp-tunnel@broker"]
+[[agents]]
+type = "echo"
+"""
+    settings = load(_args(_write(tmp_path, body)))
+    assert settings.log_file == Path("~/node.log").expanduser()
+    assert settings.tunnel[:2] == ("ssh", "-N")
+
+
+def test_a_tunnel_must_be_a_list_of_strings(tmp_path: Path) -> None:
+    with pytest.raises(ConfigError, match="tunnel"):
+        load(_args(_write(tmp_path, 'tunnel = "ssh -N"\n[[agents]]\ntype = "echo"\n')))

@@ -3,6 +3,9 @@
     # ~/.config/agent-host/node.toml
     token_file = "~/.config/agent-host/node.token"
     port = 4321
+    log_file = "~/.local/state/agent-host-node/node.log"   # rotated; default stderr
+    # kept running beside the node by `agent-host-node supervise` (optional)
+    tunnel = ["ssh", "-N", "-R", "127.0.0.1:4402:127.0.0.1:4321", "ahp-tunnel@broker.example"]
 
     [roots]                       # named folders: file:///llm/..., file:///projects/...
     llm = 'G:\\llm'
@@ -41,7 +44,20 @@ DEFAULT_STATE = Path.home() / ".local/state/agent-host-node"
 DEFAULT_PORT = 4321
 DEFAULT_BIND = "127.0.0.1"
 
-_KEYS = frozenset({"root", "roots", "port", "bind", "token_file", "state_dir", "verbose", "agents"})
+_KEYS = frozenset(
+    {
+        "root",
+        "roots",
+        "port",
+        "bind",
+        "token_file",
+        "state_dir",
+        "log_file",
+        "tunnel",
+        "verbose",
+        "agents",
+    }
+)
 
 
 class ConfigError(ValueError):
@@ -64,6 +80,11 @@ class NodeSettings:
     bind: str = DEFAULT_BIND
     token_file: Path | None = None
     state_dir: Path = DEFAULT_STATE
+    #: Where the node logs, rotated; None logs to stderr.
+    log_file: Path | None = None
+    #: A command `supervise` keeps running beside the node (an `ssh -N -R` to
+    #: a broker, say); empty for none.
+    tunnel: tuple[str, ...] = ()
     verbose: bool = False
 
 
@@ -157,6 +178,12 @@ def load(args: argparse.Namespace) -> NodeSettings:
     state_dir = args.state_dir or (
         _path(data["state_dir"], "state_dir") if "state_dir" in data else DEFAULT_STATE
     )
+    log_file = getattr(args, "log_file", None) or (
+        _path(data["log_file"], "log_file") if "log_file" in data else None
+    )
+    tunnel = data.get("tunnel", [])
+    if not isinstance(tunnel, list) or not all(isinstance(part, str) for part in tunnel):
+        raise ConfigError("tunnel must be a command: a list of strings")
     port = args.port if args.port is not None else data.get("port", DEFAULT_PORT)
     if not isinstance(port, int) or isinstance(port, bool):
         raise ConfigError("port must be a number")
@@ -167,5 +194,7 @@ def load(args: argparse.Namespace) -> NodeSettings:
         bind=str(args.bind if args.bind is not None else data.get("bind", DEFAULT_BIND)),
         token_file=token_file,
         state_dir=state_dir.expanduser(),
+        log_file=log_file.expanduser() if log_file else None,
+        tunnel=tuple(tunnel),
         verbose=bool(args.verbose or data.get("verbose", False)),
     )

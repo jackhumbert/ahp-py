@@ -25,6 +25,14 @@ versions each release speaks.
   `agent_host_server.agents` entry-point group (`create(options, NodeContext)`);
   `type = "echo"` is built in. The folder tree (`[roots]`, named or single)
   moved here from agent-host-server-claude as `agent_host_server.node.roots`.
+- `agent-host-node supervise | install | uninstall`: keeping a node running
+  without wrapper scripts. `supervise` runs the node as a child and restarts
+  it (and the config's `tunnel` command, e.g. an `ssh -N -R` to a broker)
+  with backoff, logging each exit to `<log_file>.supervisor.log`. `install`
+  starts the supervisor at login as the current user -- a Scheduled Task
+  running `pythonw.exe` directly on Windows (no console, no PowerShell), a
+  launchd agent with `KeepAlive` on macOS. `log_file` (and `--log-file`)
+  logs to a rotated file, which a windowless `pythonw` needs.
 - Steering: `SteersTurns.steer(chat_uri, message) -> bool` offers a chat's
   steering message to the turn already running. Taken, it is removed from the
   chat and noted in the transcript as a `systemNotification` part with
