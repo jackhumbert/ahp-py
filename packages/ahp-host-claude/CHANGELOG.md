@@ -4,6 +4,11 @@
 
 ### Added
 
+- The approval mode (`permissionMode`) can change mid-session: it is now
+  `sessionMutable`, and `ClaudeSession.config_changed` moves the `PreToolUse`
+  gate first and then the running client (`set_permission_mode`), so a failed
+  switch leaves the stricter behaviour in force. Resuming prefers the
+  session's current config over the resume state.
 - A TOML config file (`--config`); flags override it, unknown settings are an
   error.
 - Several named folders per host (`[roots]` / `--root NAME=PATH`), served as a

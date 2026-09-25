@@ -1,10 +1,10 @@
 """Which tool calls run freely, and which a human approves first.
 
 A session picks one of four approval modes when it is created, as the
-`permissionMode` session config property. The name and values are Claude
-Code's own, which is also what makes VS Code draw its icons for them (shield,
-pencil, sparkle, lightbulb); the labels a person reads are Ask, Accept
-edits, Auto and Plan.
+`permissionMode` session config property, and may switch between them later.
+The name and values are Claude Code's own, which is also what makes VS Code
+draw its icons for them (shield, pencil, sparkle, lightbulb); the labels a
+person reads are Ask, Accept edits, Auto and Plan.
 
 - ``default``, labelled Ask: "read freely, ask to change". Tools that only look at
   the workspace run without asking; anything that edits, executes, or reaches
@@ -89,6 +89,9 @@ APPROVALS_PROPERTY: Final[Mapping[str, Any]] = {
     "enum": [ASK, ACCEPT_EDITS, AUTO, PLAN],
     "enumLabels": ["Ask", "Accept edits", "Auto", "Plan"],
     "default": ASK,
+    # Changeable during a session: the host tells the session
+    # (`ClaudeSession.config_changed`) and it switches the running client.
+    "sessionMutable": True,
 }
 
 

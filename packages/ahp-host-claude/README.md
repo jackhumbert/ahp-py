@@ -34,8 +34,10 @@ Status: pre-alpha.
     then shows its plan and asks to start. Approving drops the session to Ask,
     so the work itself is still approved call by call.
 
-  The mode is fixed for the session's life (the host passes a provider its
-  config only at creation) and survives a host restart.
+  The mode can be switched during a session (in VS Code or the iOS app); the
+  running Claude client follows, and the choice survives a host restart.
+  Needs agent-host-server with `ReconfiguresSessions` and working session
+  resume.
 - **Continue from** another Claude Code conversation on this machine - one
   started in a terminal, the IDE, or driven from a phone through Remote
   Control - picked from a searchable list (the `continueFrom` session setting,

@@ -39,7 +39,7 @@ async def test_the_provider_offers_an_approvals_setting(tmp_path: Path) -> None:
     assert prop["enum"] == ["default", "acceptEdits", "auto", "plan"]
     assert prop["enumLabels"] == ["Ask", "Accept edits", "Auto", "Plan"]
     assert prop["default"] == "default"
-    assert not prop.get("sessionMutable")  # the host tells a provider only at creation
+    assert prop["sessionMutable"] is True  # switchable mid-session (config_changed)
     assert resolution.values["permissionMode"] == "default"
     chosen = await provider.resolve_config(ConfigRequest(values={"permissionMode": "auto"}))
     assert chosen.values["permissionMode"] == "auto"
@@ -169,3 +169,74 @@ async def test_a_rejected_plan_stays_in_plan_mode(tmp_path: Path) -> None:
     )
     assert isinstance(result, PermissionResultDeny)
     assert session.approvals == "plan"
+
+
+async def test_the_mode_can_change_mid_session(tmp_path: Path) -> None:
+    """Switching the mode moves both the PreToolUse gate and the running
+    Claude client, and the next resume keeps the new mode."""
+    result = ResultMessage(
+        subtype="success",
+        duration_ms=1,
+        duration_api_ms=1,
+        is_error=False,
+        num_turns=1,
+        session_id="abc",
+    )
+    clients: list[FakeClient] = []
+
+    def factory(options: ClaudeAgentOptions) -> FakeClient:
+        clients.append(FakeClient(options, [[result]]))
+        return clients[-1]
+
+    provider = ClaudeProvider(tmp_path, client_factory=factory)
+    resolution = await provider.resolve_config(ConfigRequest())
+    assert resolution.properties["permissionMode"]["sessionMutable"] is True
+
+    session = await provider.create_session(_context({"permissionMode": "default"}))
+    await session.send_user_message(UserMessage(text="x"), RecordingSink())
+    assert (
+        pre_tool_use_decision("Bash", session.approvals)["hookSpecificOutput"]["permissionDecision"]
+        == "ask"
+    )
+
+    await session.config_changed({"permissionMode": "auto"})
+    assert session.approvals == "auto"
+    assert clients[0].permission_modes == ["auto"]
+    saved = await provider.resume_state_of(session)
+    assert saved is not None and saved["permissionMode"] == "auto"
+
+    # Back to Ask: the gate asks for everything again.
+    await session.config_changed({"permissionMode": "default"})
+    assert clients[0].permission_modes == ["auto", "default"]
+    assert (
+        pre_tool_use_decision("Bash", session.approvals)["hookSpecificOutput"]["permissionDecision"]
+        == "ask"
+    )
+
+
+async def test_an_unknown_mode_falls_back_to_ask(tmp_path: Path) -> None:
+    session = _session(tmp_path, {"permissionMode": "auto"})
+    await session.config_changed({"permissionMode": "bypassPermissions"})
+    assert session.approvals == "default"
+
+
+async def test_a_change_before_the_first_turn_applies_when_the_client_starts(
+    tmp_path: Path,
+) -> None:
+    session = _session(tmp_path)
+    await session.config_changed({"permissionMode": "acceptEdits"})
+    assert session.approvals == "acceptEdits"
+
+
+async def test_resuming_prefers_the_sessions_current_config(tmp_path: Path) -> None:
+    provider = ClaudeProvider(tmp_path, client_factory=lambda o: None)  # type: ignore[arg-type,return-value]
+    resumed = await provider.resume_session(
+        AgentSessionContext(
+            session_uri="s",
+            chat_uri="c",
+            provider_id="claude",
+            config={"permissionMode": "plan"},
+            resume_state={"claudeSessionId": "a", "permissionMode": "auto"},
+        )
+    )
+    assert resumed.approvals == "plan"

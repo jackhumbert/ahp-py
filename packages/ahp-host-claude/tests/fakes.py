@@ -28,6 +28,7 @@ class FakeClient:
         self.prompts: list[Any] = []
         self.server_info: dict[str, Any] | None = None
         self.models: list[str | None] = []
+        self.permission_modes: list[Any] = []
         self.connected = False
         self.interrupted = False
         self.disconnected = False
@@ -56,6 +57,9 @@ class FakeClient:
 
     async def set_model(self, model: str | None = None) -> None:
         self.models.append(model)
+
+    async def set_permission_mode(self, mode: Any) -> None:
+        self.permission_modes.append(mode)
 
     async def disconnect(self) -> None:
         self.disconnected = True

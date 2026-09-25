@@ -103,6 +103,8 @@ class SdkClient(Protocol):
 
     async def set_model(self, model: str | None = None) -> None: ...
 
+    async def set_permission_mode(self, mode: Any) -> None: ...
+
     async def disconnect(self) -> None: ...
 
     async def get_server_info(self) -> dict[str, Any] | None: ...
@@ -206,8 +208,8 @@ class ClaudeSession:
         self.directory = directory
         #: Posted once, at the start of the first reply.
         self._recap = recap
-        #: Fixed for the session's life: chosen at creation (or restored on
-        #: resume), because the host tells a provider its config only then.
+        #: Chosen at creation (or restored on resume); a client may change
+        #: it later, which arrives through `config_changed`.
         self.approvals = approval_mode(
             approvals if approvals is not None else context.config.get(CONFIG_KEY)
         )
@@ -281,6 +283,24 @@ class ClaudeSession:
                 log.exception("interrupting the Claude client failed")
 
     # -- permissions ---------------------------------------------------------
+
+    async def config_changed(self, values: Mapping[str, Any]) -> None:
+        """A client switched the approval mode mid-session.
+
+        Security-relevant. The `PreToolUse` gate (`self.approvals`) moves
+        first, then the running Claude client's own mode. If switching the
+        client fails, the two disagree only in the safe direction: loosening,
+        Claude Code's stricter mode still sends calls to the approval prompt;
+        tightening to Ask, the gate already asks for everything regardless.
+        """
+        if CONFIG_KEY not in values:
+            return
+        mode = approval_mode(values[CONFIG_KEY])
+        if mode == self.approvals:
+            return
+        self.approvals = mode
+        if self._client is not None:
+            await self._client.set_permission_mode(PERMISSION_MODES[mode])
 
     async def _pre_tool_use(self, hook_input: Any, tool_use_id: str | None, context: Any) -> Any:
         return pre_tool_use_decision(str(hook_input.get("tool_name", "")), self.approvals)
@@ -527,10 +547,13 @@ class ClaudeProvider:
             root=self.roots,
             client_factory=self._client_factory,
             claude_session_id=session_id if isinstance(session_id, str) else None,
-            # The host does not replay a resumed session's config to the
-            # provider, so the mode travels in the resume state instead. A
-            # state from before approvals existed resumes in `ask`.
-            approvals=approval_mode(state.get(CONFIG_KEY, state.get("approvals", ASK))),
+            # The session's current config wins (a client may have changed
+            # the mode since the last save); then the resume state, for a host
+            # that passes no config back; a state from before approvals
+            # existed resumes in `ask`.
+            approvals=approval_mode(
+                context.config.get(CONFIG_KEY, state.get(CONFIG_KEY, state.get("approvals", ASK)))
+            ),
             directory=Path(cwd) if isinstance(cwd := state.get("cwd"), str) else None,
         )
 
