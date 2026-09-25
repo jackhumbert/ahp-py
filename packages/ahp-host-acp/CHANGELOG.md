@@ -4,6 +4,12 @@
 
 ### Added
 
+- `type = "acp"` for `agent-host-node` (agent-host-server): the package
+  registers an `acp` entry in the `agent_host_server.agents` group, so one node
+  can serve several ACP agents (goose, opencode) beside Claude from one host,
+  port and folder tree. Options are the config file's per-agent settings:
+  `provider_id`, `agent_name`, `description`, `command`, `env`, `models`,
+  `model_command`, `config_options`.
 - An ACP client provider: one agent process per session, streaming text,
   reasoning, tool calls and usage; permission requests as approval prompts
   (granted once, never "always"); session resume via `session/resume` or
@@ -16,3 +22,8 @@
 - `[config_options]`: ACP session config options set on every session
   (OpenClaw: `thought_level`).
 - A TOML config file and named roots, as in agent-host-server-claude.
+
+### Changed
+
+- `roots` and `paths` re-export `agent_host_server.node`'s instead of keeping
+  copies. `python -m agent_host_server_acp` still runs a one-agent host.

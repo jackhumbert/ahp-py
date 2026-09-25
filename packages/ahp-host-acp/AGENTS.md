@@ -11,8 +11,10 @@ server's AGENTS.md requires ("Adding a provider adapter"). It is the ACP
   and the wire.
 - `_request_permission` is the approval policy (grant once, never always).
   Changing it is a security decision: say so in the commit, and test it.
-- `roots.py` and `paths.py` are copies of agent-host-server-claude's; fix bugs
-  in both.
+- `roots.py` and `paths.py` re-export `agent_host_server.node`'s; fix bugs
+  there.
+- `agent.py` is the `acp` agent type for `agent-host-node`; keep its options
+  in step with `config.py`'s per-agent keys.
 - Tests run `tests/fake_agent.py` as a real subprocess; no network, no real
   agent.
 - Conventional commits; `CHANGELOG.md` under `[Unreleased]`.
