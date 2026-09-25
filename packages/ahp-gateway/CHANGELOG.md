@@ -17,6 +17,18 @@ Under construction. `docs/plan.md` is the design and its §7 is the build order.
 - A shared provider id across nodes is one agent offering every node's models;
   the working directory picks the node.
 
+### Added
+
+- **The machines behind the broker, in `RootState._meta`.** Under
+  `agent-host-broker/nodes`, one entry per admitted node: `id`, `label` (the
+  record's `metadata["label"]`, else the id), `folder` (`ahp-file:///<id>/`),
+  `connected`, and the provider ids of the `agents` it runs. AHP has no notion
+  of a machine, and a stock client needs none - an agent offered on several
+  machines is one agent and the folder picks the machine - but a client can
+  now say "Claude on studio", group by machine, and offer only the agents a
+  folder's machine runs. Sent in the root snapshot only (there is no root
+  action for `_meta`); the list is fixed for a connection's life.
+
 ### Fixed
 
 - **`authenticate` works with more than one node.** It names only a resource,

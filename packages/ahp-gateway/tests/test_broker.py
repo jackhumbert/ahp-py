@@ -188,3 +188,38 @@ async def test_the_nodes_see_the_surfaces_own_client_id(fleet: Fleet) -> None:
         pass
     assert principals == ["vscode-42"]
     assert ("node-a", "vscode-42") in fleet.connector.dialed
+
+
+async def test_the_root_lists_each_machine_and_the_agents_it_runs(fleet: Fleet) -> None:
+    async with fleet.surface() as client:
+        nodes = client.root["_meta"]["agent-host-broker/nodes"]
+    assert nodes == [
+        {
+            "id": "node-a",
+            "label": "node-a",
+            "folder": "ahp-file:///node-a/",
+            "connected": True,
+            "agents": ["alpha"],
+        },
+        {
+            "id": "node-b",
+            "label": "node-b",
+            "folder": "ahp-file:///node-b/",
+            "connected": True,
+            "agents": ["beta"],
+        },
+    ]
+
+
+async def test_a_machine_label_comes_from_its_record() -> None:
+    fleet = Fleet(
+        {"studio": echo_host("echo")},
+        [NodeRecord("studio", "mem://j", DEV, metadata={"label": "Studio's PC"})],
+        everyone_is_a_dev,
+    )
+    try:
+        async with fleet.surface() as client:
+            (node,) = client.root["_meta"]["agent-host-broker/nodes"]
+        assert node["label"] == "Studio's PC"
+    finally:
+        await fleet.aclose()

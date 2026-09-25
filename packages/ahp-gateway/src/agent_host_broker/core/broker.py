@@ -84,6 +84,10 @@ from agent_host_broker.registry import NodeDirectory, NodeRecord, Principal
 
 __all__ = ["Authenticator", "Broker", "BrokerInfo"]
 
+#: `RootState._meta` key listing the machines behind the broker (namespaced, as
+#: the spec asks of `_meta` keys; clients that do not know it ignore it).
+NODES_META_KEY = "agent-host-broker/nodes"
+
 _log = logging.getLogger(__name__)
 
 Authenticator = Callable[[ConnectionInfo], Principal | None]
@@ -590,7 +594,41 @@ class _SurfaceConnection:
 
     def _subscribe_root(self) -> dict[str, Any]:
         self.subscriptions.add(ROOT_URI)
-        return {"resource": ROOT_URI, "state": dict(self.root), "fromSeq": self.clock.current}
+        state = {**self.root, "_meta": {NODES_META_KEY: self._nodes_meta()}}
+        return {"resource": ROOT_URI, "state": state, "fromSeq": self.clock.current}
+
+    def _nodes_meta(self) -> list[dict[str, Any]]:
+        """The machines behind this connection, for `RootState._meta`.
+
+        AHP has no place for "which machine": a broker is one host to its
+        surfaces (invariant 1), and a stock client needs nothing more - an
+        agent offered on several machines is one agent, and the folder picks
+        the machine. A client that wants to say "Claude on studio", group
+        sessions by machine or offer only the agents a folder's machine runs
+        reads this list; `RootState._meta` is the spec's place for metadata
+        about the host itself, and clients ignore keys they do not know.
+
+        A snapshot only: there is no root action for `_meta`. That holds
+        because the list is fixed for a connection's life - admission decides
+        it - and a node coming back closes the connection so it resyncs.
+        """
+        listed: list[dict[str, Any]] = []
+        for node_id, record in self.records.items():
+            node = self.nodes.get(node_id)
+            entry: dict[str, Any] = {
+                "id": node_id,
+                "label": str(record.metadata.get("label") or node_id),
+                "folder": f"{VIRTUAL_ROOT}{node_id}/",
+                "connected": node is not None,
+            }
+            if node is not None:
+                entry["agents"] = [
+                    agent["provider"]
+                    for agent in node.root.get("agents") or []
+                    if isinstance(agent, Mapping) and isinstance(agent.get("provider"), str)
+                ]
+            listed.append(entry)
+        return listed
 
     async def _subscribe(self, params: Mapping[str, Any], after: list[dict[str, Any]]) -> Any:
         channel = params.get("channel")
