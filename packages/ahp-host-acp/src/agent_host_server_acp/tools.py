@@ -38,6 +38,21 @@ _PAST: Final[Mapping[str, str]] = {
 }
 
 
+def _guess_kind(raw_input: Any) -> str:
+    """A kind for an agent that sends none (goose), from the shape of its input.
+
+    Only the unambiguous shapes: a `command` is a shell call; a `path` with
+    `content` writes a file. Anything else stays `other`.
+    """
+    if not isinstance(raw_input, Mapping):
+        return "other"
+    if isinstance(raw_input.get("command"), str):
+        return "execute"
+    if isinstance(raw_input.get("path"), str) and "content" in raw_input:
+        return "edit"
+    return "other"
+
+
 def _short(value: Any, limit: int = 120) -> str:
     text = " ".join(str(value).split())
     return text if len(text) <= limit else text[: limit - 1] + "…"
@@ -69,6 +84,8 @@ class ToolCall:
             self.content = [item for item in content if isinstance(item, Mapping)]
         if isinstance(status := update.get("status"), str) and status:
             self.status = status
+        if self.kind == "other":
+            self.kind = _guess_kind(self.raw_input)
 
     @property
     def finished(self) -> bool:
@@ -95,6 +112,8 @@ class ToolCall:
             path = location.get("path")
             if isinstance(path, str) and path:
                 return os.path.basename(path) or path
+        if path := self._input("path"):
+            return os.path.basename(path) or path
         return _short(self._input("command") or self.title or self.kind, 80)
 
     def progress_line(self) -> str:
