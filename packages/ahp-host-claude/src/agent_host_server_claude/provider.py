@@ -165,6 +165,25 @@ async def discover_models(
     return models_from_server_info(info)
 
 
+def _steering(text: str) -> AsyncIterable[dict[str, Any]]:
+    """A message for the running turn.
+
+    ``priority: "next"`` is the CLI's own queue slot for "at the next tool
+    boundary": it joins the turn in flight, or - if the model has already made
+    its last tool call - is answered straight after it (a second result).
+    """
+
+    async def stream() -> AsyncIterator[dict[str, Any]]:
+        yield {
+            "type": "user",
+            "message": {"role": "user", "content": text},
+            "parent_tool_use_id": None,
+            "priority": "next",
+        }
+
+    return stream()
+
+
 def _as_stream(content: list[dict[str, Any]]) -> AsyncIterable[dict[str, Any]]:
     """One user message with content blocks, in the SDK's streaming-input form."""
 
@@ -228,6 +247,12 @@ class ClaudeSession:
         self._inputs: dict[str, tuple[str, dict[str, Any]]] = {}
         self._streamed_messages: set[str] = set()
         self._lock = asyncio.Lock()
+        #: Steered into the running turn and not yet echoed back by the CLI
+        #: (`--replay-user-messages`), i.e. not yet taken in. The turn stays
+        #: open until this is empty, so an answer that comes after the turn's
+        #: first result still lands in this turn rather than the next one.
+        self._steers_pending: list[str] = []
+        self._accepting_steers = False
 
     # -- lifecycle -----------------------------------------------------------
 
@@ -257,6 +282,9 @@ class ClaudeSession:
             can_use_tool=self._can_use_tool,
             hooks={"PreToolUse": [HookMatcher(matcher=None, hooks=[self._pre_tool_use])]},
             include_partial_messages=True,
+            # Echo each streamed user message when the CLI takes it in: the
+            # only signal that a steered message joined the turn.
+            extra_args={"replay-user-messages": None},
             system_prompt={"type": "preset", "preset": "claude_code"},
         )
 
@@ -281,6 +309,32 @@ class ClaudeSession:
                 await self._client.interrupt()
             except Exception:
                 log.exception("interrupting the Claude client failed")
+
+    # -- steering ------------------------------------------------------------
+
+    async def steer(self, chat_uri: str, message: UserMessage) -> bool:
+        """Send a message into the turn in flight (priority ``next``).
+
+        Refused outside a turn, or once the turn has decided it is over; the
+        host then runs the message as the next turn instead.
+        """
+        client = self._client
+        text = message.text.strip()
+        if not self._accepting_steers or client is None or not text:
+            return False
+        self._steers_pending.append(text)
+        await client.query(_steering(text))
+        return True
+
+    def _took_in(self, item: SdkUserMessage) -> None:
+        """A replayed user message: if it is a steered one, it has joined."""
+        content = item.content
+        text = content if isinstance(content, str) else None
+        if isinstance(content, list):
+            texts = [b.text for b in content if isinstance(b, TextBlock)]
+            text = "".join(texts) if texts else None
+        if text is not None and text.strip() in self._steers_pending:
+            self._steers_pending.remove(text.strip())
 
     # -- permissions ---------------------------------------------------------
 
@@ -379,21 +433,33 @@ class ClaudeSession:
         content = prompt_content(message.text, message.raw, self._roots)
         await client.query(content if isinstance(content, str) else _as_stream(content))
         model: str | None = self._model
-        async for item in client.receive_response():
-            if isinstance(item, StreamEvent):
-                await self._on_stream_event(item, sink)
-            elif isinstance(item, AssistantMessage):
-                model = item.model or model
-                await self._on_assistant(item, sink)
-            elif isinstance(item, SdkUserMessage):
-                await self._on_tool_results(item, sink)
-            elif isinstance(item, SystemMessage):
-                session_id = item.data.get("session_id")
-                if item.subtype == "init" and isinstance(session_id, str):
-                    self.claude_session_id = session_id
-            elif isinstance(item, ResultMessage):
-                self.claude_session_id = item.session_id or self.claude_session_id
-                await self._on_result(item, sink, model)
+        self._steers_pending.clear()
+        self._accepting_steers = True
+        try:
+            while True:
+                async for item in client.receive_response():
+                    if isinstance(item, StreamEvent):
+                        await self._on_stream_event(item, sink)
+                    elif isinstance(item, AssistantMessage):
+                        model = item.model or model
+                        await self._on_assistant(item, sink)
+                    elif isinstance(item, SdkUserMessage):
+                        self._took_in(item)
+                        await self._on_tool_results(item, sink)
+                    elif isinstance(item, SystemMessage):
+                        session_id = item.data.get("session_id")
+                        if item.subtype == "init" and isinstance(session_id, str):
+                            self.claude_session_id = session_id
+                    elif isinstance(item, ResultMessage):
+                        self.claude_session_id = item.session_id or self.claude_session_id
+                        await self._on_result(item, sink, model)
+                # No await between the result and this check, so a steer is
+                # either counted here or refused by `steer`.
+                if not self._steers_pending:
+                    break
+        finally:
+            self._accepting_steers = False
+            self._steers_pending.clear()
 
     async def _on_stream_event(self, item: StreamEvent, sink: TurnSink) -> None:
         # A sub-agent's text is its own conversation; its result arrives as the

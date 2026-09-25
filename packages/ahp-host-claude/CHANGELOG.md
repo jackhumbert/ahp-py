@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- Steering: a message sent while Claude works joins the running turn
+  (`ClaudeSession.steer`, sent with Claude Code's `next` priority, so it
+  arrives at the next tool boundary). The CLI's `--replay-user-messages` echo
+  says when it was taken in; if Claude had already made its last tool call it
+  answers straight after, and the turn stays open for that answer.
+
 ### Fixed
 
 - Sessions survive a restart: `python -m agent_host_server_claude` now calls

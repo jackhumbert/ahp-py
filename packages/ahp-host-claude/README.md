@@ -38,6 +38,9 @@ Status: pre-alpha.
   running Claude client follows, and the choice survives a host restart.
   Needs agent-host-server with `ReconfiguresSessions` and working session
   resume.
+- **Steering**: a message sent while Claude is working joins the turn at
+  its next tool call (Claude Code's own "next" queue slot) instead of waiting
+  for it to finish; queued messages still run afterwards.
 - **Continue from** another Claude Code conversation on this machine - one
   started in a terminal, the IDE, or driven from a phone through Remote
   Control - picked from a searchable list (the `continueFrom` session setting,
