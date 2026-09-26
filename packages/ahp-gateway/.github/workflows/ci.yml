@@ -1,0 +1,157 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Every job only reads. The release workflow is the one place that needs more,
+# and it asks for it itself.
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# Every job below checks out the sibling repositories to supply the
+# dependencies: the family is distributed from GitHub rather than an index,
+# so the siblings ARE the dependency source and the default token is enough --
+# they are public.
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - uses: actions/checkout@v4
+        with:
+          repository: jackhumbert/agent-host-protocol-py
+          path: .protocol
+      - uses: actions/checkout@v4
+        with:
+          repository: jackhumbert/agent-host-server-py
+          path: .server
+      - uses: actions/checkout@v4
+        with:
+          repository: jackhumbert/agent-host-client-py
+          path: .client
+
+      # `--group` is a pip 25.1 feature and setup-python installs whatever pip
+      # the interpreter build bundled -- which for some patch releases predates
+      # it. Without this the install fails on "no such option".
+      - run: python -m pip install --upgrade pip
+
+      # The pins in pyproject.toml are the real declaration; this only
+      # supplies them, from working trees rather than from an index that
+      # lacks them. One command, so pip resolves the server's and client's
+      # dependency on the protocol against the checkout beside them.
+      - run: pip install -e .protocol -e .server -e .client
+      - run: pip install -e '.[ws]' && pip install --group dev
+
+      - name: Lint
+        run: ruff check . && ruff format --check .
+
+      - name: Type-check
+        run: mypy
+
+      - name: Import contracts
+        run: lint-imports
+
+      - name: Test
+        run: pytest
+
+  distributions-are-installable:
+    # Everything above imports the source tree. A name in `__all__` that is
+    # never bound, a subpackage the backend did not collect, and an absent
+    # py.typed all pass from a checkout and fail from an install -- and all
+    # three have happened in this family of repositories.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/checkout@v4
+        with:
+          repository: jackhumbert/agent-host-protocol-py
+          path: .protocol
+      - uses: actions/checkout@v4
+        with:
+          repository: jackhumbert/agent-host-server-py
+          path: .server
+      - uses: actions/checkout@v4
+        with:
+          repository: jackhumbert/agent-host-client-py
+          path: .client
+      - run: pip install build twine
+      # Both distributions: the sdist is what a distro packager builds from,
+      # and it is where the packaging defects live that a wheel cannot show.
+      - run: python -m build --outdir dist
+      - name: Metadata is valid
+        run: twine check dist/*
+      - name: The sdist contains only what a source release is
+        # It once shipped tool caches in a sibling repository -- both
+        # self-ignored with a nested .gitignore, which git honours and
+        # hatchling's file selection does not. The allowlist in pyproject.toml
+        # is the fix; this is the tripwire that keeps the next cache out.
+        run: |
+          if tar -tzf dist/*.tar.gz | grep -E '\.hypothesis/|_cache/|\.github/|\.venv/'; then
+            echo "::error::the sdist contains files that do not belong in a source release"
+            exit 1
+          fi
+      - name: Install the wheel into a clean venv
+        run: |
+          python -m venv /tmp/fresh
+          # The dependency first, from the sibling checkout -- no index
+          # carries it, by design. `--no-deps` on the wheel so pip does not
+          # then try to resolve the same names from an index that lacks them.
+          /tmp/fresh/bin/pip install ./.protocol ./.server ./.client
+          # `websockets` by hand: it is the `[ws]` extra, and `--no-deps` does
+          # not resolve extras.
+          /tmp/fresh/bin/pip install --no-deps "$(echo dist/*.whl)" websockets
+      - name: Smoke-test it from outside the checkout
+        # The edges, not just the package root: `core` and `ws` are where the
+        # sibling imports live, so this is what proves they resolve.
+        run: cd /tmp && /tmp/fresh/bin/python -c "import agent_host_broker, agent_host_broker.core, agent_host_broker.ws; print(agent_host_broker.__version__)"
+
+  siblings-main:
+    # Non-blocking. The dependencies are pinned to 0.1, so this repository
+    # is insulated from the siblings' main branches -- which is exactly why
+    # drift there would otherwise be invisible until a release. This makes it
+    # visible the day it lands, without failing a PR for someone else's commit.
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: jackhumbert/agent-host-protocol-py
+          ref: main
+          path: .protocol
+      - uses: actions/checkout@v4
+        with:
+          repository: jackhumbert/agent-host-server-py
+          ref: main
+          path: .server
+      - uses: actions/checkout@v4
+        with:
+          repository: jackhumbert/agent-host-client-py
+          ref: main
+          path: .client
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install --upgrade pip
+      - run: pip install -e .protocol -e .server -e .client
+      - run: pip install -e '.[ws]' && pip install --group dev
+      - run: pytest
