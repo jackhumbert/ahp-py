@@ -101,17 +101,21 @@ class Roots:
 
         Named: `file:///<name>/<rel>`; the top (`file:///`) means the primary
         root. Unnamed: the URI's own path, if it lies inside the root.
+
+        A named tree also takes a plain absolute URI inside one of its roots
+        (`file:///G:/llm`): what a session stored before its node's roots were
+        named, or what a client sends that never saw the tree. A tree name wins
+        where the two spellings could collide.
         """
         if self.is_named:
             parsed = urlparse(uri)
             if parsed.scheme in ("file", "vscode-agent-host") and not parsed.path.strip("/"):
                 return self.primary
             split = self._split(uri)
-            if split is None:
-                return None
-            index, rel = split
-            real = (self.paths[index] / rel).resolve() if rel else self.paths[index]
-            return real if _inside(real, self.paths[index]) else None
+            if split is not None:
+                index, rel = split
+                real = (self.paths[index] / rel).resolve() if rel else self.paths[index]
+                return real if _inside(real, self.paths[index]) else None
         path = directory_of(uri)
         if path is None:
             return None
@@ -149,6 +153,12 @@ class NamedRootsResourceProvider:
 
     def _jail_uri(self, uri: str) -> tuple[RootedFilesystemResourceProvider, str]:
         split = self.roots._split(uri)
+        if split is None:
+            # A plain absolute URI inside a root (`serves` says yes to those):
+            # its tree spelling, so the read still walks that root's jail.
+            real = self.roots.real_path(uri)
+            tree = self.roots.tree_uri(real) if real is not None else None
+            split = self.roots._split(tree) if tree is not None else None
         if split is None:
             raise errors.AhpError(-32008, f"No such resource: {uri}")
         index, rel = split

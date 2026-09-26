@@ -68,6 +68,8 @@ def test_the_task_runs_the_supervisor_at_logon_and_keeps_it_up() -> None:
     xml = task_xml(command, user="STUDIO\\me", working_directory=r"C:\Users\me", description="d")
     root = ET.fromstring(xml.split("\n", 1)[1])  # without the UTF-16 declaration
     assert root.findtext("t:Triggers/t:LogonTrigger/t:UserId", namespaces=_NS) == "STUDIO\\me"
+    # Not Task Scheduler's default of 7, which also lowers I/O priority.
+    assert root.findtext("t:Settings/t:Priority", namespaces=_NS) == "4"
     assert (
         root.findtext("t:Principals/t:Principal/t:LogonType", namespaces=_NS) == "InteractiveToken"
     )

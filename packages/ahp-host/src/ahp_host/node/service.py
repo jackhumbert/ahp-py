@@ -240,7 +240,9 @@ def task_xml(command: Sequence[str], *, user: str, working_directory: str, descr
     <RunOnlyIfIdle>false</RunOnlyIfIdle>
     <WakeToRun>false</WakeToRun>
     <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
-    <Priority>7</Priority>
+    <!-- Normal. Task Scheduler's default, 7, also means low I/O priority:
+         a supervisor started at logon sat in an I/O wait for minutes. -->
+    <Priority>4</Priority>
     <RestartOnFailure>
       <Interval>PT1M</Interval>
       <Count>999</Count>

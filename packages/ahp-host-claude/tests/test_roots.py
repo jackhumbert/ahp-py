@@ -84,6 +84,61 @@ async def test_a_symlink_out_of_a_root_is_refused(two_roots: Roots) -> None:
     assert two_roots.real_path("file:///llm/escape") is None
 
 
+def test_a_plain_absolute_uri_inside_a_named_root_is_accepted(two_roots: Roots) -> None:
+    """What a session stored before its node's roots were named: a Windows node's
+    `file:///G:/llm` failed every start-up with "G:\\llm is outside this host's
+    root G:\\llm". Inside a root it is that root's path, whichever spelling."""
+    llm, work = two_roots.paths
+    assert two_roots.real_path((llm / "model").as_uri()) == (llm / "model").resolve()
+    assert two_roots.real_path(work.as_uri()) == work.resolve()
+
+
+def test_a_plain_absolute_uri_outside_every_root_is_still_refused(two_roots: Roots) -> None:
+    llm = two_roots.paths[0]
+    assert two_roots.real_path((llm.parent / "secret").as_uri()) is None
+    assert two_roots.real_path(llm.parent.as_uri()) is None, "the roots' own parent"
+    # `..` is resolved before the check, so it cannot climb out of a root.
+    assert two_roots.real_path(f"{llm.as_uri()}/../secret") is None
+    assert two_roots.real_path("file:///llm/../../secret") is None
+
+
+async def test_what_serves_says_yes_to_can_be_read(two_roots: Roots) -> None:
+    """The host asks `serves` before a read; a yes that the read then turns
+    into "no such resource" would be a lie."""
+    llm = two_roots.paths[0]
+    provider = NamedRootsResourceProvider(two_roots)
+    uri = (llm / "model" / "weights.txt").as_uri()
+    assert provider.serves(uri)
+    assert (await provider.read(uri)).data == b"w"
+    assert [e.name for e in await provider.list_dir((llm / "model").as_uri())] == ["weights.txt"]
+    outside = (llm.parent / "secret" / "key").as_uri()
+    assert not provider.serves(outside)
+    with pytest.raises(AhpError):
+        await provider.read(outside)
+
+
+@posix_only
+def test_a_plain_absolute_uri_through_a_symlink_out_is_refused(two_roots: Roots) -> None:
+    llm = two_roots.paths[0]
+    os.symlink(llm.parent / "secret", llm / "escape")
+    assert two_roots.real_path((llm / "escape").as_uri()) is None
+    assert two_roots.real_path((llm / "escape" / "key").as_uri()) is None
+
+
+async def test_a_session_stored_with_an_absolute_folder_still_starts(two_roots: Roots) -> None:
+    provider = ClaudeProvider(two_roots)
+    work = two_roots.paths[1]
+    session = await provider.create_session(
+        AgentSessionContext(
+            session_uri="s",
+            chat_uri="c",
+            provider_id="claude",
+            working_directories=((work / "app").as_uri(),),
+        )
+    )
+    assert session.working_directory() == (work / "app").resolve()
+
+
 async def test_a_session_starts_in_the_named_folder_it_was_given(two_roots: Roots) -> None:
     from claude_agent_sdk import ClaudeAgentOptions, ResultMessage
 

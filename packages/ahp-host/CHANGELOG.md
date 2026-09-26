@@ -118,6 +118,15 @@ versions each release speaks.
 
 ### Fixed
 
+- **Named roots accept a plain absolute URI inside a root.** A node with
+  named roots took only its tree spelling (`file:///llm/...`), so a session
+  stored with `file:///G:/llm` -- from before the roots were named -- failed
+  every start-up as "outside this host's root". `Roots.real_path` now also
+  takes an absolute URI, accepted only once resolved inside a root, and the
+  named-roots resource provider reads it through that root's jail.
+- **`ahp-node install` on Windows runs at normal priority** (4). Task
+  Scheduler's default, 7, also lowers I/O priority, and a supervisor started
+  at logon sat in an I/O wait for minutes before starting anything.
 - The `toolClientExecution` entry a client tool call adds to
   `SessionState.inputNeeded` now carries the call's `contributor`, which the
   spec requires. A client not subscribed to the chat reads that entry to find
