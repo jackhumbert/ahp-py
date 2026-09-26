@@ -112,6 +112,7 @@ from agent_host_server.provider.base import (
     ForkedFrom,
     HandlesCustomizations,
     ManagesMcpServers,
+    OpensSessions,
     ReconfiguresSessions,
     ResumableAgentProvider,
     SessionPublisher,
@@ -836,6 +837,43 @@ class _Publisher:
         return True
 
 
+class _Directory:
+    """`SessionDirectory`: `open_session` and `close_session`, for one provider."""
+
+    def __init__(self, host: Host, provider_id: str) -> None:
+        self._host = host
+        self._provider_id = provider_id
+
+    async def open(
+        self,
+        uri: str,
+        *,
+        title: str,
+        resume_state: Mapping[str, Any],
+        working_directories: Sequence[str] = (),
+    ) -> bool:
+        return await self._host.open_session(
+            uri,
+            title=title,
+            resume_state=resume_state,
+            working_directories=working_directories,
+            provider_id=self._provider_id,
+        )
+
+    async def close(self, uri: str) -> bool:
+        session = self._host._sessions.get(uri)
+        if session is None or session.provider_id != self._provider_id:
+            return False
+        return await self._host.close_session(uri)
+
+    def uris(self) -> Sequence[str]:
+        return [
+            uri
+            for uri, session in self._host._sessions.items()
+            if session.provider_id == self._provider_id
+        ]
+
+
 class _ExternalTurn:
     """An `AgentSession` whose only turn is one the provider is already running.
 
@@ -1274,6 +1312,13 @@ class Host:
                 ROOT_URI,
                 {"type": "root/activeSessionsChanged", "activeSessions": len(self._sessions)},
             )
+        # After restoring, so each directory already lists what was saved.
+        for provider_id, provider in self.providers.items():
+            if isinstance(provider, OpensSessions):
+                try:
+                    await provider.attach_directory(_Directory(self, provider_id))
+                except Exception:
+                    _log.exception("attach_directory failed for %s", provider_id)
         return count
 
     async def open_session(

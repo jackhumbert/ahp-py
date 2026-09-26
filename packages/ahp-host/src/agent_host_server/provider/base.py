@@ -42,8 +42,10 @@ __all__ = [
     "ManagesMcpServers",
     "ModelInfo",
     "ModelSelection",
+    "OpensSessions",
     "ResumableAgentProvider",
     "SessionDescription",
+    "SessionDirectory",
     "SessionPublisher",
     "ToolConfirmation",
     "ToolConfirmationOutcome",
@@ -564,6 +566,51 @@ class DisposesSessions(Protocol):
     """
 
     async def disposed(self) -> None: ...
+
+
+@runtime_checkable
+class SessionDirectory(Protocol):
+    """A provider's own view of the host's session list.
+
+    For an agent whose conversations are started somewhere else and should be
+    listed here too (Claude Code sessions on claude.ai): it opens one when it
+    appears there and closes it when it ends there. Every call is scoped to
+    the provider that was given the directory.
+    """
+
+    async def open(
+        self,
+        uri: str,
+        *,
+        title: str,
+        resume_state: Mapping[str, Any],
+        working_directories: Sequence[str] = (),
+    ) -> bool:
+        """`Host.open_session` for this provider: the agent comes from
+        `resume_session` with *resume_state*. ``False`` if it was already
+        listed (its agent is then made sure to be running)."""
+        ...
+
+    async def close(self, uri: str) -> bool:
+        """`Host.close_session`: dispose it, as a client deleting it would."""
+        ...
+
+    def uris(self) -> Sequence[str]:
+        """This provider's sessions, including restored ones not yet running."""
+        ...
+
+
+@runtime_checkable
+class OpensSessions(Protocol):
+    """A provider that lists sessions of its own accord.
+
+    Given its `SessionDirectory` once, after the host has restored what it
+    saved - so `uris()` already includes sessions from the last run. The
+    provider typically starts watching wherever its sessions live and returns;
+    it must not block serving.
+    """
+
+    async def attach_directory(self, directory: SessionDirectory) -> None: ...
 
 
 @runtime_checkable

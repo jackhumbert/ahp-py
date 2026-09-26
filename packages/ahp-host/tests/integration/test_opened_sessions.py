@@ -202,3 +202,52 @@ async def test_deleting_a_session_says_so_and_shutting_down_does_not(tmp_path: P
     assert isinstance(kept, _Disposable)
     assert gone.calls == ["disposed", "aclose"]
     assert kept.calls == ["aclose"]
+
+
+class _Listing(MirrorProvider):
+    """Opens sessions of its own accord (`OpensSessions`)."""
+
+    def __init__(self, provider_id: str = "mirror") -> None:
+        super().__init__()
+        self.provider_id = provider_id
+        self.directory: Any = None
+        self.saw_at_attach: list[str] = []
+
+    @property
+    def agent(self) -> AgentInfo:
+        return AgentInfo(provider=self.provider_id, display_name="M", description="", models=())
+
+    async def attach_directory(self, directory: Any) -> None:
+        self.directory = directory
+        self.saw_at_attach = list(directory.uris())
+
+
+async def test_a_provider_gets_its_own_directory_after_restore(tmp_path: Path) -> None:
+    first = _host(tmp_path, MirrorProvider())
+    try:
+        await first.open_session("ahp-session:/saved", title="t", resume_state={"remote": "s"})
+        await asyncio.sleep(0.2)
+    finally:
+        await first.aclose()
+
+    listing, other = _Listing(), _Listing("other")
+    host = Host(
+        [listing, other],
+        LoopbackSingleUserPolicy(),
+        store=FileSessionStore(tmp_path / "sessions", debounce=0.05),
+        sequence_file=tmp_path / "seq",
+    )
+    try:
+        await host.restore()
+        assert listing.saw_at_attach == ["ahp-session:/saved"], "restored sessions were not listed"
+        assert other.saw_at_attach == []
+
+        assert await listing.directory.open(
+            "ahp-session:/new", title="From elsewhere", resume_state={"remote": "n"}
+        )
+        assert "ahp-session:/new" in listing.directory.uris()
+        assert not await other.directory.close("ahp-session:/new"), "closed another's session"
+        assert await listing.directory.close("ahp-session:/new")
+        assert "ahp-session:/new" not in host.session_uris()
+    finally:
+        await host.aclose()

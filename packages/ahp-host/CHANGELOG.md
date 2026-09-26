@@ -12,6 +12,12 @@ versions each release speaks.
 
 ### Added
 
+- `OpensSessions.attach_directory(directory)`: a provider that lists
+  sessions of its own accord (Claude Code sessions started elsewhere, on
+  claude.ai) is given a `SessionDirectory` - `open`, `close` and `uris`,
+  scoped to that provider - once `Host.restore()` has brought back what was
+  saved. Until now only an embedder holding the `Host` could open a session,
+  and an agent plugged into `agent-host-node` never holds it.
 - `ArchivesSessions.archived_changed(is_archived)`: an agent session that
   implements it is told when a client archives or unarchives it
   (`session/isArchivedChanged`), and the session is then saved. For an agent
