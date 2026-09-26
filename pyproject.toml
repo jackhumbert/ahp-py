@@ -1,0 +1,11 @@
+# Workspace root only: nothing is built from here. Each package under
+# `packages/` is its own distribution with its own pyproject.toml.
+[tool.uv.workspace]
+members = ["packages/*"]
+
+# Sibling dependencies resolve to the workspace, never an index. Keyed by the
+# distribution names the packages still declare; rename these with them.
+[tool.uv.sources]
+agent-host-protocol = { workspace = true }
+agent-host-server = { workspace = true }
+agent-host-client = { workspace = true }
