@@ -282,6 +282,7 @@ class ClaudeSession:
         recap: str | None = None,
         remote_control: bool = False,
         bridge_session_id: str | None = None,
+        archived: bool = False,
     ) -> None:
         self.context = context
         #: Set when continuing another Claude Code conversation: its folder,
@@ -300,6 +301,8 @@ class ClaudeSession:
         #: one. Kept while Remote Control is off, for when it is turned on.
         self.bridge_session_id = bridge_session_id
         self.session_url: str | None = None
+        #: Archived by a client: filed away on claude.ai too, and not started.
+        self.archived = archived
         self._roots = as_roots(root)
         self._root = self._roots.primary
         self._client_factory = client_factory
@@ -397,7 +400,7 @@ class ClaudeSession:
                 await client.connect()
                 self._client = client
                 self._reader = asyncio.create_task(self._read(client))
-                if self.remote_control:
+                if self.remote_control and not self.archived:
                     await self._enable_remote_control(client)
             return self._client
 
@@ -418,25 +421,68 @@ class ClaudeSession:
         """Deleted here, so it goes from claude.ai too.
 
         Only a deletion: at shutdown the session stays there, offline, for
-        the next start to reattach to. Archiving it takes three steps because
-        a session turned on as kept is never archived while it stays on: off,
-        on again unkept (same session), off.
+        the next start to reattach to. One already archived is already gone
+        from there.
+        """
+        if self.bridge_session_id is None or self.archived:
+            return
+        self.archived = True
+        if await self._archive_on_claude_ai():
+            self.bridge_session_id = None
+
+    async def archived_changed(self, is_archived: bool) -> None:
+        """A client filed the session away, or brought it back.
+
+        Archived, it is archived on claude.ai too, and its Claude process
+        stops: nothing needs to reach it. Unarchived, the process starts again
+        and reattaches, which brings the claude.ai session back. The
+        bridge id is kept throughout, so it is the same session both ways.
+        """
+        if is_archived == self.archived:
+            return
+        self.archived = is_archived
+        if is_archived:
+            await self._archive_on_claude_ai()
+            await self._stop_client()
+        elif self.remote_control:
+            self._starting = None
+            self.start_soon()
+
+    async def _archive_on_claude_ai(self) -> bool:
+        """Archive the claude.ai session. Whether it worked.
+
+        Three steps, because a session turned on as kept is never archived
+        while it stays on: off, on again unkept (the same session), off.
+        `self.archived` is set first, so starting a client for this does not
+        turn Remote Control back on as kept.
         """
         bridge = self.bridge_session_id
         if bridge is None:
-            return
-        self.remote_control = False  # starting a client must not turn it back on as kept
+            return False
         try:
             client = await self._ensure_client()
             if self.session_url is not None:
                 await client.remote_control(False)
+            self.session_url = None
             await client.remote_control(True, reattach=bridge, keep=False)
             await client.remote_control(False)
         except Exception:
             log.warning("could not archive claude.ai session %s", bridge, exc_info=True)
-            return
-        self.bridge_session_id = None
-        self.session_url = None
+            return False
+        return True
+
+    async def _stop_client(self) -> None:
+        """Let the Claude process go; the next turn starts one again."""
+        client, self._client = self._client, None
+        reader, self._reader = self._reader, None
+        self._starting = None
+        if reader is not None:
+            reader.cancel()
+        if client is not None:
+            try:
+                await client.disconnect()
+            except Exception:
+                log.exception("disconnecting the Claude client failed")
 
     async def cancel(self, reason: str | None = None) -> None:
         if self._client is not None:
@@ -468,6 +514,8 @@ class ClaudeSession:
         if enabled == self.remote_control:
             return
         self.remote_control = enabled
+        if self.archived:
+            return  # takes effect when it is unarchived
         if enabled:
             # Starting the client is what turns it on.
             client = await self._ensure_client()
@@ -978,8 +1026,11 @@ class ClaudeProvider:
         ]
 
     def _started(self, session: ClaudeSession) -> ClaudeSession:
-        """A session on claude.ai must be reachable before its first message here."""
-        if session.remote_control:
+        """A session on claude.ai must be reachable before its first message here.
+
+        Not an archived one: starting it would reattach, which unarchives it.
+        """
+        if session.remote_control and not session.archived:
             session.start_soon()
         return session
 
@@ -1034,6 +1085,7 @@ class ClaudeProvider:
                     context.config.get(RC_CONFIG_KEY, state.get(RC_CONFIG_KEY))
                 ),
                 bridge_session_id=bridge if isinstance(bridge, str) else None,
+                archived=state.get("archived") is True,
             )
         )
 
@@ -1050,6 +1102,8 @@ class ClaudeProvider:
             state["claudeSessionId"] = session.claude_session_id
         if session.bridge_session_id:
             state["bridgeSessionId"] = session.bridge_session_id
+        if session.archived:
+            state["archived"] = True
         if session.directory is not None:
             state["cwd"] = str(session.directory)
         return state

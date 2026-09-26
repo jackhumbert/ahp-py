@@ -42,6 +42,12 @@
   agent-host-server with `DisposesSessions`); shutting the host down still
   leaves it there, offline, for the next start to reattach to.
 
+- Archiving a session in a client (`session/isArchivedChanged`) archives it
+  on claude.ai too and stops its Claude process; unarchiving starts it again
+  and brings the same claude.ai session back. An archived session is not
+  started at restart, which would unarchive it (needs agent-host-server with
+  `ArchivesSessions`).
+
 ### Changed
 
 - One reader per Claude client: Claude Code's output is read continuously

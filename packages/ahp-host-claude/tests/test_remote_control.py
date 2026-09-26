@@ -245,6 +245,74 @@ async def test_deleting_a_session_that_never_had_it_starts_nothing(tmp_path: Pat
     assert harness.clients == []
 
 
+# -- archiving --------------------------------------------------------------
+
+
+async def test_archiving_files_it_away_on_claude_ai_and_stops_claude(tmp_path: Path) -> None:
+    harness = Harness(tmp_path)
+    session = await harness.session()
+    await eventually(lambda: session.session_url is not None)
+
+    await session.archived_changed(True)
+    client = harness.clients[0]
+    assert client.remote_controls[1:] == [(False, None), (True, "cse_1"), (False, None)]
+    assert client.keeps[2] is False
+    assert client.disconnected, "an archived session kept its Claude process"
+    state = await harness.provider.resume_state_of(session)
+    assert state is not None
+    assert state["archived"] is True
+    assert state["bridgeSessionId"] == "cse_1", "unarchiving needs the same session"
+
+
+async def test_unarchiving_brings_it_back_on_claude_ai(tmp_path: Path) -> None:
+    harness = Harness(tmp_path)
+    session = await harness.session()
+    await eventually(lambda: session.session_url is not None)
+    await session.archived_changed(True)
+
+    await session.archived_changed(False)
+    await eventually(lambda: len(harness.clients) == 2 and session.session_url is not None)
+    assert harness.clients[1].remote_controls == [(True, "cse_1")]
+    assert harness.clients[1].keeps == [True]
+
+
+async def test_an_archived_session_is_not_started_on_restore(tmp_path: Path) -> None:
+    """Starting it would reattach, which unarchives it on claude.ai."""
+    harness = Harness(tmp_path)
+    session = await harness.provider.resume_session(
+        AgentSessionContext(
+            session_uri="s",
+            chat_uri="c",
+            provider_id="claude",
+            resume_state={"bridgeSessionId": "cse_1", "remoteControl": True, "archived": True},
+        )
+    )
+    await asyncio.sleep(0.02)
+    assert harness.clients == []
+    await session.config_changed({"remoteControl": True})
+    await session.disposed()
+    assert harness.clients == [], "touched a session already filed away"
+
+
+async def test_a_turn_in_an_archived_session_stays_off_claude_ai(tmp_path: Path) -> None:
+    harness = Harness(tmp_path, [_result()])
+    session = await harness.provider.resume_session(
+        AgentSessionContext(
+            session_uri="s",
+            chat_uri="c",
+            provider_id="claude",
+            resume_state={
+                "claudeSessionId": "claude-1",
+                "bridgeSessionId": "cse_1",
+                "remoteControl": True,
+                "archived": True,
+            },
+        )
+    )
+    await session.send_user_message(UserMessage(text="hi"), RecordingSink())
+    assert harness.clients[0].remote_controls == []
+
+
 # -- turns from elsewhere ------------------------------------------------------
 
 
