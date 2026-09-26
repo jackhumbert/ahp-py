@@ -69,10 +69,14 @@ jobs:
         working-directory: packages/ahp-host-acp
         run: uv run --no-sync pytest && uv run --no-sync python -m ahp_host_acp --help
       - name: Protocol, client and gateway
+        # Every package runs even after one fails, so a failure never hides
+        # the next one's.
         run: |
+          status=0
           for package in ahp-protocol ahp-client ahp-gateway; do
-            (cd "packages/$package" && uv run --no-sync pytest)
+            (cd "packages/$package" && uv run --no-sync pytest) || status=1
           done
+          exit $status
       - name: Host, whole suite (informational)
         # The rest of the host has never been run on Windows (the pty backend,
         # for one, is POSIX by construction). Reported, not gating.
