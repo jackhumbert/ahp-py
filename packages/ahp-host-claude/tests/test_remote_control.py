@@ -134,6 +134,28 @@ async def test_a_new_session_goes_on_claude_ai_before_its_first_message(tmp_path
     assert state["remoteControl"] is True
 
 
+async def test_a_new_claude_ai_session_is_saved_straight_away(tmp_path: Path) -> None:
+    """The host saves a session when something happens in it; an idle one
+    would lose its bridge id at the next restart, and get a new one each time."""
+    harness = Harness(tmp_path)
+    session = await harness.session()
+    await eventually(lambda: session.session_url is not None)
+    assert harness.publisher.config_changes == [{"remoteControl": True}]
+
+    resumed = Harness(tmp_path)
+    again = await resumed.provider.resume_session(
+        AgentSessionContext(
+            session_uri="s",
+            chat_uri="c",
+            provider_id="claude",
+            resume_state={"claudeSessionId": "claude-1", "bridgeSessionId": "cse_1"},
+            publisher=resumed.publisher,
+        )
+    )
+    await eventually(lambda: again.session_url is not None)
+    assert resumed.publisher.config_changes == [], "saved a reattach that changed nothing"
+
+
 async def test_a_session_without_it_starts_on_its_first_message(tmp_path: Path) -> None:
     harness = Harness(tmp_path, [_result()], remote_control=False)
     session = await harness.session()
@@ -529,6 +551,11 @@ async def test_a_long_running_tool_approved_elsewhere_is_reported_before_it_ends
 # -- the approval mode, switched on claude.ai ----------------------------------
 
 
+def _modes(publisher: FakePublisher) -> list[dict[str, Any]]:
+    """The approval-mode changes published, leaving out the saves of a bridge id."""
+    return [change for change in publisher.config_changes if "permissionMode" in change]
+
+
 def _status(mode: str) -> SystemMessage:
     return SystemMessage("status", {"status": None, "permissionMode": mode})
 
@@ -538,7 +565,7 @@ async def test_a_mode_switched_on_the_phone_is_followed_here(tmp_path: Path) -> 
     session = await harness.session()
     harness.clients[0].push(_status("acceptEdits"))
     await eventually(lambda: session.approvals == "acceptEdits")
-    assert harness.publisher.config_changes == [{"permissionMode": "acceptEdits"}]
+    assert _modes(harness.publisher) == [{"permissionMode": "acceptEdits"}]
 
 
 async def test_our_own_switch_echoed_back_is_not_published_again(tmp_path: Path) -> None:
@@ -548,7 +575,7 @@ async def test_our_own_switch_echoed_back_is_not_published_again(tmp_path: Path)
     harness.clients[0].push(_status("auto"))
     await asyncio.sleep(0.02)
     assert session.approvals == "auto"
-    assert harness.publisher.config_changes == []
+    assert _modes(harness.publisher) == []
 
 
 @pytest.mark.parametrize("mode", ["bypassPermissions", "dontAsk"])
@@ -560,7 +587,7 @@ async def test_a_mode_this_adapter_does_not_offer_is_put_back_to_ask(
     harness.clients[0].push(_status(mode))
     await eventually(lambda: session.approvals == "default")
     assert harness.clients[0].permission_modes == ["default"]
-    assert harness.publisher.config_changes == [{"permissionMode": "default"}]
+    assert _modes(harness.publisher) == [{"permissionMode": "default"}]
 
 
 async def test_a_plan_approved_on_the_phone_drops_to_ask(tmp_path: Path) -> None:
@@ -577,7 +604,7 @@ async def test_a_plan_approved_on_the_phone_drops_to_ask(tmp_path: Path) -> None
     await session.send_user_message(UserMessage(text="plan it"), sink)
 
     assert session.approvals == "default"
-    assert harness.publisher.config_changes == [{"permissionMode": "default"}]
+    assert _modes(harness.publisher) == [{"permissionMode": "default"}]
 
 
 async def test_a_plan_approved_here_shows_the_mode_it_drops_to(tmp_path: Path) -> None:
@@ -588,7 +615,7 @@ async def test_a_plan_approved_here_shows_the_mode_it_drops_to(tmp_path: Path) -
         "ExitPlanMode", {"plan": "p"}, ToolPermissionContext(tool_use_id="p1")
     )
     assert session.approvals == "default"
-    assert harness.publisher.config_changes == [{"permissionMode": "default"}]
+    assert _modes(harness.publisher) == [{"permissionMode": "default"}]
 
 
 # -- configuration -------------------------------------------------------------

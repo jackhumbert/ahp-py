@@ -79,6 +79,10 @@
 
 ### Fixed
 
+- A session that goes on claude.ai and then sits idle keeps its claude.ai
+  session across restarts: its bridge id is saved as soon as it has one.
+  Before, the host only saved it on the next turn, so every restart gave such
+  a session a new claude.ai session and left the old one behind.
 - A session with Remote Control on is reachable again right after a restart:
   the host restores sessions lazily, on their first turn, so until something
   here touched one it was offline on claude.ai. They are now brought back

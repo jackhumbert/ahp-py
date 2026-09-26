@@ -524,10 +524,29 @@ class ClaudeSession:
             if bridge is None:
                 log.warning("Remote Control gave an answer this adapter does not understand")
                 return
+            new = bridge.bridge_session_id != self.bridge_session_id
             self.bridge_session_id = bridge.bridge_session_id
             self.session_url = bridge.session_url
             log.info("Remote Control: %s", bridge.session_url)
+            if new:
+                await self._save()
             return
+
+    async def _save(self) -> None:
+        """Have the host save this session now, with a new bridge id in it.
+
+        The host saves a session when something happens in it. One that comes
+        up, goes on claude.ai and sits idle would otherwise lose its bridge id
+        at the next restart - and get a new claude.ai session each time.
+        Restating the setting is the one thing a provider can do that saves.
+        """
+        publisher = self.context.publisher
+        if publisher is None:
+            return
+        try:
+            await publisher.config_changed({RC_CONFIG_KEY: self.remote_control})
+        except Exception:
+            log.warning("could not save the claude.ai session id", exc_info=True)
 
     async def _set_remote_control(self, enabled: bool) -> None:
         if enabled == self.remote_control:
