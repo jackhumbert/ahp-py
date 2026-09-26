@@ -6,6 +6,22 @@ Every release states the protocol versions it speaks.
 
 ## [Unreleased]
 
+### Added
+
+- `Client.open_session(uri, tools=...)`: join a session you did not create as
+  an active client that offers and runs tools, as `create_session(tools=...)`
+  does for one you did.
+
+### Fixed
+
+- A client whose connection came back had dropped out of the session's
+  `activeClients`, because the host removes a client that disconnects. Every
+  later call to its tools then failed as addressed to nobody. A session with
+  tools now offers them again on every reconnect.
+- A `toolClientExecution` entry in `SessionState.inputNeeded` whose call
+  carries no `contributor` is recognised by the entry's own `clientId`. Before
+  this, a client not subscribed to the chat never ran such a call.
+
 ### Fixed — wss:// hosts were unreachable without a hand-built SSL context
 
 - **`connect("wss://…")` failed before opening a socket** with

@@ -15,6 +15,7 @@ from ahp_gateway.core.node import (
     NodeUnavailableError,
     open_node_link,
 )
+from ahp_gateway.core.orchestrator import Orchestrator, OrchestratorConfig
 from ahp_gateway.core.uris import (
     SCHEME,
     VIRTUAL_ROOT,
@@ -38,6 +39,8 @@ __all__ = [
     "NodeLink",
     "NodeRequestHandler",
     "NodeUnavailableError",
+    "Orchestrator",
+    "OrchestratorConfig",
     "is_virtual_root",
     "node_of",
     "open_node_link",

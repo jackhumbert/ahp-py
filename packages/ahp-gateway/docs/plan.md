@@ -276,3 +276,44 @@ of happening at the moment of loss.
 - `WebSocketServer` is typed to take a concrete `Host`. `serve_gateway` casts
   around it; typing that parameter as a protocol with a `serve` method would
   remove the cast.
+
+## 10. The orchestrator (as built)
+
+An agent that runs sessions on the fleet's machines. It is on when the
+gateway is given an `OrchestratorConfig` (`Gateway(orchestrator=...)`), and
+the embedder calls `Gateway.start()` and `Gateway.aclose()` around serving.
+`ahp_gateway.core.orchestrator` has the details.
+
+- **What a surface sees.** One more agent in the merged list,
+  `orchestrator`. Its entry copies the agent it runs on
+  (`OrchestratorConfig.provider`, normally Claude), and it is listed only when
+  an admitted node runs that agent. A session of it is an ordinary session of
+  that agent on one node: the node its folder names, else `config.node`, else
+  the default.
+- **Fleet tools.** The gateway joins that session as an active client that
+  offers `list_machines`, `list_folder`, `start_session`, `send_message`,
+  `read_session`, `wait_for_sessions`, `stop_session` and `list_sessions`. The
+  agent calls them as it calls any client tool, and the gateway runs them.
+- **Its own links.** A surface's node links close with the surface, and an
+  orchestrator has to keep working after the phone that started it sleeps. So
+  the orchestrator holds one supervised `ahp_client` connection per
+  (principal, node). It dials with the gateway's connector and credentials,
+  only to nodes the registry admits that principal to, with a client id of its
+  own. It creates the orchestrator session itself, on the surface's URI, so
+  the surface subscribes to it as it would to any session it created.
+- **Limits, which the agent cannot change.**
+  - Workers run with `child_config`, by default `permissionMode: auto`, so
+    the node's own approval policy gates every action they take.
+  - No tool answers an approval, so a prompt waits for a person.
+  - Only sessions this orchestrator started can be driven.
+  - At most `max_running` of them run a turn at once.
+  - Workers get no fleet tools, so a worker cannot start more workers.
+- **Restarts.** Orchestrators and their workers are kept in
+  `config.state_path`. `start()` joins each orchestrator again in the
+  background, retrying until its node answers. A link that drops rejoins with
+  its tools too, because the node forgot them when the link went.
+
+**Not yet:** marking workers as children of their orchestrator for a surface
+to nest them (`ChatOrigin` `kind: tool` on the worker's chat). `start_session`
+already returns `ToolResultSubagentContent` naming the worker's chat, which is
+the parent's side of that link.

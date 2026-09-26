@@ -898,6 +898,11 @@ class ActionTurnSink:
                     "invocationMessage": ready["invocationMessage"],
                     "confirmed": "not-needed",
                     "status": "running",
+                    # "whose `contributor` is a client `ToolCallClientContributor`
+                    # whose `clientId` matches the denormalized `clientId`" -- and
+                    # the one thing a client that is not subscribed to the chat
+                    # can tell its own calls by.
+                    "contributor": {"kind": "client", "clientId": call.client_id},
                     **({"toolInput": ready["toolInput"]} if "toolInput" in ready else {}),
                 },
             },

@@ -86,9 +86,7 @@ class OrchestratorConfig:
     node: str | None = None
     #: Merged over whatever config a worker's agent resolves, and not
     #: changeable by the orchestrator. The default asks Claude Code's auto mode.
-    child_config: Mapping[str, Any] = field(
-        default_factory=lambda: {"permissionMode": "auto"}
-    )
+    child_config: Mapping[str, Any] = field(default_factory=lambda: {"permissionMode": "auto"})
     #: How many of one orchestrator's sessions may run a turn at the same time.
     max_running: int = 4
     #: JSON file holding which orchestrators exist and what each started. None:
@@ -294,9 +292,7 @@ class Orchestrator:
         Absent when no admitted node runs that agent: the fleet cannot start
         one then, and advertising it would say otherwise (invariant 4).
         """
-        base = next(
-            (a for a in merged_agents if a.get("provider") == self.config.provider), None
-        )
+        base = next((a for a in merged_agents if a.get("provider") == self.config.provider), None)
         if base is None:
             return None
         entry = dict(base)
@@ -308,7 +304,7 @@ class Orchestrator:
         return entry
 
     def is_orchestrator(self, provider: Any) -> bool:
-        return provider == self.config.agent
+        return isinstance(provider, str) and provider == self.config.agent
 
     async def create(self, principal: Principal, node_id: str, params: Mapping[str, Any]) -> None:
         """Start an orchestrator session where the surface asked for one.
@@ -350,16 +346,16 @@ class Orchestrator:
         key = (principal.subject, node_id)
         lock = self._connecting.setdefault(key, asyncio.Lock())
         async with lock:
-            client = self._clients.get(key)
-            if client is not None:
-                return client
+            existing = self._clients.get(key)
+            if existing is not None:
+                return existing
             record = self._record(principal, node_id)
             connector = self.gateway.connector
 
             async def dial() -> Transport:
                 return await connector.connect(record, principal)
 
-            client = await connect(
+            client: Client = await connect(
                 transport_factory=dial,
                 client_id=self._client_id(principal),
                 label=f"orchestrator:{node_id}",
@@ -419,13 +415,16 @@ class Orchestrator:
                 client = await asyncio.wait_for(
                     self._client(adopted.principal, record.node_id), self.gateway.connect_timeout
                 )
-                entry["online"] = True
-                entry["agents"] = [
-                    str(a.get("provider")) for a in client.agents() if a.get("provider")
-                ]
-                entry["folders"] = await self._entries(client, client.default_directory())
             except Exception:
                 entry["online"] = False
+                machines.append(entry)
+                continue
+            entry["online"] = True
+            entry["agents"] = [str(a.get("provider")) for a in client.agents() if a.get("provider")]
+            try:
+                entry["folders"] = await self._entries(client, client.default_directory)
+            except Exception as exc:
+                entry["folders_error"] = str(exc) or type(exc).__name__
             machines.append(entry)
         return machines
 
@@ -441,7 +440,11 @@ class Orchestrator:
         listed = await client.protocol.resource_list(folder)
         base = folder.rstrip("/")
         return [
-            {"name": str(e.get("name")), "type": str(e.get("type")), "uri": f"{base}/{e.get('name')}"}
+            {
+                "name": str(e.get("name")),
+                "type": str(e.get("type")),
+                "uri": f"{base}/{e.get('name')}",
+            }
             for e in listed.get("entries") or []
             if isinstance(e, Mapping)
         ]
@@ -465,7 +468,9 @@ class Orchestrator:
         session = await client.create_session(
             provider=agent,
             uri=f"{agent}:/{uuid.uuid4()}",
-            working_directories=[_folder_uri(folder)] if isinstance(folder, str) and folder else None,
+            working_directories=[_folder_uri(folder)]
+            if isinstance(folder, str) and folder
+            else None,
             config=dict(self.config.child_config),
         )
         title = arguments.get("title")
@@ -483,9 +488,7 @@ class Orchestrator:
         self._sessions[session.uri] = (client, session)
         client.protocol.dispatch(chat.uri, actions.turn_started(str(uuid.uuid4()), text=prompt))
         with contextlib.suppress(Exception):
-            client.protocol.dispatch(
-                session.uri, {"type": "session/titleChanged", "title": title}
-            )
+            client.protocol.dispatch(session.uri, {"type": "session/titleChanged", "title": title})
         return {
             "content": [
                 {
@@ -635,8 +638,12 @@ class Orchestrator:
                 listed.append(self._status(client, child))
             except Exception:
                 listed.append(
-                    {"session": child.uri, "title": child.title, "machine": child.node,
-                     "status": "unreachable"}
+                    {
+                        "session": child.uri,
+                        "title": child.title,
+                        "machine": child.node,
+                        "status": "unreachable",
+                    }
                 )
         return listed
 

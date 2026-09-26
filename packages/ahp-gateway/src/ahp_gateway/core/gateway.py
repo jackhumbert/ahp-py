@@ -181,9 +181,7 @@ class Gateway:
         #: Each redial delay is spread across +/- this fraction (`jittered`).
         self.redial_jitter = redial_jitter
         #: Fleet tools for sessions of the orchestrator agent; None: not offered.
-        self.orchestrator = (
-            Orchestrator(self, orchestrator) if orchestrator is not None else None
-        )
+        self.orchestrator = Orchestrator(self, orchestrator) if orchestrator is not None else None
 
     async def start(self) -> None:
         """Take up what outlives a connection: the orchestrators, if any."""
@@ -936,7 +934,7 @@ class _SurfaceConnection:
         assert self.principal is not None, "admission sets the principal"
         await orchestrator.create(self.principal, node_id, outgoing)
         # `createSession` answers null.
-        return None
+        return
 
     def _node_for_new_session(self, params: Mapping[str, Any]) -> str:
         named = self._node_named_by_files(params)

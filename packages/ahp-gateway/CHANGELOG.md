@@ -20,6 +20,16 @@ Under construction. `docs/plan.md` is the design and its §7 is the build order.
 
 ### Added
 
+- **The orchestrator** (`Gateway(orchestrator=OrchestratorConfig(...))`,
+  `Gateway.start()` / `aclose()`). An `orchestrator` agent in the merged list
+  whose sessions run a real agent with fleet tools: list machines and folders,
+  start sessions, then message, read, wait for and stop the sessions it
+  started. The gateway runs the tools over supervised links of its own, one
+  per (principal, node), and rejoins after a restart or a dropped link.
+  Workers run with a fixed config (default `permissionMode: auto`). Nothing
+  answers their approvals, the orchestrator can only drive sessions it
+  started, and `max_running` caps how many run at once. See `docs/plan.md`
+  §10.
 - **Automations across machines.** The gateway merges every node's
   `ahp-automations://` catalogue into one and advertises `automations` when
   any node hosts them. A new automation goes to the machine its folder names

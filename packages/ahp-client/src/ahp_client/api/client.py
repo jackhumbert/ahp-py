@@ -1040,7 +1040,16 @@ class Session:
             if not isinstance(entry, Mapping) or entry.get("kind") != "toolClientExecution":
                 continue
             call = entry.get("toolCall")
-            if isinstance(call, Mapping) and tools.owns(call):
+            if not isinstance(call, Mapping):
+                continue
+            # The entry's own `clientId` is the denormalized contributor; a
+            # host that leaves `contributor` off the call still names us here.
+            if tools.owns(call) or (
+                "contributor" not in call
+                and tools.owns(
+                    {"contributor": {"kind": "client", "clientId": entry.get("clientId")}}
+                )
+            ):
                 yield str(entry.get("chat", "")), str(entry.get("turnId", "")), call
 
     def _spawn_executor(

@@ -118,6 +118,10 @@ versions each release speaks.
 
 ### Fixed
 
+- The `toolClientExecution` entry a client tool call adds to
+  `SessionState.inputNeeded` now carries the call's `contributor`, which the
+  spec requires. A client not subscribed to the chat reads that entry to find
+  its own calls, and without the `contributor` it never ran them.
 - A client tool that ran and reported `success: false` reached the provider as a
   refusal with no reason. `ToolResult.reason` now carries the result's text, or
   its `error.message`.
