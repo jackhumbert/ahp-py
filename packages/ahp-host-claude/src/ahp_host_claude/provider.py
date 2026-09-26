@@ -1296,6 +1296,9 @@ class ClaudeProvider:
         self._poll_s = poll_s
         self._directory: SessionDirectory | None = None
         self._poller: asyncio.Task[None] | None = None
+        #: One sync at a time: two would both see a restored mirror as not yet
+        #: started, and open it twice.
+        self._sync_lock = asyncio.Lock()
         #: This host's own sessions, so their claude.ai twins are not listed twice.
         self._local: weakref.WeakSet[ClaudeSession] = weakref.WeakSet()
         self._mirrors: dict[str, ClaudeSession] = {}
@@ -1515,6 +1518,10 @@ class ClaudeProvider:
         already. With the `LOCAL` scope only sessions running on this machine
         are listed, and one found to run elsewhere is closed.
         """
+        async with self._sync_lock:
+            await self._sync_claude_ai()
+
+    async def _sync_claude_ai(self) -> None:
         api, directory = self._claude_ai, self._directory
         if api is None or directory is None:
             return

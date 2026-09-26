@@ -213,10 +213,14 @@ class TestWindowsSpellings:
         long_dir = root / "a rather long directory name"
         long_dir.mkdir()
         (long_dir / "f.txt").write_bytes(b"long\n")
-        short = _short_name(long_dir)
-        if short == str(long_dir):
+        # Only the component below the root: GetShortPathNameW also shortens
+        # the root's own ancestors where they have 8.3 names (a CI runner's
+        # user profile does), and an 8.3 spelling of the root is refused by
+        # design -- see the next test.
+        short = root / Path(_short_name(long_dir)).name
+        if short == long_dir:
             pytest.skip("8.3 name generation is disabled on this volume")
-        short_uri = Path(short).as_uri() + "/f.txt"
+        short_uri = short.as_uri() + "/f.txt"
         assert (await provider.read(short_uri)).data == b"long\n"
         # The policy is shown the canonical, long spelling -- never the alias.
         assert (await provider.resolve(short_uri)).uri == _uri(long_dir / "f.txt")

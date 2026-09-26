@@ -479,10 +479,11 @@ class TestActivity:
         await client.request("subscribe", {"channel": chat})
 
         await _turn(client, chat, text="hello")
+        # Seen once is the claim. Re-reading it here would race the turn's own
+        # retraction, which may already have run by the time this resumes.
         await client.collect_until(
             lambda: _at(narrating, uri).get("activity") == "Editing core.py", timeout=10.0
         )
-        assert _state(narrating, uri).get("activity") == "Editing core.py"
 
         await _no_activity(narrating, client, uri)
         assert "activity" not in _state(narrating, uri), "the activity outlived the turn"

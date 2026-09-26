@@ -37,7 +37,7 @@ SETUP = "needs node + `npm i --no-save @microsoft/agent-host-protocol@0.9.0 ws`"
 def _client_available() -> bool:
     if shutil.which("node") is None:
         return False
-    return (ROOT / "node_modules" / "@microsoft" / "ahp-protocol").is_dir()
+    return (ROOT / "node_modules" / "@microsoft" / "agent-host-protocol").is_dir()
 
 
 if os.environ.get("AHP_INTEROP_REQUIRED") and not _client_available():

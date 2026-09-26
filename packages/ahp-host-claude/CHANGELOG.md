@@ -119,6 +119,9 @@
 
 ### Fixed
 
+- **One claude.ai sync at a time.** `sync_claude_ai` is public and the poller
+  calls it too; two overlapping calls each saw a restored mirror as not yet
+  started and opened it twice. Calls now queue.
 - A restart no longer un-archives what was archived on claude.ai. Every
   session with Remote Control on reattached at start-up, and reattaching
   un-archives, so each restart brought back this host's sessions archived in

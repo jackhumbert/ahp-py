@@ -5,7 +5,7 @@ import { existsSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 export async function resolve(specifier, context, next) {
-  if (specifier.endsWith('.js') && context.parentURL?.includes('/ahp-protocol/types/')) {
+  if (specifier.endsWith('.js') && context.parentURL?.includes('/agent-host-protocol/types/')) {
     const candidate = new URL(specifier, context.parentURL);
     const asTs = candidate.href.replace(/\.js$/, '.ts');
     if (existsSync(fileURLToPath(asTs))) {
