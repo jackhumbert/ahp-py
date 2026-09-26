@@ -33,8 +33,8 @@ jobs:
   platforms:
     # The Windows filesystem jail is a separate implementation (NT handles, not
     # `openat`), attacked on a real Windows runner: real junctions, real
-    # symlinks, and a thread racing to swap a component mid-walk. The Claude
-    # host runs on all three platforms.
+    # symlinks, and a thread racing to swap a component mid-walk. Everything
+    # but the host's POSIX-only terminal backend gates on all three platforms.
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -64,6 +64,15 @@ jobs:
       - name: Claude host
         working-directory: packages/ahp-host-claude
         run: uv run --no-sync pytest && uv run --no-sync python -m ahp_host_claude --help
+      - name: ACP host
+        # Windows has its own path here: agents are often npm `.cmd` shims.
+        working-directory: packages/ahp-host-acp
+        run: uv run --no-sync pytest && uv run --no-sync python -m ahp_host_acp --help
+      - name: Protocol, client and gateway
+        run: |
+          for package in ahp-protocol ahp-client ahp-gateway; do
+            (cd "packages/$package" && uv run --no-sync pytest)
+          done
       - name: Host, whole suite (informational)
         # The rest of the host has never been run on Windows (the pty backend,
         # for one, is POSIX by construction). Reported, not gating.

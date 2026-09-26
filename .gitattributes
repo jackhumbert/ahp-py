@@ -1,0 +1,9 @@
+# Normalise text to LF in the repository; checkouts use the platform default.
+* text=auto
+
+# Shell scripts run under bash on every platform (Git Bash on Windows), which
+# rejects a CR at the end of a line.
+*.sh text eol=lf
+
+# Upstream's files are vendored byte-for-byte; never convert them.
+packages/ahp-protocol/vendor/** -text
