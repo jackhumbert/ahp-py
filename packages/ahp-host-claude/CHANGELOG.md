@@ -4,6 +4,18 @@
 
 ### Added
 
+- Client tools. Tools a client publishes on `activeClient.tools` are offered to
+  Claude as an in-process MCP server (`mcp__client__<name>`), and each call runs
+  in that client through the host's `run_client_tool`, under Claude's own tool
+  call id. Chats get them too, because they touch nothing on this machine. The
+  session follows clients joining, leaving and republishing
+  (`FollowsActiveClients`; needs ahp-host with it). Who runs a tool changes at
+  once. When the set of tools itself changes, Claude restarts on the same
+  conversation, straight away if it is idle, otherwise after the current turn.
+  Security: these calls skip this host's approval gate. The client that runs a
+  tool decides whether it may, which is what AHP means by `confirmed:
+  'not-needed'` for client-provided tools.
+
 - Automations: saved prompts that run as new sessions on a schedule or on
   request (AHP 0.9.0), kept under `<state_dir>/automations`. Needs
   ahp-host with `Host(automations=...)`.

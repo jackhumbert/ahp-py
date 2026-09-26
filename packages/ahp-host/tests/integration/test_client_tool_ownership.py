@@ -280,6 +280,8 @@ class TestParkKind:
 
         deltas = _deltas(client, chat_uri)
         assert "refused" in deltas, deltas
+        # The result's own words reach the agent, not only the fact of failure.
+        assert "no such tool here" in deltas, deltas
         assert "said: {}" not in deltas, "a refusal was reported to the agent as an empty result"
         assert "said: None" not in deltas, "a refusal was reported to the agent as an empty result"
         assert len(host.pending) == 0, "the provider is still parked on an answered call"
@@ -583,3 +585,51 @@ class TestOwnerLeaves:
         assert _tool_call(host, chat_uri)["status"] == "running"
         assert len(host.pending) == 1
         assert _input_needed(host, session_uri) != []
+
+
+class TestAgentFollowsClients:
+    """`FollowsActiveClients`: the agent hears who can run tools for it now.
+
+    The context names only the creator, so without this a client that joined
+    later, republished its tools or went away never reached the agent -- which
+    went on offering the creator's tools, and asking a departed client to run
+    them.
+    """
+
+    @pytest.fixture
+    async def host(self) -> AsyncIterator[Host]:
+        host = Host(EchoProvider(client_tools=True), LoopbackSingleUserPolicy())
+        try:
+            yield host
+        finally:
+            await host.aclose()
+
+    async def test_the_agent_hears_the_whole_list_as_it_changes(self, host: Host) -> None:
+        owner = await _attach(host, "owner")
+        session_uri, _ = await _session(host, owner, "echo:/follow-clients", owner="owner")
+        heard: list[list[str]] = []
+
+        async def active_clients_changed(clients: Any) -> None:
+            heard.append([c["clientId"] for c in clients])
+
+        agent = host._sessions[session_uri].agent_session
+        agent.active_clients_changed = active_clients_changed  # type: ignore[union-attr]
+
+        joiner = await _attach(host, "joiner")
+        await joiner.request("subscribe", {"channel": session_uri})
+        await joiner.notify(
+            "dispatchAction",
+            {
+                "channel": session_uri,
+                "clientSeq": 1,
+                "action": {
+                    "type": "session/activeClientSet",
+                    "activeClient": {"clientId": "joiner", "tools": _TOOLS},
+                },
+            },
+        )
+        await joiner.collect_until(lambda: len(heard) == 1, timeout=10.0)
+        await owner.transport.close()
+        await joiner.collect_until(lambda: len(heard) == 2, timeout=10.0)
+
+        assert heard == [["owner", "joiner"], ["joiner"]]

@@ -34,6 +34,7 @@ __all__ = [
     "ConfiguresSessions",
     "DescribesSession",
     "DisposesSessions",
+    "FollowsActiveClients",
     "FollowsWorkingDirectories",
     "ForkedFrom",
     "HandlesCustomizations",
@@ -569,6 +570,27 @@ class FollowsWorkingDirectories(Protocol):
     """
 
     async def working_directories_changed(self, directories: Sequence[str]) -> None: ...
+
+
+@runtime_checkable
+class FollowsActiveClients(Protocol):
+    """An agent session that follows which clients can run tools for it.
+
+    The context's `active_client_id` and `client_tools` are only the creator,
+    at creation: a restored session has neither, and a client that reconnects,
+    joins later or republishes its tools ("re-dispatch with the full, updated
+    entry") never reached the agent. An adapter that offered the creator's
+    tools for the life of the session would ask a departed client to run them
+    and fail every call.
+
+    Called with the whole `SessionState.activeClients` list as it now stands
+    (each entry a `SessionActiveClient`: `clientId`, `tools`, ...) after
+    `session/activeClientSet`, `session/activeClientRemoved`, a client
+    disconnecting, and a restored session getting its agent back. Raising is
+    logged; it does not undo the change.
+    """
+
+    async def active_clients_changed(self, clients: Sequence[Mapping[str, Any]]) -> None: ...
 
 
 @runtime_checkable

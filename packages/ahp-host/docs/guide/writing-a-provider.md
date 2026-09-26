@@ -148,6 +148,20 @@ the context gauge does not appear at all. And `meta` is where the protocol's
 well-known keys go — `ptyTerminal: {"input": …, "output": …}` is what makes a
 client render a shell command as a terminal instead of a row.
 
+`run_client_tool` needs a client that is in the session *now*: it raises
+`LookupError` for one that is not, rather than waiting on an answer that cannot
+come. `AgentSessionContext.active_client_id` and `client_tools` only describe
+the client that created the session, and a restored session has neither. To
+follow clients that join, leave or republish their tools, implement
+`FollowsActiveClients.active_clients_changed(clients)`. The host calls it with
+the whole `activeClients` list after every change, and once more when a restored
+session gets its agent back.
+
+A failed call returns a `ToolResult` that is not `accepted`. That covers a
+client that refused, one that left, and a tool that ran and reported
+`success: false`. Its `reason` carries the result's own text, so the agent can
+say what went wrong.
+
 Parts are segmented for you: switching between text, reasoning and tool calls
 starts a new response part, so prose written *after* a tool call renders below
 it rather than being appended to the part that came first. A run of the same

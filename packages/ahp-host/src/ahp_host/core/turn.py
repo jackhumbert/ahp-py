@@ -912,6 +912,11 @@ class ActionTurnSink:
             # refusal that reads as an empty success is the worst possible
             # rendering of it: the agent believes it ran the editor's tool.
             reason = outcome.payload if isinstance(outcome.payload, str) else None
+            if isinstance(outcome.payload, Mapping):
+                # A completion with `success: false` is a tool that ran and
+                # failed, and its `content` says why ("no such node"). Dropping
+                # it left the agent with a bare refusal it could not act on.
+                reason = _result_text(outcome.payload) or reason
             return ToolResult(response=outcome.response, reason=reason)
         return ToolResult(value=outcome.payload)
 
@@ -999,6 +1004,24 @@ def _agent_uri(value: Any) -> str | None:
         uri = value.get("uri")
         return uri if isinstance(uri, str) else None
     return None
+
+
+def _result_text(result: Mapping[str, Any]) -> str | None:
+    """The readable part of a `ToolCallResult`: its text content, else `error`."""
+    content = result.get("content")
+    parts = content if isinstance(content, list) else []
+    texts = [
+        part["text"]
+        for part in parts
+        if isinstance(part, Mapping)
+        and part.get("type") == "text"
+        and isinstance(part.get("text"), str)
+    ]
+    if texts:
+        return "\n".join(texts)
+    error = result.get("error")
+    message = error.get("message") if isinstance(error, Mapping) else None
+    return message if isinstance(message, str) else None
 
 
 def _encoded_tool_input(value: Any) -> Any:

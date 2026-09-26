@@ -34,6 +34,7 @@ from typing import Any, Final, Protocol
 from ahp_host.provider.base import (
     AgentInfo,
     AgentSessionContext,
+    ClientToolCall,
     ConfigRequest,
     ConfigResolution,
     ConfigValue,
@@ -60,6 +61,7 @@ from claude_agent_sdk import (
 from claude_agent_sdk import UserMessage as SdkUserMessage
 from claude_agent_sdk.types import StreamEvent
 
+from ahp_host_claude import client_tools
 from ahp_host_claude.attachments import prompt_content
 from ahp_host_claude.claude_ai import (
     ALL,
@@ -73,6 +75,7 @@ from ahp_host_claude.claude_ai import (
     this_machine,
     uri_of,
 )
+from ahp_host_claude.client_tools import ClientTool, is_client_tool
 from ahp_host_claude.config import DEFAULT_STATE
 from ahp_host_claude.paths import directory_of
 from ahp_host_claude.permissions import (
@@ -397,6 +400,19 @@ class ClaudeSession:
         #: Approvals the other side answered: the call, and the timer that
         #: reports it approved unless its result says otherwise first.
         self._answered_elsewhere: dict[str, asyncio.Task[None]] = {}
+        #: The tools this session's clients run for it (`client_tools.py`),
+        #: starting with the creator's; `active_clients_changed` keeps it current.
+        creator = (
+            [{"clientId": context.active_client_id, "tools": list(context.client_tools)}]
+            if context.active_client_id is not None
+            else []
+        )
+        self._client_tools = client_tools.offered(creator)
+        #: The tools the running Claude client was started with.
+        self._started_tools: tuple[ClientTool, ...] = ()
+        #: Claude's id for each client tool call about to run, in order, keyed
+        #: by tool: the MCP handler is not told it, and the hook before it is.
+        self._client_calls: dict[str, list[tuple[str, dict[str, Any]]]] = {}
 
     @property
     def _sink(self) -> TurnSink | None:
@@ -461,11 +477,17 @@ class ClaudeSession:
         cwd, extra, tools = self._access()
         if cwd == self._chat_dir:
             cwd.mkdir(parents=True, exist_ok=True, mode=0o700)
-        chat: dict[str, Any] = {}
+        options: dict[str, Any] = {}
         prompt: dict[str, Any] = {"type": "preset", "preset": "claude_code"}
         if not tools:
-            chat = {"tools": list(CHAT_TOOLS), "strict_mcp_config": True}
+            options = {"tools": list(CHAT_TOOLS), "strict_mcp_config": True}
             prompt["append"] = CHAT_PROMPT
+        if self._client_tools:
+            # Tools that run in a client, not here: offered with or without a
+            # folder, since they touch nothing on this machine.
+            options["mcp_servers"] = {
+                client_tools.SERVER: client_tools.server(self._client_tools, self._run_client_tool)
+            }
         return ClaudeAgentOptions(
             cwd=str(cwd),
             add_dirs=list(extra),
@@ -482,7 +504,7 @@ class ClaudeSession:
             extra_args={"replay-user-messages": None},
             system_prompt=prompt,  # type: ignore[arg-type]
             env={"CLAUDE_CODE_ENTRYPOINT": ENTRYPOINT},
-            **chat,
+            **options,
         )
 
     async def working_directories_changed(self, directories: Sequence[str]) -> None:
@@ -568,6 +590,7 @@ class ClaudeSession:
                 options = self._options()
                 # Pinned: the conversation lives under this folder from now on.
                 self.directory = Path(str(options.cwd))
+                self._started_tools = self._client_tools if self.mirror_of is None else ()
                 client = self._client_factory(options)
                 await client.connect()
                 self._client = client
@@ -768,11 +791,80 @@ class ClaudeSession:
             await self._client.set_permission_mode(PERMISSION_MODES[mode])
 
     async def _pre_tool_use(self, hook_input: Any, tool_use_id: str | None, context: Any) -> Any:
-        return pre_tool_use_decision(str(hook_input.get("tool_name", "")), self.approvals)
+        name = str(hook_input.get("tool_name", ""))
+        if is_client_tool(name):
+            # Security-relevant: allowed without this host's approval. The
+            # client that runs it owns that decision (`client_tools.py`).
+            call_id = tool_use_id or hook_input.get("tool_use_id")
+            tool_input = hook_input.get("tool_input")
+            if isinstance(call_id, str):
+                self._client_calls.setdefault(name, []).append(
+                    (call_id, tool_input if isinstance(tool_input, dict) else {})
+                )
+            return {
+                "hookSpecificOutput": {
+                    "hookEventName": "PreToolUse",
+                    "permissionDecision": "allow",
+                }
+            }
+        return pre_tool_use_decision(name, self.approvals)
+
+    # -- client tools --------------------------------------------------------
+
+    async def active_clients_changed(self, clients: Sequence[Mapping[str, Any]]) -> None:
+        """The session's clients changed (`FollowsActiveClients`).
+
+        Who runs each tool follows at once. Claude Code fixes its tools when
+        it starts, so a changed set of tools restarts the client - resuming
+        the same conversation - now if it is idle, else once its turn is over,
+        as a changed folder does. A client joining with no tools, or with the
+        same ones, restarts nothing.
+        """
+        self._client_tools = client_tools.offered(clients)
+        if self.mirror_of is not None or self._client is None:
+            return
+        if self._client_tools == self._started_tools:
+            return
+        self._restart_pending = True
+        if not self._lock.locked() and self._turn is None:
+            await self._restart_client()
+
+    def _claimed_call(self, tool: ClientTool, arguments: dict[str, Any]) -> str | None:
+        """Claude's id for this call, recorded by the hook just before it."""
+        queue = self._client_calls.get(f"mcp__{client_tools.SERVER}__{tool.name}") or []
+        for index, (_, tool_input) in enumerate(queue):
+            if tool_input == arguments:
+                return queue.pop(index)[0]
+        return queue.pop(0)[0] if queue else None
+
+    async def _run_client_tool(self, tool: ClientTool, arguments: dict[str, Any]) -> dict[str, Any]:
+        """Have the client run one of its tools, as a call of this turn."""
+        call_id = self._claimed_call(tool, arguments) or f"client-{uuid.uuid4()}"
+        sink = self._sink
+        if sink is None:
+            return client_tools.error("No turn is running to ask the client in.")
+        current = next((t for t in self._client_tools if t.name == tool.name), None)
+        if current is None:
+            return client_tools.error(f"No client offers {tool.title!r} any more.")
+        try:
+            result = await sink.run_client_tool(
+                ClientToolCall(
+                    call_id=call_id,
+                    name=current.published,
+                    client_id=current.client_id,
+                    tool_input=arguments,
+                    display_name=current.title,
+                )
+            )
+        except LookupError as exc:
+            return client_tools.error(str(exc))
+        return client_tools.mcp_result(result)
 
     async def _announce(self, call_id: str, name: str, tool_input: Mapping[str, Any]) -> None:
         if call_id in self._announced or self._sink is None:
             return
+        if is_client_tool(name):
+            return  # the client's call: `run_client_tool` announces it, as the client's
         self._announced.add(call_id)
         self._inputs[call_id] = (name, dict(tool_input))
         display, _ = describe(name, tool_input)
@@ -904,6 +996,7 @@ class ClaudeSession:
     def _begin(self, turn: _Turn) -> None:
         self._announced.clear()
         self._inputs.clear()
+        self._client_calls.clear()
         self._turn = turn
 
     def _finish(self, turn: _Turn) -> None:

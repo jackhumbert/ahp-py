@@ -102,6 +102,12 @@ Status: pre-alpha.
   with that folder granted, once any turn in flight is over. The first folder
   is fixed for the session's life (`immutablePrimary`), because Claude Code
   keeps a conversation under the directory it started in.
+- **Client tools.** Tools a client publishes for the session (its
+  `activeClient.tools`) become Claude's tools, and each call runs in that
+  client. An editor's own tools, or a gateway's tools for other machines, work
+  this way. They are offered to chats as well, since they run nowhere here. The
+  client that runs a tool decides whether it may, so these calls do not pass
+  this host's approval gate.
 - A model picker populated from Claude Code itself at start-up (the same list
   `/model` shows for the logged-in account, its default first), so new models
   appear without a release of this adapter.

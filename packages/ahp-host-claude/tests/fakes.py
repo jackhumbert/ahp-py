@@ -130,6 +130,11 @@ class RecordingSink:
         #: The latest line under each call's name, and each call's past tense.
         self.invocations: dict[str, str] = {}
         self.past_tense: dict[str, str | None] = {}
+        #: Client tools the adapter asked for, and what the client answers.
+        self.client_calls: list[ClientToolCall] = []
+        self.client_result: ToolResult | Exception = ToolResult(
+            value={"success": True, "content": [{"type": "text", "text": "ran"}]}
+        )
 
     async def text_delta(self, text: str) -> None:
         self.events.append(("text", text))
@@ -219,7 +224,11 @@ class RecordingSink:
         raise AssertionError("not used")
 
     async def run_client_tool(self, call: ClientToolCall) -> ToolResult:
-        raise AssertionError("not used")
+        self.client_calls.append(call)
+        self.events.append(("client_tool", call.call_id, call.name, call.client_id))
+        if isinstance(self.client_result, Exception):
+            raise self.client_result
+        return self.client_result
 
 
 class FakePublisher:

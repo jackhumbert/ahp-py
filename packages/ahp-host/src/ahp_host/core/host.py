@@ -122,6 +122,7 @@ from ahp_host.provider.base import (
     ConfiguresSessions,
     DescribesSession,
     DisposesSessions,
+    FollowsActiveClients,
     FollowsWorkingDirectories,
     ForkedFrom,
     HandlesCustomizations,
@@ -4178,7 +4179,26 @@ class Host:
                 session.uri,
                 {"type": "session/activeClientRemoved", "clientId": client_id},
             )
+            await self._tell_active_clients(session)
             await self._fail_client_tools(session, client_id, "the client disconnected")
+
+    async def _tell_active_clients(self, session: _Session) -> None:
+        """Tell the agent who can run tools for it now (`FollowsActiveClients`).
+
+        The whole list, read back from state after the reducer, for the same
+        reason as the folders: an agent re-deriving it from one action would be
+        a second reducer that could disagree. Told before a departed client's
+        calls are failed, so an adapter never offers a tool whose owner is gone.
+        """
+        agent = session.agent_session
+        if not isinstance(agent, FollowsActiveClients):
+            return
+        state = self.sequencer.state_of(session.uri)
+        clients = state.get("activeClients") if isinstance(state, Mapping) else None
+        try:
+            await agent.active_clients_changed([c for c in clients or () if isinstance(c, Mapping)])
+        except Exception:
+            _log.exception("active_clients_changed failed for %s", session.uri)
 
     async def _fail_client_tools(self, session: _Session, client_id: str, reason: str) -> None:
         """End every tool call this client was asked to run.
@@ -5269,6 +5289,7 @@ class Host:
         """
         if channel not in self._sessions:
             return
+        await self._tell_active_clients(self._sessions[channel])
         if action.get("type") == "session/activeClientRemoved":
             # The same SHOULD as on disconnect: a client that leaves the session
             # is as unable to answer as one whose socket dropped.
@@ -5828,6 +5849,10 @@ class Host:
             session.agent_session = await provider.resume_session(context)
         except Exception:
             _log.exception("could not resume %s", session.uri)
+            return
+        # The context names no clients (they are not the creator), but some may
+        # have joined while the session waited for its agent.
+        await self._tell_active_clients(session)
 
     async def _react_to_config(self, channel: str, action: Mapping[str, Any]) -> None:
         """Tell the agent a `sessionMutable` property changed, then save it.

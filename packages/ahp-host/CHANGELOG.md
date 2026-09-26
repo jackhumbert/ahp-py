@@ -16,6 +16,11 @@ versions each release speaks.
 
 ### Added
 
+- `FollowsActiveClients.active_clients_changed(clients)`: a provider hears the
+  session's whole `activeClients` list after `session/activeClientSet`,
+  `session/activeClientRemoved`, a client disconnecting, and a restored session
+  getting its agent back. Without it an adapter knew only the creator's tools
+  (`AgentSessionContext.client_tools`), and a restored session knew none.
 - **Automations** (protocol 0.9.0), behind `Host(automations=...)`:
   the `ahp-automations://` catalogue and `ahp-automation-run:` channels,
   `automation/createRequested` / `updateRequested` / `removed`,
@@ -113,6 +118,9 @@ versions each release speaks.
 
 ### Fixed
 
+- A client tool that ran and reported `success: false` reached the provider as a
+  refusal with no reason. `ToolResult.reason` now carries the result's text, or
+  its `error.message`.
 - A turn started by `SessionPublisher.external_turn` carries the
   `Message.origin` the schema requires (`{"kind": "user"}`). Without it,
   strict clients could not decode the chat at all (the iOS client failed its
