@@ -1,0 +1,35 @@
+# the pinned upstream revision lives in UPSTREAM.md, and the vendoring script
+# reproduces this directory.
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+# Grimp writes its own `.import_linter_cache/.gitignore`, which keeps git clean
+# but not the sdist: hatchling reads only this file, so without this line the
+# cache shipped in the source distribution.
+.import_linter_cache/
+.coverage
+htmlcov/
+
+# Node (dev-only: the conformance counterparty runs the real TypeScript client)
+node_modules/
+package-lock.json
+
+# Editors / OS
+# Local workspace settings: these accumulate live connection tokens once you
+# point VS Code at a running host. The example lives in the README instead.
+.vscode/
+.DS_Store
+.idea/
+*.swp
+
+# Local, per-machine notes and config (AGENTS.local.md etc.)
+*.local.*

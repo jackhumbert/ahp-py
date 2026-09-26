@@ -1,0 +1,69 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# The siblings are the dependency source (the family is not on an index). While
+# they are private, checking them out needs a token that can read them: add a
+# fine-grained PAT with read-only Contents on the four sibling repos as the
+# SIBLINGS_TOKEN secret. Once they are public the default token is enough.
+
+jobs:
+  check:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # Windows is here on purpose: this adapter is meant to run on every
+        # machine a developer uses, and nothing else in the family tests it.
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        python-version: ["3.11", "3.13"]
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - uses: actions/checkout@v4
+        with:
+          repository: jackhumbert/agent-host-protocol-py
+          path: .protocol
+          token: ${{ secrets.SIBLINGS_TOKEN || github.token }}
+      - uses: actions/checkout@v4
+        with:
+          repository: jackhumbert/agent-host-server-py
+          path: .server
+          token: ${{ secrets.SIBLINGS_TOKEN || github.token }}
+
+      # `--group` needs pip 25.1+.
+      - run: python -m pip install --upgrade pip
+      - run: pip install -e .protocol -e '.server[ws]'
+      - run: pip install -e . && pip install --group dev
+
+      - name: Lint
+        run: ruff check . && ruff format --check .
+
+      - name: Type-check
+        run: mypy
+
+      - name: Test
+        run: pytest
+
+      # The entry point must at least start and parse its flags on every OS:
+      # a POSIX-only call at import or start-up is exactly what the unit tests
+      # would miss.
+      - name: CLI starts
+        run: python -m agent_host_server_claude --help
