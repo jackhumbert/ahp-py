@@ -12,6 +12,11 @@ versions each release speaks.
 
 ### Added
 
+- `SessionPublisher.config_changed(values)`: the provider-side twin of a
+  client's `session/configChanged`, for an agent whose setting moved
+  somewhere else (Claude Code's permission mode, switched on a phone under
+  Remote Control). Published, merged and saved like a client's change; the
+  provider is not called back with it.
 - `TurnSink.tool_call_confirmed(call_id, approved=, reason_message=)`: for an
   agent that puts the same approval to this host and to somewhere else (Claude
   Code under Remote Control asks a phone too). When the other side answers

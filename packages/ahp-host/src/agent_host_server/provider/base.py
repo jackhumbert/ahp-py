@@ -431,6 +431,17 @@ class SessionPublisher(Protocol):
         """Rename the session, for an agent whose sessions are named elsewhere."""
         ...
 
+    async def config_changed(self, values: Mapping[str, Any]) -> None:
+        """Change session config values, for an agent reconfigured elsewhere.
+
+        The provider-side twin of a client's `session/configChanged`: the
+        agent's own setting moved (a mode switched on another device), and
+        clients should show what is actually in force. Merged, like a client's;
+        saved, so a restart resumes with it. The provider is not called back
+        with its own change.
+        """
+        ...
+
     async def external_turn(self, text: str, run: Callable[[TurnSink], Awaitable[None]]) -> bool:
         """Start a turn on the default chat that no client asked for.
 

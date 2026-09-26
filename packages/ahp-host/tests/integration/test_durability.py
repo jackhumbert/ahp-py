@@ -21,6 +21,7 @@ from agent_host_protocol.transport import memory_pair
 from agent_host_server.core import Host, LoopbackSingleUserPolicy
 from agent_host_server.core.store import FileSessionStore
 from agent_host_server.provider import EchoProvider
+from agent_host_server.provider.echo import EchoSession
 
 from .test_host_end_to_end import FakeClient
 
@@ -354,5 +355,48 @@ class TestRestoredConfigSchema:
             ]
             assert state["config"]["schema"]["properties"]["prefix"]["sessionMutable"] is True
             assert state["config"]["values"]["style"] == "shout"
+        finally:
+            await second.aclose()
+
+    async def test_a_config_change_from_the_agent_reaches_clients_and_is_saved(
+        self, tmp_path: Path
+    ) -> None:
+        """`SessionPublisher.config_changed`: the agent's own setting moved
+        elsewhere (a mode switched on a phone), so clients and the saved state
+        must show what is actually in force."""
+        first = _host(tmp_path, configurable=True)
+        uri = "echo:/durable-agent-config"
+        try:
+            client = await _client(first)
+            await client.request("createSession", {"channel": uri, "provider": "echo"})
+            await client.collect(seconds=0.3)
+            await client.request("subscribe", {"channel": uri})
+            agent = first._sessions[uri].agent_session
+            assert isinstance(agent, EchoSession)
+            publisher = agent.context.publisher
+            assert publisher is not None
+
+            await publisher.config_changed({"prefix": "Changed there:"})
+            await client.collect(seconds=0.3)
+            changes = [
+                e["action"]
+                for e in client.actions(uri)
+                if e["action"]["type"] == "session/configChanged"
+            ]
+            assert changes == [
+                {"type": "session/configChanged", "config": {"prefix": "Changed there:"}}
+            ]
+            assert agent.config_overrides == {}, "the agent heard its own change"
+        finally:
+            await first.aclose()
+
+        second = _host(tmp_path, configurable=True)
+        try:
+            assert await second.restore() == 1
+            client = await _client(second)
+            state = (await client.request("subscribe", {"channel": uri}))["result"]["snapshot"][
+                "state"
+            ]
+            assert state["config"]["values"]["prefix"] == "Changed there:"
         finally:
             await second.aclose()

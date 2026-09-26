@@ -809,6 +809,12 @@ class _Publisher:
         )
         await self._host._mirror_summary(self._session)
 
+    async def config_changed(self, values: Mapping[str, Any]) -> None:
+        await self._host.sequencer.publish(
+            self._session.uri, {"type": "session/configChanged", "config": dict(values)}
+        )
+        await self._host._persist(self._session)
+
     async def external_turn(self, text: str, run: Callable[[TurnSink], Awaitable[None]]) -> bool:
         host, session = self._host, self._session
         channel = session.chat_uri
