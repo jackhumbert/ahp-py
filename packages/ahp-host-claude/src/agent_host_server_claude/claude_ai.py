@@ -288,6 +288,18 @@ class Api:
                 break
         return rows
 
+    async def status(self, session_id: str) -> str | None:
+        """``active`` / ``archived``; None if claude.ai has no such session."""
+        try:
+            found = await self._request("GET", f"/v1/code/sessions/{session_id}")
+        except RemoteError as error:
+            if error.status == 404:
+                return None
+            raise
+        # The single-session read nests everything under `response_shape`.
+        status = ((found or {}).get("response_shape") or {}).get("status")
+        return status if isinstance(status, str) else None
+
     async def recent(self, session_id: str, limit: int) -> list[Event]:
         """The newest *limit* events, newest first."""
         page = await self._request(

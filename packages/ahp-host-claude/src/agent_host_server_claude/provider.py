@@ -19,7 +19,14 @@ import logging
 import re
 import uuid
 import weakref
-from collections.abc import AsyncIterable, AsyncIterator, Callable, Mapping, Sequence
+from collections.abc import (
+    AsyncIterable,
+    AsyncIterator,
+    Awaitable,
+    Callable,
+    Mapping,
+    Sequence,
+)
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Final, Protocol
@@ -322,8 +329,11 @@ class ClaudeSession:
         mirror_of: str | None = None,
         on_disposed: Callable[[], None] | None = None,
         chat_dir: Path | None = None,
+        status_on_claude_ai: Callable[[str], Awaitable[str | None]] | None = None,
     ) -> None:
         self.context = context
+        #: Asks claude.ai whether a session is archived there (`start`).
+        self._status_on_claude_ai = status_on_claude_ai
         #: The folders the session has now: the context's are only the ones it
         #: was created with, and a client may add or remove one later.
         self.working_directories: tuple[str, ...] = tuple(context.working_directories)
@@ -513,22 +523,44 @@ class ClaudeSession:
             # Reachable from claude.ai again straight away, as at creation.
             self.start_soon()
 
-    def start_soon(self) -> None:
+    def start_soon(self, *, unarchive: bool = False) -> None:
         """`start`, without holding up whoever created the session."""
         if self._starting is None:
-            self._starting = asyncio.create_task(self.start())
+            self._starting = asyncio.create_task(self.start(unarchive=unarchive))
 
-    async def start(self) -> None:
+    async def start(self, *, unarchive: bool = False) -> None:
         """Start the Claude client now, rather than on the first message.
 
         A session on claude.ai needs a running client to be reachable at all,
         so one with Remote Control starts as soon as it exists. A failure here
         is logged, not raised: the first turn tries again and reports it.
         """
+        if not unarchive and await self._archived_on_claude_ai():
+            log.info(
+                "claude.ai session %s is archived there; left as it is", self.bridge_session_id
+            )
+            return
         try:
             await self._ensure_client()
         except Exception:
             log.exception("starting the Claude client failed; the first turn will retry")
+
+    async def _archived_on_claude_ai(self) -> bool:
+        """Whether the claude.ai session was archived there, by someone else.
+
+        Starting would reattach to it, and reattaching un-archives: without
+        this every host restart brought back what was archived on claude.ai.
+        A message sent here still reattaches - that is someone using it. If
+        claude.ai cannot be asked, it is started as before.
+        """
+        bridge, ask = self.bridge_session_id, self._status_on_claude_ai
+        if bridge is None or ask is None:
+            return False
+        try:
+            return await ask(bridge) == "archived"
+        except Exception:
+            log.debug("could not ask claude.ai about %s", bridge, exc_info=True)
+            return False
 
     async def _ensure_client(self) -> SdkClient:
         async with self._connecting:
@@ -588,7 +620,8 @@ class ClaudeSession:
             await self._stop_client()
         elif self.remote_control:
             self._starting = None
-            self.start_soon()
+            # Archived on claude.ai by us; reattaching is the point.
+            self.start_soon(unarchive=True)
 
     async def _archive_on_claude_ai(self) -> bool:
         """Archive the claude.ai session. Whether it worked.
@@ -1141,6 +1174,7 @@ class ClaudeProvider:
         chat_dir: Path | None = None,
         machine: str | None = None,
         running_here: Callable[[], Mapping[str, str]] = running_here,
+        status_on_claude_ai: Callable[[str], Awaitable[str | None]] | None = None,
     ) -> None:
         if not is_valid_provider_id(provider_id):
             raise ValueError(f"invalid provider id: {provider_id!r}")
@@ -1155,6 +1189,8 @@ class ClaudeProvider:
         self.remote_control = remote_control
         #: Set to list the account's other Remote Control sessions here too.
         self._claude_ai = claude_ai
+        self._claude_ai_status: Api | None = None
+        self._status_override = status_on_claude_ai
         #: `LOCAL`: only sessions running on this machine, so each machine's
         #: node lists its own - the broker files them under it, and several
         #: machines can list at once without listing anything twice. `ALL`:
@@ -1221,6 +1257,17 @@ class ClaudeProvider:
             for info in found
         ]
 
+    async def _status_on_claude_ai(self, session_id: str) -> str | None:
+        """For a local session's start: is its claude.ai session archived there?"""
+        if self._status_override is not None:
+            return await self._status_override(session_id)
+        if self._claude_ai is None:
+            # Only ever asked about a session already on claude.ai, so the
+            # login this reads is one Claude Code here already has.
+            self._claude_ai_status = self._claude_ai_status or Api()
+            return await self._claude_ai_status.status(session_id)
+        return await self._claude_ai.status(session_id)
+
     def _started(self, session: ClaudeSession) -> ClaudeSession:
         """A session on claude.ai must be reachable before its first message here.
 
@@ -1228,6 +1275,7 @@ class ClaudeProvider:
         """
         if session.mirror_of is None:
             self._local.add(session)
+            session._status_on_claude_ai = self._status_on_claude_ai
         if session.remote_control and not session.archived:
             session.start_soon()
         return session
@@ -1326,6 +1374,10 @@ class ClaudeProvider:
         """
         self._directory = directory
         for uri in directory.uris():
+            if uri.startswith(_MIRROR_URI):
+                # Brought back by the first sync, and only if still active
+                # on claude.ai.
+                continue
             try:
                 await directory.open(uri, title="", resume_state={})
             except Exception:
@@ -1339,8 +1391,9 @@ class ClaudeProvider:
             poller.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await poller
-        if self._claude_ai is not None:
-            await self._claude_ai.aclose()
+        for api in (self._claude_ai, self._claude_ai_status):
+            if api is not None:
+                await api.aclose()
 
     async def _watch_claude_ai(self) -> None:
         warned = False
@@ -1391,6 +1444,10 @@ class ClaudeProvider:
                 elsewhere.add(remote_id)
             if self._scope == LOCAL and not local and remote_id not in listed:
                 continue
+            if remote_id in listed and remote_id not in self._mirrors:
+                # Restored from the last run: its agent starts now it is
+                # known to be active there.
+                await directory.open(listed[remote_id], title=row.title, resume_state={})
             if remote_id not in listed:
                 if not row.live:
                     continue

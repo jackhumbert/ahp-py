@@ -128,6 +128,9 @@ class FakeApi:
     async def post(self, session_id: str, payload: Mapping[str, Any]) -> None:
         self.posted.append((session_id, dict(payload)))
 
+    async def status(self, session_id: str) -> str | None:
+        return next((row.status for row in self.rows if row.id == session_id), None)
+
     async def machine_of(self, environment_id: str) -> Machine | None:
         return self.machines.get(environment_id)
 
@@ -724,3 +727,43 @@ def test_the_setting(value: Any, scope: str | None) -> None:
 def test_a_bad_setting_is_refused() -> None:
     with pytest.raises(ValueError, match='"all"'):
         scope_of("everything")
+
+
+async def test_a_restored_mirror_starts_only_once_claude_ai_says_it_is_active(
+    tmp_path: Path,
+) -> None:
+    """Restored from the last run, it is not started blindly: one archived
+    there meanwhile is closed, not woken."""
+    api = FakeApi()
+    api.rows = [_row("cse_kept"), _row("cse_gone", status="archived")]
+    provider = ClaudeProvider(
+        tmp_path,
+        claude_ai=api,  # type: ignore[arg-type]
+        claude_ai_scope=ALL,
+        state_dir=tmp_path,
+        poll_s=3600,
+    )
+    directory = FakeDirectory(provider)
+    restored: list[str] = []
+
+    async def open_(
+        uri: str, *, title: str, resume_state: Any, working_directories: Any = ()
+    ) -> bool:
+        restored.append(uri)
+        return False
+
+    directory.sessions = {uri_of("cse_kept"): None, uri_of("cse_gone"): None}  # type: ignore[dict-item]
+    directory.open = open_  # type: ignore[method-assign]
+    closed: list[str] = []
+
+    async def close(uri: str) -> bool:
+        closed.append(uri)
+        return True
+
+    directory.close = close  # type: ignore[method-assign]
+    await provider.attach_directory(directory)
+    assert restored == [], "started mirrors before asking claude.ai"
+    await provider.sync_claude_ai()
+    assert restored == [uri_of("cse_kept")]
+    assert closed == [uri_of("cse_gone")]
+    await provider.aclose()

@@ -103,6 +103,12 @@
 
 ### Fixed
 
+- A restart no longer un-archives what was archived on claude.ai. Every
+  session with Remote Control on reattached at start-up, and reattaching
+  un-archives, so each restart brought back this host's sessions archived in
+  the Claude apps. One archived there is now left alone until it is used here
+  (a message sent here reattaches, as it should), and a restored mirror
+  starts only once claude.ai says it is still active.
 - A claude.ai session listed here shows its conversation even after sitting
   idle: its history is paged back past the control and system traffic an idle
   session fills its recent events with (hundreds of events), where only the

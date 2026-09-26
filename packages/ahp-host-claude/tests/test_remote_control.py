@@ -53,9 +53,17 @@ class Harness:
         self.clients: list[FakeClient] = []
         self.publisher = FakePublisher()
         self.bridge_reply: Any = None
+        #: What claude.ai says about a session's status, by id; "active" if unset.
+        self.statuses: dict[str, str] = {}
         self.provider = ClaudeProvider(
-            root, client_factory=self._factory, remote_control=remote_control
+            root,
+            client_factory=self._factory,
+            remote_control=remote_control,
+            status_on_claude_ai=self._status,
         )
+
+    async def _status(self, session_id: str) -> str | None:
+        return self.statuses.get(session_id, "active")
 
     def _factory(self, options: ClaudeAgentOptions) -> FakeClient:
         client = FakeClient(options, self.turns)
@@ -265,6 +273,61 @@ async def test_deleting_a_session_that_never_had_it_starts_nothing(tmp_path: Pat
     session = await harness.session()
     await session.disposed()
     assert harness.clients == []
+
+
+# -- archived on claude.ai ---------------------------------------------------------
+
+
+async def _resumed(harness: Harness, status: str) -> ClaudeSession:
+    harness.statuses["cse_1"] = status
+    session = await harness.provider.resume_session(
+        AgentSessionContext(
+            session_uri="s",
+            chat_uri="c",
+            provider_id="claude",
+            resume_state={"claudeSessionId": "claude-1", "bridgeSessionId": "cse_1"},
+            publisher=harness.publisher,
+        )
+    )
+    await asyncio.sleep(0.02)
+    return session
+
+
+async def test_a_restart_leaves_a_session_archived_on_claude_ai_alone(tmp_path: Path) -> None:
+    """Reattaching un-archives: every restart used to bring those back."""
+    harness = Harness(tmp_path)
+    await _resumed(harness, "archived")
+    assert harness.clients == [], "started, and so un-archived, a session archived there"
+
+
+async def test_a_restart_reattaches_one_still_active_there(tmp_path: Path) -> None:
+    harness = Harness(tmp_path)
+    session = await _resumed(harness, "active")
+    await eventually(lambda: session.session_url is not None)
+    assert harness.clients[0].remote_controls == [(True, "cse_1")]
+
+
+async def test_a_message_here_brings_one_archived_there_back(tmp_path: Path) -> None:
+    harness = Harness(tmp_path, [_result()])
+    session = await _resumed(harness, "archived")
+    await session.send_user_message(UserMessage(text="hi"), RecordingSink())
+    assert harness.clients[0].remote_controls == [(True, "cse_1")]
+
+
+async def test_unarchiving_here_reattaches_even_though_claude_ai_says_archived(
+    tmp_path: Path,
+) -> None:
+    harness = Harness(tmp_path)
+    session = await harness.session()
+    await eventually(lambda: session.session_url is not None)
+
+    async def archived(session_id: str) -> str | None:
+        return "archived"
+
+    session._status_on_claude_ai = archived
+    await session.archived_changed(True)
+    await session.archived_changed(False)
+    await eventually(lambda: len(harness.clients) == 2 and session.session_url is not None)
 
 
 # -- archiving --------------------------------------------------------------
