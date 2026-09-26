@@ -644,8 +644,10 @@ async def test_each_machine_lists_only_the_sessions_running_on_it(tmp_path: Path
     """So every machine's node can have it on: each lists its own, the gateway
     files them under the right machine, and none is listed twice."""
     api = FakeApi()
+    # This machine's folder must be absolute on whatever OS runs the test.
+    app = tmp_path / "Github" / "app"
     api.machines = {
-        "env_mac": Machine("My-Mac-Mini", "/Users/me/Github/app"),
+        "env_mac": Machine("My-Mac-Mini", str(app)),
         "env_studio": Machine("Studio", "C:\\Users\\me\\project"),
     }
     api.rows = [
@@ -659,7 +661,7 @@ async def test_each_machine_lists_only_the_sessions_running_on_it(tmp_path: Path
     await provider.sync_claude_ai()
     assert sorted(directory.uris()) == [uri_of("cse_desktop"), uri_of("cse_server")]
     assert directory.folders[uri_of("cse_desktop")] == ((tmp_path / "desktop").as_uri(),)
-    assert directory.folders[uri_of("cse_server")] == ("file:///Users/me/Github/app",)
+    assert directory.folders[uri_of("cse_server")] == (app.as_uri(),)
     await provider.aclose()
 
 

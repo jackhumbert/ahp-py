@@ -64,6 +64,7 @@ from ahp_protocol.errors import (
 
 import ahp_gateway
 from ahp_gateway.core.node import NodeConnector, NodeLink, open_node_link
+from ahp_gateway.core.orchestrator import Orchestrator, OrchestratorConfig
 from ahp_gateway.core.paging import (
     check_limit,
     decode_cursor,
@@ -158,6 +159,7 @@ class Gateway:
         known_down_timeout: float = 1.0,
         redial_backoff: tuple[float, float] = (0.5, 30.0),
         redial_jitter: float = 0.25,
+        orchestrator: OrchestratorConfig | None = None,
     ) -> None:
         if not 0.0 <= redial_jitter < 1.0:
             raise ValueError(f"redial_jitter must be in [0, 1), got {redial_jitter}")
@@ -178,6 +180,19 @@ class Gateway:
         self.redial_backoff = redial_backoff
         #: Each redial delay is spread across +/- this fraction (`jittered`).
         self.redial_jitter = redial_jitter
+        #: Fleet tools for sessions of the orchestrator agent; None: not offered.
+        self.orchestrator = (
+            Orchestrator(self, orchestrator) if orchestrator is not None else None
+        )
+
+    async def start(self) -> None:
+        """Take up what outlives a connection: the orchestrators, if any."""
+        if self.orchestrator is not None:
+            await self.orchestrator.start()
+
+    async def aclose(self) -> None:
+        if self.orchestrator is not None:
+            await self.orchestrator.aclose()
 
     async def serve(
         self,
@@ -370,6 +385,14 @@ class _SurfaceConnection:
         if not self.initialized:
             raise invalid_params("initialize must be the first request")
         params = self._from_client(method, params)
+        orchestrator = self.gateway.orchestrator
+        if (
+            orchestrator is not None
+            and method != "createSession"
+            and orchestrator.is_orchestrator(params.get("provider"))
+        ):
+            # Its settings, completions and routing are the agent it runs on.
+            params = {**params, "provider": orchestrator.config.provider}
         if method == "subscribe":
             return await self._subscribe(params, after)
         if method == "listSessions":
@@ -508,7 +531,7 @@ class _SurfaceConnection:
         for node in opened:
             if node is not None:
                 self.nodes[node.link.node_id] = node
-        self.root = merge_root([node.root for node in self.nodes.values()])
+        self.root = self._merged_root()
         self.initialized = True
         for node in self.nodes.values():
             node.pump = self._spawn(self._pump(node))
@@ -882,11 +905,38 @@ class _SurfaceConnection:
         channel = params.get("channel")
         if not isinstance(channel, str):
             raise invalid_params("channel is required")
+        orchestrator = self.gateway.orchestrator
+        if orchestrator is not None and orchestrator.is_orchestrator(params.get("provider")):
+            return await self._create_orchestrator(orchestrator, channel, params)
         node_id = self._node_for_new_session(params)
         # Claimed before the request, so an action the node publishes for the
         # new session ahead of its reply already has somewhere to go.
         self.owners.claim(node_id, {channel})
         return await self._call(node_id, "createSession", params)
+
+    async def _create_orchestrator(
+        self, orchestrator: Orchestrator, channel: str, params: Mapping[str, Any]
+    ) -> None:
+        """Created by the orchestrator's own connection, on the surface's URI.
+
+        The node is chosen as for the agent it runs on, except that a
+        configured node wins over the default when no folder names one.
+        """
+        base = {**params, "provider": orchestrator.config.provider}
+        preferred = orchestrator.config.node
+        if self._node_named_by_files(base) is None and preferred in self.nodes:
+            node_id = str(preferred)
+        else:
+            node_id = self._node_for_new_session(base)
+        self.owners.claim(node_id, {channel})
+        try:
+            outgoing = unqualify_file_uris(base, node_id, self._path_root(node_id))
+        except ForeignUriError as exc:
+            raise invalid_params(str(exc)) from exc
+        assert self.principal is not None, "admission sets the principal"
+        await orchestrator.create(self.principal, node_id, outgoing)
+        # `createSession` answers null.
+        return None
 
     def _node_for_new_session(self, params: Mapping[str, Any]) -> str:
         named = self._node_named_by_files(params)
@@ -1206,8 +1256,18 @@ class _SurfaceConnection:
             self.delivered[channel] = stamp
             self._send(echo)
 
+    def _merged_root(self) -> dict[str, Any]:
+        """Every node's root as one, plus the orchestrator when it can run."""
+        merged = merge_root([node.root for node in self.nodes.values()])
+        orchestrator = self.gateway.orchestrator
+        if orchestrator is not None:
+            entry = orchestrator.agent_entry(merged["agents"])
+            if entry is not None:
+                merged["agents"].append(entry)
+        return merged
+
     def _republish_root(self) -> None:
-        before, self.root = self.root, merge_root([node.root for node in self.nodes.values()])
+        before, self.root = self.root, self._merged_root()
         if ROOT_URI not in self.subscriptions:
             return
         for action in root_actions(before, self.root):

@@ -306,6 +306,36 @@ async def test_a_published_tool_is_actually_executed() -> None:
     await host.stop()
 
 
+async def test_a_session_opened_with_tools_offers_and_runs_them() -> None:
+    """`open_session(tools=...)` is how a client that restarted takes a
+    session's tools up again: it joins as an active client offering them, and
+    runs their calls, as if it had created the session."""
+    host = _session_host()
+    await host.start()
+    async with connect(transport=host.transport()) as client:
+        tools = ClientToolHost(client.protocol, client_id=client.client_id)
+        tools.register({"name": "usages"}, lambda _a: _ok())
+        session = await client.open_session("echo:/theirs", tools=tools)
+        await _settle(lambda: _dispatched(host, "session/activeClientSet"))
+        [joined] = _dispatched(host, "session/activeClientSet")
+        assert joined["activeClient"]["clientId"] == client.client_id
+        assert [t["name"] for t in joined["activeClient"]["tools"]] == ["usages"]
+
+        chat = await session.chat()
+        await host.push(chat.uri, {"type": "chat/turnStarted", "turnId": "t1"})
+        await host._emit_tool(
+            chat.uri,
+            "t1",
+            FakeToolCall(
+                "tc1", "usages", contributor={"kind": "client", "clientId": client.client_id}
+            ),
+        )
+        await _settle(lambda: _dispatched(host, "chat/toolCallComplete"))
+        assert _dispatched(host, "chat/toolCallComplete")[-1]["result"]["success"] is True
+        await session._stop_tools()
+    await host.stop()
+
+
 async def test_the_executor_is_found_by_a_name_the_ready_action_does_not_carry() -> None:
     """`toolName` is published once, on `chat/toolCallStart`; the ready that
     hands execution over carries none, and neither does it name the contributor

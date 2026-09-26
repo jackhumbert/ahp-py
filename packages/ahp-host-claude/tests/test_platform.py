@@ -52,9 +52,12 @@ def test_folder_browsing_is_off_where_the_jail_cannot_run(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import os
+    import sys
 
     from ahp_host_claude import __main__ as cli
 
+    # The POSIX case: Windows has its own jail and takes another branch.
+    monkeypatch.setattr(sys, "platform", "linux")
     monkeypatch.setattr(os, "supports_dir_fd", set())
     assert cli._jail_supported() is False
 

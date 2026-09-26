@@ -524,14 +524,26 @@ class Client:
         await self._runtime.subscribe(uri, "terminal")
         return Terminal(self, uri, owned=False)
 
-    async def open_session(self, uri: str) -> Session:
+    async def open_session(
+        self, uri: str, *, tools: ClientToolHost | Sequence[Mapping[str, Any]] | None = None
+    ) -> Session:
         """Attach to a session someone else created.
 
         Never disposed on ``__aexit__``: disposing another client's session on a
         ``with`` exit is the kind of surprise that loses trust.
+
+        *tools* joins the session as an active client offering them
+        (`session/activeClientSet`) and runs them, exactly as
+        :meth:`create_session` does for a session this client creates. It is
+        how a client that restarted takes up a session's tools again.
         """
         await self._runtime.subscribe(uri, "session")
-        return Session(self, uri, "", owned=False)
+        session = Session(self, uri, "", owned=False)
+        tool_host = self._tool_host(tools)
+        if tool_host is not None:
+            self.protocol.dispatch(uri, tool_host.attach_action())
+            session._serve_tools(tool_host)
+        return session
 
     async def aclose(self) -> None:
         await self._runtime.shutdown()
@@ -948,7 +960,14 @@ class Session:
     async def _rescan_on_reconnect(
         self, states: Any, tools: ClientToolHost, started: set[tuple[str, str]]
     ) -> None:
-        """Wake the level scan when a connection comes (back) up.
+        """Rejoin, and wake the level scan, when a connection comes (back) up.
+
+        The host removes a client that disconnects from every session's
+        `activeClients` ("the server SHOULD automatically dispatch that
+        removal"), and a host that restarted has forgotten it anyway. So a
+        client that came back offers its tools again, or every later call to
+        them fails as addressed to nobody. The entry is a full upsert, so
+        restating it when nothing was lost changes nothing.
 
         A snapshot-arm resume replays **no actions**, so a call handed over
         during the gap never reaches the event loop above -- but the fresh
@@ -959,6 +978,8 @@ class Session:
         """
         async for state in states:
             if getattr(state, "status", "") == "connected":
+                with contextlib.suppress(Exception):
+                    self._client.protocol.dispatch(self.uri, tools.attach_action())
                 with contextlib.suppress(Exception):
                     self._scan_client_tools(tools, started)
 
