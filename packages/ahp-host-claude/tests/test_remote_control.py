@@ -20,7 +20,7 @@ from claude_agent_sdk import (
 )
 from claude_agent_sdk import UserMessage as SdkUserMessage
 
-from agent_host_server_claude.provider import ClaudeProvider, ClaudeSession, discover
+from agent_host_server_claude.provider import ClaudeProvider, ClaudeSession, _Turn, discover
 from agent_host_server_claude.remote_control import auto_enable, bridge_of
 from tests.fakes import FakeClient, FakePublisher, RecordingSink, Step, eventually
 
@@ -408,6 +408,71 @@ async def test_a_long_running_tool_approved_elsewhere_is_reported_before_it_ends
     await eventually(lambda: ("confirmed_elsewhere", "w1", True, None) in sink.events, 0.75)
     assert not any(e[0] == "completed" for e in sink.events)
     await asyncio.wait_for(turn, 2)
+
+
+# -- the approval mode, switched on claude.ai ----------------------------------
+
+
+def _status(mode: str) -> SystemMessage:
+    return SystemMessage("status", {"status": None, "permissionMode": mode})
+
+
+async def test_a_mode_switched_on_the_phone_is_followed_here(tmp_path: Path) -> None:
+    harness = Harness(tmp_path)
+    session = await harness.session()
+    harness.clients[0].push(_status("acceptEdits"))
+    await eventually(lambda: session.approvals == "acceptEdits")
+    assert harness.publisher.config_changes == [{"permissionMode": "acceptEdits"}]
+
+
+async def test_our_own_switch_echoed_back_is_not_published_again(tmp_path: Path) -> None:
+    harness = Harness(tmp_path)
+    session = await harness.session()
+    await session.config_changed({"permissionMode": "auto"})
+    harness.clients[0].push(_status("auto"))
+    await asyncio.sleep(0.02)
+    assert session.approvals == "auto"
+    assert harness.publisher.config_changes == []
+
+
+@pytest.mark.parametrize("mode", ["bypassPermissions", "dontAsk"])
+async def test_a_mode_this_adapter_does_not_offer_is_put_back_to_ask(
+    tmp_path: Path, mode: str
+) -> None:
+    harness = Harness(tmp_path)
+    session = await harness.session(permissionMode="acceptEdits")
+    harness.clients[0].push(_status(mode))
+    await eventually(lambda: session.approvals == "default")
+    assert harness.clients[0].permission_modes == ["default"]
+    assert harness.publisher.config_changes == [{"permissionMode": "default"}]
+
+
+async def test_a_plan_approved_on_the_phone_drops_to_ask(tmp_path: Path) -> None:
+    """In plan mode the gate stays out of the way; Claude Code's default mode
+    after the plan would then run whatever the user's allow rules allow."""
+    steps = _asked_then_answered_elsewhere(ToolResultBlock(tool_use_id="w1", content="ok"))
+    steps[0] = AssistantMessage(
+        [ToolUseBlock(id="w1", name="ExitPlanMode", input={"plan": "p"})], model="m"
+    )
+    harness = Harness(tmp_path, steps)
+    session = await harness.session(permissionMode="plan")
+    sink = RecordingSink()
+    sink.hold = asyncio.Event()
+    await session.send_user_message(UserMessage(text="plan it"), sink)
+
+    assert session.approvals == "default"
+    assert harness.publisher.config_changes == [{"permissionMode": "default"}]
+
+
+async def test_a_plan_approved_here_shows_the_mode_it_drops_to(tmp_path: Path) -> None:
+    harness = Harness(tmp_path, remote_control=False)
+    session = await harness.session(permissionMode="plan")
+    session._begin(_Turn(sink=RecordingSink(approve=True)))
+    await session._can_use_tool(
+        "ExitPlanMode", {"plan": "p"}, ToolPermissionContext(tool_use_id="p1")
+    )
+    assert session.approvals == "default"
+    assert harness.publisher.config_changes == [{"permissionMode": "default"}]
 
 
 # -- configuration -------------------------------------------------------------

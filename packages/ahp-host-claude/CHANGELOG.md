@@ -24,6 +24,14 @@
   same on every machine; the broker merges them and the folder picks the
   machine) and `agent_name`.
 
+- The approval mode follows a switch made on claude.ai (Claude Code's
+  `system/status`), and the session setting shows it
+  (`SessionPublisher.config_changed`, needs agent-host-server with it). A mode
+  this adapter does not offer (`bypassPermissions`, `dontAsk`) is not
+  followed: the client is put back in Ask. A plan approved on claude.ai drops
+  the session to Ask like one approved here, and either way the setting now
+  shows Ask rather than still Plan.
+
 ### Changed
 
 - One reader per Claude client: Claude Code's output is read continuously

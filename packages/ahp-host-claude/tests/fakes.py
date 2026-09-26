@@ -231,6 +231,7 @@ class FakePublisher:
         self.turns: list[tuple[str, RecordingSink]] = []
         self.tasks: list[asyncio.Task[None]] = []
         self.refusals = 0
+        self.config_changes: list[dict[str, Any]] = []
 
     async def external_turn(self, text: str, run: Callable[[Any], Awaitable[None]]) -> bool:
         if any(not task.done() for task in self.tasks):
@@ -270,6 +271,9 @@ class FakePublisher:
 
     async def title_changed(self, title: str) -> None:
         return
+
+    async def config_changed(self, values: Mapping[str, Any]) -> None:
+        self.config_changes.append(dict(values))
 
 
 async def eventually(condition: Callable[[], bool], timeout: float = 2.0) -> None:

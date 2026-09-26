@@ -37,7 +37,9 @@ Status: pre-alpha.
   The mode can be switched during a session (in VS Code or the iOS app); the
   running Claude client follows, and the choice survives a host restart.
   Needs agent-host-server with `ReconfiguresSessions` and working session
-  resume.
+  resume. A switch made on claude.ai (Remote Control) is followed here too,
+  and the setting shows it - except to a mode not listed above (such as
+  bypass permissions), which puts the session back in Ask instead.
 - **Steering**: a message sent while Claude is working joins the turn at
   its next tool call (Claude Code's own "next" queue slot) instead of waiting
   for it to finish; queued messages still run afterwards.
@@ -120,6 +122,10 @@ account this machine is signed in to: anyone signed in to it, on any device,
 can send the session messages and answer its approval prompts. The approval
 mode still applies - a phone answers the same prompts a client here would -
 but "a human approved this" then means "someone signed in to that account".
+They can also switch the approval mode, to any of the four above; the
+session follows it (bypass permissions and anything else is refused and
+reset to Ask), and a plan approved there drops the session to Ask exactly as
+one approved here does.
 Turn it off (`remote_control = false`, or per session) where that is not the
 same set of people as those who can reach this host.
 

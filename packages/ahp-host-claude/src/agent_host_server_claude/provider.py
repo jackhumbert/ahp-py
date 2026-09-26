@@ -20,7 +20,7 @@ import uuid
 from collections.abc import AsyncIterable, AsyncIterator, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Final, Protocol
 
 from agent_host_server.provider.base import (
     AgentInfo,
@@ -59,6 +59,7 @@ from agent_host_server_claude.permissions import (
     DISALLOWED_TOOLS,
     EXIT_PLAN_TOOL,
     PERMISSION_MODES,
+    PLAN,
     approval_mode,
     describe,
     past_tense,
@@ -546,9 +547,7 @@ class ClaudeSession:
         if not outcome.approved:
             return PermissionResultDeny(message="The user declined this tool call.")
         if tool_name == EXIT_PLAN_TOOL:
-            # Leaving plan mode must not leave the session looser than Ask: in
-            # Claude Code's own default mode the user's allow rules would apply.
-            self.approvals = ASK
+            await self._left_plan_mode()
         approved = outcome.tool_input if isinstance(outcome.tool_input, dict) else tool_input
         return PermissionResultAllow(updated_input=approved)
 
@@ -557,7 +556,7 @@ class ClaudeSession:
         await asyncio.sleep(_ANSWER_GRACE)
         self._answered_elsewhere.pop(call_id, None)
         try:
-            await sink.tool_call_confirmed(call_id, approved=True)
+            await self._answered(sink, call_id, denied=False)
         except Exception:
             log.exception("reporting an approval given elsewhere failed")
 
@@ -571,11 +570,58 @@ class ClaudeSession:
         if timer is None:
             return
         timer.cancel()
+        await self._answered(sink, call_id, denied=denied)
+
+    async def _answered(self, sink: TurnSink, call_id: str, *, denied: bool) -> None:
         await sink.tool_call_confirmed(
             call_id,
             approved=not denied,
             reason_message="Declined on another device" if denied else None,
         )
+        name, _ = self._inputs.get(call_id, ("", {}))
+        if not denied and name == EXIT_PLAN_TOOL:
+            await self._left_plan_mode()
+
+    # -- the approval mode, when it moves on its own ----------------------------
+
+    async def _left_plan_mode(self) -> None:
+        """A plan was approved, here or on claude.ai.
+
+        Security-relevant. Leaving plan mode must not leave the session looser
+        than Ask: Claude Code drops to its own default mode, where the user's
+        allow rules would apply, and in `plan` the gate stays out of the way.
+        If the phone chose a looser mode as it approved, the CLI says so next
+        (`system/status`) and that is followed like any other switch there.
+        """
+        if self.approvals == PLAN:
+            await self._follow_mode(ASK)
+
+    async def _on_mode_elsewhere(self, claude_mode: Any) -> None:
+        """Claude Code's permission mode moved: switched on claude.ai, or ours echoed.
+
+        Security-relevant. Followed, because whoever can switch it there can
+        already answer every approval prompt there. A mode this adapter does
+        not offer (`bypassPermissions`, `dontAsk`) is not followed: the client
+        is put back in Ask, and so is the gate.
+        """
+        mode = _APPROVAL_MODES.get(claude_mode) if isinstance(claude_mode, str) else None
+        if mode is None:
+            mode = ASK
+            if self._client is not None:
+                await self._client.set_permission_mode(PERMISSION_MODES[ASK])
+        await self._follow_mode(mode)
+
+    async def _follow_mode(self, mode: str) -> None:
+        """Move the gate to `mode`, and show clients here what is in force."""
+        if mode == self.approvals:
+            return
+        self.approvals = mode
+        publisher = self.context.publisher
+        if publisher is not None:
+            try:
+                await publisher.config_changed({CONFIG_KEY: mode})
+            except Exception:
+                log.exception("publishing the approval mode failed")
 
     # -- turns ---------------------------------------------------------------
 
@@ -695,6 +741,8 @@ class ClaudeSession:
             session_id = item.data.get("session_id")
             if item.subtype == "init" and isinstance(session_id, str):
                 self.claude_session_id = session_id
+            elif item.subtype == "status" and "permissionMode" in item.data:
+                await self._on_mode_elsewhere(item.data["permissionMode"])
         elif isinstance(item, ResultMessage):
             self.claude_session_id = item.session_id or self.claude_session_id
             if self._stale_results:
@@ -818,6 +866,11 @@ class ClaudeSession:
             detail = "; ".join(item.errors or []) or item.result or item.subtype
             await sink.turn_failed(detail, error_type=f"claude.{item.subtype}")
 
+
+#: Claude Code permission mode -> approval mode.
+_APPROVAL_MODES: Final[Mapping[str, str]] = {
+    claude: approval for approval, claude in PERMISSION_MODES.items()
+}
 
 #: A result for a turn someone stopped.
 _ABORTED = ("aborted_streaming", "aborted_tools")
