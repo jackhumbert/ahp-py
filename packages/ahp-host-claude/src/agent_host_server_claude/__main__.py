@@ -179,6 +179,8 @@ def main(argv: list[str] | None = None) -> None:
         level=logging.DEBUG if settings.verbose else logging.INFO,
         format="%(asctime)s %(levelname)-7s %(name)s: %(message)s",
     )
+    # One line per request is a line every few seconds per claude.ai session.
+    logging.getLogger("httpx").setLevel(logging.DEBUG if settings.verbose else logging.WARNING)
     with contextlib.suppress(KeyboardInterrupt):
         asyncio.run(_run(settings))
 

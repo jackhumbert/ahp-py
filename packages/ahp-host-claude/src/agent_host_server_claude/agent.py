@@ -44,6 +44,9 @@ async def create(options: Mapping[str, Any], node: NodeContext) -> ClaudeProvide
     found = await discover(node.roots.primary)
     log = logging.getLogger(__name__)
     log.info("models: %s", ", ".join(m.id for m in found.models) or "none")
+    if claude_ai_sessions:
+        # One line per request is a line every few seconds per claude.ai session.
+        logging.getLogger("httpx").setLevel(logging.WARNING)
     if remote_control is None:
         remote_control = found.remote_control
     log.info("Remote Control for new sessions: %s", "on" if remote_control else "off")
