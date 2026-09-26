@@ -75,6 +75,16 @@
 
 ### Changed
 
+- `claude_ai_sessions = true` now lists only the sessions running on this
+  machine - found in Claude Code's registry here, or by the machine a
+  `claude --remote-control` environment names - each in its own folder. Every
+  machine running this host can turn it on: each lists its own, a broker
+  files them under the right machine, and none is listed twice. `"all"`
+  (`--claude-ai-sessions all`) keeps listing every session on the account,
+  for machines that run no host. A mirror found to run elsewhere is closed.
+  Mirrors skip this host's folder checks: their folders are their own
+  machine's.
+
 - One reader per Claude client: Claude Code's output is read continuously
   rather than per turn, so output nobody here asked for (a turn from
   claude.ai, the aborted result of a stopped turn) can no longer be read as

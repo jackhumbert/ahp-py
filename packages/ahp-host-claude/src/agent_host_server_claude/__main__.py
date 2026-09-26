@@ -26,7 +26,7 @@ from agent_host_server.core.store import FileSessionStore
 from agent_host_server.ws import serve_websocket
 
 from agent_host_server_claude import __version__
-from agent_host_server_claude.claude_ai import Api
+from agent_host_server_claude.claude_ai import LOCAL, Api
 from agent_host_server_claude.config import ConfigError, Settings, load
 from agent_host_server_claude.provider import (
     ClaudeProvider,
@@ -63,10 +63,11 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--claude-ai-sessions",
-        action=argparse.BooleanOptionalAction,
-        default=None,
-        help="also list this account's other Remote Control sessions (terminal, desktop app, "
-        "other machines), through claude.ai; on one machine only",
+        nargs="?",
+        const="local",
+        choices=["local", "all", "off"],
+        help="also list this machine's other Remote Control sessions (terminal, desktop app) "
+        "through claude.ai; 'all' lists every machine's (on one machine only)",
     )
     parser.add_argument("-v", "--verbose", action="store_true", default=None)
     return parser.parse_args(argv)
@@ -107,6 +108,7 @@ async def _run(settings: Settings) -> None:
             provider_id=settings.provider_id,
             remote_control=remote_control,
             claude_ai=Api() if settings.claude_ai_sessions else None,
+            claude_ai_scope=settings.claude_ai_sessions or LOCAL,
             state_dir=state,
         ),
         LoopbackSingleUserPolicy(),

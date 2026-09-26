@@ -55,11 +55,15 @@ from claude_agent_sdk.types import StreamEvent
 
 from agent_host_server_claude.attachments import prompt_content
 from agent_host_server_claude.claude_ai import (
+    ALL,
     BACKFILL_EXCHANGES,
+    LOCAL,
     Api,
     LoginError,
     RemoteClient,
     RemoteSession,
+    running_here,
+    this_machine,
     uri_of,
 )
 from agent_host_server_claude.config import DEFAULT_STATE
@@ -432,12 +436,18 @@ class ClaudeSession:
     @property
     def is_chat(self) -> bool:
         """No folder: no tools that touch the machine."""
+        if self.mirror_of is not None:
+            return False  # its tools are its own machine's business
         try:
             return not self._access()[2]
         except PermissionError:
             return True
 
     def _options(self) -> ClaudeAgentOptions:
+        if self.mirror_of is not None:
+            # Claude Code runs on the session's own machine, with its own
+            # folders, tools and mode; all this host adds is its approvals.
+            return ClaudeAgentOptions(can_use_tool=self._can_use_tool)
         cwd, extra, tools = self._access()
         if cwd == self._chat_dir:
             cwd.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -476,6 +486,10 @@ class ClaudeSession:
         the served ones; one that got here anyway fails the next turn
         (`working_directory`), it is never silently dropped.
         """
+        if self.mirror_of is not None:
+            # Where it runs on its own machine: nothing here to restart.
+            self.working_directories = tuple(directories)
+            return
         try:
             before: Any = self._access()
         except PermissionError:
@@ -1121,9 +1135,12 @@ class ClaudeProvider:
         sessions: ClaudeCodeSessions | None = None,
         remote_control: bool = False,
         claude_ai: Api | None = None,
+        claude_ai_scope: str = LOCAL,
         state_dir: Path | None = None,
         poll_s: float = 15.0,
         chat_dir: Path | None = None,
+        machine: str | None = None,
+        running_here: Callable[[], Mapping[str, str]] = running_here,
     ) -> None:
         if not is_valid_provider_id(provider_id):
             raise ValueError(f"invalid provider id: {provider_id!r}")
@@ -1138,6 +1155,15 @@ class ClaudeProvider:
         self.remote_control = remote_control
         #: Set to list the account's other Remote Control sessions here too.
         self._claude_ai = claude_ai
+        #: `LOCAL`: only sessions running on this machine, so each machine's
+        #: node lists its own - the broker files them under it, and several
+        #: machines can list at once without listing anything twice. `ALL`:
+        #: every session on the account, for machines that run no node.
+        if claude_ai_scope not in (LOCAL, ALL):
+            raise ValueError(f"claude_ai_scope must be {LOCAL!r} or {ALL!r}")
+        self._scope = claude_ai_scope
+        self._machine = (machine or this_machine()).casefold()
+        self._running_here = running_here
         self._poll_s = poll_s
         self._directory: SessionDirectory | None = None
         self._poller: asyncio.Task[None] | None = None
@@ -1335,26 +1361,35 @@ class ClaudeProvider:
     async def sync_claude_ai(self) -> None:
         """Match the host's list to the account's live Remote Control sessions.
 
-        New ones are opened (with their last few exchanges), titles and
-        busy/idle follow claude.ai, and one archived or gone there is closed
-        here. One whose machine went away stays listed - its history is here -
-        but a new one appears only while its machine is connected. This
-        host's own sessions are skipped: they are listed already.
+        New ones are opened (with their last few exchanges and their folder),
+        titles and busy/idle follow claude.ai, and one archived or gone there
+        is closed here. One whose machine went away stays listed - its
+        history is here - but a new one appears only while its machine is
+        connected. This host's own sessions are skipped: they are listed
+        already. With the `LOCAL` scope only sessions running on this machine
+        are listed, and one found to run elsewhere is closed.
         """
         api, directory = self._claude_ai, self._directory
         if api is None or directory is None:
             return
         rows = {row.id: row for row in await api.sessions()}
+        here = await asyncio.to_thread(self._running_here)
         own = {s.bridge_session_id for s in list(self._local) if s.bridge_session_id}
         listed = {
             uri.removeprefix(_MIRROR_URI): uri
             for uri in directory.uris()
             if uri.startswith(_MIRROR_URI)
         }
+        elsewhere: set[str] = set()
         for remote_id, row in rows.items():
             if remote_id in own or remote_id in self._dismissed:
                 continue
             if row.environment_kind != "bridge" or row.status != "active":
+                continue
+            local, folder = await self._whereabouts(api, row, here)
+            if local is False:
+                elsewhere.add(remote_id)
+            if self._scope == LOCAL and not local and remote_id not in listed:
                 continue
             if remote_id not in listed:
                 if not row.live:
@@ -1364,17 +1399,38 @@ class ClaudeProvider:
                     uri_of(remote_id),
                     title=row.title,
                     resume_state={MIRROR_KEY: remote_id, "backfill": True},
+                    working_directories=[folder] if folder else (),
                 )
             await self._follow_row(row)
         for remote_id, uri in listed.items():
             found = rows.get(remote_id)
             gone = found is None or found.status != "active" or remote_id in own
-            if gone:
+            if gone or (self._scope == LOCAL and remote_id in elsewhere):
                 self._closing.add(remote_id)
                 try:
                     await directory.close(uri)
                 finally:
                     self._closing.discard(remote_id)
+
+    async def _whereabouts(
+        self, api: Api, row: RemoteSession, here: Mapping[str, str]
+    ) -> tuple[bool | None, str | None]:
+        """Whether *row* runs on this machine (None: cannot tell), and its folder URI.
+
+        This machine's registry is certain for what runs here now. Failing
+        that, a session started by ``claude --remote-control`` names its
+        machine and folder through its environment. One switched on from
+        inside (desktop app, IDE) and no longer running here names neither;
+        a listed one is then kept rather than dropped on a guess.
+        """
+        if row.id in here:
+            return True, _folder_uri(here[row.id])
+        if row.environment_id:
+            machine = await api.machine_of(row.environment_id)
+            if machine is not None:
+                local = machine.name.casefold() == self._machine
+                return local, _folder_uri(machine.directory) if local else None
+        return None, None
 
     async def _follow_row(self, row: RemoteSession) -> None:
         session = self._mirrors.get(row.id)
@@ -1443,3 +1499,11 @@ _ACTIVITY: Final[Mapping[str, str]] = {
     "running": "Working",
     "requires_action": "Waiting for you",
 }
+
+
+def _folder_uri(folder: str | None) -> str | None:
+    """A folder on this machine as a `file:` URI, or None if it is not one."""
+    if not folder:
+        return None
+    path = Path(folder)
+    return path.as_uri() if path.is_absolute() else None

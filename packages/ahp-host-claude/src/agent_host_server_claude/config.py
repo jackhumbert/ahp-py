@@ -24,6 +24,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from agent_host_server_claude.claude_ai import scope_of
 from agent_host_server_claude.roots import Roots, parse_root_arg
 
 DEFAULT_STATE = Path.home() / ".local/state/agent-host-server-claude"
@@ -67,7 +68,8 @@ class Settings:
     remote_control: bool | None = None
     #: Also list the account's other Remote Control sessions, through
     #: claude.ai. On one machine only: each would otherwise list them all.
-    claude_ai_sessions: bool = False
+    #: None (off), `"local"` (this machine's) or `"all"`: see `claude_ai.scope_of`.
+    claude_ai_sessions: str | None = None
     verbose: bool = False
 
 
@@ -144,9 +146,11 @@ def load(args: argparse.Namespace) -> Settings:
     remote_control = pick(args.remote_control, "remote_control", None)
     if remote_control is not None and not isinstance(remote_control, bool):
         raise ConfigError("remote_control must be true or false")
-    claude_ai_sessions = pick(args.claude_ai_sessions, "claude_ai_sessions", False)
-    if not isinstance(claude_ai_sessions, bool):
-        raise ConfigError("claude_ai_sessions must be true or false")
+    try:
+        chosen = pick(args.claude_ai_sessions, "claude_ai_sessions", False)
+        claude_ai_sessions = scope_of(False if chosen == "off" else chosen)
+    except ValueError as exc:
+        raise ConfigError(str(exc)) from exc
     port = pick(args.port, "port", DEFAULT_PORT)
     if not isinstance(port, int) or isinstance(port, bool):
         raise ConfigError("port must be a number")

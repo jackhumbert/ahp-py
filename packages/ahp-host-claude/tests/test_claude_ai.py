@@ -20,13 +20,18 @@ from claude_agent_sdk import (
 from claude_agent_sdk import UserMessage as SdkUserMessage
 
 from agent_host_server_claude.claude_ai import (
+    ALL,
+    LOCAL,
     Api,
     Event,
     Login,
     LoginError,
+    Machine,
     RemoteClient,
     RemoteSession,
     _user_text,
+    running_here,
+    scope_of,
     uri_of,
 )
 from agent_host_server_claude.provider import ClaudeProvider, ClaudeSession
@@ -88,6 +93,8 @@ class FakeApi:
             True: asyncio.Queue(),
         }
         self.closed = False
+        #: Environment id -> machine, as `GET /v1/environments/{id}` says.
+        self.machines: dict[str, Machine] = {}
 
     def push(self, event: Event, *, control: bool = False) -> None:
         self._live[control].put_nowait(event)
@@ -120,6 +127,9 @@ class FakeApi:
 
     async def post(self, session_id: str, payload: Mapping[str, Any]) -> None:
         self.posted.append((session_id, dict(payload)))
+
+    async def machine_of(self, environment_id: str) -> Machine | None:
+        return self.machines.get(environment_id)
 
     async def aclose(self) -> None:
         self.closed = True
@@ -422,6 +432,7 @@ class FakeDirectory:
         self.sessions: dict[str, ClaudeSession] = {}
         self.publishers: dict[str, FakePublisher] = {}
         self.titles: dict[str, str] = {}
+        self.folders: dict[str, tuple[str, ...]] = {}
 
     async def open(
         self,
@@ -436,6 +447,7 @@ class FakeDirectory:
         publisher = FakePublisher()
         self.publishers[uri] = publisher
         self.titles[uri] = title
+        self.folders[uri] = tuple(working_directories)
         self.sessions[uri] = await self.provider.resume_session(
             AgentSessionContext(
                 session_uri=uri,
@@ -471,8 +483,22 @@ def _row(remote_id: str, **over: str) -> RemoteSession:
     return RemoteSession.from_wire({**base, **over})
 
 
-async def _provider(tmp_path: Path, api: FakeApi) -> tuple[ClaudeProvider, FakeDirectory]:
-    provider = ClaudeProvider(tmp_path, claude_ai=api, state_dir=tmp_path, poll_s=3600)  # type: ignore[arg-type]
+async def _provider(
+    tmp_path: Path,
+    api: FakeApi,
+    *,
+    scope: str = ALL,
+    here: Mapping[str, str] | None = None,
+) -> tuple[ClaudeProvider, FakeDirectory]:
+    provider = ClaudeProvider(
+        tmp_path,
+        claude_ai=api,  # type: ignore[arg-type]
+        claude_ai_scope=scope,
+        state_dir=tmp_path,
+        poll_s=3600,
+        machine="My-Mac-Mini",
+        running_here=lambda: dict(here or {}),
+    )
     directory = FakeDirectory(provider)
     await provider.attach_directory(directory)
     return provider, directory
@@ -606,3 +632,95 @@ async def test_a_turn_typed_there_opens_one_here(tmp_path: Path) -> None:
     assert "".join(e[1] for e in sink.events if e[0] == "text") == "sure"
     await provider.aclose()
     assert api.closed
+
+
+# -- which machine a session runs on -------------------------------------------------
+
+
+async def test_each_machine_lists_only_the_sessions_running_on_it(tmp_path: Path) -> None:
+    """So every machine's node can have it on: each lists its own, the broker
+    files them under the right machine, and none is listed twice."""
+    api = FakeApi()
+    api.machines = {
+        "env_mac": Machine("My-Mac-Mini", "/Users/me/Github/app"),
+        "env_studio": Machine("Studio", "C:\\Users\\me\\project"),
+    }
+    api.rows = [
+        _row("cse_desktop"),  # desktop app here: in this machine's registry
+        _row("cse_server", environment_id="env_mac"),  # `claude --remote-control` here
+        _row("cse_studio", environment_id="env_studio"),  # on another machine
+        _row("cse_unknown"),  # switched on from inside, somewhere else
+    ]
+    here = {"cse_desktop": str(tmp_path / "desktop")}
+    provider, directory = await _provider(tmp_path, api, scope=LOCAL, here=here)
+    await provider.sync_claude_ai()
+    assert sorted(directory.uris()) == [uri_of("cse_desktop"), uri_of("cse_server")]
+    assert directory.folders[uri_of("cse_desktop")] == ((tmp_path / "desktop").as_uri(),)
+    assert directory.folders[uri_of("cse_server")] == ("file:///Users/me/Github/app",)
+    await provider.aclose()
+
+
+async def test_one_listed_here_but_running_elsewhere_is_closed(tmp_path: Path) -> None:
+    """What a machine listed before it knew better (or with `all`) goes."""
+    api = FakeApi()
+    api.machines = {"env_studio": Machine("Studio", None)}
+    api.rows = [_row("cse_studio", environment_id="env_studio")]
+    provider, directory = await _provider(tmp_path, api, scope=ALL)
+    await provider.sync_claude_ai()
+    assert directory.uris() == [uri_of("cse_studio")]
+    assert directory.folders[uri_of("cse_studio")] == (), "another machine's folder, here"
+    await provider.aclose()
+
+    local, directory2 = await _provider(tmp_path, api, scope=LOCAL)
+    directory2.sessions = directory.sessions
+    directory2.publishers = directory.publishers
+    await local.sync_claude_ai()
+    assert directory2.uris() == []
+    await local.sync_claude_ai()
+    assert directory2.uris() == [], "closing it counted as a person deleting it"
+    await local.aclose()
+
+
+async def test_one_that_stopped_running_here_is_kept_rather_than_guessed_away(
+    tmp_path: Path,
+) -> None:
+    api = FakeApi()
+    api.rows = [_row("cse_desktop")]
+    running = {"cse_desktop": "/tmp"}
+    provider = ClaudeProvider(
+        tmp_path,
+        claude_ai=api,  # type: ignore[arg-type]
+        state_dir=tmp_path,
+        poll_s=3600,
+        running_here=lambda: dict(running),
+    )
+    directory = FakeDirectory(provider)
+    await provider.attach_directory(directory)
+    await provider.sync_claude_ai()
+    running.clear()  # the desktop app quit; claude.ai still has it
+    api.rows = [_row("cse_desktop", connection_status="disconnected")]
+    await provider.sync_claude_ai()
+    assert directory.uris() == [uri_of("cse_desktop")]
+    await provider.aclose()
+
+
+def test_the_registry_names_this_machines_sessions(tmp_path: Path) -> None:
+    (tmp_path / "123.json").write_text(
+        json.dumps({"pid": 123, "cwd": "/work", "bridgeSessionId": "session_01ABC"})
+    )
+    (tmp_path / "456.json").write_text(json.dumps({"pid": 456, "cwd": "/other"}))
+    (tmp_path / "789.json").write_text("not json")
+    assert running_here(tmp_path) == {"cse_01ABC": "/work"}
+
+
+@pytest.mark.parametrize(
+    ("value", "scope"),
+    [(False, None), (None, None), (True, LOCAL), ("local", LOCAL), ("all", ALL)],
+)
+def test_the_setting(value: Any, scope: str | None) -> None:
+    assert scope_of(value) == scope
+
+
+def test_a_bad_setting_is_refused() -> None:
+    with pytest.raises(ValueError, match='"all"'):
+        scope_of("everything")

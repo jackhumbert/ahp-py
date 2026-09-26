@@ -37,6 +37,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import socket
 import subprocess
 import sys
 import time
@@ -160,6 +161,10 @@ class RemoteSession:
     status: str
     #: ``running`` / ``idle`` / ``requires_action``.
     worker_status: str
+    #: Set for a session started by ``claude --remote-control``: its machine
+    #: and folder are that environment's (`Api.machine_of`). Empty for one
+    #: whose Remote Control was switched on from inside (desktop app, IDE).
+    environment_id: str = ""
 
     @property
     def live(self) -> bool:
@@ -179,6 +184,7 @@ class RemoteSession:
             connection_status=str(row.get("connection_status") or ""),
             status=str(row.get("status") or ""),
             worker_status=str(row.get("worker_status") or ""),
+            environment_id=str(row.get("environment_id") or ""),
         )
 
 
@@ -205,6 +211,14 @@ class Event:
         return cls(sequence_num, source if isinstance(source, str) else None, payload)
 
 
+@dataclass(frozen=True)
+class Machine:
+    """Where a session runs: the machine's name, and the folder it works in."""
+
+    name: str
+    directory: str | None
+
+
 class Api:
     """Authenticated calls to claude.ai's Remote Control endpoints."""
 
@@ -215,9 +229,32 @@ class Api:
         self._http = http or httpx.AsyncClient(
             base_url=BASE_URL, timeout=httpx.Timeout(30, read=60)
         )
+        self._machines: dict[str, Machine | None] = {}
 
     async def aclose(self) -> None:
         await self._http.aclose()
+
+    async def machine_of(self, environment_id: str) -> Machine | None:
+        """The machine behind an environment (``GET /v1/environments/{id}``).
+
+        Only ``claude --remote-control`` registers one, and it does not move,
+        so the answer is kept.
+        """
+        if environment_id in self._machines:
+            return self._machines[environment_id]
+        machine: Machine | None = None
+        try:
+            found = await self._request("GET", f"/v1/environments/{environment_id}")
+        except RemoteError as error:
+            if error.status != 404:
+                raise
+            found = None
+        config = (found or {}).get("config") or {}
+        name, folder = config.get("machine_name"), config.get("directory")
+        if isinstance(name, str) and name:
+            machine = Machine(name, folder if isinstance(folder, str) and folder else None)
+        self._machines[environment_id] = machine
+        return machine
 
     async def _headers(self, *, reread: bool = False) -> dict[str, str]:
         token = await self._login.token(reread=reread)
@@ -587,6 +624,62 @@ class RemoteClient:
         for task in tasks:
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await task
+
+
+#: Which sessions a host lists: those running on its own machine, or all.
+LOCAL: Final = "local"
+ALL: Final = "all"
+
+
+def scope_of(value: object) -> str | None:
+    """The `claude_ai_sessions` setting as a scope: off, `LOCAL` or `ALL`.
+
+    ``true`` is this machine's sessions - every machine can have it on, and
+    each lists its own. ``"all"`` lists every session on the account, on one
+    machine, for the machines that run no node.
+    """
+    if value is None or value is False:
+        return None
+    if value is True or value == LOCAL:
+        return LOCAL
+    if value == ALL:
+        return ALL
+    raise ValueError('claude_ai_sessions must be true, false or "all"')
+
+
+#: Where Claude Code registers each session running on this machine.
+REGISTRY: Final = Path.home() / ".claude" / "sessions"
+
+
+def running_here(registry: Path = REGISTRY) -> dict[str, str]:
+    """This machine's Claude Code sessions on claude.ai: session id -> folder.
+
+    Claude Code keeps a file per running process, with the Remote Control
+    session it is on (``bridgeSessionId``, ``session_…``; claude.ai's API
+    calls the same session ``cse_…``) and the folder it works in. That is
+    the one sure way to know a session runs here: one whose Remote Control
+    was switched on from inside - the desktop app, an IDE - names no machine
+    on claude.ai.
+    """
+    found: dict[str, str] = {}
+    try:
+        entries = list(registry.glob("*.json"))
+    except OSError:
+        return found
+    for entry in entries:
+        try:
+            data = json.loads(entry.read_text())
+        except (OSError, ValueError):
+            continue
+        bridge, cwd = data.get("bridgeSessionId"), data.get("cwd")
+        if isinstance(bridge, str) and bridge.startswith("session_") and isinstance(cwd, str):
+            found["cse_" + bridge.removeprefix("session_")] = cwd
+    return found
+
+
+def this_machine() -> str:
+    """This machine's name as Claude Code reports it, for comparing."""
+    return socket.gethostname().split(".")[0].casefold()
 
 
 def uri_of(session_id: str) -> str:
