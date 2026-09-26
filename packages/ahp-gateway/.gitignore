@@ -21,3 +21,6 @@ htmlcov/
 .DS_Store
 .idea/
 *.swp
+
+# Local, per-machine notes and config (AGENTS.local.md etc.)
+*.local.*

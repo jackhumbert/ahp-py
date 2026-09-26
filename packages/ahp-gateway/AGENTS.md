@@ -8,6 +8,23 @@ every section below is a pointer into it. If this file and the plan disagree,
 one of them is wrong - fix it in the same PR, never leave them silently
 inconsistent.
 
+## Keep it generic
+
+This repository is public. It is a library for anyone to embed or run against
+their own deployment, so nothing tracked may name or depend on one particular
+setup: no hostnames, machine names, domains, home-directory paths, IP
+addresses, tokens, employers or internal projects. Use placeholders
+(`example.com`, `my-mac-mini`, `/Users/me`) in code, tests, docs *and* commit
+messages — a commit message is as public as the code.
+
+Deployment glue (service files, reverse-proxy config, one fleet's layout)
+belongs in the deployment, not here. A feature one setup needs is generalised
+into an option or left out.
+
+Anything an agent needs to know about the local setup lives in
+`AGENTS.local.md`, gitignored by `*.local.*`. Read it if it exists; never copy
+from it into a tracked file.
+
 ## What this project is
 
 The **broker** of the federated AHP fleet: the one component that implements
