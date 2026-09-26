@@ -15,7 +15,7 @@ from agent_host_server.provider.base import (
 from claude_agent_sdk import ClaudeAgentOptions, ResultMessage
 
 from agent_host_server_claude.permissions import pre_tool_use_decision
-from agent_host_server_claude.provider import ClaudeProvider, ClaudeSession
+from agent_host_server_claude.provider import ClaudeProvider, ClaudeSession, _Turn
 from tests.fakes import FakeClient, RecordingSink
 
 
@@ -100,7 +100,7 @@ async def test_a_resumed_session_keeps_its_mode(tmp_path: Path) -> None:
     session = await provider.create_session(_context({"permissionMode": "auto"}))
     await session.send_user_message(UserMessage(text="x"), RecordingSink())
     state = await provider.resume_state_of(session)
-    assert state == {"claudeSessionId": "abc", "permissionMode": "auto"}
+    assert state == {"claudeSessionId": "abc", "permissionMode": "auto", "remoteControl": False}
 
     resumed = await provider.resume_session(
         AgentSessionContext(session_uri="s", chat_uri="c", provider_id="claude", resume_state=state)
@@ -138,7 +138,7 @@ async def test_plan_mode_shows_the_plan_and_drops_to_ask_once_approved(tmp_path:
     assert pre_tool_use_decision("Write", "plan") == {}
 
     sink = RecordingSink(approve=True)
-    session._sink = sink
+    session._begin(_Turn(sink=sink))
     plan_input = {"plan": "1. Add x.txt\n2. Done"}
     result = await session._can_use_tool(
         "ExitPlanMode", plan_input, ToolPermissionContext(tool_use_id="p1")
@@ -163,7 +163,7 @@ async def test_a_rejected_plan_stays_in_plan_mode(tmp_path: Path) -> None:
     from claude_agent_sdk import PermissionResultDeny, ToolPermissionContext
 
     session = _session(tmp_path, {"permissionMode": "plan"})
-    session._sink = RecordingSink(approve=False)
+    session._begin(_Turn(sink=RecordingSink(approve=False)))
     result = await session._can_use_tool(
         "ExitPlanMode", {"plan": "p"}, ToolPermissionContext(tool_use_id="p2")
     )

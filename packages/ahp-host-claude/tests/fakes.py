@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterable, AsyncIterator, Awaitable, Callable, Mapping, Sequence
+from dataclasses import replace
 from typing import Any
 
 from agent_host_server.provider.base import (
@@ -15,6 +17,7 @@ from agent_host_server.provider.base import (
     ToolResult,
 )
 from claude_agent_sdk import ClaudeAgentOptions
+from claude_agent_sdk import UserMessage as SdkUserMessage
 
 #: A script step is a message to yield, or a coroutine function run in place
 #: (how a test makes the CLI "ask permission" mid-stream).
@@ -22,6 +25,14 @@ Step = Any | Callable[[ClaudeAgentOptions], Awaitable[None]]
 
 
 class FakeClient:
+    """Claude Code, scripted.
+
+    `turns` is what the CLI says in answer to each `query`, in order: sending a
+    message queues the next script onto the one stream (`receive_messages`),
+    as the real CLI's output is one stream for the life of the client. `push`
+    queues messages nobody here asked for - a turn typed on claude.ai.
+    """
+
     def __init__(self, options: ClaudeAgentOptions, turns: list[list[Step]]) -> None:
         self.options = options
         self.turns = turns
@@ -29,9 +40,16 @@ class FakeClient:
         self.server_info: dict[str, Any] | None = None
         self.models: list[str | None] = []
         self.permission_modes: list[Any] = []
+        self.remote_controls: list[tuple[bool, str | None]] = []
+        #: What `remote_control(True)` answers; an exception is raised.
+        self.bridge_reply: Mapping[str, Any] | Exception = {
+            "session_url": "https://claude.ai/code/session_1",
+            "bridge_session_id": "cse_1",
+        }
         self.connected = False
         self.interrupted = False
         self.disconnected = False
+        self._stream: asyncio.Queue[Step] = asyncio.Queue()
 
     async def connect(self) -> None:
         self.connected = True
@@ -40,17 +58,34 @@ class FakeClient:
         if isinstance(prompt, str):
             self.prompts.append(prompt)
         else:
-            self.prompts.append([message async for message in prompt])
+            messages = [message async for message in prompt]
+            self.prompts.append(messages)
+        if self.turns:
+            self.push(*self.turns.pop(0))
+
+    def push(self, *steps: Step) -> None:
+        for step in steps:
+            self._stream.put_nowait(step)
 
     async def get_server_info(self) -> dict[str, Any] | None:
         return self.server_info
 
-    async def receive_response(self) -> AsyncIterator[Any]:
-        for step in self.turns.pop(0):
+    async def receive_messages(self) -> AsyncIterator[Any]:
+        while True:
+            step = await self._stream.get()
             if callable(step):
                 await step(self.options)
             else:
-                yield step
+                yield self._echoed(step)
+
+    def _echoed(self, step: Any) -> Any:
+        """A scripted replay of a message we sent carries its uuid, as the CLI's does."""
+        if not isinstance(step, SdkUserMessage) or step.uuid is not None or step.origin:
+            return step
+        for prompt in reversed(self.prompts):
+            if isinstance(prompt, list) and text_of(prompt) == step.content:
+                return replace(step, uuid=prompt[0].get("uuid"))
+        return step
 
     async def interrupt(self) -> None:
         self.interrupted = True
@@ -61,8 +96,25 @@ class FakeClient:
     async def set_permission_mode(self, mode: Any) -> None:
         self.permission_modes.append(mode)
 
+    async def remote_control(
+        self, enabled: bool, *, reattach: str | None = None
+    ) -> Mapping[str, Any]:
+        self.remote_controls.append((enabled, reattach))
+        if not enabled:
+            return {}
+        if isinstance(self.bridge_reply, Exception):
+            raise self.bridge_reply
+        return self.bridge_reply
+
     async def disconnect(self) -> None:
         self.disconnected = True
+
+
+def text_of(prompt: Any) -> Any:
+    """What a recorded prompt said: its text, or its content blocks."""
+    if isinstance(prompt, list) and len(prompt) == 1 and isinstance(prompt[0], dict):
+        return prompt[0]["message"]["content"]
+    return prompt
 
 
 class RecordingSink:
@@ -71,6 +123,8 @@ class RecordingSink:
         self.approve = approve
         self.edited_input = edited_input
         self.confirmations: list[ToolConfirmation] = []
+        #: Set to keep approval prompts unanswered, as when a phone answers.
+        self.hold: asyncio.Event | None = None
         #: The latest line under each call's name, and each call's past tense.
         self.invocations: dict[str, str] = {}
         self.past_tense: dict[str, str | None] = {}
@@ -147,13 +201,79 @@ class RecordingSink:
     async def confirm_tool_call(self, call: ToolConfirmation) -> ToolConfirmationOutcome:
         self.confirmations.append(call)
         self.events.append(("confirm", call.call_id))
+        if self.hold is not None:
+            await self.hold.wait()  # nobody here answers
         return ToolConfirmationOutcome(
             approved=self.approve,
             tool_input=self.edited_input if self.edited_input is not None else call.tool_input,
         )
+
+    async def tool_call_confirmed(
+        self, call_id: str, *, approved: bool, reason_message: str | None = None
+    ) -> None:
+        self.events.append(("confirmed_elsewhere", call_id, approved, reason_message))
 
     async def request_authentication(self, call_id: str, challenge: AuthChallenge) -> None:
         raise AssertionError("not used")
 
     async def run_client_tool(self, call: ClientToolCall) -> ToolResult:
         raise AssertionError("not used")
+
+
+class FakePublisher:
+    """The host's out-of-turn side: only `external_turn` does anything.
+
+    Runs each external turn the way the host does - on its own task, with a
+    fresh sink - and refuses one while another is running.
+    """
+
+    def __init__(self) -> None:
+        self.turns: list[tuple[str, RecordingSink]] = []
+        self.tasks: list[asyncio.Task[None]] = []
+        self.refusals = 0
+
+    async def external_turn(self, text: str, run: Callable[[Any], Awaitable[None]]) -> bool:
+        if any(not task.done() for task in self.tasks):
+            self.refusals += 1
+            return False
+        sink = RecordingSink()
+        self.turns.append((text, sink))
+
+        async def turn() -> None:
+            await run(sink)
+
+        self.tasks.append(asyncio.create_task(turn()))
+        return True
+
+    async def customizations_changed(
+        self,
+        customizations: Sequence[Mapping[str, Any]],
+        server_tools: Sequence[Mapping[str, Any]] | None = None,
+    ) -> None:
+        return
+
+    async def activity_changed(self, activity: str | None) -> None:
+        return
+
+    async def changes_published(self, changeset: Any, changes: Sequence[Any]) -> str:
+        return ""
+
+    async def mcp_server_changed(
+        self, customization_id: str, state: Mapping[str, Any], channel: str | None = None
+    ) -> None:
+        return
+
+    async def progress(
+        self, progress: float, total: float | None = None, message: str | None = None
+    ) -> None:
+        return
+
+    async def title_changed(self, title: str) -> None:
+        return
+
+
+async def eventually(condition: Callable[[], bool], timeout: float = 2.0) -> None:
+    """Wait for something the adapter does on its own task."""
+    async with asyncio.timeout(timeout):
+        while not condition():
+            await asyncio.sleep(0.005)

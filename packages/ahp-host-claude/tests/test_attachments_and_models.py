@@ -20,7 +20,7 @@ from agent_host_server_claude.provider import (
     discover_models,
     models_from_server_info,
 )
-from tests.fakes import FakeClient, RecordingSink
+from tests.fakes import FakeClient, RecordingSink, text_of
 
 
 def _b64(data: bytes) -> str:
@@ -195,18 +195,9 @@ async def test_attachments_are_sent_as_one_streamed_user_message(tmp_path: Path)
     }
     await session.send_user_message(UserMessage(text="read this", raw=raw), RecordingSink())
     [sent] = clients[0].prompts
-    assert sent == [
-        {
-            "type": "user",
-            "message": {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": "read this"},
-                    {"type": "text", "text": f"[Attached file a: {(tmp_path / 'a').resolve()}]"},
-                ],
-            },
-            "parent_tool_use_id": None,
-        }
+    assert text_of(sent) == [
+        {"type": "text", "text": "read this"},
+        {"type": "text", "text": f"[Attached file a: {(tmp_path / 'a').resolve()}]"},
     ]
 
 

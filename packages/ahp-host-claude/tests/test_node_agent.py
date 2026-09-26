@@ -26,3 +26,9 @@ async def test_a_bad_provider_id_is_refused(tmp_path: Path) -> None:
     node = NodeContext(roots=Roots.single(tmp_path), state_dir=tmp_path)
     with pytest.raises(ValueError, match="provider id"):
         await create({"provider_id": "has space"}, node)
+
+
+async def test_remote_control_must_be_a_boolean(tmp_path: Path) -> None:
+    node = NodeContext(roots=Roots.single(tmp_path), state_dir=tmp_path)
+    with pytest.raises(ValueError, match="remote_control"):
+        await create({"remote_control": "yes"}, node)

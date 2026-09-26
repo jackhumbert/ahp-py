@@ -41,6 +41,16 @@ Status: pre-alpha.
 - **Steering**: a message sent while Claude is working joins the turn at
   its next tool call (Claude Code's own "next" queue slot) instead of waiting
   for it to finish; queued messages still run afterwards.
+- **Remote Control**, like a terminal session: each session is also on
+  claude.ai and in the Claude apps, so it can be read, driven and approved from
+  a phone. On by default when Claude Code's would be (your
+  `remoteControlAtStartup` setting, then org policy); `remote_control` in the
+  config overrides that for new sessions, and the `remoteControl` session
+  setting switches it per session. A message sent from the phone shows up here
+  as a turn of its own. An approval goes to both places, and whichever answers
+  first wins; the other prompt is withdrawn. Such a session keeps its Claude
+  process running while the host is up, so it stays reachable, and a host
+  restart reattaches to the same claude.ai session.
 - **Continue from** another Claude Code conversation on this machine - one
   started in a terminal, the IDE, or driven from a phone through Remote
   Control - picked from a searchable list (the `continueFrom` session setting,
@@ -92,6 +102,7 @@ error, so a typo cannot silently fall back to a default.
 | `port`, `bind` / `--port`, `--bind` | Default `127.0.0.1:4321`. Loopback only. |
 | `state_dir` / `--state-dir` | Persisted sessions and sequence counter. Default `~/.local/state/agent-host-server-claude`. |
 | `agent_name` / `--agent-name` | What clients call the agent. |
+| `remote_control` / `--[no-]remote-control` | Put new sessions on claude.ai (Remote Control). Default: whatever Claude Code does, i.e. your `remoteControlAtStartup` setting. |
 | `provider_id` / `--provider-id` | The agent's id (default `claude`). Machines behind one broker share it: the broker merges them into one agent and the folder picks the machine. |
 
 Authentication is Claude Code's own: the SDK uses whatever login `claude` has
@@ -103,6 +114,14 @@ The agent runs as the host's OS user, so whatever that user can touch, an
 approved tool call can touch. The approval gate and the `--root` check are the
 boundary; see `agent-host-server`'s SECURITY.md for the host's own posture.
 Never bind this off loopback without a proxy that authenticates peers.
+
+With Remote Control on, the session is also reachable through the Claude
+account this machine is signed in to: anyone signed in to it, on any device,
+can send the session messages and answer its approval prompts. The approval
+mode still applies - a phone answers the same prompts a client here would -
+but "a human approved this" then means "someone signed in to that account".
+Turn it off (`remote_control = false`, or per session) where that is not the
+same set of people as those who can reach this host.
 
 ## Development
 

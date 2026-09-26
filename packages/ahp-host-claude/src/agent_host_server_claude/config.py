@@ -42,6 +42,7 @@ _KEYS = frozenset(
         "state_dir",
         "agent_name",
         "provider_id",
+        "remote_control",
         "verbose",
     }
 )
@@ -60,6 +61,9 @@ class Settings:
     state_dir: Path = DEFAULT_STATE
     agent_name: str = DEFAULT_AGENT_NAME
     provider_id: str = DEFAULT_PROVIDER_ID
+    #: Put new sessions on claude.ai. None: whatever Claude Code itself does
+    #: (the user's `remoteControlAtStartup`, then org policy).
+    remote_control: bool | None = None
     verbose: bool = False
 
 
@@ -133,6 +137,9 @@ def load(args: argparse.Namespace) -> Settings:
     state_dir = args.state_dir or (
         _path(data["state_dir"], "state_dir") if "state_dir" in data else DEFAULT_STATE
     )
+    remote_control = pick(args.remote_control, "remote_control", None)
+    if remote_control is not None and not isinstance(remote_control, bool):
+        raise ConfigError("remote_control must be true or false")
     port = pick(args.port, "port", DEFAULT_PORT)
     if not isinstance(port, int) or isinstance(port, bool):
         raise ConfigError("port must be a number")
@@ -144,5 +151,6 @@ def load(args: argparse.Namespace) -> Settings:
         state_dir=state_dir.expanduser(),
         agent_name=str(pick(args.agent_name, "agent_name", DEFAULT_AGENT_NAME)),
         provider_id=str(pick(args.provider_id, "provider_id", DEFAULT_PROVIDER_ID)),
+        remote_control=remote_control,
         verbose=bool(args.verbose or data.get("verbose", False)),
     )

@@ -4,6 +4,19 @@
 
 ### Added
 
+- Remote Control: sessions are also on claude.ai and in the Claude apps, like
+  terminal sessions, when Claude Code's own would be (`remoteControlAtStartup`,
+  read from the CLI at start-up). Override it with `remote_control` in the
+  config, `--[no-]remote-control`, the node's `remote_control` option, or per
+  session with the `remoteControl` setting (changeable mid-session). A session
+  with it starts its Claude client at once, so it is reachable before its first
+  message here, and a restart reattaches to the same claude.ai session
+  (`bridgeSessionId` in the resume state). A message sent from the phone opens
+  a turn on the host (`external_turn`); an approval answered on the phone
+  withdraws the prompt here (`TurnSink.tool_call_confirmed`, needs
+  agent-host-server with it). Security: anyone signed in to the machine's
+  Claude account can now drive and approve the session; see README.
+
 - `type = "claude"` for `agent-host-node` (agent-host-server): the package
   registers a `claude` entry in the `agent_host_server.agents` group, so one
   node can serve Claude beside other agents (goose, opencode) from one host,
@@ -12,6 +25,12 @@
   machine) and `agent_name`.
 
 ### Changed
+
+- One reader per Claude client: Claude Code's output is read continuously
+  rather than per turn, so output nobody here asked for (a turn from
+  claude.ai, the aborted result of a stopped turn) can no longer be read as
+  the next turn's. Every message sent carries its own uuid, which is how the
+  CLI's replays are told apart from messages typed elsewhere.
 
 - The folder tree (`roots`, `paths`) moved to `agent_host_server.node`; the
   modules here re-export it. `python -m agent_host_server_claude` still runs a

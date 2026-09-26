@@ -29,7 +29,7 @@ from agent_host_server_claude import __version__
 from agent_host_server_claude.config import ConfigError, Settings, load
 from agent_host_server_claude.provider import (
     ClaudeProvider,
-    discover_models,
+    discover,
     is_valid_provider_id,
 )
 from agent_host_server_claude.roots import NamedRootsResourceProvider
@@ -53,6 +53,13 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--agent-name")
     parser.add_argument("--provider-id", help="the agent's id (default: claude)")
+    parser.add_argument(
+        "--remote-control",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="put new sessions on claude.ai (default: whatever Claude Code does, i.e. "
+        "your remoteControlAtStartup setting)",
+    )
     parser.add_argument("-v", "--verbose", action="store_true", default=None)
     return parser.parse_args(argv)
 
@@ -75,15 +82,22 @@ async def _run(settings: Settings) -> None:
     state.mkdir(parents=True, exist_ok=True, mode=0o700)
     log = logging.getLogger(__name__)
 
-    # Once, at start-up: the picker offers what Claude Code offers this account.
-    models = await discover_models(settings.roots.primary)
+    # Once, at start-up: the picker offers what Claude Code offers this account,
+    # and new sessions go on claude.ai if Claude Code's own would.
+    found = await discover(settings.roots.primary)
+    models = found.models
+    remote_control = (
+        found.remote_control if settings.remote_control is None else settings.remote_control
+    )
     log.info("models: %s", ", ".join(m.id for m in models) or "none")
+    log.info("Remote Control for new sessions: %s", "on" if remote_control else "off")
     host = Host(
         ClaudeProvider(
             settings.roots,
             display_name=settings.agent_name,
             models=models,
             provider_id=settings.provider_id,
+            remote_control=remote_control,
         ),
         LoopbackSingleUserPolicy(),
         info=HostInfo(name="agent-host-server-claude", version=__version__),
@@ -94,7 +108,8 @@ async def _run(settings: Settings) -> None:
     )
     # Bring back the sessions saved before the last stop. Without this they
     # were written to `state/sessions` and never read again, so every restart
-    # emptied the session list. Their Claude clients start on their first turn.
+    # emptied the session list. Their Claude clients start on their first turn,
+    # or straight away for those on claude.ai.
     restored = await host.restore()
     log.info("restored %d session(s)", restored)
     stop = asyncio.Event()

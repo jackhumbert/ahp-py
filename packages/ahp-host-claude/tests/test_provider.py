@@ -31,7 +31,7 @@ from claude_agent_sdk.types import StreamEvent
 from agent_host_server_claude.paths import directory_of
 from agent_host_server_claude.permissions import needs_approval, pre_tool_use_decision
 from agent_host_server_claude.provider import ClaudeProvider, ClaudeSession
-from tests.fakes import FakeClient, RecordingSink, Step
+from tests.fakes import FakeClient, RecordingSink, Step, text_of
 
 
 def _stream(event: dict[str, Any], parent: str | None = None) -> StreamEvent:
@@ -120,7 +120,7 @@ async def test_text_streams_as_deltas_and_is_not_repeated_by_the_final_message(
         ("text", "lo"),
         ("usage", 10, 3, 7, "claude-opus-5"),
     ]
-    assert harness.clients[0].prompts == ["hi"]
+    assert [text_of(p) for p in harness.clients[0].prompts] == ["hi"]
     assert session.claude_session_id == "claude-session-1"
 
 
@@ -256,7 +256,7 @@ async def test_sessions_resume_with_the_sdk_session_id(tmp_path: Path) -> None:
     session = await harness.provider.create_session(_context(tmp_path))
     await session.send_user_message(UserMessage(text="x"), RecordingSink())
     state = await harness.provider.resume_state_of(session)
-    assert state == {"claudeSessionId": "abc", "permissionMode": "default"}
+    assert state == {"claudeSessionId": "abc", "permissionMode": "default", "remoteControl": False}
 
     context = _context(tmp_path)
     resumed_context = AgentSessionContext(
