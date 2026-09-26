@@ -197,6 +197,54 @@ async def test_it_can_be_switched_during_a_session(tmp_path: Path) -> None:
     assert session.session_url is not None
 
 
+# -- deleting a session ---------------------------------------------------------
+
+
+async def test_deleting_a_session_archives_it_on_claude_ai(tmp_path: Path) -> None:
+    """Kept is fixed while it is on, and a kept session is never archived:
+    off, back on unkept (the same session), off."""
+    harness = Harness(tmp_path)
+    session = await harness.session()
+    await eventually(lambda: session.session_url is not None)
+
+    await session.disposed()
+    client = harness.clients[0]
+    assert client.remote_controls[1:] == [(False, None), (True, "cse_1"), (False, None)]
+    assert client.keeps[1:] == [True, False, True]
+    assert session.bridge_session_id is None
+    state = await harness.provider.resume_state_of(session)
+    assert state is None or "bridgeSessionId" not in state
+
+
+async def test_shutting_down_leaves_it_on_claude_ai(tmp_path: Path) -> None:
+    harness = Harness(tmp_path)
+    session = await harness.session()
+    await eventually(lambda: session.session_url is not None)
+    await session.aclose()
+    assert harness.clients[0].remote_controls == [(True, None)]
+    assert harness.clients[0].keeps == [True]
+
+
+async def test_a_session_turned_off_earlier_is_still_archived_when_deleted(
+    tmp_path: Path,
+) -> None:
+    harness = Harness(tmp_path)
+    session = await harness.session()
+    await eventually(lambda: session.session_url is not None)
+    await session.config_changed({"remoteControl": False})
+
+    await session.disposed()
+    assert harness.clients[0].remote_controls[-2:] == [(True, "cse_1"), (False, None)]
+    assert harness.clients[0].keeps[-2] is False
+
+
+async def test_deleting_a_session_that_never_had_it_starts_nothing(tmp_path: Path) -> None:
+    harness = Harness(tmp_path, remote_control=False)
+    session = await harness.session()
+    await session.disposed()
+    assert harness.clients == []
+
+
 # -- turns from elsewhere ------------------------------------------------------
 
 

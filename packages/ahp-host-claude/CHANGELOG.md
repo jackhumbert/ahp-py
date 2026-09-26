@@ -38,6 +38,10 @@
   offers its claude.ai artifact tools and guide agent; they pass the same
   approval gate as every other tool.
 
+- Deleting a session archives it on claude.ai too (`disposed`, needs
+  agent-host-server with `DisposesSessions`); shutting the host down still
+  leaves it there, offline, for the next start to reattach to.
+
 ### Changed
 
 - One reader per Claude client: Claude Code's output is read continuously

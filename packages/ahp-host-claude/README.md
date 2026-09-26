@@ -52,7 +52,8 @@ Status: pre-alpha.
   as a turn of its own. An approval goes to both places, and whichever answers
   first wins; the other prompt is withdrawn. Such a session keeps its Claude
   process running while the host is up, so it stays reachable, and a host
-  restart reattaches to the same claude.ai session.
+  restart reattaches to the same claude.ai session; deleting the session here
+  archives it there.
 - **In `claude --resume`**, like any other conversation on the machine:
   sessions are recorded as started by `agent-host`, not by the SDK, whose
   sessions the picker hides. Claude Code then offers them what it offers a

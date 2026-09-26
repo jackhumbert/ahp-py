@@ -41,6 +41,7 @@ class FakeClient:
         self.models: list[str | None] = []
         self.permission_modes: list[Any] = []
         self.remote_controls: list[tuple[bool, str | None]] = []
+        self.keeps: list[bool] = []
         #: What `remote_control(True)` answers; an exception is raised.
         self.bridge_reply: Mapping[str, Any] | Exception = {
             "session_url": "https://claude.ai/code/session_1",
@@ -97,9 +98,10 @@ class FakeClient:
         self.permission_modes.append(mode)
 
     async def remote_control(
-        self, enabled: bool, *, reattach: str | None = None
+        self, enabled: bool, *, reattach: str | None = None, keep: bool = True
     ) -> Mapping[str, Any]:
         self.remote_controls.append((enabled, reattach))
+        self.keeps.append(keep)
         if not enabled:
             return {}
         if isinstance(self.bridge_reply, Exception):

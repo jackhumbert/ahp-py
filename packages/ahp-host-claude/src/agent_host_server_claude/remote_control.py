@@ -77,18 +77,23 @@ class RemoteControlClient(ClaudeSDKClient):
     """`ClaudeSDKClient`, plus the one control request the SDK does not wrap."""
 
     async def remote_control(
-        self, enabled: bool, *, reattach: str | None = None
+        self, enabled: bool, *, reattach: str | None = None, keep: bool = True
     ) -> Mapping[str, Any]:
+        """Turn Remote Control on or off.
+
+        `keep` is fixed when it is turned on, for as long as it stays on: a
+        kept session is never archived, not when the process exits and not
+        when it is turned off. That is what a restart needs (the next start
+        reattaches to it); a deletion needs the opposite, so it turns it off,
+        back on unkept, and off again (`ClaudeSession.disposed`).
+        """
         query = self._query
         if query is None:
             raise RuntimeError("not connected")
         request: dict[str, Any] = {
             "subtype": "remote_control",
             "enabled": enabled,
-            # A host restart must not archive the claude.ai session: the
-            # next start reattaches to it (`reattach`), so a phone keeps
-            # the same conversation rather than finding a new one.
-            "keep_session_on_exit": True,
+            "keep_session_on_exit": keep,
         }
         if reattach is not None:
             request["reattach_session_id"] = reattach

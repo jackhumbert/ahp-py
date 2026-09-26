@@ -129,7 +129,7 @@ class SdkClient(Protocol):
     async def get_server_info(self) -> dict[str, Any] | None: ...
 
     async def remote_control(
-        self, enabled: bool, *, reattach: str | None = None
+        self, enabled: bool, *, reattach: str | None = None, keep: bool = True
     ) -> Mapping[str, Any]: ...
 
 
@@ -413,6 +413,30 @@ class ClaudeSession:
                 await client.disconnect()
             except Exception:  # a dying subprocess must not fail session disposal
                 log.exception("disconnecting the Claude client failed")
+
+    async def disposed(self) -> None:
+        """Deleted here, so it goes from claude.ai too.
+
+        Only a deletion: at shutdown the session stays there, offline, for
+        the next start to reattach to. Archiving it takes three steps because
+        a session turned on as kept is never archived while it stays on: off,
+        on again unkept (same session), off.
+        """
+        bridge = self.bridge_session_id
+        if bridge is None:
+            return
+        self.remote_control = False  # starting a client must not turn it back on as kept
+        try:
+            client = await self._ensure_client()
+            if self.session_url is not None:
+                await client.remote_control(False)
+            await client.remote_control(True, reattach=bridge, keep=False)
+            await client.remote_control(False)
+        except Exception:
+            log.warning("could not archive claude.ai session %s", bridge, exc_info=True)
+            return
+        self.bridge_session_id = None
+        self.session_url = None
 
     async def cancel(self, reason: str | None = None) -> None:
         if self._client is not None:
