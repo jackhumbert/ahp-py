@@ -12,6 +12,11 @@ versions each release speaks.
 
 ### Added
 
+- `ArchivesSessions.archived_changed(is_archived)`: an agent session that
+  implements it is told when a client archives or unarchives it
+  (`session/isArchivedChanged`), and the session is then saved. For an agent
+  whose session also lives elsewhere (Claude Code on claude.ai), which can
+  file it away there too.
 - `DisposesSessions.disposed()`: an agent session that implements it is told
   when it is being deleted (`disposeSession`, `Host.close_session`), before
   `aclose`. `aclose` alone also runs at shutdown, and an agent whose session

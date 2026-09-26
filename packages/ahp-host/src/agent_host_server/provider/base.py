@@ -22,6 +22,7 @@ __all__ = [
     "AgentProvider",
     "AgentSession",
     "AgentSessionContext",
+    "ArchivesSessions",
     "AuthChallenge",
     "ClientToolCall",
     "Completes",
@@ -531,6 +532,22 @@ class SteersTurns(Protocol):
     """
 
     async def steer(self, chat_uri: str, message: UserMessage) -> bool: ...
+
+
+@runtime_checkable
+class ArchivesSessions(Protocol):
+    """An agent session that follows a client archiving or unarchiving it.
+
+    `session/isArchivedChanged` is a flag in state: the session stays, filed
+    away. For most agents that is all it is. One whose session also lives
+    somewhere else (Claude Code's on claude.ai) can file it away there too,
+    and let go of what it keeps running for it; unarchiving brings it back.
+    Called after the reducer has applied the change, then the session is
+    saved, so `resume_state_of` can record it. Raising is logged; it does not
+    undo the change.
+    """
+
+    async def archived_changed(self, is_archived: bool) -> None: ...
 
 
 @runtime_checkable

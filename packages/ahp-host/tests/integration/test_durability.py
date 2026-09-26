@@ -400,3 +400,37 @@ class TestRestoredConfigSchema:
             assert state["config"]["values"]["prefix"] == "Changed there:"
         finally:
             await second.aclose()
+
+    async def test_archiving_reaches_the_agent_and_is_saved(self, tmp_path: Path) -> None:
+        """`ArchivesSessions`: a client files the session away (or back), and an
+        agent whose session also lives elsewhere does the same there."""
+        host = _host(tmp_path)
+        uri = "echo:/durable-archive"
+        try:
+            client = await _client(host)
+            await client.request("createSession", {"channel": uri, "provider": "echo"})
+            await client.collect(seconds=0.3)
+            await client.request("subscribe", {"channel": uri})
+            heard: list[bool] = []
+
+            async def archived_changed(is_archived: bool) -> None:
+                heard.append(is_archived)
+
+            agent = host._sessions[uri].agent_session
+            agent.archived_changed = archived_changed  # type: ignore[union-attr]
+            for seq, archived in enumerate((True, False), start=1):
+                await client.notify(
+                    "dispatchAction",
+                    {
+                        "channel": uri,
+                        "clientSeq": seq,
+                        "action": {"type": "session/isArchivedChanged", "isArchived": archived},
+                    },
+                )
+            await client.collect(seconds=0.3)
+            assert heard == [True, False]
+            state = host.sequencer.state_of(uri)
+            assert isinstance(state, dict)
+            assert state["status"] & (1 << 6) == 0, "the reducer did not unarchive it"
+        finally:
+            await host.aclose()

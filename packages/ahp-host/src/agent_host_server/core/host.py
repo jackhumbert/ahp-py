@@ -102,6 +102,7 @@ from agent_host_server.provider.base import (
     AgentProvider,
     AgentSession,
     AgentSessionContext,
+    ArchivesSessions,
     Completes,
     CompletionRequest,
     ConfigRequest,
@@ -4919,6 +4920,9 @@ class Host:
         if action_type == "session/configChanged":
             await self._react_to_config(channel, action)
             return
+        if action_type == "session/isArchivedChanged":
+            await self._react_to_archive(channel, action)
+            return
         if action_type in _MCP_LIFECYCLE_ACTIONS:
             await self._react_to_mcp(channel, action)
             return
@@ -5644,6 +5648,19 @@ class Host:
                 await session.agent_session.config_changed(dict(values))
             except Exception:
                 _log.exception("config_changed failed for %s", channel)
+        await self._persist(session)
+
+    async def _react_to_archive(self, channel: str, action: Mapping[str, Any]) -> None:
+        """Tell the agent its session was archived or unarchived, then save it."""
+        session = self._sessions.get(channel)
+        archived = action.get("isArchived")
+        if session is None or not isinstance(archived, bool):
+            return
+        if isinstance(session.agent_session, ArchivesSessions):
+            try:
+                await session.agent_session.archived_changed(archived)
+            except Exception:
+                _log.exception("archived_changed failed for %s", channel)
         await self._persist(session)
 
     async def _run_turn(
