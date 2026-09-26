@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import sys
 from pathlib import Path
+
+import pytest
 
 from ahp_client.client.client import AhpClient
 from ahp_client.doctor import diagnose
@@ -91,6 +94,10 @@ def test_redaction_does_not_mutate_the_frame_being_sent(tmp_path: Path) -> None:
     assert params["token"] == "keep-me"
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX permission bits; on Windows the user profile's ACL is what keeps it private",
+)
 def test_the_log_is_owner_only(tmp_path: Path) -> None:
     log = WireLog(tmp_path / "ahp-test.jsonl")
     assert log.path.stat().st_mode & 0o777 == 0o600

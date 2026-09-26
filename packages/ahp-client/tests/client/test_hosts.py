@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -115,6 +116,10 @@ async def test_an_explicitly_supplied_client_id_is_still_written_back() -> None:
     await factory.stop()
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX permission bits; on Windows the user profile's ACL is what keeps it private",
+)
 async def test_the_file_store_round_trips_and_is_owner_only(tmp_path: Path) -> None:
     store = FileClientIdStore(tmp_path)
     assert await store.load("h") is None
@@ -363,6 +368,11 @@ async def test_a_refused_reconnect_falls_back_to_initialize() -> None:
         await asyncio.sleep(0.01)
         if any(m.get("method") == "initialize" for m in second.received):
             break
+    # Receiving `initialize` is not yet having its answer: let it land.
+    for _ in range(200):
+        if runtime.state.status == "connected":
+            break
+        await asyncio.sleep(0.01)
     assert runtime.state.status == "connected"
     await runtime.shutdown()
     await factory.stop()

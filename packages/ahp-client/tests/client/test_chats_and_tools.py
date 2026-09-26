@@ -649,7 +649,8 @@ async def test_a_call_the_tap_never_delivered_is_executed_from_state() -> None:
         assert runs == 0  # no event has woken the pump yet
         # Any event on this session's channels is the clock.
         await host.push(session.uri, {"type": "session/titleChanged", "title": "T"})
-        await _settle(lambda: runs == 1)
+        # The handler returning is not yet its completion being dispatched.
+        await _settle(lambda: runs == 1 and bool(_dispatched(host, "chat/toolCallComplete")))
         completion = _dispatched(host, "chat/toolCallComplete")[-1]
         assert completion["turnId"] == "t1"
         assert completion["toolCallId"] == "tc1"
@@ -693,7 +694,8 @@ async def test_work_already_handed_over_in_the_snapshot_is_picked_up_on_attach()
 
         tools.register({"name": "usages"}, counted)
         await client.create_session(provider="echo", tools=tools)
-        await _settle(lambda: runs == 1)
+        # The handler returning is not yet its completion being dispatched.
+        await _settle(lambda: runs == 1 and bool(_dispatched(host, "chat/toolCallComplete")))
         completion = _dispatched(host, "chat/toolCallComplete")[-1]
         assert completion["turnId"] == "t1"
         assert completion["toolCallId"] == "tc1"
