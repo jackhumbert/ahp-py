@@ -42,6 +42,12 @@ Under construction. `docs/plan.md` is the design and its §7 is the build order.
 
 ### Fixed
 
+- **A folder on another machine is refused out loud.** A `dispatchAction`
+  naming another node's file (say a `session/workingDirectorySet` of a folder
+  on node B, on a session owned by node A) is still not relayed, but is now
+  echoed back to the dispatching surface with a `rejectionReason` and its
+  `origin`, stamped from the broker's `serverSeq`. It used to be dropped
+  silently, leaving the surface's optimistic prediction applied.
 - **`authenticate` works with more than one node.** It names only a resource,
   so the broker refused it ("cannot tell which node authenticate is for"),
   leaving an agent that signs in through it (VS Code's Copilot) unusable in a

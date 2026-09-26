@@ -7,10 +7,13 @@ resource commands a folder picker sends are exercised end to end.
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
+from typing import Any
 
 import pytest
 from agent_host_client import AhpClient, RpcError
+from agent_host_client.client import ActionEvent, Subscription
 from agent_host_server import Host, LoopbackSingleUserPolicy
 from agent_host_server.core.resources import RootedFilesystemResourceProvider
 from agent_host_server.provider.echo import EchoProvider
@@ -20,9 +23,11 @@ from agent_host_broker.registry import NodeRecord
 from tests.fleet import DEV, Fleet, everyone_is_a_dev
 
 
-def _rooted_host(root: Path, provider: str = "claude") -> Host:
+def _rooted_host(
+    root: Path, provider: str = "claude", capabilities: dict[str, Any] | None = None
+) -> Host:
     return Host(
-        EchoProvider(provider_id=provider),
+        EchoProvider(provider_id=provider, capabilities=capabilities),
         LoopbackSingleUserPolicy(),
         resources=RootedFilesystemResourceProvider(root),
         default_directory=root.resolve().as_uri(),
@@ -216,3 +221,82 @@ def test_only_a_node_named_first_segment_is_an_alias() -> None:
     assert from_client_alias("file:///", nodes) == "file:///"
     assert from_client_alias("file:///", nodes, root_uri=True) == "ahp-file:///"
     assert from_client_alias({"a": ["file:///box"]}, nodes) == {"a": ["ahp-file:///box"]}
+
+
+async def _echoes(subscription: Subscription, count: int) -> list[dict[str, Any]]:
+    """The next `count` working-directory echoes on a channel, then a beat more
+    to catch any echo that should not have come."""
+    found: list[dict[str, Any]] = []
+
+    async def gather() -> None:
+        async for event in subscription:
+            if isinstance(event, ActionEvent) and str(
+                event.envelope.get("action", {}).get("type")
+            ).startswith("session/workingDirector"):
+                found.append(event.envelope)
+
+    task = asyncio.create_task(gather())
+    try:
+        async with asyncio.timeout(5):
+            while len(found) < count:
+                await asyncio.sleep(0.01)
+        await asyncio.sleep(0.2)
+    finally:
+        task.cancel()
+    return found
+
+
+async def test_a_folder_on_another_machine_is_refused_out_loud(tmp_path: Path) -> None:
+    # A session's agent loop lives on one node and cannot reach another's
+    # disk. The broker refuses, and echoes the refusal so the surface reverts
+    # its optimistic prediction instead of showing a folder the agent lacks.
+    multiroot = {"multipleWorkingDirectories": {"immutablePrimary": False}}
+    mac = _tree(tmp_path, "mac", ["broker/README.md"])
+    box = _tree(tmp_path, "box", ["game/main.py", "tools/x.py"])
+    fleet = Fleet(
+        {
+            "mac": _rooted_host(mac, capabilities=multiroot),
+            "box": _rooted_host(box, capabilities=multiroot),
+        },
+        [NodeRecord("mac", "mem://mac", DEV), NodeRecord("box", "mem://box", DEV)],
+        everyone_is_a_dev,
+    )
+    try:
+        raw, _ = await _connect(fleet)
+        channel = "claude:/on-box"
+        await raw.request(
+            "createSession",
+            {
+                "channel": channel,
+                "provider": "claude",
+                "workingDirectories": ["ahp-file:///box/game"],
+            },
+        )
+        _, subscription = await raw.subscribe(channel)
+        set_dir = "session/workingDirectorySet"
+        foreign = raw.dispatch(channel, {"type": set_dir, "directory": "ahp-file:///mac/broker"})
+        local = raw.dispatch(channel, {"type": set_dir, "directory": "ahp-file:///box/tools"})
+        refused, accepted = await _echoes(subscription, 2)
+
+        assert refused["action"] == {"type": set_dir, "directory": "ahp-file:///mac/broker"}
+        assert refused["origin"] == {"clientId": "picker", "clientSeq": foreign.client_seq}
+        assert "'mac'" in refused["rejectionReason"]
+        assert "'box'" in refused["rejectionReason"]
+        # The same-node one reached box, came back from it, and is shown in
+        # the tree again.
+        assert "rejectionReason" not in accepted
+        assert accepted["origin"] == {"clientId": "picker", "clientSeq": local.client_seq}
+        assert accepted["action"]["directory"] == "ahp-file:///box/tools"
+        assert accepted["serverSeq"] > refused["serverSeq"]
+        await raw.shutdown()
+
+        async with fleet.direct("box") as direct_box:
+            on_box = {i["resource"]: i for i in (await direct_box.sessions())["items"]}
+        async with fleet.direct("mac") as direct_mac:
+            on_mac = (await direct_mac.sessions())["items"]
+        directories = on_box[channel]["workingDirectories"]
+        assert [d.rsplit("/", 1)[-1] for d in directories] == ["game", "tools"]
+        assert all("/box/Github/" in d for d in directories)
+        assert not on_mac
+    finally:
+        await fleet.aclose()

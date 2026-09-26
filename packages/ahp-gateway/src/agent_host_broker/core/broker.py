@@ -946,8 +946,12 @@ class _SurfaceConnection:
                 return
             try:
                 outgoing = unqualify_file_uris(params, node_id, target.path_root)
-            except ForeignUriError:
-                _log.debug("dispatchAction naming another node's file dropped")
+            except ForeignUriError as exc:
+                # A session's agent loop runs on one machine and cannot reach
+                # another's disk, so this is refused - but out loud: dropped
+                # silently, the surface's optimistic prediction stays applied.
+                _log.debug("dispatchAction naming another node's file rejected: %s", exc)
+                self._reject(params, str(exc))
                 return
             target.link.notify("dispatchAction", outgoing)
         # Unknown notifications are ignored, per the additive-change guarantee.
@@ -1007,6 +1011,40 @@ class _SurfaceConnection:
         node.root = reduced if isinstance(reduced, dict) else node.root
         self.owners.claim(node.link.node_id, learn_owned_channels(node.root))
         self._republish_root()
+
+    def _reject(self, dispatch: Mapping[str, Any], reason: str) -> None:
+        """Echo a surface's own dispatch back to it, refused.
+
+        AHP has a rejected client action echoed with `rejectionReason` so the
+        client reverts its optimistic prediction. The node never saw this one,
+        so the broker stamps the echo from its own clock, and holds it behind
+        an in-flight subscribe exactly as `_relay` holds a node's actions.
+        """
+        channel = dispatch.get("channel")
+        action = dispatch.get("action")
+        client_seq = dispatch.get("clientSeq")
+        if not (
+            isinstance(channel, str) and isinstance(action, Mapping) and isinstance(client_seq, int)
+        ):
+            return
+        stamp = self.clock.tick()
+        echo = {
+            "jsonrpc": "2.0",
+            "method": "action",
+            "params": {
+                "channel": channel,
+                "action": dict(action),
+                "serverSeq": stamp,
+                "origin": {"clientId": self.client_id, "clientSeq": client_seq},
+                "rejectionReason": reason,
+            },
+        }
+        if channel in self.pending:
+            for buffer in self.pending[channel]:
+                buffer.append((stamp, echo))
+        elif channel in self.subscriptions:
+            self.delivered[channel] = stamp
+            self._send(echo)
 
     def _republish_root(self) -> None:
         before, self.root = self.root, merge_root([node.root for node in self.nodes.values()])

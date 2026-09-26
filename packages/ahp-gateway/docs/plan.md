@@ -181,6 +181,13 @@ folder yet - a plain chat's `createSession`, or the `resolveSessionConfig` /
 the first connected node offering it, in inventory (node id) order. Anything
 else is refused as ambiguous rather than guessed.
 
+A session lives on one node, so a `dispatchAction` naming another node's
+folder (a `session/workingDirectorySet` of `ahp-file:///<other>/...` on a
+session owned elsewhere) is refused, not relayed: the broker echoes the action
+back to that surface with a `rejectionReason`, stamped from its own
+`serverSeq`, so the surface reverts its optimistic prediction. Moving a session
+between nodes is a separate feature, not built.
+
 **One `serverSeq`.** Every node action is restamped from the broker's own
 counter, and every snapshot's `fromSeq` is translated to the stamp of that
 link's last action at or before it. Actions that reach the broker for a
