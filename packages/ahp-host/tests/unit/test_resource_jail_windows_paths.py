@@ -320,13 +320,13 @@ class TestConstruction:
 def test_windows_serves_is_drive_aware_and_case_insensitive() -> None:
     from agent_host_server.core.resources_windows import windows_serves
 
-    root = ("G:", ["llm"])
+    root = ("D:", ["work"])
     assert windows_serves("file:///D:/work", *root)
-    assert windows_serves("file:///g%3A/LLM/proj", *root)
+    assert windows_serves("file:///d%3A/WORK/proj", *root)
     assert windows_serves("file:///D:/work/a/b", *root)
     assert not windows_serves("file:///D:/work2", *root)
-    assert not windows_serves("file:///C:/llm", *root)
-    assert not windows_serves("file:///G:/", *root)
+    assert not windows_serves("file:///C:/work", *root)
+    assert not windows_serves("file:///D:/", *root)
     assert not windows_serves("file:///D:/work/../secret", *root)
     # Not a file: URI at all - not this jail's to judge.
     assert windows_serves("vscode-agent-host://x/y", *root)
