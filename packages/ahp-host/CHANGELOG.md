@@ -82,6 +82,10 @@ versions each release speaks.
 
 ### Fixed
 
+- A turn started by `SessionPublisher.external_turn` carries the
+  `Message.origin` the schema requires (`{"kind": "user"}`). Without it,
+  strict clients could not decode the chat at all (the iOS client failed its
+  `subscribe`). Turns saved before the fix get the same origin on restore.
 - Restored sessions could never take a turn: the host did not resume their
   agents (every turn failed `provider.resumeSession`) and never asked a
   `ResumableAgentProvider` for its resume state, so nothing was stored to

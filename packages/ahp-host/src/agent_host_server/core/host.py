@@ -568,6 +568,25 @@ def _reducer_for_restored(uri: str, state: Mapping[str, Any], session_uri: str) 
     return "session"
 
 
+def _turns_with_message_origins(turns: Any) -> Any:
+    """Stored turns, each message given the `origin` the schema requires.
+
+    External turns were published without one until it was fixed, and those
+    turns are on disk: a chat holding one fails to decode in every strict
+    client, forever. They were typed by the user (see `external_turn`), so
+    that is the origin they get back. Anything else is left as it was.
+    """
+    if not isinstance(turns, list):
+        return turns
+    repaired: list[Any] = []
+    for turn in turns:
+        message = turn.get("message") if isinstance(turn, Mapping) else None
+        if isinstance(message, Mapping) and "origin" not in message:
+            turn = {**turn, "message": {**message, "origin": {"kind": "user"}}}
+        repaired.append(turn)
+    return repaired
+
+
 def _connection_identity(client_id: Any) -> str:
     """The id a connection is known by, minted when the client supplied none.
 
@@ -828,7 +847,10 @@ class _Publisher:
             "type": "chat/turnStarted",
             "turnId": f"external-{uuid.uuid4()}",
             "startedAt": now_iso(),
-            "message": {"text": text},
+            # `Message.origin` is required (`state.schema.json` Message). Left
+            # out, the turn broke every client that decodes chat state strictly:
+            # the iOS client could not open the chat at all.
+            "message": {"text": text, "origin": {"kind": "user"}},
         }
         # Published, then run -- the same order as a queued message, for the
         # same reason: there is no client dispatch to have published it.
@@ -1444,6 +1466,7 @@ class Host:
                 # said before the crash -- but it is moved out of `activeTurn`,
                 # because a turn nothing is running is not active.
                 restored_state.pop("activeTurn", None)
+                restored_state["turns"] = _turns_with_message_origins(restored_state.get("turns"))
                 session.chat_uris.add(uri)
             elif uri == stored.uri:
                 await self._refresh_config_schema(stored.provider, restored_state)

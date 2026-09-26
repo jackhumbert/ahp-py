@@ -106,6 +106,7 @@ async def test_an_opened_session_is_listed_and_takes_turns(tmp_path: Path) -> No
             "state"
         ]["turns"]
         assert turns[-1]["state"] == "complete"
+        assert turns[-1]["message"]["origin"] == {"kind": "user"}
         assert "from my phone" in str(turns[-1])
         assert "answered elsewhere" in str(turns[-1])
 

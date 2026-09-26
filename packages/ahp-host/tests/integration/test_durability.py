@@ -238,6 +238,55 @@ class TestRestart:
         finally:
             await second.aclose()
 
+    async def test_a_stored_turn_without_a_message_origin_is_given_one(
+        self, tmp_path: Path
+    ) -> None:
+        """External turns were once stored with no `Message.origin`, which the
+        schema requires; a chat holding one could not be decoded by a strict
+        client. Restoring gives them the origin they were typed with."""
+        first = _host(tmp_path)
+        uri = "echo:/durable-origin"
+        try:
+            client = await _client(first)
+            await client.request("createSession", {"channel": uri, "provider": "echo"})
+            await client.collect(seconds=0.3)
+            state = (await client.request("subscribe", {"channel": uri}))["result"]["snapshot"][
+                "state"
+            ]
+            chat = state["chats"][0]["resource"]
+            await first.sequencer.publish(
+                chat,
+                {
+                    "type": "chat/turnStarted",
+                    "turnId": "old",
+                    "startedAt": "1970-01-01T00:00:01.000Z",
+                    "message": {"text": "typed elsewhere"},
+                },
+            )
+            await first.sequencer.publish(chat, {"type": "chat/turnComplete", "turnId": "old"})
+            session = first._sessions[uri]
+            await first._persist(session)
+            await first.store.flush()
+        finally:
+            await first.aclose()
+
+        second = _host(tmp_path)
+        try:
+            await second.restore()
+            client = await _client(second)
+            state = (await client.request("subscribe", {"channel": uri}))["result"]["snapshot"][
+                "state"
+            ]
+            chat = state["chats"][0]["resource"]
+            transcript = (await client.request("subscribe", {"channel": chat}))["result"][
+                "snapshot"
+            ]["state"]
+            assert [t["message"] for t in transcript["turns"]] == [
+                {"text": "typed elsewhere", "origin": {"kind": "user"}}
+            ]
+        finally:
+            await second.aclose()
+
     async def test_a_disposed_session_does_not_come_back(self, tmp_path: Path) -> None:
         first = _host(tmp_path)
         try:
