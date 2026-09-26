@@ -48,6 +48,15 @@ Under construction. `docs/plan.md` is the design and its §7 is the build order.
   echoed back to the dispatching surface with a `rejectionReason` and its
   `origin`, stamped from the broker's `serverSeq`. It used to be dropped
   silently, leaving the surface's optimistic prediction applied.
+- **A machine that is off no longer costs every connection 10 seconds.** The
+  handshake waits for its slowest node, and a node that never answers held
+  every `initialize` and `reconnect` for the whole `connect_timeout`. The
+  broker now remembers which nodes failed their last dial, from any
+  connection, and gives those only `Broker(known_down_timeout=1.0)` at the
+  handshake. The background redial still allows the full timeout, and a node
+  that answers is no longer marked down. Measured on the deployed broker with
+  one machine off: every handshake took 10.07 s. The log line for a failed
+  dial now names the error (`TimeoutError()`), where it printed nothing.
 - **`authenticate` works with more than one node.** It names only a resource,
   so the broker refused it ("cannot tell which node authenticate is for"),
   leaving an agent that signs in through it (VS Code's Copilot) unusable in a

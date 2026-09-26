@@ -147,6 +147,7 @@ class Broker:
         info: BrokerInfo | None = None,
         supported_versions: Sequence[str] = DEFAULT_SUPPORTED_VERSIONS,
         connect_timeout: float = 10.0,
+        known_down_timeout: float = 1.0,
         redial_backoff: tuple[float, float] = (0.5, 30.0),
         redial_jitter: float = 0.25,
     ) -> None:
@@ -158,6 +159,13 @@ class Broker:
         self.info = info or BrokerInfo()
         self.supported_versions = tuple(supported_versions)
         self.connect_timeout = connect_timeout
+        #: How long admission waits on a node whose last dial failed. Every
+        #: surface's handshake waits for its slowest node, so one machine that
+        #: is off would otherwise cost every connection `connect_timeout`.
+        self.known_down_timeout = known_down_timeout
+        #: Nodes whose last dial, from any surface, failed. Broker-wide, since
+        #: what one connection learned about a machine holds for the next.
+        self.down_nodes: set[str] = set()
         #: (first delay, ceiling) in seconds, doubling, for redialing a node.
         self.redial_backoff = redial_backoff
         #: Each redial delay is spread across +/- this fraction (`jittered`).
@@ -545,6 +553,13 @@ class _SurfaceConnection:
             delay = min(delay * 2, ceiling)
 
     async def _open(self, record: NodeRecord, *, quiet: bool = False) -> _Node | None:
+        """Dial one node; None if it does not answer in time.
+
+        Admission (not `quiet`) gives a node already known to be down only
+        `known_down_timeout`: the surface is waiting. A redial probe (`quiet`)
+        runs in the background and gives it the full `connect_timeout`, so a
+        slow node still comes back - and its success clears the mark.
+        """
         principal = self.principal
         assert principal is not None, "admission sets the principal before any dial"
 
@@ -558,14 +573,21 @@ class _SurfaceConnection:
                 client_info=self.client_info,
             )
 
+        broker = self.broker
+        known_down = record.node_id in broker.down_nodes
+        timeout = broker.known_down_timeout if known_down and not quiet else broker.connect_timeout
         try:
-            link = await asyncio.wait_for(connect(), self.broker.connect_timeout)
+            link = await asyncio.wait_for(connect(), timeout)
         except Exception as exc:
             # One unreachable node degrades the fleet; it does not refuse the
             # surface. It is simply absent, as a node the principal was never
             # admitted to would be, until a redial finds it again.
-            (_log.debug if quiet else _log.warning)("node %s unavailable: %s", record.node_id, exc)
+            broker.down_nodes.add(record.node_id)
+            (_log.debug if quiet or known_down else _log.warning)(
+                "node %s unavailable: %r", record.node_id, exc
+            )
             return None
+        broker.down_nodes.discard(record.node_id)
         handshake = link.handshake
         node_seq = handshake.get("serverSeq")
         sequence = LinkSequence(self.clock, node_seq if isinstance(node_seq, int) else 0)

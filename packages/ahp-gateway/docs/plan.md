@@ -215,6 +215,15 @@ each node for it: a node that does not have a channel answers `subscribe`
 with no snapshot, which is plain AHP. The broker process therefore keeps no
 state, and a surface can reconnect to a different broker instance.
 
+**A node known to be down gets a short dial.** Every handshake waits for
+its slowest node, so the broker remembers, across connections, which nodes
+failed their last dial. At the handshake those get only
+`Broker(known_down_timeout=...)` (1 s), not the full `connect_timeout`. The
+background redial still allows the full timeout, and any successful dial
+clears the mark. This is a cache about machines, not about any surface, so
+the statement above holds: a surface can still reconnect to any instance,
+which at worst waits the full timeout once.
+
 **Node recovery: redial, then bounce.** A node whose link drops, or that was
 unreachable at the handshake, is redialed in the background with doubling
 backoff (`Broker(redial_backoff=(first, ceiling))`), each delay spread by

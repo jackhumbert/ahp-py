@@ -156,6 +156,56 @@ async def test_an_unreachable_node_degrades_the_fleet_rather_than_refusing() -> 
         await fleet.aclose()
 
 
+class _Silent:
+    """Wraps a connector so chosen nodes never answer, as a machine that is
+    off (not refusing - silent) does: the dial hangs until the timeout."""
+
+    def __init__(self, inner: Any, silent: set[str]) -> None:
+        self.inner = inner
+        self.silent = silent
+
+    async def connect(self, record: NodeRecord, principal: Principal) -> Any:
+        if record.node_id in self.silent:
+            await asyncio.Event().wait()
+        return await self.inner.connect(record, principal)
+
+
+async def test_a_node_known_to_be_down_does_not_stall_every_handshake() -> None:
+    fleet = Fleet(
+        {"node-a": echo_host("alpha"), "node-b": echo_host("beta")},
+        [NodeRecord("node-a", "m", DEV), NodeRecord("node-b", "m", DEV)],
+        everyone_is_a_dev,
+        connect_timeout=1.0,
+        known_down_timeout=0.05,
+        # No redial during the test: it would bounce the surfaces.
+        redial_backoff=(60.0, 60.0),
+    )
+    silent = _Silent(fleet.connector, {"node-b"})
+    fleet.broker.connector = silent  # type: ignore[assignment]
+    loop = asyncio.get_running_loop()
+    try:
+        started = loop.time()
+        async with fleet.surface() as client:
+            assert providers(client) == {"alpha"}
+        # The first connection has to find out: the full timeout.
+        assert loop.time() - started >= 1.0
+
+        started = loop.time()
+        async with fleet.surface() as client:
+            assert providers(client) == {"alpha"}
+        # Every later one already knows.
+        assert loop.time() - started < 0.5
+
+        # Back, and the next connection sees it: a node that answers is
+        # never held to the short timeout's verdict.
+        silent.silent.clear()
+        async with fleet.surface() as client:
+            assert providers(client) == {"alpha", "beta"}
+        assert "node-b" not in fleet.broker.down_nodes
+    finally:
+        await fleet.aclose()
+
+
 async def test_actions_reach_the_surface_on_one_monotonic_sequence(fleet: Fleet) -> None:
     async with fleet.surface() as client:
         seqs: list[int] = []
