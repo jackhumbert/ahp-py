@@ -5,8 +5,13 @@
 // The corpus comparator normalises `null` away on both sides, so it is
 // structurally incapable of catching an undefined-vs-null divergence. This is.
 import { createInterface } from 'node:readline';
+import { fileURLToPath } from 'node:url';
 
-const T = '/Users/me/Github/agent-host-server-py/.research/agent-host-protocol/types';
+// Upstream's `types/` directory: `AHP_UPSTREAM_TYPES`, else this repository's
+// gitignored `.research/agent-host-protocol/types` checkout.
+const T =
+  process.env.AHP_UPSTREAM_TYPES ??
+  fileURLToPath(new URL('../.research/agent-host-protocol/types', import.meta.url));
 
 const { terminalReducer } = await import(`${T}/channels-terminal/reducer.ts`);
 const { changesetReducer } = await import(`${T}/channels-changeset/reducer.ts`);
