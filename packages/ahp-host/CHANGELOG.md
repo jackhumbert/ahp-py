@@ -12,6 +12,11 @@ versions each release speaks.
 
 ### Added
 
+- `DisposesSessions.disposed()`: an agent session that implements it is told
+  when it is being deleted (`disposeSession`, `Host.close_session`), before
+  `aclose`. `aclose` alone also runs at shutdown, and an agent whose session
+  lives somewhere else too (Claude Code on claude.ai) must keep it on one and
+  end it on the other.
 - `SessionPublisher.config_changed(values)`: the provider-side twin of a
   client's `session/configChanged`, for an agent whose setting moved
   somewhere else (Claude Code's permission mode, switched on a phone under

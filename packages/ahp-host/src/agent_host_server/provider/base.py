@@ -32,6 +32,7 @@ __all__ = [
     "ConfigValue",
     "ConfiguresSessions",
     "DescribesSession",
+    "DisposesSessions",
     "ForkedFrom",
     "HandlesCustomizations",
     "InputOutcome",
@@ -530,6 +531,22 @@ class SteersTurns(Protocol):
     """
 
     async def steer(self, chat_uri: str, message: UserMessage) -> bool: ...
+
+
+@runtime_checkable
+class DisposesSessions(Protocol):
+    """An agent session that should know it is being deleted, not just closed.
+
+    `aclose` runs both when a session is disposed and when the host shuts
+    down, and a provider cannot tell which. That matters for an agent whose
+    session also exists somewhere else (Claude Code's on claude.ai): a
+    shutdown should leave it there to come back to, a deletion should end it.
+    Called before `aclose` when the session is disposed (`disposeSession`, or
+    `Host.close_session`), never at shutdown. Raising is logged; `aclose`
+    still runs.
+    """
+
+    async def disposed(self) -> None: ...
 
 
 @runtime_checkable

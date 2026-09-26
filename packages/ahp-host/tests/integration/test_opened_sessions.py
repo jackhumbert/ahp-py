@@ -163,3 +163,42 @@ async def test_an_opened_session_comes_back_after_a_restart(tmp_path: Path) -> N
         assert second.session_uris() == ["ahp-session:/remote-3"]
     finally:
         await second.aclose()
+
+
+class _Disposable(MirrorSession):
+    def __init__(self, context: AgentSessionContext) -> None:
+        super().__init__(context)
+        self.calls: list[str] = []
+
+    async def disposed(self) -> None:
+        self.calls.append("disposed")
+
+    async def aclose(self) -> None:
+        self.calls.append("aclose")
+
+
+class _DisposableProvider(MirrorProvider):
+    async def resume_session(self, context: AgentSessionContext) -> MirrorSession:
+        session = _Disposable(context)
+        self.sessions[str((context.resume_state or {})["remote"])] = session
+        return session
+
+
+async def test_deleting_a_session_says_so_and_shutting_down_does_not(tmp_path: Path) -> None:
+    """`DisposesSessions`: `aclose` alone cannot tell a deletion from a
+    shutdown, and an agent whose session also lives elsewhere must."""
+    provider = _DisposableProvider()
+    host = _host(tmp_path, provider)
+    try:
+        await _client(host)
+        await host.open_session("ahp-session:/gone", title="t", resume_state={"remote": "gone"})
+        await host.open_session("ahp-session:/kept", title="t", resume_state={"remote": "kept"})
+        assert await host.close_session("ahp-session:/gone")
+    finally:
+        await host.aclose()
+
+    gone, kept = provider.sessions["gone"], provider.sessions["kept"]
+    assert isinstance(gone, _Disposable)
+    assert isinstance(kept, _Disposable)
+    assert gone.calls == ["disposed", "aclose"]
+    assert kept.calls == ["aclose"]

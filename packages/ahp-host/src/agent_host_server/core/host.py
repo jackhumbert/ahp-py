@@ -107,6 +107,7 @@ from agent_host_server.provider.base import (
     ConfigRequest,
     ConfiguresSessions,
     DescribesSession,
+    DisposesSessions,
     ForkedFrom,
     HandlesCustomizations,
     ManagesMcpServers,
@@ -4606,6 +4607,14 @@ class Host:
         for mid_turn in [session.chat_uri, *sorted(session.chat_uris - {session.chat_uri})]:
             await self._end_stranded_turn(session, mid_turn)
         if session.agent_session is not None:
+            # Deleted, not merely closed: `aclose` alone is also what a
+            # shutdown does, and an agent living elsewhere too must tell them
+            # apart.
+            if isinstance(session.agent_session, DisposesSessions):
+                try:
+                    await session.agent_session.disposed()
+                except Exception:
+                    _log.exception("disposed() failed for %s", channel)
             await session.agent_session.aclose()
 
         del self._sessions[channel]
