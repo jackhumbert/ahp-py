@@ -26,6 +26,7 @@ from agent_host_server_claude.claude_ai import (
     LoginError,
     RemoteClient,
     RemoteSession,
+    _user_text,
     uri_of,
 )
 from agent_host_server_claude.provider import ClaudeProvider, ClaudeSession
@@ -96,6 +97,15 @@ class FakeApi:
 
     async def recent(self, session_id: str, limit: int) -> list[Event]:
         return list(reversed(self.history))[:limit]
+
+    async def typed(self, session_id: str, want: int, *, max_events: int = 3000) -> list[int]:
+        newest_first = list(reversed(self.history))[:max_events]
+        found = [
+            e.sequence_num
+            for e in newest_first
+            if e.sequence_num is not None and _user_text(e.payload)
+        ]
+        return found[:want]
 
     async def stream(
         self, session_id: str, from_sequence_num: int, *, control: bool = False
@@ -234,6 +244,53 @@ async def test_a_new_listing_shows_the_last_exchanges() -> None:
     assert api.started_at[False] == 2, "should start just before the second-last message"
     assert api.started_at[True] == 6
     await client.disconnect()
+
+
+async def test_history_is_found_behind_an_idle_sessions_housekeeping() -> None:
+    """Left idle, a session's recent events are all control and system traffic."""
+    control = [
+        _event(n, {"type": "control_request", "request": {"subtype": "noop"}})
+        for n in range(3, 500)
+    ]
+    api = FakeApi([_typed(1, "the question", "u1"), _assistant(2, "the answer"), *control])
+    client, _ = _client(api, backfill=5)
+    await client.connect()
+    await eventually(lambda: False in api.started_at)
+    assert api.started_at[False] == 0
+    assert isinstance(await _next(client), SdkUserMessage)
+    await client.disconnect()
+
+
+async def test_real_paging_walks_back_through_the_log() -> None:
+    pages = {
+        None: {
+            "data": [{"sequence_num": n, "payload": {"type": "system"}} for n in (9, 8, 7)],
+            "next_cursor": "p2",
+        },
+        "p2": {
+            "data": [
+                {
+                    "sequence_num": 6,
+                    "payload": {
+                        "type": "user",
+                        "uuid": "u",
+                        "message": {"role": "user", "content": "hi"},
+                    },
+                }
+            ],
+            "next_cursor": None,
+        },
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=pages[request.url.params.get("cursor")])
+
+    api = Api(
+        Login(lambda: ("t", 9e12)),
+        http=httpx.AsyncClient(base_url="https://x", transport=httpx.MockTransport(handler)),
+    )
+    assert await api.typed("cse_1", 5) == [6]
+    await api.aclose()
 
 
 async def test_a_message_typed_in_an_app_is_marked_as_from_elsewhere() -> None:

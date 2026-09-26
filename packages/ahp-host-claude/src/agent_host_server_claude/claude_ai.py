@@ -261,6 +261,40 @@ class Api:
         events = (Event.from_wire(row) for row in page.get("data") or ())
         return [event for event in events if event is not None]
 
+    async def typed(self, session_id: str, want: int, *, max_events: int = 3000) -> list[int]:
+        """Sequence numbers of the last *want* messages someone typed, newest first.
+
+        Paged back past everything else: a session left idle fills its recent
+        history with control and system traffic, hundreds of events of it,
+        and the conversation is behind that. Stops at *max_events*.
+        """
+        found: list[int] = []
+        cursor: str | None = None
+        seen = 0
+        while len(found) < want and seen < max_events:
+            params = {
+                "limit": "100",
+                "sort_order": "desc",
+                **({"cursor": cursor} if cursor else {}),
+            }
+            page = await self._request(
+                "GET", f"/v1/code/sessions/{session_id}/events", params=params
+            )
+            rows = page.get("data") or []
+            seen += len(rows)
+            for row in rows:
+                event = Event.from_wire(row)
+                if (
+                    event is not None
+                    and event.sequence_num is not None
+                    and _user_text(event.payload)
+                ):
+                    found.append(event.sequence_num)
+            cursor = page.get("next_cursor")
+            if not cursor or not rows:
+                break
+        return found[:want]
+
     async def stream(
         self, session_id: str, from_sequence_num: int, *, control: bool = False
     ) -> AsyncIterator[Event]:
@@ -325,7 +359,7 @@ async def _sse(lines: AsyncIterator[str]) -> AsyncIterator[tuple[str, str | None
 # -- a session, behind the Agent SDK's client interface ---------------------------
 
 #: How many recent exchanges a newly listed session shows.
-BACKFILL_EXCHANGES: Final = 2
+BACKFILL_EXCHANGES: Final = 5
 #: Control requests that wait on a person. The rest is plumbing between
 #: Claude Code and claude.ai.
 _ASKS: Final = frozenset({"can_use_tool"})
@@ -387,13 +421,8 @@ class RemoteClient:
 
     async def _backfill_from(self, current: int) -> int:
         """Where to start for the last few exchanges to be shown."""
-        events = await self._api.recent(self.session_id, 100)
-        typed = [e for e in events if _user_text(e.payload) and e.sequence_num is not None]
-        if not typed:
-            return current
-        oldest = typed[: self._backfill][-1]
-        assert oldest.sequence_num is not None
-        return oldest.sequence_num - 1
+        typed = await self._api.typed(self.session_id, self._backfill)
+        return typed[-1] - 1 if typed else current
 
     async def _follow(self, start: int, *, control: bool) -> None:
         position = start

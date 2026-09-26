@@ -93,6 +93,11 @@
 
 ### Fixed
 
+- A claude.ai session listed here shows its conversation even after sitting
+  idle: its history is paged back past the control and system traffic an idle
+  session fills its recent events with (hundreds of events), where only the
+  last 100 were read before and often held no message at all. A new listing
+  now shows the last five exchanges, not two.
 - A session that goes on claude.ai and then sits idle keeps its claude.ai
   session across restarts: its bridge id is saved as soon as it has one.
   Before, the host only saved it on the next turn, so every restart gave such
