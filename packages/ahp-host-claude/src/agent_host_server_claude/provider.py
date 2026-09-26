@@ -62,6 +62,7 @@ from agent_host_server_claude.claude_ai import (
     RemoteSession,
     uri_of,
 )
+from agent_host_server_claude.config import DEFAULT_STATE
 from agent_host_server_claude.paths import directory_of
 from agent_host_server_claude.permissions import (
     APPROVALS_PROPERTY,
@@ -118,6 +119,26 @@ ENTRYPOINT = "agent-host"
 
 #: Claude Code's value for "whatever the account's default is".
 DEFAULT_MODEL = "default"
+
+#: What a session with no folder may use: nothing that touches the machine.
+#: Its `cwd` is an empty directory of the agent's own, but Claude Code's shell
+#: and file tools are not jailed to `cwd` - the OS user is the only boundary -
+#: so a chat gets no file or shell tools at all, and no MCP servers from the
+#: user's config (which can reach anything). The web tools still pass the
+#: approval gate like any other.
+CHAT_TOOLS: Final = ("WebSearch", "WebFetch")
+#: Told to Claude in a session with no folder, so it says why it cannot look
+#: at a file rather than trying tools that are not there.
+CHAT_PROMPT: Final = (
+    "This conversation has no folder: you have no file, shell or code tools on "
+    "this machine. If the user wants you to work with files, they can add a "
+    "folder to this conversation, which gives you those tools there."
+)
+#: The capability that lets a client add a folder to a running session.
+#: `immutablePrimary`: the session's `cwd` is fixed for its life (Claude Code
+#: keeps a conversation under the folder it started in, so resuming it anywhere
+#: else starts a blank one), and the first folder is where it points.
+WORKING_DIRECTORIES_CAPABILITY: Final[Mapping[str, Any]] = {"immutablePrimary": True}
 
 
 class SdkClient(Protocol):
@@ -296,14 +317,24 @@ class ClaudeSession:
         archived: bool = False,
         mirror_of: str | None = None,
         on_disposed: Callable[[], None] | None = None,
+        chat_dir: Path | None = None,
     ) -> None:
         self.context = context
+        #: The folders the session has now: the context's are only the ones it
+        #: was created with, and a client may add or remove one later.
+        self.working_directories: tuple[str, ...] = tuple(context.working_directories)
+        #: Where a session with no folder runs: empty, and nobody's project.
+        self._chat_dir = (chat_dir if chat_dir is not None else DEFAULT_STATE / "chat").resolve()
+        #: The folders changed while a client was running with the old ones.
+        self._restart_pending = False
         #: The claude.ai session this one mirrors (`claude_ai.py`), if it is
         #: one started elsewhere rather than here.
         self.mirror_of = mirror_of
         self._on_disposed = on_disposed
-        #: Set when continuing another Claude Code conversation: its folder,
-        #: which is what that conversation's context refers to.
+        #: The session's `cwd`, fixed at its first start and kept in its resume
+        #: state: Claude Code keeps a conversation under the folder it started
+        #: in, so a client started anywhere else would begin a blank one. When
+        #: continuing another Claude Code conversation, that conversation's.
         self.directory = directory
         #: Posted once, at the start of the first reply.
         self._recap = recap
@@ -359,25 +390,65 @@ class ClaudeSession:
 
     # -- lifecycle -----------------------------------------------------------
 
-    def working_directory(self) -> Path:
-        """The session's directory, which must lie inside a served folder."""
-        if self.directory is not None:
-            resolved = self.directory.resolve()
-            if not self._roots.contains(resolved):
-                raise PermissionError(f"{resolved} is outside this host's root {self._root}")
-            return resolved
-        for uri in self.context.working_directories:
+    def _granted(self) -> list[Path]:
+        """The session's folders as real paths, each inside a served folder."""
+        granted: list[Path] = []
+        for uri in self.working_directories:
             real = self._roots.real_path(uri)
             if real is not None:
-                return real
+                granted.append(real)
+                continue
             path = directory_of(uri)
             if path is not None:
                 raise PermissionError(f"{path.resolve()} is outside this host's root {self._root}")
-        return self._root
+        return granted
+
+    def working_directory(self) -> Path:
+        """The session's `cwd`: where it started, else its first folder, else a chat's.
+
+        Must lie inside a served folder, or be the chat directory.
+        """
+        if self.directory is not None:
+            resolved = self.directory.resolve()
+            if resolved != self._chat_dir and not self._roots.contains(resolved):
+                raise PermissionError(f"{resolved} is outside this host's root {self._root}")
+            return resolved
+        granted = self._granted()
+        return granted[0] if granted else self._chat_dir
+
+    def _access(self) -> tuple[Path, tuple[Path, ...], bool]:
+        """`cwd`, the other folders, and whether the session may touch any of it.
+
+        Tools come with a folder, never without: a session's own folders, or
+        the folder a continued conversation came from. A session that started
+        as a chat keeps the chat directory as its `cwd` after a folder is
+        added; the folder is added beside it, and granted.
+        """
+        cwd = self.working_directory()
+        granted = self._granted()
+        extra = tuple(path for path in granted if path != cwd)
+        return cwd, extra, bool(granted) or cwd != self._chat_dir
+
+    @property
+    def is_chat(self) -> bool:
+        """No folder: no tools that touch the machine."""
+        try:
+            return not self._access()[2]
+        except PermissionError:
+            return True
 
     def _options(self) -> ClaudeAgentOptions:
+        cwd, extra, tools = self._access()
+        if cwd == self._chat_dir:
+            cwd.mkdir(parents=True, exist_ok=True, mode=0o700)
+        chat: dict[str, Any] = {}
+        prompt: dict[str, Any] = {"type": "preset", "preset": "claude_code"}
+        if not tools:
+            chat = {"tools": list(CHAT_TOOLS), "strict_mcp_config": True}
+            prompt["append"] = CHAT_PROMPT
         return ClaudeAgentOptions(
-            cwd=str(self.working_directory()),
+            cwd=str(cwd),
+            add_dirs=list(extra),
             resume=self.claude_session_id,
             model=None if self._model == DEFAULT_MODEL else self._model,
             permission_mode=PERMISSION_MODES[self.approvals],  # type: ignore[arg-type]
@@ -389,9 +460,44 @@ class ClaudeSession:
             # only signal that a steered message joined the turn, and what
             # tells our own messages from ones typed elsewhere.
             extra_args={"replay-user-messages": None},
-            system_prompt={"type": "preset", "preset": "claude_code"},
+            system_prompt=prompt,  # type: ignore[arg-type]
             env={"CLAUDE_CODE_ENTRYPOINT": ENTRYPOINT},
+            **chat,
         )
+
+    async def working_directories_changed(self, directories: Sequence[str]) -> None:
+        """A client added, removed or replaced a folder (`FollowsWorkingDirectories`).
+
+        Security-relevant: this is what gives a chat file and shell tools, and
+        takes them away. Claude Code fixes its tools and folders when it
+        starts, so a running client with the old ones is restarted - resuming
+        the same conversation, in the same `cwd` - now if it is idle, else
+        once its turn is over. The host has already refused a folder outside
+        the served ones; one that got here anyway fails the next turn
+        (`working_directory`), it is never silently dropped.
+        """
+        try:
+            before: Any = self._access()
+        except PermissionError:
+            before = None
+        self.working_directories = tuple(directories)
+        try:
+            after: Any = self._access()
+        except PermissionError:
+            after = None
+        if self._client is None or before == after:
+            return
+        self._restart_pending = True
+        if not self._lock.locked() and self._turn is None:
+            await self._restart_client()
+
+    async def _restart_client(self) -> None:
+        """Start again with the session's folders as they are now."""
+        self._restart_pending = False
+        await self._stop_client()
+        if self.remote_control and not self.archived:
+            # Reachable from claude.ai again straight away, as at creation.
+            self.start_soon()
 
     def start_soon(self) -> None:
         """`start`, without holding up whoever created the session."""
@@ -413,7 +519,10 @@ class ClaudeSession:
     async def _ensure_client(self) -> SdkClient:
         async with self._connecting:
             if self._client is None:
-                client = self._client_factory(self._options())
+                options = self._options()
+                # Pinned: the conversation lives under this folder from now on.
+                self.directory = Path(str(options.cwd))
+                client = self._client_factory(options)
                 await client.connect()
                 self._client = client
                 self._reader = asyncio.create_task(self._read(client))
@@ -763,6 +872,8 @@ class ClaudeSession:
 
     async def send_user_message(self, message: UserMessage, sink: TurnSink) -> None:
         async with self._lock:
+            if self._restart_pending:
+                await self._restart_client()
             try:
                 client = await self._ensure_client()
             except PermissionError as error:
@@ -1012,6 +1123,7 @@ class ClaudeProvider:
         claude_ai: Api | None = None,
         state_dir: Path | None = None,
         poll_s: float = 15.0,
+        chat_dir: Path | None = None,
     ) -> None:
         if not is_valid_provider_id(provider_id):
             raise ValueError(f"invalid provider id: {provider_id!r}")
@@ -1036,6 +1148,9 @@ class ClaudeProvider:
         #: Mirrors this host closed itself, as opposed to a person deleting one.
         self._closing: set[str] = set()
         self._dismissed_file = state_dir / "claude-ai-dismissed.json" if state_dir else None
+        #: Where sessions with no folder run. Kept, not temporary: a chat's
+        #: conversation is stored under it, and resuming needs it again.
+        self.chat_dir = chat_dir or (state_dir or DEFAULT_STATE) / "chat"
         self._dismissed: set[str] = self._load_dismissed()
 
     @property
@@ -1045,6 +1160,7 @@ class ClaudeProvider:
             display_name=self._display_name,
             description="Claude Code, running on this machine as its user.",
             models=self._models,
+            capabilities={"multipleWorkingDirectories": dict(WORKING_DIRECTORIES_CAPABILITY)},
         )
 
     def _remote_control(self, value: Any) -> bool:
@@ -1100,6 +1216,7 @@ class ClaudeProvider:
                     root=self.roots,
                     client_factory=self._client_factory,
                     remote_control=remote_control,
+                    chat_dir=self.chat_dir,
                 )
             )
         continuation = await self.sessions.continue_from(chosen)
@@ -1112,6 +1229,7 @@ class ClaudeProvider:
                 directory=continuation.directory,
                 recap=continuation.recap,
                 remote_control=remote_control,
+                chat_dir=self.chat_dir,
             )
         )
 
@@ -1145,6 +1263,7 @@ class ClaudeProvider:
                 ),
                 bridge_session_id=bridge if isinstance(bridge, str) else None,
                 archived=state.get("archived") is True,
+                chat_dir=self.chat_dir,
             )
         )
 
@@ -1292,6 +1411,7 @@ class ClaudeProvider:
             client_factory=client,
             mirror_of=remote_id,
             on_disposed=dismissed,
+            chat_dir=self.chat_dir,
         )
         self._mirrors[remote_id] = session
         session.start_soon()

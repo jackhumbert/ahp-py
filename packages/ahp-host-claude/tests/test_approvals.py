@@ -100,7 +100,12 @@ async def test_a_resumed_session_keeps_its_mode(tmp_path: Path) -> None:
     session = await provider.create_session(_context({"permissionMode": "auto"}))
     await session.send_user_message(UserMessage(text="x"), RecordingSink())
     state = await provider.resume_state_of(session)
-    assert state == {"claudeSessionId": "abc", "permissionMode": "auto", "remoteControl": False}
+    assert state == {
+        "claudeSessionId": "abc",
+        "permissionMode": "auto",
+        "remoteControl": False,
+        "cwd": str((tmp_path / "state" / "chat").resolve()),
+    }
 
     resumed = await provider.resume_session(
         AgentSessionContext(session_uri="s", chat_uri="c", provider_id="claude", resume_state=state)

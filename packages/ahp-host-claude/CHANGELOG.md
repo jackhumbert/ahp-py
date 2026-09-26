@@ -4,6 +4,20 @@
 
 ### Added
 
+- Chats, and folders added later. A session with no folder runs as a chat, in
+  an empty directory of the agent's own (`<state_dir>/chat`), with no file,
+  shell or MCP tools (`tools` is web search and fetch only,
+  `strict_mcp_config`) and a line in the system prompt saying why. The agent
+  advertises `multipleWorkingDirectories` (`immutablePrimary`) and follows a
+  client adding, removing or replacing a folder mid-session
+  (`FollowsWorkingDirectories`, needs agent-host-server with it): Claude
+  restarts on the same conversation, straight away if idle, else after the
+  turn in flight, with the folders granted (`add_dirs`). A session's `cwd` is
+  now fixed at its first start and kept in its resume state (`cwd`), because
+  Claude Code keeps a conversation under the directory it started in.
+  Security: a folderless session used to run in the first served folder with
+  every tool (the host filled it in); it now has none that touch the machine.
+
 - The account's other Claude Code sessions, through claude.ai
   (`claude_ai_sessions`, off by default; one machine only). Every live Remote
   Control session - terminal, desktop app, IDE, any machine - is listed, with

@@ -86,6 +86,14 @@ Status: pre-alpha.
   forked, never resumed directly, so it is untouched even if it is still open
   elsewhere; the new session runs in its folder with the full context, and the
   first reply opens with a short recap.
+- **Chats, and folders added later.** A session created with no folder is a
+  chat: Claude runs in an empty directory of its own (`<state_dir>/chat`) with
+  no file, shell or MCP tools - only web search and fetch, behind the approval
+  gate. A client can add a folder to any session while it runs
+  (`multipleWorkingDirectories`); Claude restarts on the same conversation
+  with that folder granted, once any turn in flight is over. The first folder
+  is fixed for the session's life (`immutablePrimary`), because Claude Code
+  keeps a conversation under the directory it started in.
 - A model picker populated from Claude Code itself at start-up (the same list
   `/model` shows for the logged-in account, its default first), so new models
   appear without a release of this adapter.
@@ -124,7 +132,7 @@ error, so a typo cannot silently fall back to a default.
 
 | Setting / flag | Meaning |
 |---|---|
-| `[roots]` / `--root NAME=PATH` (repeatable) | Named folders. Clients browse (read-only) a small tree of them; sessions may work in any. Nothing else on the machine is reachable. A folderless session starts in the first. |
+| `[roots]` / `--root NAME=PATH` (repeatable) | Named folders. Clients browse (read-only) a small tree of them; sessions may work in any. Nothing else on the machine is reachable. A session with no folder is a chat, with no file or shell tools. |
 | `root` / `--root PATH` | One unnamed folder, served as itself. |
 | `token_file` / `--token-file` | Require this connection token. Read from a file so it never appears in `ps` or logs. |
 | `port`, `bind` / `--port`, `--bind` | Default `127.0.0.1:4321`. Loopback only. |
@@ -141,7 +149,8 @@ on this machine (or `ANTHROPIC_API_KEY` if set).
 
 The agent runs as the host's OS user, so whatever that user can touch, an
 approved tool call can touch. The approval gate and the `--root` check are the
-boundary; see `agent-host-server`'s SECURITY.md for the host's own posture.
+boundary - Claude Code's shell is not confined to the session's folders - which
+is why a session with no folder gets no file or shell tools at all; see `agent-host-server`'s SECURITY.md for the host's own posture.
 Never bind this off loopback without a proxy that authenticates peers.
 
 With Remote Control on, the session is also reachable through the Claude
