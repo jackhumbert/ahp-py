@@ -1,0 +1,56 @@
+// Feed a JSONL stream of {reducer, initial, actions} through the REAL upstream
+// TypeScript reducers and print the resulting state, so the Python port can be
+// diffed against it on inputs the fixture corpus never covers.
+//
+// The corpus comparator normalises `null` away on both sides, so it is
+// structurally incapable of catching an undefined-vs-null divergence. This is.
+import { createInterface } from 'node:readline';
+import { fileURLToPath } from 'node:url';
+
+// Upstream's `types/` directory: `AHP_UPSTREAM_TYPES`, else this repository's
+// gitignored `.research/agent-host-protocol/types` checkout.
+const T =
+  process.env.AHP_UPSTREAM_TYPES ??
+  fileURLToPath(new URL('../.research/agent-host-protocol/types', import.meta.url));
+
+const { terminalReducer } = await import(`${T}/channels-terminal/reducer.ts`);
+const { changesetReducer } = await import(`${T}/channels-changeset/reducer.ts`);
+const { annotationsReducer } = await import(`${T}/channels-annotations/reducer.ts`);
+const { sessionReducer } = await import(`${T}/channels-session/reducer.ts`);
+const { chatReducer } = await import(`${T}/channels-chat/reducer.ts`);
+const { rootReducer } = await import(`${T}/channels-root/reducer.ts`);
+const { automationReducer } = await import(`${T}/channels-automation/reducer.ts`);
+const { automationRunReducer } = await import(`${T}/channels-automation-run/reducer.ts`);
+
+const REDUCERS = {
+  terminal: terminalReducer,
+  changeset: changesetReducer,
+  annotations: annotationsReducer,
+  session: sessionReducer,
+  chat: chatReducer,
+  root: rootReducer,
+  automation: automationReducer,
+  automationRun: automationRunReducer,
+};
+
+// Since 0.9.0 no reducer reads the clock; it stays pinned so an older pin's
+// chatReducer, which stamped modifiedAt from it, still reproduces.
+Date.now = () => 9999;
+
+const rl = createInterface({ input: process.stdin });
+for await (const line of rl) {
+  if (!line.trim()) continue;
+  const testCase = JSON.parse(line);
+  const reducer = REDUCERS[testCase.reducer];
+  let out;
+  try {
+    let state = testCase.initial;
+    for (const action of testCase.actions) state = reducer(state, action, () => {});
+    // JSON.stringify is the point: it is what drops `undefined`-valued keys,
+    // which is the whole distinction under test.
+    out = { name: testCase.name, ok: true, state: JSON.parse(JSON.stringify(state)) };
+  } catch (error) {
+    out = { name: testCase.name, ok: false, error: String(error && error.message) };
+  }
+  process.stdout.write(JSON.stringify(out) + '\n');
+}

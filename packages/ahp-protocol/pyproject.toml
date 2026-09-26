@@ -1,0 +1,134 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "agent-host-protocol"
+description = "Wire types, pure reducers and the conformance corpora for the Agent Host Protocol (AHP)."
+# Single-sourced from the package, so the two cannot drift. There is no second
+# place to forget -- the host learned this one the hard way, shipping `0.0.0`
+# in two files.
+dynamic = ["version"]
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.11"
+authors = [{ name = "agent-host-protocol-py contributors" }]
+keywords = ["ahp", "agent-host-protocol", "agent", "protocol", "json-rpc", "reducers"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+  "Topic :: Software Development :: Libraries",
+  "Typing :: Typed",
+]
+# Zero runtime dependencies, permanently. This package is the floor both a host
+# and a client stand on; anything it requires, they both inherit.
+dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/jackhumbert/agent-host-protocol-py"
+Repository = "https://github.com/jackhumbert/agent-host-protocol-py"
+Issues = "https://github.com/jackhumbert/agent-host-protocol-py/issues"
+
+# Dev requirements live in a PEP 735 dependency group, NOT in
+# [project.optional-dependencies]. An extra is baked into the wheel's
+# Requires-Dist metadata and rides along to every installer forever; the tools
+# that build and lint this package are not part of its interface. A group is a
+# lockfile-side concept and never ships.
+[dependency-groups]
+dev = [
+  "pytest>=8",
+  "mypy>=1.11",
+  "ruff>=0.6",
+  "types-jsonschema",
+  "import-linter>=2",
+  "jsonschema>=4",
+  "build>=1",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/agent_host_protocol"]
+
+# The vendored corpus has exactly one copy under version control
+# (`vendor/upstream/`, written by scripts/vendor_upstream.sh) and is mapped into
+# the package at build time. Duplicating it into src/ would give two trees that
+# can disagree; leaving it out of the wheel would ship a corpus loader with no
+# corpus, which is the defect this package was extracted partly to fix.
+# `conformance/corpus.py::_corpus_root` reads whichever exists.
+[tool.hatch.version]
+path = "src/agent_host_protocol/__init__.py"
+
+[tool.hatch.build.targets.wheel.force-include]
+"vendor/upstream" = "agent_host_protocol/conformance/_upstream"
+
+[tool.hatch.build.targets.sdist]
+include = ["src", "tests", "scripts", "vendor", "docs", "*.md", "LICENSE"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q --strict-markers"
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+files = ["src", "tests", "scripts"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N", "UP", "B", "A", "C4", "PT", "RET", "SIM", "TID", "RUF"]
+ignore = [
+  # The protocol's own field names are camelCase; mirroring them is correct.
+  "N815",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"src/agent_host_protocol/types/_generated.py" = ["E501"]
+# TransportClosed signals end-of-stream, not a fault; the Error suffix would mislead.
+"src/agent_host_protocol/transport/base.py" = ["N818"]
+"tests/**" = ["RUF059"]
+
+[tool.ruff.format]
+# The generator is the sole authority on this file's content; formatting it here
+# would break the `git diff --exit-code` reproducibility gate in CI.
+exclude = ["src/agent_host_protocol/types/_generated.py"]
+
+[tool.importlinter]
+root_package = "agent_host_protocol"
+include_external_packages = true
+
+# The whole reason this package exists as its own distribution: the layer below
+# is pure, and nothing in it may reach upward or sideways into I/O.
+[[tool.importlinter.contracts]]
+name = "Layered: nothing below reaches up"
+type = "layers"
+layers = [
+  "agent_host_protocol.conformance",
+  "(agent_host_protocol.transport)",
+  "(agent_host_protocol.errors)",
+  "(agent_host_protocol.channels)",
+  "(agent_host_protocol.versions)",
+  "(agent_host_protocol.reducers)",
+  "agent_host_protocol.types",
+]
+
+[[tool.importlinter.contracts]]
+name = "types performs no I/O"
+type = "forbidden"
+source_modules = ["agent_host_protocol.types"]
+forbidden_modules = ["asyncio", "socket", "pathlib", "json", "os", "websockets"]
+
+# Reducers are pure. `json` is absent deliberately: a reducer that serialises is
+# a reducer that has an opinion about the wire, and the corpus compares values.
+[[tool.importlinter.contracts]]
+name = "reducers perform no I/O"
+type = "forbidden"
+source_modules = ["agent_host_protocol.reducers"]
+forbidden_modules = ["asyncio", "socket", "pathlib", "json", "os", "websockets"]

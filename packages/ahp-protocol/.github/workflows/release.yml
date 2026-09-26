@@ -1,0 +1,87 @@
+name: Release
+
+# Tag-triggered, and the tag has to agree with the version in the package --
+# the tag and the GitHub release are the public record of what shipped, and a
+# record that disagrees with the artifact it points at is worse than none.
+#
+# There is no index upload here on purpose: these packages are distributed
+# from GitHub (`pip install "agent-host-protocol @ git+https://…"`), and the
+# GitHub release -- notes from the CHANGELOG, distributions attached -- is the
+# whole release.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - run: pip install build
+
+      - name: Build
+        run: python -m build --outdir dist
+
+      - name: The tag must match the packaged version
+        id: version
+        run: |
+          version="$(python -c 'import re,pathlib; print(re.search(r"__version__ = \"([^\"]+)\"", pathlib.Path("src/agent_host_protocol/__init__.py").read_text()).group(1))')"
+          tag="${GITHUB_REF_NAME#v}"
+          if [ "$version" != "$tag" ]; then
+            echo "::error::tag v$tag does not match __version__ $version"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      # The same install-and-run check CI does on every push. A wheel that
+      # cannot be imported from a clean venv must not be released.
+      - name: Smoke-test the built wheel
+        run: |
+          python -m venv /tmp/fresh
+          /tmp/fresh/bin/pip install "$(echo dist/*.whl)"
+          cd /tmp && /tmp/fresh/bin/python "$GITHUB_WORKSPACE/scripts/smoke_wheel.py"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - name: Draft the release from the CHANGELOG
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          # The section for this version, verbatim. If the CHANGELOG has no
+          # entry for it, that is a release nobody described -- fail rather
+          # than publish an empty one.
+          awk -v v="## [$VERSION]" '
+            index($0, v) == 1 { inside = 1; next }
+            inside && /^## \[/ { exit }
+            inside { print }
+          ' CHANGELOG.md > notes.md
+          if [ ! -s notes.md ]; then
+            echo "::error::CHANGELOG.md has no section for $VERSION"
+            exit 1
+          fi
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --title "$GITHUB_REF_NAME" --notes-file notes.md
