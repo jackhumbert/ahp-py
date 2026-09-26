@@ -32,6 +32,12 @@
   the session to Ask like one approved here, and either way the setting now
   shows Ask rather than still Plan.
 
+- Sessions show up in `claude --resume`: Claude Code records them as
+  started by `agent-host` (`CLAUDE_CODE_ENTRYPOINT`) rather than `sdk-py`,
+  which the picker hides. As with a terminal session, Claude Code then also
+  offers its claude.ai artifact tools and guide agent; they pass the same
+  approval gate as every other tool.
+
 ### Changed
 
 - One reader per Claude client: Claude Code's output is read continuously

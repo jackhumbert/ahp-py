@@ -96,6 +96,15 @@ def is_valid_provider_id(value: str) -> bool:
     return _PROVIDER_ID.fullmatch(value) is not None
 
 
+#: What Claude Code records as having started these sessions. Not the SDK's
+#: `sdk-py`: `claude --resume` hides every `sdk-*` session, and these are
+#: meant to be found there like a terminal's. Not `cli` either: in a
+#: non-interactive process Claude Code rewrites that to `sdk-cli`. A name of
+#: its own is kept as written. Claude Code then also treats the session as a
+#: terminal one in what it offers (claude.ai artifacts, its guide agent), which
+#: is the point; those tools pass the same approval gate as any other.
+ENTRYPOINT = "agent-host"
+
 #: Claude Code's value for "whatever the account's default is".
 DEFAULT_MODEL = "default"
 
@@ -361,6 +370,7 @@ class ClaudeSession:
             # tells our own messages from ones typed elsewhere.
             extra_args={"replay-user-messages": None},
             system_prompt={"type": "preset", "preset": "claude_code"},
+            env={"CLAUDE_CODE_ENTRYPOINT": ENTRYPOINT},
         )
 
     def start_soon(self) -> None:

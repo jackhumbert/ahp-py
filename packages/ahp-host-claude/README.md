@@ -53,6 +53,11 @@ Status: pre-alpha.
   first wins; the other prompt is withdrawn. Such a session keeps its Claude
   process running while the host is up, so it stays reachable, and a host
   restart reattaches to the same claude.ai session.
+- **In `claude --resume`**, like any other conversation on the machine:
+  sessions are recorded as started by `agent-host`, not by the SDK, whose
+  sessions the picker hides. Claude Code then offers them what it offers a
+  terminal session (claude.ai artifacts among them), each tool behind the same
+  approval gate.
 - **Continue from** another Claude Code conversation on this machine - one
   started in a terminal, the IDE, or driven from a phone through Remote
   Control - picked from a searchable list (the `continueFrom` session setting,

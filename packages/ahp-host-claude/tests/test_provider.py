@@ -347,3 +347,12 @@ async def test_a_shell_call_reads_as_what_it_does_not_as_run_command(tmp_path: P
 
     assert sink.invocations == {"t4": "Count tracked files", "t5": "Read file: a.py"}
     assert sink.past_tense == {"t4": "Ran `git ls-files | wc -l`", "t5": "Failed: Read file: a.py"}
+
+
+def test_sessions_are_recorded_so_claude_resume_lists_them(tmp_path: Path) -> None:
+    """`claude --resume` hides sessions whose entrypoint is `sdk-*`, which is
+    what the SDK sets; `cli` would be rewritten to `sdk-cli`."""
+    session = ClaudeSession(_context(tmp_path), root=tmp_path, client_factory=lambda o: None)  # type: ignore[arg-type,return-value]
+    entrypoint = session._options().env["CLAUDE_CODE_ENTRYPOINT"]
+    assert not entrypoint.startswith("sdk-")
+    assert entrypoint != "cli"
