@@ -1382,6 +1382,146 @@ class TestWorkingDirectories:
             serve.cancel()
             await host.aclose()
 
+    async def _created_directories(self, host: Host, uri: str, params: dict[str, Any]) -> Any:
+        client, serve = await self._connect(host)
+        try:
+            await client.request("createSession", {"channel": uri, "provider": "echo", **params})
+            state = (await client.request("subscribe", {"channel": uri}))["result"]["snapshot"][
+                "state"
+            ]
+            return state.get("workingDirectories")
+        finally:
+            serve.cancel()
+            await host.aclose()
+
+    async def test_a_session_that_names_no_folder_gets_none(self, tmp_path: Path) -> None:
+        """A plain chat. Filling in the served root would hand the agent the
+        whole tree for a session nobody chose a folder for."""
+        host = Host(
+            EchoProvider(),
+            LoopbackSingleUserPolicy(),
+            resources=RootedFilesystemResourceProvider(tmp_path),
+            default_directory=tmp_path.as_uri(),
+        )
+        assert not await self._created_directories(host, "echo:/wd-chat", {})
+
+    async def test_a_refused_folder_still_falls_back_to_the_root(self, tmp_path: Path) -> None:
+        """VS Code sends `file:///` when it has no better answer; the jail
+        refuses it, and the session gets the served root rather than nothing."""
+        host = Host(
+            EchoProvider(),
+            LoopbackSingleUserPolicy(),
+            resources=RootedFilesystemResourceProvider(tmp_path),
+            default_directory=tmp_path.as_uri(),
+        )
+        directories = await self._created_directories(
+            host, "echo:/wd-fallback", {"workingDirectories": ["file:///"]}
+        )
+        assert directories == [tmp_path.as_uri()]
+
+    async def test_a_folder_added_later_answers_to_the_jail(self, tmp_path: Path) -> None:
+        """Adding a folder is as much tool access as choosing one at creation."""
+        inside = tmp_path / "inside"
+        inside.mkdir()
+        host = Host(
+            EchoProvider(capabilities={"multipleWorkingDirectories": {}}),
+            LoopbackSingleUserPolicy(),
+            resources=RootedFilesystemResourceProvider(inside),
+        )
+        client, serve = await self._connect(host)
+        try:
+            uri = "echo:/wd-jail"
+            await client.request("createSession", {"channel": uri, "provider": "echo"})
+            await client.request("subscribe", {"channel": uri})
+            for seq, directory in enumerate((tmp_path.as_uri(), inside.as_uri()), start=1):
+                await client.notify(
+                    "dispatchAction",
+                    {
+                        "channel": uri,
+                        "clientSeq": seq,
+                        "action": {"type": "session/workingDirectorySet", "directory": directory},
+                    },
+                )
+            await client.collect(seconds=0.3)
+            rejections = [
+                e.get("rejectionReason")
+                for e in client.actions(uri)
+                if e["action"]["type"] == "session/workingDirectorySet"
+            ]
+            assert rejections == ["that directory is outside the served folders", None]
+            state = host.sequencer.state_of(uri)
+            assert isinstance(state, dict)
+            assert state["workingDirectories"] == [inside.as_uri()]
+        finally:
+            serve.cancel()
+            await host.aclose()
+
+    async def test_the_agent_hears_the_whole_set_as_it_changes(self) -> None:
+        """`FollowsWorkingDirectories`: a folder added to a running session
+        reaches the agent, not only state. The set after the reducer, each time."""
+        host = self._host({})
+        client, serve = await self._connect(host)
+        try:
+            uri = "echo:/wd-follow"
+            await client.request(
+                "createSession",
+                {"channel": uri, "provider": "echo", "workingDirectories": ["file:///a"]},
+            )
+            await client.collect(seconds=0.3)
+            await client.request("subscribe", {"channel": uri})
+            heard: list[list[str]] = []
+
+            async def working_directories_changed(directories: Any) -> None:
+                heard.append(list(directories))
+
+            agent = host._sessions[uri].agent_session
+            agent.working_directories_changed = working_directories_changed  # type: ignore[union-attr]
+            actions = [
+                {"type": "session/workingDirectorySet", "directory": "file:///b"},
+                {"type": "session/workingDirectoryRemoved", "directory": "file:///a"},
+            ]
+            for seq, action in enumerate(actions, start=1):
+                await client.notify(
+                    "dispatchAction", {"channel": uri, "clientSeq": seq, "action": action}
+                )
+            await client.collect(seconds=0.3)
+            assert heard == [["file:///a", "file:///b"], ["file:///b"]]
+        finally:
+            serve.cancel()
+            await host.aclose()
+
+    async def test_a_rejected_change_does_not_reach_the_agent(self) -> None:
+        host = self._host()  # no multipleWorkingDirectories: every change is refused
+        client, serve = await self._connect(host)
+        try:
+            uri = "echo:/wd-unheard"
+            await client.request(
+                "createSession",
+                {"channel": uri, "provider": "echo", "workingDirectories": ["file:///a"]},
+            )
+            await client.collect(seconds=0.3)
+            await client.request("subscribe", {"channel": uri})
+            heard: list[Any] = []
+
+            async def working_directories_changed(directories: Any) -> None:
+                heard.append(directories)
+
+            agent = host._sessions[uri].agent_session
+            agent.working_directories_changed = working_directories_changed  # type: ignore[union-attr]
+            await client.notify(
+                "dispatchAction",
+                {
+                    "channel": uri,
+                    "clientSeq": 1,
+                    "action": {"type": "session/workingDirectorySet", "directory": "file:///b"},
+                },
+            )
+            await client.collect(seconds=0.3)
+            assert heard == []
+        finally:
+            serve.cancel()
+            await host.aclose()
+
 
 class TestAnnotationsChannel:
     """VS Code subscribes to `<session>/annotations` unconditionally and its

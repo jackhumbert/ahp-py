@@ -109,6 +109,7 @@ from agent_host_server.provider.base import (
     ConfiguresSessions,
     DescribesSession,
     DisposesSessions,
+    FollowsWorkingDirectories,
     ForkedFrom,
     HandlesCustomizations,
     ManagesMcpServers,
@@ -4159,6 +4160,7 @@ class Host:
     ) -> list[str]:
         """The directories `createSession` may seed, after capability and policy."""
         requested = [d for d in params.get("workingDirectories") or () if isinstance(d, str)]
+        asked = bool(requested)
         # Anything the resource provider will not serve is dropped HERE, before
         # it can become the session's working directory. Necessary because the
         # ancestor chain of the served root is deliberately walkable
@@ -4181,7 +4183,7 @@ class Host:
                 [d for d in requested if d not in servable],
             )
         requested = servable
-        if not requested and self.default_directory is not None:
+        if asked and not requested and self.default_directory is not None:
             # Fall back to the served root. A session with NO working directory
             # is not merely cosmetic: the client builds `folders[0]` -- and
             # therefore `gitRepository` and the `hasGitRepository` context key --
@@ -4193,6 +4195,11 @@ class Host:
             # This is exactly the common path: VS Code sends `file:///` when it
             # has no better answer, the jail correctly refuses it, and the
             # session ends up with nothing.
+            #
+            # Only for a client that asked for a folder and was refused one. A
+            # client that names none is asking for a session with no folder (a
+            # plain chat); the agent decides what that may touch, and filling in
+            # the root would hand it the whole served tree instead.
             requested = [self.default_directory]
         if self._multiroot(self._provider_named(params.get("provider"))) is None:
             # "Servers without that capability treat only the first entry as the
@@ -4253,6 +4260,11 @@ class Host:
             return "directory must be a string"
 
         if action["type"] == "session/workingDirectorySet":
+            if not self._inside_the_jail(directory):
+                # The same jail `createSession` applies (`_admit_working_directories`):
+                # a folder added later is exactly as much tool access as one
+                # chosen at creation, and must not be a way around it.
+                return "that directory is outside the served folders"
             if not self.policy.may_grant_working_directory(connection.info, channel, directory):
                 return "rejected by policy"
             return None
@@ -4273,6 +4285,8 @@ class Host:
                 # "Replacing index `0` additionally requires primaryReplacement;
                 # clients MUST NOT target an immutable primary."
                 return "the primary working directory is not replaceable"
+            if not self._inside_the_jail(replacement):
+                return "that directory is outside the served folders"
             # A replacement grants tool access to a directory the session did
             # not have, exactly as a set does, so it answers to the same policy.
             if not self.policy.may_grant_working_directory(connection.info, channel, replacement):
@@ -4990,6 +5004,9 @@ class Host:
             return
         if action_type == "session/isArchivedChanged":
             await self._react_to_archive(channel, action)
+            return
+        if action_type in _WORKING_DIRECTORY_ACTIONS:
+            await self._react_to_working_directories(channel)
             return
         if action_type in _MCP_LIFECYCLE_ACTIONS:
             await self._react_to_mcp(channel, action)
@@ -5729,6 +5746,29 @@ class Host:
                 await session.agent_session.archived_changed(archived)
             except Exception:
                 _log.exception("archived_changed failed for %s", channel)
+        await self._persist(session)
+
+    async def _react_to_working_directories(self, channel: str) -> None:
+        """Tell the agent the session's folders changed, then save it.
+
+        The whole set, read back from state, rather than the one action: the
+        reducer is what decides the result of a set/remove/replace, and an
+        agent re-deriving it would be a second reducer that could disagree.
+        A restored session with no agent yet gets nothing to call: resuming
+        reads its folders from state (`_resume_if_restored`).
+        """
+        session = self._sessions.get(channel)
+        if session is None:
+            return
+        if isinstance(session.agent_session, FollowsWorkingDirectories):
+            state = self.sequencer.state_of(channel)
+            directories = state.get("workingDirectories") if isinstance(state, Mapping) else None
+            try:
+                await session.agent_session.working_directories_changed(
+                    [d for d in directories or () if isinstance(d, str)]
+                )
+            except Exception:
+                _log.exception("working_directories_changed failed for %s", channel)
         await self._persist(session)
 
     async def _run_turn(

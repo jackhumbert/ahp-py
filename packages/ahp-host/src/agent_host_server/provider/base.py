@@ -34,6 +34,7 @@ __all__ = [
     "ConfiguresSessions",
     "DescribesSession",
     "DisposesSessions",
+    "FollowsWorkingDirectories",
     "ForkedFrom",
     "HandlesCustomizations",
     "InputOutcome",
@@ -550,6 +551,24 @@ class ArchivesSessions(Protocol):
     """
 
     async def archived_changed(self, is_archived: bool) -> None: ...
+
+
+@runtime_checkable
+class FollowsWorkingDirectories(Protocol):
+    """An agent session that follows its folders changing mid-session.
+
+    `session/workingDirectorySet`, `...Removed` and `...Replaced` are
+    client-dispatchable once the agent advertises
+    `multipleWorkingDirectories`, and between them they decide what the agent
+    may touch. The context's `working_directories` is only the set at
+    creation; without this a folder added to a running session reached state
+    and every client, and never the agent. Called after the reducer has
+    applied the change (and the host's capability and policy checks have
+    passed), with the whole set as it now stands, then the session is saved.
+    Raising is logged; it does not undo the change.
+    """
+
+    async def working_directories_changed(self, directories: Sequence[str]) -> None: ...
 
 
 @runtime_checkable

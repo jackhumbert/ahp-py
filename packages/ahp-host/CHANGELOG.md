@@ -18,6 +18,13 @@ versions each release speaks.
   scoped to that provider - once `Host.restore()` has brought back what was
   saved. Until now only an embedder holding the `Host` could open a session,
   and an agent plugged into `agent-host-node` never holds it.
+- `FollowsWorkingDirectories.working_directories_changed(directories)`: an
+  agent session that implements it is told the session's whole folder set
+  after a client adds, removes or replaces one
+  (`session/workingDirectorySet` / `Removed` / `Replaced`, accepted only for
+  an agent advertising `multipleWorkingDirectories`), and the session is then
+  saved. Until now a folder added to a running session reached state and
+  every client, and never the agent.
 - `ArchivesSessions.archived_changed(is_archived)`: an agent session that
   implements it is told when a client archives or unarchives it
   (`session/isArchivedChanged`), and the session is then saved. For an agent
@@ -86,6 +93,14 @@ versions each release speaks.
   `Message.origin` the schema requires (`{"kind": "user"}`). Without it,
   strict clients could not decode the chat at all (the iOS client failed its
   `subscribe`). Turns saved before the fix get the same origin on restore.
+- A `createSession` that names no working directory gets none, instead of the
+  served root (`default_directory`). The root is still the fallback for a
+  client that asked for folders the jail refused (VS Code's `file:///`), which
+  is what it exists for; a client that names none is asking for a plain chat,
+  and the agent decides what that may touch.
+- `session/workingDirectorySet` and `...Replaced` answer to the same jail as
+  `createSession`: a folder outside the served ones is rejected, where before
+  only the policy was asked.
 - Restored sessions could never take a turn: the host did not resume their
   agents (every turn failed `provider.resumeSession`) and never asked a
   `ResumableAgentProvider` for its resume state, so nothing was stored to
