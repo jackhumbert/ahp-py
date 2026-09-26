@@ -19,6 +19,12 @@ Under construction. `docs/plan.md` is the design and its §7 is the build order.
 
 ### Added
 
+- **Automations across machines.** The broker merges every node's
+  `ahp-automations://` catalogue into one and advertises `automations` when
+  any node hosts them. A new automation goes to the machine its folder names
+  (else one running its agent, else the first that hosts automations); edits,
+  runs, history paging, run channels and cancellation follow the automation's
+  owner. See `docs/plan.md` §9.
 - **Each machine's own view, in its node-list entry.** A connected node's
   entry under `agent-host-broker/nodes` now also carries its `serverInfo`,
   its root `_meta` (as `meta`) and its root `config`, verbatim. The merge
