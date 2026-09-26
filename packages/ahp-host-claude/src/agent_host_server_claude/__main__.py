@@ -20,7 +20,7 @@ import signal
 import sys
 from pathlib import Path
 
-from agent_host_server.core import Host, HostInfo, LoopbackSingleUserPolicy
+from agent_host_server.core import FileAutomationStore, Host, HostInfo, LoopbackSingleUserPolicy
 from agent_host_server.core.resources import ResourceProvider, RootedFilesystemResourceProvider
 from agent_host_server.core.store import FileSessionStore
 from agent_host_server.ws import serve_websocket
@@ -117,6 +117,10 @@ async def _run(settings: Settings) -> None:
         default_directory=settings.roots.default_directory(),
         store=FileSessionStore(state / "sessions"),
         sequence_file=state / "sequence",
+        # Saved prompts that run on a schedule or on request, each as a new
+        # session. `restore()` below starts the scheduler, so they fire before
+        # anyone connects.
+        automations=FileAutomationStore(state / "automations"),
     )
     # Bring back the sessions saved before the last stop. Without this they
     # were written to `state/sessions` and never read again, so every restart

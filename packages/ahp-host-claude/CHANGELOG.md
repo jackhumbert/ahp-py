@@ -4,6 +4,9 @@
 
 ### Added
 
+- Automations: saved prompts that run as new sessions on a schedule or on
+  request (AHP 0.9.0), kept under `<state_dir>/automations`. Needs
+  agent-host-server with `Host(automations=...)`.
 - Chats, and folders added later. A session with no folder runs as a chat, in
   an empty directory of the agent's own (`<state_dir>/chat`), with no file,
   shell or MCP tools (`tools` is web search and fetch only,

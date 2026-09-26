@@ -111,6 +111,13 @@ Status: pre-alpha.
   Chat and annotation references are named but not resolved yet.
 - Sessions that survive a host restart: the Agent SDK's session id is the
   host's resume state.
+- **Automations**: a saved prompt that runs as a new session on a schedule
+  (AHP cron in a named time zone) or on request, kept under
+  `<state_dir>/automations`. The host evaluates schedules itself, so they fire
+  with no client connected. Nobody is watching a scheduled run, so an approval
+  prompt waits until someone answers it: give the automation's session
+  template `config: {"permissionMode": "acceptEdits"}` or `"auto"` for work
+  that should finish on its own. Needs agent-host-server with automations.
 
 ## Run it
 
@@ -144,7 +151,7 @@ error, so a typo cannot silently fall back to a default.
 | `root` / `--root PATH` | One unnamed folder, served as itself. |
 | `token_file` / `--token-file` | Require this connection token. Read from a file so it never appears in `ps` or logs. |
 | `port`, `bind` / `--port`, `--bind` | Default `127.0.0.1:4321`. Loopback only. |
-| `state_dir` / `--state-dir` | Persisted sessions and sequence counter. Default `~/.local/state/agent-host-server-claude`. |
+| `state_dir` / `--state-dir` | Persisted sessions, automations and sequence counter. Default `~/.local/state/agent-host-server-claude`. |
 | `agent_name` / `--agent-name` | What clients call the agent. |
 | `remote_control` / `--[no-]remote-control` | Put new sessions on claude.ai (Remote Control). Default: whatever Claude Code does, i.e. your `remoteControlAtStartup` setting. |
 | `claude_ai_sessions` / `--claude-ai-sessions [all]` | Also list this machine's other Remote Control sessions, through claude.ai (default off; safe on every machine). `"all"`: every machine's, on one machine only. |
