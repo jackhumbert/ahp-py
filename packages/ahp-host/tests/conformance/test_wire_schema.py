@@ -19,10 +19,11 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from agent_host_protocol.channels import ROOT_URI
+from agent_host_protocol.channels import AUTOMATIONS_URI, ROOT_URI
 from agent_host_protocol.transport import memory_pair
 
 from agent_host_server.core import Host, LoopbackSingleUserPolicy
+from agent_host_server.core.automations import InMemoryAutomationStore
 from agent_host_server.core.pty_backend import PtyTerminalBackend
 from agent_host_server.core.resources import RootedFilesystemResourceProvider
 from agent_host_server.core.watches import PollingResourceWatcher
@@ -124,6 +125,10 @@ class Recorder:
 def _kind_of(channel: str) -> str | None:
     if channel == ROOT_URI:
         return "root"
+    if channel == AUTOMATIONS_URI:
+        return "automation"
+    if channel.startswith("ahp-automation-run:"):
+        return "automationRun"
     if channel.endswith("/annotations"):
         return "annotations"
     if channel.startswith("ahp-chat"):
@@ -461,6 +466,91 @@ class TestTheWireMatchesTheSpec:
                 "the tool never completed, so its result content was never checked"
             )
             _check(client)
+        finally:
+            serve.cancel()
+            await host.aclose()
+
+    async def test_automations(self) -> None:
+        """The catalogue, a manual run, a scheduled run, and their snapshots."""
+        from datetime import UTC, datetime, timedelta
+
+        host = Host(
+            EchoProvider(delay=0.01),
+            LoopbackSingleUserPolicy(),
+            automations=InMemoryAutomationStore(),
+        )
+        client_transport, server_transport = memory_pair()
+        serve = asyncio.create_task(host.serve(server_transport))
+        client = Recorder(client_transport)
+        try:
+            await client.request(
+                "initialize",
+                {
+                    "channel": ROOT_URI,
+                    "clientId": "conformance",
+                    "protocolVersions": ["0.9.0"],
+                    "initialSubscriptions": [ROOT_URI, AUTOMATIONS_URI],
+                },
+            )
+            await client.notify(
+                "dispatchAction",
+                {
+                    "channel": AUTOMATIONS_URI,
+                    "clientSeq": 1,
+                    "action": {
+                        "type": "automation/createRequested",
+                        "resource": "ahp-automation:/a",
+                        "definition": {
+                            "title": "A",
+                            "message": {"text": "go", "origin": {"kind": "automation"}},
+                            "session": {"provider": "echo"},
+                            "enabled": True,
+                            "triggers": [
+                                {
+                                    "id": "t",
+                                    "kind": "schedule",
+                                    "schedule": {"expression": "*/5 * * * *", "timeZone": "UTC"},
+                                    "misfirePolicy": "runOnce",
+                                }
+                            ],
+                        },
+                    },
+                },
+            )
+            await client.drain(0.3)
+            run = (
+                await client.request(
+                    "runAutomation",
+                    {
+                        "channel": AUTOMATIONS_URI,
+                        "automation": "ahp-automation:/a",
+                        "requestId": "r",
+                    },
+                )
+            )["result"]["resource"]
+            await client.request("subscribe", {"channel": run})
+            await client.drain(0.5)
+            await host.run_due_automations(datetime.now(UTC) + timedelta(minutes=10))
+            await client.drain(0.5)
+            await client.request("subscribe", {"channel": run})
+            await client.request("subscribe", {"channel": AUTOMATIONS_URI})
+            session = host.sequencer.state_of(run)["primarySession"]
+            await client.request("subscribe", {"channel": session})
+            await client.request("listSessions", {"channel": ROOT_URI})
+            await client.request("listAutomationTriggerDefinitions", {"channel": ROOT_URI})
+            await client.request(
+                "fetchAutomationRuns",
+                {"channel": AUTOMATIONS_URI, "automation": "ahp-automation:/a"},
+            )
+            checked = _check(client)
+            kinds = {_kind_of(channel) for channel, _ in client.snapshots()}
+            assert {"automation", "automationRun", "session"} <= kinds
+            types = {action["type"] for action in client.actions}
+            # A run links its session before a client can know the run's URI,
+            # so `sessionSet` reaches this client in the run's snapshot, which
+            # is validated above, rather than as an action.
+            assert {"automation/set", "automationRun/lifecycleChanged"} <= types
+            assert checked > 0
         finally:
             serve.cancel()
             await host.aclose()

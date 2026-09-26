@@ -21,11 +21,12 @@ import time
 import uuid
 from collections.abc import Awaitable, Callable, Collection, Coroutine, Mapping, Sequence
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import Any, Final
 
 from agent_host_protocol import errors
-from agent_host_protocol.channels import ROOT_URI
+from agent_host_protocol.channels import AUTOMATIONS_URI, ROOT_URI
 from agent_host_protocol.reducers import js
 from agent_host_protocol.reducers.clock import now_iso
 from agent_host_protocol.transport.base import Transport
@@ -47,6 +48,18 @@ from agent_host_server.core.auth import (
     auth_required,
     auth_required_params,
     scopes_satisfied,
+)
+from agent_host_server.core.automations import (
+    AUTOMATION_SCHEME,
+    TERMINAL_STATUSES,
+    AutomationRecord,
+    AutomationStore,
+    apply_patch,
+    definition_rejection,
+    due_occurrences,
+    iso,
+    next_run_at,
+    reset_cursors,
 )
 from agent_host_server.core.changesets import (
     Changeset,
@@ -126,6 +139,17 @@ from agent_host_server.provider.base import (
 __all__ = ["Host", "HostInfo"]
 
 _log = logging.getLogger(__name__)
+
+#: `AutomationCapabilities.runHistoryLimit` unless the embedder says otherwise.
+DEFAULT_AUTOMATION_HISTORY: Final = 20
+
+#: Terminal runs kept on disk per automation, beyond which the oldest go -- run
+#: channel, idempotency key and all. `fetchAutomationRuns` pages within this.
+_RETAINED_RUNS: Final = 100
+
+#: The scheduler wakes at least this often even with nothing due, so a clock
+#: that jumped (a laptop waking from sleep) is noticed within a minute.
+_SCHEDULER_TICK: Final = 60.0
 
 #: SessionStatus.Idle -- what a freshly created session reports.
 _STATUS_IDLE = SessionStatus.IDLE
@@ -1157,6 +1181,8 @@ class Host:
         completion_trigger_characters: Sequence[str] | None = None,
         outbox_limit: int = DEFAULT_OUTBOX_LIMIT,
         claim_gated_actions: Collection[str] = CLAIM_GATED_ACTIONS,
+        automations: AutomationStore | None = None,
+        automation_history: int = DEFAULT_AUTOMATION_HISTORY,
     ) -> None:
         if policy is None:  # pragma: no cover - defensive; typing already forbids it
             raise ValueError("a Policy is required; there is no default")
@@ -1296,6 +1322,26 @@ class Host:
         # never saw them. Cancel a `!sleep 400` turn and the child outlived the
         # turn, `aclose()`, and the host process itself.
         self._oneshot_terminals: dict[str, TerminalProcess] = {}
+        # No store, no automations: the capability is not advertised and the
+        # catalogue channel never exists, which is what the spec says absence
+        # means. An automation outlives the process by definition, so there is
+        # no in-memory default to fall back on -- see `core/automations.py`.
+        self.automations = automations
+        #: `AutomationCapabilities.runHistoryLimit`: terminal runs shown per
+        #: automation before `fetchAutomationRuns` pages in more.
+        self.automation_history = max(1, automation_history)
+        self._automations: dict[str, AutomationRecord] = {}
+        #: Run URI -> the task executing it, while it executes.
+        self._run_tasks: dict[str, asyncio.Task[None]] = {}
+        #: Runs a client asked to cancel. Read when the run's turn ends, so a
+        #: turn cancelled on the run's behalf reads as the run cancelled.
+        self._cancelled_runs: set[str] = set()
+        #: Extra history pages `fetchAutomationRuns` has loaded, per automation.
+        #: Display state shared by every subscriber, and not worth persisting.
+        self._run_pages: dict[str, int] = {}
+        self._automations_ready = False
+        self._scheduler: asyncio.Task[None] | None = None
+        self._schedule_changed = asyncio.Event()
         self.sequencer.observer = self
         self._root_ready = False
         self.wire_log = WireLog(wire_log) if wire_log is not None else None
@@ -1587,6 +1633,7 @@ class Host:
                 root_state["config"] = self.root_config.to_wire()
             await self.sequencer.register_channel(ROOT_URI, root_state, "root")
             self._root_ready = True
+        await self._ensure_automations()
 
     async def serve(
         self,
@@ -1754,6 +1801,16 @@ class Host:
             return await self._resolve_session_config(params)
         if method == "sessionConfigCompletions":
             return await self._session_config_completions(params)
+        if method == "listAutomationTriggerDefinitions":
+            self._require_automations()
+            # Event trigger types are host-defined, and this host defines none.
+            # Schedule triggers "are protocol-defined and therefore do not
+            # appear in this result".
+            return {"items": []}
+        if method == "runAutomation":
+            return await self._run_automation(connection, params)
+        if method == "fetchAutomationRuns":
+            return await self._fetch_automation_runs(connection, params)
         raise errors.method_not_found(method)
 
     async def _handle_notification(
@@ -1845,6 +1902,17 @@ class Host:
             # `!ls` would render as a terminal request this host then declines,
             # turning a working input into a dead end.
             result["terminalCommandPrefix"] = TERMINAL_COMMAND_PREFIX
+        if self.automations is not None:
+            # "Presence means clients may subscribe to `ahp-automations://`."
+            # No `minIntervalMinutes`: the cron grammar's one-minute resolution
+            # is the only limit, and an embedder who wants a floor can refuse
+            # in `Policy.may_dispatch`.
+            result["automations"] = {
+                "create": {},
+                "schedules": {},
+                "runCancellation": {},
+                "runHistoryLimit": self.automation_history,
+            }
         return result
 
     async def _subscribe(self, connection: Connection, params: Mapping[str, Any]) -> dict[str, Any]:
@@ -1964,12 +2032,19 @@ class Host:
 
     def _full_summary(self, session: _Session) -> dict[str, Any]:
         """Identity fields plus the projection. What `listSessions` returns."""
-        return {
+        summary: dict[str, Any] = {
             "resource": session.uri,
             "provider": session.provider_id,
             "createdAt": session.created_at,
             **self._project_summary(session),
         }
+        state = self.sequencer.state_of(session.uri)
+        if isinstance(state, Mapping) and isinstance(state.get("origin"), Mapping):
+            # Identity, like `createdAt`: set once at creation and never in a
+            # change set. `SessionSummary.origin` is how a session list shows
+            # which rows an automation made.
+            summary["origin"] = dict(state["origin"])
+        return summary
 
     async def _mirror_summary(self, session: _Session) -> None:
         """Emit `root/sessionSummaryChanged` for whatever actually changed.
@@ -4156,7 +4231,7 @@ class Host:
         return capability if isinstance(capability, Mapping) else None
 
     def _admit_working_directories(
-        self, connection: Connection, session: str, params: Mapping[str, Any]
+        self, connection: Connection | None, session: str, params: Mapping[str, Any]
     ) -> list[str]:
         """The directories `createSession` may seed, after capability and policy."""
         requested = [d for d in params.get("workingDirectories") or () if isinstance(d, str)]
@@ -4210,7 +4285,8 @@ class Host:
         return [
             directory
             for directory in requested
-            if self.policy.may_grant_working_directory(connection.info, session, directory)
+            if connection is None
+            or self.policy.may_grant_working_directory(connection.info, session, directory)
         ]
 
     def _inside_the_jail(self, uri: str) -> bool:
@@ -4372,6 +4448,27 @@ class Host:
         return source, self._copy_turns(source.chat_uri, fork.get("turnId"))
 
     async def _create_session(self, connection: Connection, params: Mapping[str, Any]) -> None:
+        await self._new_session(connection, params)
+
+    async def _new_session(
+        self,
+        connection: Connection | None,
+        params: Mapping[str, Any],
+        *,
+        origin: Mapping[str, Any] | None = None,
+        title: str | None = None,
+    ) -> asyncio.Task[None]:
+        """`createSession`, and the host creating one of its own.
+
+        `connection` is `None` only for an automation run: the host is the
+        creator, so there is no peer to ask `Policy` about, no `activeClient`
+        to check, and nothing to fork. Who may make the host do this was
+        decided when the automation was created -- `Policy.may_dispatch` on
+        `automation/createRequested`. The working-directory jail still applies.
+
+        Returns the bring-up task, which a caller that must wait for the
+        session to be `ready` awaits.
+        """
         channel = params.get("channel")
         if not isinstance(channel, str):
             raise errors.invalid_params("channel is required")
@@ -4392,15 +4489,17 @@ class Host:
         # rather than against the session map, which knows only some of them.
         if channel in self._sessions or self.sequencer.has_channel(channel):
             raise errors.already_exists(channel)
-        verdict = self.policy.may_create_session(connection.info, params)
-        if not verdict:
-            self._audit("session.refused", connection, channel=channel, allowed=False)
-            raise errors.AhpError(
-                -32009, policy_mod.reason_or(verdict, "Not permitted to create a session")
-            )
+        if connection is not None:
+            verdict = self.policy.may_create_session(connection.info, params)
+            if not verdict:
+                self._audit("session.refused", connection, channel=channel, allowed=False)
+                raise errors.AhpError(
+                    -32009, policy_mod.reason_or(verdict, "Not permitted to create a session")
+                )
         active_client = params.get("activeClient")
         if active_client is not None and (
-            not isinstance(active_client, Mapping)
+            connection is None
+            or not isinstance(active_client, Mapping)
             or not js.strict_equal(active_client.get("clientId"), connection.client_id)
         ):
             # "The `clientId` MUST match the `clientId` the creating client
@@ -4433,7 +4532,7 @@ class Host:
             # session list, which groups by provider, would show rows under an
             # agent that does not exist.
             raise errors.provider_not_found(str(provider_id))
-        forked = self._fork_source(connection, params)
+        forked = self._fork_source(connection, params) if connection is not None else None
         if forked is None:
             working_directories = self._admit_working_directories(connection, channel, params)
         else:
@@ -4477,7 +4576,7 @@ class Host:
             # "New Session".
             title=_published_title(self.sequencer.state_of(forked[0].uri))
             if forked is not None
-            else "New Session",
+            else title or _DEFAULT_SESSION_TITLE,
             created_at=created_at,
         )
         session.chat_uris.add(chat_uri)
@@ -4505,6 +4604,11 @@ class Host:
             session_state["workingDirectories"] = working_directories
         if session_config is not None:
             session_state["config"] = session_config
+        if origin is not None:
+            # `SessionMetadata.origin`: "Durable provenance ... when an
+            # automation run created this session". Immutable, so seeded here
+            # and never moved by an action.
+            session_state["origin"] = dict(origin)
         await self.sequencer.register_channel(channel, session_state, "session")
         # Before the response goes out, so a policy that refuses unowned
         # channels never has a window in which the peer's own session is
@@ -4551,7 +4655,7 @@ class Host:
         task = asyncio.create_task(self._bring_up(session, params, working_directories, forked))
         self._background.add(task)
         task.add_done_callback(self._background.discard)
-        return
+        return task
 
     async def _bring_up(
         self,
@@ -4882,6 +4986,9 @@ class Host:
         if not self.policy.may_dispatch(connection.info, channel, action):
             return "rejected by policy"
 
+        if action_type.startswith(("automation/", "automationRun/")):
+            return self._validate_automation_action(channel, action)
+
         # Shape before meaning: a tool-call action missing a REQUIRED field is
         # sequenced and fanned out, then applied by no reducer -- while the host
         # resolves the parked request by `toolCallId` and runs the tool anyway.
@@ -4996,6 +5103,11 @@ class Host:
     ) -> None:
         """Side effects a client action triggers on the agent."""
         action_type = action.get("type")
+        if isinstance(action_type, str) and action_type.startswith(
+            ("automation/", "automationRun/")
+        ):
+            await self._react_to_automation(channel, action)
+            return
         if action_type == "session/customizationToggled":
             await self._react_to_toggle(channel, action)
             return
@@ -5815,10 +5927,562 @@ class Host:
 
     # ─── observability ───────────────────────────────────────────────────
 
+    # ─── automations ─────────────────────────────────────────────────────
+    #
+    # The catalogue channel, its client actions and commands, running a run,
+    # and the scheduler. What is valid and when a schedule is due live in
+    # `core/automations.py`; everything here needs the host.
+
+    def _require_automations(self) -> AutomationStore:
+        if self.automations is None:
+            # Invariant 14: a declined feature names its reason. The spec's own
+            # signal is the absent `automations` capability; this is for a
+            # client that asks anyway.
+            raise errors.AhpError(-32009, "this host does not run automations")
+        return self.automations
+
+    async def _ensure_automations(self) -> None:
+        """Load the catalogue and start the scheduler, once.
+
+        From `_ensure_root`, so both `restore()` and the first connection bring
+        it up -- and a node whose embedder calls `restore()` at startup runs
+        its schedules before anyone connects, which is the point of a
+        schedule.
+        """
+        if self.automations is None or self._automations_ready:
+            return
+        self._automations_ready = True
+        entries: list[dict[str, Any]] = []
+        for record in await self.automations.load_all():
+            if record.resource in self._automations:
+                continue
+            self._automations[record.resource] = record
+            repaired = False
+            for run in record.runs:
+                lifecycle = run.get("lifecycle")
+                status = lifecycle.get("status") if isinstance(lifecycle, Mapping) else None
+                if status not in TERMINAL_STATUSES:
+                    # Nothing is executing it any more: the process that was is
+                    # gone. Left `running`, it would read as in progress forever.
+                    run["lifecycle"] = self._failed_lifecycle(
+                        run, "the host stopped while this run was in progress"
+                    )
+                    repaired = True
+                await self.sequencer.register_channel(
+                    str(run.get("resource")), copy.deepcopy(run), "automationRun"
+                )
+            if repaired:
+                await self.automations.save(record)
+            entries.append(self._automation_entry(record))
+        await self.sequencer.register_channel(AUTOMATIONS_URI, {"entries": entries}, "automation")
+        self._scheduler = asyncio.create_task(self._schedule_loop())
+
+    def _automation_entry(self, record: AutomationRecord) -> dict[str, Any]:
+        """`AutomationEntry`: the definition plus what the host knows about it."""
+        shown = self.automation_history * (1 + self._run_pages.get(record.resource, 0))
+        runs: list[dict[str, Any]] = []
+        terminal = 0
+        for run in record.runs:
+            lifecycle = run.get("lifecycle")
+            status = lifecycle.get("status") if isinstance(lifecycle, Mapping) else None
+            if status in TERMINAL_STATUSES:
+                # "Active runs are not counted toward the limit."
+                terminal += 1
+                if terminal > shown:
+                    continue
+            runs.append(self._run_summary(run))
+        entry: dict[str, Any] = {
+            "resource": record.resource,
+            "definition": copy.deepcopy(record.definition),
+            "runs": runs,
+            "operations": ["update", "remove", "run"],
+            "createdAt": record.created_at,
+            "modifiedAt": record.modified_at,
+        }
+        upcoming = next_run_at(record)
+        if upcoming is not None:
+            entry["nextRunAt"] = iso(upcoming)
+        if terminal > shown:
+            entry["runsNextCursor"] = str(shown)
+        return entry
+
+    @staticmethod
+    def _run_summary(run: Mapping[str, Any]) -> dict[str, Any]:
+        sessions = run.get("sessions")
+        summary: dict[str, Any] = {
+            "resource": run.get("resource"),
+            "automation": run.get("automation"),
+            "origin": copy.deepcopy(run.get("origin")),
+            "lifecycle": copy.deepcopy(run.get("lifecycle")),
+            "sessionCount": len(sessions) if isinstance(sessions, list) else 0,
+        }
+        if isinstance(run.get("primarySession"), str):
+            summary["primarySession"] = run["primarySession"]
+        return summary
+
+    async def _publish_automation(self, record: AutomationRecord) -> None:
+        # Only while it is still catalogued: a run finishing after its
+        # automation was removed must not put the entry back.
+        if self._automations.get(record.resource) is record:
+            await self.sequencer.publish(
+                AUTOMATIONS_URI,
+                {"type": "automation/set", "automation": self._automation_entry(record)},
+            )
+
+    async def _save_automation(self, record: AutomationRecord) -> None:
+        if self.automations is not None and self._automations.get(record.resource) is record:
+            await self.automations.save(record)
+
+    def _validate_automation_action(self, channel: str, action: Mapping[str, Any]) -> str | None:
+        """Reject what the reducers accept and the host cannot honour.
+
+        Every automation request is checked against the channel it names as
+        well as its payload. `automation/removed` is client-dispatchable and
+        its reducer drops any entry it matches, so the gate on it is the only
+        thing between a peer and the catalogue.
+        """
+        action_type = action.get("type")
+        if action_type == "automationRun/cancelRequested":
+            if self.sequencer.reducer_of(channel) != "automationRun":
+                return "automationRun/cancelRequested belongs on an automation-run channel"
+            state = self.sequencer.state_of(channel)
+            lifecycle = state.get("lifecycle") if isinstance(state, Mapping) else None
+            if not isinstance(lifecycle, Mapping) or lifecycle.get("status") in TERMINAL_STATUSES:
+                # "The host revalidates that the run is non-terminal."
+                return "the run has already finished"
+            return None
+        if channel != AUTOMATIONS_URI or self.automations is None:
+            return f"{action_type} belongs on {AUTOMATIONS_URI}"
+        resource = action.get("resource")
+        if not isinstance(resource, str):
+            return f"{action_type} needs a resource"
+        record = self._automations.get(resource)
+        if action_type == "automation/createRequested":
+            if not resource.startswith(AUTOMATION_SCHEME):
+                return f"an automation resource must use the {AUTOMATION_SCHEME} scheme"
+            if record is not None:
+                return f"{resource} already exists"
+            return definition_rejection(action.get("definition"), self.providers)
+        if record is None:
+            # `automation/removed` of an unknown resource is specified as a
+            # no-op; rejected rather than sequenced, so it cannot remove a
+            # coincidentally matching entry some other way.
+            return f"no automation {resource}"
+        if action_type == "automation/updateRequested":
+            changes = action.get("changes")
+            if not isinstance(changes, Mapping):
+                return "automation/updateRequested needs changes"
+            return definition_rejection(apply_patch(record.definition, changes), self.providers)
+        if action_type == "automation/removed":
+            return None
+        return f"{action_type} is not an action this host accepts"
+
+    async def _react_to_automation(self, channel: str, action: Mapping[str, Any]) -> None:
+        action_type = action.get("type")
+        if action_type == "automationRun/cancelRequested":
+            await self._cancel_run(channel)
+            return
+        store = self.automations
+        resource = action.get("resource")
+        if store is None or not isinstance(resource, str):
+            return
+        now = datetime.now(UTC)
+        if action_type == "automation/createRequested":
+            definition = action.get("definition")
+            if resource in self._automations or not isinstance(definition, Mapping):
+                return
+            stamp = iso(now)
+            created = AutomationRecord(
+                resource=resource,
+                definition=copy.deepcopy(dict(definition)),
+                created_at=stamp,
+                modified_at=stamp,
+            )
+            self._automations[resource] = created
+            await store.save(created)
+            await self._publish_automation(created)
+        elif action_type == "automation/updateRequested":
+            record = self._automations.get(resource)
+            changes = action.get("changes")
+            if record is None or not isinstance(changes, Mapping):
+                return
+            patched = apply_patch(record.definition, changes)
+            # Revalidated: two updates can pass validation before either is
+            # applied, and "the later action in server order wins" only holds
+            # if each applies to the result of the one before.
+            if definition_rejection(patched, self.providers) is not None:
+                _log.warning("dropping an automation update that no longer applies to %s", resource)
+                return
+            schedule_moved = patched.get("triggers") != record.definition.get("triggers") or (
+                patched.get("enabled") is True and record.definition.get("enabled") is not True
+            )
+            record.definition = patched
+            record.modified_at = iso(now)
+            if schedule_moved:
+                # A new schedule, or one just switched back on, starts from
+                # now. Neither should catch up on occurrences it never had.
+                reset_cursors(record, now)
+            await store.save(record)
+            await self._publish_automation(record)
+        elif action_type == "automation/removed":
+            # The reducer has already dropped the entry. Runs in flight carry
+            # on -- their sessions are ordinary sessions -- but their channels
+            # go with the automation that owned them once they finish.
+            removed = self._automations.pop(resource, None)
+            self._run_pages.pop(resource, None)
+            if removed is not None:
+                await store.delete(resource)
+                for run in removed.runs:
+                    uri = str(run.get("resource"))
+                    if uri not in self._run_tasks:
+                        await self.sequencer.drop_channel(uri)
+        self._schedule_changed.set()
+
+    def _automation_named(self, params: Mapping[str, Any]) -> AutomationRecord:
+        self._require_automations()
+        resource = params.get("automation")
+        if not isinstance(resource, str):
+            raise errors.invalid_params("automation is required")
+        record = self._automations.get(resource)
+        if record is None:
+            raise errors.AhpError(-32008, f"No such automation: {resource}")
+        return record
+
+    async def _run_automation(
+        self, connection: Connection, params: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        record = self._automation_named(params)
+        request_id = params.get("requestId")
+        if not isinstance(request_id, str) or not request_id:
+            raise errors.invalid_params("requestId is required")
+        if not self.policy.may_see_channel(connection.info, AUTOMATIONS_URI):
+            raise errors.AhpError(-32009, f"Not permitted to run {record.resource}")
+        existing = record.requests.get(request_id)
+        if existing is not None:
+            # "Retrying with the same key and automation MUST return the
+            # original run URI rather than create another run."
+            return {"resource": existing}
+        self._audit("automation.run", connection, channel=record.resource)
+        run = await self._start_run(record, {"kind": "manual"}, request_id=request_id)
+        return {"resource": run}
+
+    async def _fetch_automation_runs(
+        self, connection: Connection, params: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        record = self._automation_named(params)
+        if not self.policy.may_see_channel(connection.info, AUTOMATIONS_URI):
+            raise errors.AhpError(-32009, f"Not permitted to observe {AUTOMATIONS_URI}")
+        cursor = params.get("cursor")
+        pages = self._run_pages.get(record.resource, 0)
+        if isinstance(cursor, str) and cursor.isascii() and cursor.isdecimal():
+            # The cursor is how many terminal runs the caller already has; the
+            # next page is one history-limit's worth past it. `max` so a stale
+            # cursor from another subscriber never shrinks what is shown.
+            pages = max(pages, int(cursor) // self.automation_history)
+        elif cursor is None:
+            # "Omit to request the first page not already included."
+            pages += 1
+        else:
+            raise errors.invalid_params("cursor is not one this host issued")
+        self._run_pages[record.resource] = pages
+        # "The response only acknowledges the request. The updated full state
+        # arrives through `automation/set`."
+        await self._publish_automation(record)
+        return {}
+
+    def _prune_runs(self, record: AutomationRecord) -> list[str]:
+        """Drop terminal runs past `_RETAINED_RUNS`, oldest first."""
+        kept: list[dict[str, Any]] = []
+        dropped: list[str] = []
+        terminal = 0
+        for run in record.runs:
+            lifecycle = run.get("lifecycle")
+            if isinstance(lifecycle, Mapping) and lifecycle.get("status") in TERMINAL_STATUSES:
+                terminal += 1
+                if terminal > _RETAINED_RUNS:
+                    dropped.append(str(run.get("resource")))
+                    continue
+            kept.append(run)
+        record.runs = kept
+        if dropped:
+            gone = set(dropped)
+            record.requests = {k: v for k, v in record.requests.items() if v not in gone}
+        return dropped
+
+    async def _start_run(
+        self,
+        record: AutomationRecord,
+        origin: Mapping[str, Any],
+        *,
+        request_id: str | None = None,
+    ) -> str:
+        """Create a run, persist it, and set it going. Returns its URI."""
+        run_uri = f"ahp-automation-run:/{uuid.uuid4()}"
+        run: dict[str, Any] = {
+            "resource": run_uri,
+            "automation": record.resource,
+            "origin": dict(origin),
+            "lifecycle": {"status": "pending", "createdAt": now_iso()},
+            "sessions": [],
+        }
+        record.runs.insert(0, run)
+        if request_id is not None:
+            record.requests[request_id] = run_uri
+        for dropped in self._prune_runs(record):
+            await self.sequencer.drop_channel(dropped)
+        await self.sequencer.register_channel(run_uri, copy.deepcopy(run), "automationRun")
+        # "The host persists the run before beginning session side effects."
+        await self._save_automation(record)
+        await self._publish_automation(record)
+        task = asyncio.create_task(self._execute_run(record, run_uri))
+        self._run_tasks[run_uri] = task
+        task.add_done_callback(lambda _: self._run_tasks.pop(run_uri, None))
+        return run_uri
+
+    async def _run_changed(
+        self, record: AutomationRecord, run_uri: str, action: dict[str, Any]
+    ) -> None:
+        """Publish one run action, and mirror it into the record and catalogue."""
+        await self.sequencer.publish(run_uri, action)
+        state = self.sequencer.state_of(run_uri)
+        run = record.run(run_uri)
+        if run is not None and isinstance(state, Mapping):
+            run.clear()
+            run.update(copy.deepcopy(dict(state)))
+        await self._save_automation(record)
+        await self._publish_automation(record)
+
+    @staticmethod
+    def _failed_lifecycle(run: Mapping[str, Any], message: str) -> dict[str, Any]:
+        previous = run.get("lifecycle")
+        previous = previous if isinstance(previous, Mapping) else {}
+        lifecycle: dict[str, Any] = {
+            "status": "failed",
+            "createdAt": previous.get("createdAt", now_iso()),
+            "completedAt": now_iso(),
+            "error": {"message": message},
+        }
+        if "startedAt" in previous:
+            lifecycle["startedAt"] = previous["startedAt"]
+        return lifecycle
+
+    async def _finish_run(
+        self, record: AutomationRecord, run_uri: str, status: str, error: str | None = None
+    ) -> None:
+        self._cancelled_runs.discard(run_uri)
+        state = self.sequencer.state_of(run_uri)
+        if not isinstance(state, Mapping):
+            return
+        if status == "failed":
+            lifecycle = self._failed_lifecycle(state, error or "the run failed")
+        else:
+            previous = state.get("lifecycle")
+            previous = previous if isinstance(previous, Mapping) else {}
+            lifecycle = {
+                "status": status,
+                "createdAt": previous.get("createdAt", now_iso()),
+                "completedAt": now_iso(),
+            }
+            if "startedAt" in previous:
+                lifecycle["startedAt"] = previous["startedAt"]
+        await self._run_changed(
+            record, run_uri, {"type": "automationRun/lifecycleChanged", "lifecycle": lifecycle}
+        )
+
+    async def _execute_run(self, record: AutomationRecord, run_uri: str) -> None:
+        """One run: a fresh session from the template, the saved message as its
+        first turn, and the run's lifecycle following that turn to its end.
+
+        A turn that stops for a tool confirmation leaves the run `running`:
+        "Linked `SessionState.status` and `SessionState.inputNeeded` remain
+        authoritative for whether user attention ... is required."
+        """
+        try:
+            definition = copy.deepcopy(record.definition)
+            template = definition.get("session")
+            template = template if isinstance(template, Mapping) else {}
+            provider_id = template.get("provider", self.provider.agent.provider)
+            if provider_id not in self.providers:
+                # "The host revalidates every selection when the run starts."
+                await self._finish_run(
+                    record, run_uri, "failed", f"no agent for provider {provider_id!r}"
+                )
+                return
+            params: dict[str, Any] = {
+                # Minted in the shape VS Code mints its own, `<provider>:/<uuid>`.
+                "channel": f"{provider_id}:/{uuid.uuid4()}",
+                "provider": provider_id,
+            }
+            for key in ("workingDirectories", "config"):
+                if key in template:
+                    params[key] = copy.deepcopy(template[key])
+            title = definition.get("title")
+            bring_up = await self._new_session(
+                None,
+                params,
+                origin={"kind": "automation", "automation": record.resource, "run": run_uri},
+                title=title if isinstance(title, str) and title else None,
+            )
+            session_uri = params["channel"]
+            await self._run_changed(
+                record, run_uri, {"type": "automationRun/sessionSet", "session": session_uri}
+            )
+            await self._run_changed(
+                record,
+                run_uri,
+                {"type": "automationRun/primarySessionChanged", "primarySession": session_uri},
+            )
+            await bring_up
+            session = self._sessions.get(session_uri)
+            state = self.sequencer.state_of(session_uri)
+            if (
+                session is None
+                or not isinstance(state, Mapping)
+                or state.get("lifecycle") != "ready"
+            ):
+                await self._finish_run(
+                    record, run_uri, "failed", "the run's session could not be created"
+                )
+                return
+            if run_uri in self._cancelled_runs:
+                await self._finish_run(record, run_uri, "cancelled")
+                return
+            created = self.sequencer.state_of(run_uri)
+            previous = created.get("lifecycle") if isinstance(created, Mapping) else None
+            await self._run_changed(
+                record,
+                run_uri,
+                {
+                    "type": "automationRun/lifecycleChanged",
+                    "lifecycle": {
+                        "status": "running",
+                        "createdAt": previous.get("createdAt", now_iso())
+                        if isinstance(previous, Mapping)
+                        else now_iso(),
+                        "startedAt": now_iso(),
+                    },
+                },
+            )
+            message = copy.deepcopy(definition.get("message"))
+            if not isinstance(message, dict):
+                await self._finish_run(record, run_uri, "failed", "the automation has no message")
+                return
+            for key in ("model", "agent"):
+                # The template's selections ride on the message, which is where
+                # a turn carries them.
+                if key in template and key not in message:
+                    message[key] = copy.deepcopy(template[key])
+            turn_id = str(uuid.uuid4())
+            started = {
+                "type": "chat/turnStarted",
+                "turnId": turn_id,
+                "startedAt": now_iso(),
+                "message": message,
+            }
+            await self.sequencer.publish(session.chat_uri, started)
+            await self._start_turn(session, session.chat_uri, started)
+            turn = session.turns.get(session.chat_uri)
+            if turn is not None:
+                await asyncio.wait({turn})
+            await self._settle_run(record, run_uri, session.chat_uri, turn_id)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            _log.exception("automation run %s failed", run_uri)
+            await self._finish_run(record, run_uri, "failed", f"{type(exc).__name__}: {exc}")
+
+    async def _settle_run(
+        self, record: AutomationRecord, run_uri: str, chat_uri: str, turn_id: str
+    ) -> None:
+        """The run ends as its turn did."""
+        state = self.sequencer.state_of(chat_uri)
+        turns = state.get("turns") if isinstance(state, Mapping) else None
+        ended = next(
+            (
+                turn
+                for turn in reversed(turns if isinstance(turns, list) else [])
+                if isinstance(turn, Mapping) and turn.get("id") == turn_id
+            ),
+            None,
+        )
+        outcome = ended.get("state") if ended is not None else None
+        if outcome == "complete":
+            await self._finish_run(record, run_uri, "completed")
+        elif outcome == "cancelled" or run_uri in self._cancelled_runs:
+            await self._finish_run(record, run_uri, "cancelled")
+        else:
+            await self._finish_run(record, run_uri, "failed", "the run's turn ended in an error")
+
+    async def _cancel_run(self, run_uri: str) -> None:
+        record = next((r for r in self._automations.values() if r.run(run_uri) is not None), None)
+        if record is None:
+            return
+        self._cancelled_runs.add(run_uri)
+        state = self.sequencer.state_of(run_uri)
+        primary = state.get("primarySession") if isinstance(state, Mapping) else None
+        session = self._sessions.get(primary) if isinstance(primary, str) else None
+        if session is not None and session.chat_uri in session.turns:
+            # The turn's end settles the run, as `cancelled`.
+            await self._cancel_turn(session, session.chat_uri, "automation run cancelled")
+            return
+        task = self._run_tasks.get(run_uri)
+        if task is not None and session is None:
+            # Still pending: nothing has started that needs stopping.
+            task.cancel()
+            await self._finish_run(record, run_uri, "cancelled")
+        # Otherwise the session is coming up; `_execute_run` sees the request
+        # before it starts the turn.
+
+    async def run_due_automations(self, now: datetime | None = None) -> int:
+        """Start every run a schedule asks for at `now`. Returns how many.
+
+        The scheduler calls this; it is public so an embedder with its own
+        clock (or a test) can drive schedules without waiting for one.
+        """
+        await self._ensure_automations()
+        now = now or datetime.now(UTC)
+        started = 0
+        for record in list(self._automations.values()):
+            occurrences, cursors = due_occurrences(record, now)
+            if not cursors:
+                continue
+            record.cursors.update(cursors)
+            if not occurrences:
+                # Skipped misfires still move `nextRunAt`.
+                await self._save_automation(record)
+                await self._publish_automation(record)
+            for occurrence in occurrences:
+                origin: dict[str, Any] = {
+                    "kind": "trigger",
+                    "triggerId": occurrence.trigger_id,
+                    "scheduledFor": iso(occurrence.scheduled_for),
+                }
+                if occurrence.catch_up:
+                    origin["catchUp"] = True
+                await self._start_run(record, origin)
+                started += 1
+        return started
+
+    async def _schedule_loop(self) -> None:
+        while True:
+            self._schedule_changed.clear()
+            try:
+                await self.run_due_automations()
+            except Exception:
+                _log.exception("automation scheduler tick failed")
+            delay = _SCHEDULER_TICK
+            now = datetime.now(UTC)
+            for record in self._automations.values():
+                upcoming = next_run_at(record)
+                if upcoming is not None:
+                    delay = min(delay, max(0.5, (upcoming - now).total_seconds()))
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(self._schedule_changed.wait(), delay)
+
     def _audit(
         self,
         kind: str,
-        connection: Connection,
+        connection: Connection | None,
         *,
         channel: str | None = None,
         allowed: bool = True,
@@ -5829,8 +6493,8 @@ class Host:
             self.audit,
             AuditEvent(
                 kind=kind,
-                client_id=connection.client_id or None,
-                peer=connection.peer,
+                client_id=(connection.client_id or None) if connection is not None else None,
+                peer=connection.peer if connection is not None else None,
                 channel=channel,
                 allowed=allowed,
                 reason=reason,
@@ -5867,6 +6531,16 @@ class Host:
     # ─── shutdown ────────────────────────────────────────────────────────
 
     async def aclose(self) -> None:
+        if self._scheduler is not None:
+            self._scheduler.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._scheduler
+        # Left non-terminal on purpose: the next start marks them failed, which
+        # is the truth -- the host stopped while they ran.
+        for task in list(self._run_tasks.values()):
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
         for session in self._sessions.values():
             for task in session.running():
                 task.cancel()

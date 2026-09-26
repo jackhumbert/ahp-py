@@ -153,7 +153,7 @@ detailed below · **all nine reducers**, gated on upstream's whole 272-fixture c
 provider with an offline echo implementation · WebSocket transport behind a
 transport abstraction.
 
-All 29 commands, and none of them a stub:
+All 32 commands, and none of them a stub:
 
 `initialize` · `ping` · `subscribe` · `unsubscribe` · `reconnect` ·
 `listSessions` (paginated) · `createSession` (with `fork`) · `disposeSession` ·
@@ -162,7 +162,8 @@ All 29 commands, and none of them a stub:
 `authenticate` · `createTerminal` · `disposeTerminal` · `createResourceWatch` ·
 `invokeChangesetOperation` · `resourceResolve` · `resourceRead` ·
 `resourceList` · `resourceRequest` · `resourceWrite` · `resourceMkdir` ·
-`resourceDelete` · `resourceMove` · `resourceCopy`
+`resourceDelete` · `resourceMove` · `resourceCopy` ·
+`listAutomationTriggerDefinitions` · `runAutomation` · `fetchAutomationRuns`
 
 A provider can also **stop and wait for a human** — elicitation, tool-call
 confirmation, and handing a tool to a client to execute — all on one primitive
@@ -230,6 +231,24 @@ that does not hold the claim; **`disposeTerminal` deliberately is not** — a
 session-claimed terminal is held by no client, so gating disposal on the claim
 would make every handed-over terminal unkillable — and it is gated where the
 other commands are, by `Policy`. **Resource watches** poll and coalesce.
+
+**Automations** are a saved prompt plus a session template, run by hand
+(`runAutomation`) or on a cron schedule the host evaluates in a named time
+zone. Pass `automations=FileAutomationStore(path)` to turn them on;
+`agent-host-node` does, under its state directory. Each run is an ordinary
+session whose `origin` points back at the run, with the saved message as its
+first turn, and the run's lifecycle follows that turn: `completed`, `failed`,
+or `cancelled` through `automationRun/cancelRequested`. A turn parked on a tool
+confirmation leaves the run `running` until someone answers. Missed occurrences
+follow `misfirePolicy` — one catch-up run, or none — so a host that was down
+overnight neither forgets the schedule nor fires it eight times. A run that was
+in flight when the host stopped comes back `failed`, not forever `running`.
+`runAutomation`'s `requestId` makes a retry return the same run. Definitions
+are validated before they are saved, with the refusal echoed as
+`rejectionReason`: an unparseable cron field, an unknown zone, a duplicate
+trigger id, a message whose origin is not `automation`, an unknown provider.
+**Event triggers are refused** — their types are host-defined, and this host
+defines none, so `listAutomationTriggerDefinitions` answers an empty list.
 
 **Changesets** are driven from a real git working tree: two changesets
 (`uncommitted` and `session`), per-file review flags, and operations wired to

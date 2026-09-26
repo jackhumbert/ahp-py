@@ -12,6 +12,26 @@ versions each release speaks.
 
 ### Added
 
+- **Automations** (protocol 0.9.0), behind `Host(automations=...)`:
+  the `ahp-automations://` catalogue and `ahp-automation-run:` channels,
+  `automation/createRequested` / `updateRequested` / `removed`,
+  `automationRun/cancelRequested`, and `runAutomation`,
+  `fetchAutomationRuns` and `listAutomationTriggerDefinitions` - which until
+  now were declined. Each run creates a session from the definition's
+  template, stamped with `SessionMetadata.origin`, and sends the saved message
+  as its first turn; the run completes, fails or is cancelled as that turn
+  does. Schedule triggers use AHP's five-field cron in a named time zone,
+  evaluated by a scheduler the host starts itself, with `misfirePolicy`
+  honoured across restarts. Event triggers are refused: this host defines no
+  event types. `FileAutomationStore` and `InMemoryAutomationStore` in
+  `agent_host_server.core`; `Host.run_due_automations(now)` drives schedules
+  by hand. Off without a store, which is what an absent `automations`
+  capability means.
+- `agent-host-node` keeps automations under `<state_dir>/automations`.
+- On Windows, a dependency on `tzdata`: `zoneinfo` needs a time-zone database
+  and Windows has none.
+- `SessionSummary.origin` in `listSessions` and `root/sessionAdded`, for a
+  session an automation created.
 - `OpensSessions.attach_directory(directory)`: a provider that lists
   sessions of its own accord (Claude Code sessions started elsewhere, on
   claude.ai) is given a `SessionDirectory` - `open`, `close` and `uris`,

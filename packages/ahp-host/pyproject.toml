@@ -27,7 +27,10 @@ classifiers = [
   "Topic :: Software Development :: Libraries",
   "Typing :: Typed",
 ]
-# Exactly one runtime dependency, and it is the other half of this project.
+# One runtime dependency, and it is the other half of this project -- plus,
+# on Windows only, the IANA time-zone database. Automation schedules are
+# evaluated in a named zone (`AutomationSchedule.timeZone`), `zoneinfo` reads
+# the operating system's database, and Windows does not have one.
 # `agent-host-protocol` holds the wire types, the seven reducers and the
 # vendored conformance corpora, so a host and a client share them rather than
 # forking 1,161 lines of reducer and detecting the drift afterwards.
@@ -35,7 +38,7 @@ classifiers = [
 # The pin is TIGHT on purpose: the spec lands breaking changes in MINOR bumps
 # and the protocol package's MINOR moves with the vendored tag, so a loose pin
 # would let a spec break arrive as a patch upgrade.
-dependencies = ["agent-host-protocol~=0.1.0"]
+dependencies = ["agent-host-protocol~=0.1.0", "tzdata; sys_platform == 'win32'"]
 
 [project.optional-dependencies]
 ws = ["websockets>=13"]

@@ -126,6 +126,8 @@ def assert_valid_state(channel_kind: str, state: Any) -> None:
         "terminal": "TerminalState",
         "changeset": "ChangesetState",
         "annotations": "AnnotationsState",
+        "automation": "AutomationState",
+        "automationRun": "AutomationRunState",
     }[channel_kind]
     problems = validate_against("state", definition, state)
     assert not problems, f"{channel_kind} state does not match {definition}:\n  " + "\n  ".join(

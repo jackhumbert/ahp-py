@@ -173,7 +173,7 @@ host code calls the reducers and reviews touch both sides of that line.
     echo — that asymmetry is specified.
 13. **No `Host` without a `Policy`.** No socket-binding convenience function.
 14. **A declined feature answers a specific error, never a silent stub and
-    never a blanket `MethodNotFound`.** All 29 protocol commands are dispatched
+    never a blanket `MethodNotFound`.** All 32 protocol commands are dispatched
     (`tests/docs/test_readme_is_true.py` parses the dispatcher out of
     `core/host.py` and checks the README's list both ways), so `-32601` is
     reserved for a method

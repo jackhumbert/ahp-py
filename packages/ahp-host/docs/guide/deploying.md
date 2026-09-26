@@ -51,6 +51,7 @@ pass by name.
 | Reading files | `resources=RootedFilesystemResourceProvider(path)` | Everything under `path`, to any admitted peer |
 | Writing files | the same, plus `writable=True` | Creating, overwriting, moving and **deleting** under `path` |
 | Running commands | `terminals=PtyTerminalBackend()` | Arbitrary command execution as the host user |
+| Automations | `automations=FileAutomationStore(path)` | Agent turns that start **with nobody watching**, on a schedule |
 
 Reading and writing are deliberately two separate acts. Reading discloses;
 writing destroys. Granting both with one gesture is how a review misses the
@@ -140,6 +141,41 @@ assert unbounded.max_read_bytes is None
 A read above the bound answers `PermissionDenied` (-32009); the file still
 resolves and still lists, because the bound is on the bytes rather than on the
 existence of the thing.
+
+### Automations run without a client
+
+An automation run is a session the host creates itself, on a schedule, with no
+connection behind it. So two things differ from a session a client creates:
+
+- **`Policy` is asked when the automation is saved, not when it runs.**
+  `may_dispatch` sees `automation/createRequested` and
+  `automation/updateRequested`; that is the moment to refuse a definition.
+  At run time there is no peer to ask about, so `may_create_session` and
+  `may_grant_working_directory` are not consulted. The filesystem jail still
+  applies to the template's working directories.
+- **Whatever the agent would ask a person, it asks nobody.** A tool that needs
+  confirmation parks the turn, and the run stays `running` until a client
+  answers. Choose the template's `config` (a permission mode, a tool set)
+  with that in mind.
+
+The scheduler starts when the host comes up — from `restore()`, or the first
+connection, whichever is first — so call `restore()` at startup if schedules
+must fire before anyone connects:
+
+```python
+from agent_host_server import Host, LoopbackSingleUserPolicy
+from agent_host_server.core import InMemoryAutomationStore
+from agent_host_server.provider import EchoProvider
+
+# `FileAutomationStore(path)` in production; an automation outlives the process
+# by definition, so there is no default store.
+scheduled = Host(EchoProvider(), LoopbackSingleUserPolicy(), automations=InMemoryAutomationStore())
+assert scheduled.automations is not None
+```
+
+On Windows, schedules need the `tzdata` package (installed with this one
+there): `zoneinfo` reads the operating system's time-zone database, and
+Windows does not ship one.
 
 ## The Policy is the part only you can write
 

@@ -35,6 +35,7 @@ from pathlib import Path
 from typing import Any
 
 from agent_host_server.core import Host, HostInfo, LoopbackSingleUserPolicy
+from agent_host_server.core.automations import FileAutomationStore
 from agent_host_server.core.resources import ResourceProvider, RootedFilesystemResourceProvider
 from agent_host_server.core.store import FileSessionStore
 from agent_host_server.node.config import ConfigError, NodeSettings, load
@@ -176,6 +177,9 @@ async def run(settings: NodeSettings, info: HostInfo | None = None) -> None:
         default_directory=settings.roots.default_directory(),
         store=FileSessionStore(state / "sessions"),
         sequence_file=state / "sequence",
+        # A node is always on and single-user, which is what a schedule needs:
+        # `restore()` below starts the scheduler before anyone connects.
+        automations=FileAutomationStore(state / "automations"),
     )
     restored = await host.restore()
     _log.info("restored %d session(s)", restored)
