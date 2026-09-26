@@ -199,6 +199,25 @@ is the concatenation. `config` is never advertised. The handshake extras
 `completionTriggerCharacters` and `terminalCommandPrefix` are advertised only
 when every node agrees on them (invariant 4).
 
+**The automation catalogue is merged too.** Each node hosts its own
+automations (AHP 0.9.0 `ahp-automations://`), and the broker subscribes to
+every node's at the handshake, next to root. The surface's catalogue is the
+union of their entries (first node wins a shared resource), and each node's
+`automation/set` / `automation/removed` is relayed as the same change to the
+union; a node that drops has its entries retracted. The `automations`
+capability is advertised when *any* connected node hosts them - unlike the
+fields above, nothing is promised that the fleet cannot keep, since a new
+automation only ever goes to a node that hosts them - with the options all of
+those nodes share. `automation/createRequested` routes like `createSession`:
+the node its template's working directories name, else one offering its
+provider, else the first hosting node in inventory order; a folder on a node
+without automations is refused out loud. Everything after - update, remove,
+`runAutomation` and `fetchAutomationRuns` (by their `automation` param), the
+run channels and `automationRun/cancelRequested` - follows the owner, learned
+from the node's catalogue. Schedules run on the node, so a machine that is
+off does not fire them; its `misfirePolicy` decides what happens when it
+comes back.
+
 **`listSessions`** fans out and merges newest-first. The cursor records each
 node's own cursor and offset, so it is stateless and exact across page
 boundaries, including when a node returns short pages.

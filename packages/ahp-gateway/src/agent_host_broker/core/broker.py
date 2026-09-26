@@ -10,8 +10,11 @@ the surface's own `clientId`. From then on it relays:
   `listSessions` fans out to every node and merges into one flat list.
 * **Actions** from the nodes are restamped onto one broker `serverSeq`
   (`agent_host_broker.core.sequence`), and every `fromSeq` translated to match.
-* **The root channel** is the one thing synthesized rather than relayed: it
-  is merged from every node's (`agent_host_broker.core.root`).
+* **The root channel** is synthesized rather than relayed: it is merged from
+  every node's (`agent_host_broker.core.root`). So is the **automation
+  catalogue**, `ahp-automations://`: the union of every node's entries, each
+  node's catalogue actions passed through. A new automation goes to the node
+  its folder names; everything after follows the automation's owner.
 * **Host-initiated requests** (a node reading a client-side resource, an
   elicitation) go back to the surface and their answer back to the node.
 
@@ -50,6 +53,7 @@ from agent_host_protocol import (
     TransportClosed,
     negotiate,
 )
+from agent_host_protocol.channels import AUTOMATIONS_URI
 from agent_host_protocol.errors import (
     internal_error,
     invalid_params,
@@ -115,7 +119,11 @@ that proxy - the embedder's guarantee to make, as with `agent_host_server`.
 _REFUSED: Final = -32009
 
 #: Params whose value is a channel some node owns, in routing precedence.
-_CHANNEL_KEYS: Final = ("channel", "resource", "session", "sessionResource", "chat")
+#: `automation` is an `ahp-automation:` URI, which is not a channel but is owned
+#: all the same: `runAutomation` and `fetchAutomationRuns` name one.
+_CHANNEL_KEYS: Final = ("channel", "resource", "session", "sessionResource", "chat", "automation")
+#: Channels every node has its own copy of, merged here rather than routed.
+_MERGED: Final = frozenset({ROOT_URI, AUTOMATIONS_URI})
 #: Params whose value may be a file URI naming its node.
 _FILE_KEYS: Final = ("uri", "root", "cwd", "workingDirectory", "channel", "resource")
 #: Asked before a session exists, often before its folder is chosen.
@@ -199,6 +207,8 @@ class _Node:
     path_root: str | None = None
     pump: asyncio.Task[None] | None = None
     subscribed: set[str] = field(default_factory=set)
+    #: The node's `AutomationState`, when it advertised `automations`.
+    automations: dict[str, Any] | None = None
 
 
 class _SurfaceConnection:
@@ -375,6 +385,9 @@ class _SurfaceConnection:
             # Asked before a folder is chosen: the default node answers, and
             # the client asks again once the folder names one.
             node_id = self._default_node(params.get("provider"))
+        if node_id is None and method == "listAutomationTriggerDefinitions":
+            # The same question for an automation's template.
+            node_id = self._default_node(params.get("provider"), automations=True)
         if node_id is None:
             # Nothing in the request names a node, and more than one could
             # answer it. Guessing would run the command somewhere the surface
@@ -405,15 +418,19 @@ class _SurfaceConnection:
             return {"uri": VIRTUAL_ROOT, "type": "directory"}
         raise AhpError(-32009, "the list of nodes is read-only")
 
-    def _default_node(self, provider: Any) -> str | None:
+    def _default_node(self, provider: Any, *, automations: bool = False) -> str | None:
         """The first connected node, in inventory order, offering `provider`.
 
         Where a request cannot say which node it is for - a new chat with no
         folder, or its settings asked for before one is picked - it goes here.
+        With `automations`, only a node that hosts them will do.
         """
         offering = set(self._nodes_offering(provider)) if isinstance(provider, str) else set()
         for node_id in self.records:
-            if node_id in self.nodes and (not offering or node_id in offering):
+            node = self.nodes.get(node_id)
+            if node is None or (automations and node.automations is None):
+                continue
+            if not offering or node_id in offering:
                 return node_id
         return None
 
@@ -439,17 +456,22 @@ class _SurfaceConnection:
         )
 
         snapshots: list[dict[str, Any]] = []
-        for uri in params.get("initialSubscriptions") or []:
-            if not isinstance(uri, str) or uri == ROOT_URI:
+        wanted = params.get("initialSubscriptions") or []
+        for uri in wanted:
+            if not isinstance(uri, str) or uri in _MERGED:
                 continue
             with contextlib.suppress(AhpError):
                 snapshot = await self._subscribe_channel(uri, after)
                 if snapshot is not None:
                     snapshots.append(snapshot)
-        # Root last and with no await after it: the snapshot, the subscription
-        # and the reply are one step, so no merged root action can be stamped
-        # between the `fromSeq` taken here and the reply that carries it.
-        if ROOT_URI in (params.get("initialSubscriptions") or []):
+        # The merged channels last and with no await after them: the snapshot,
+        # the subscription and the reply are one step, so no merged action can
+        # be stamped between the `fromSeq` taken here and the reply.
+        if AUTOMATIONS_URI in wanted:
+            catalogue = self._subscribe_automations()
+            if catalogue is not None:
+                snapshots.insert(0, catalogue)
+        if ROOT_URI in wanted:
             snapshots.insert(0, self._subscribe_root())
 
         result: dict[str, Any] = {
@@ -513,12 +535,16 @@ class _SurfaceConnection:
         wanted = [uri for uri in params.get("subscriptions") or [] if isinstance(uri, str)]
         snapshots: list[dict[str, Any]] = []
         for uri in dict.fromkeys(wanted):
-            if uri == ROOT_URI:
+            if uri in _MERGED:
                 continue
             with contextlib.suppress(AhpError):
                 snapshot = await self._subscribe_channel(uri, after)
                 if snapshot is not None:
                     snapshots.append(snapshot)
+        if AUTOMATIONS_URI in wanted:
+            catalogue = self._subscribe_automations()
+            if catalogue is not None:
+                snapshots.insert(0, catalogue)
         if ROOT_URI in wanted:
             snapshots.insert(0, self._subscribe_root())
         return {"type": "snapshot", "snapshots": snapshots}
@@ -593,18 +619,32 @@ class _SurfaceConnection:
         sequence = LinkSequence(self.clock, node_seq if isinstance(node_seq, int) else 0)
         root: dict[str, Any] = {}
         path_root = root_of(handshake.get("defaultDirectory"))
+        automations: dict[str, Any] | None = None
         for snapshot in handshake.get("snapshots") or []:
-            if isinstance(snapshot, Mapping) and snapshot.get("resource") == ROOT_URI:
-                state = qualify_file_uris(snapshot.get("state"), record.node_id, path_root)
+            if not isinstance(snapshot, Mapping):
+                continue
+            state = qualify_file_uris(snapshot.get("state"), record.node_id, path_root)
+            if snapshot.get("resource") == ROOT_URI:
                 root = state if isinstance(state, dict) else {}
+            elif (
+                snapshot.get("resource") == AUTOMATIONS_URI
+                and isinstance(handshake.get("automations"), Mapping)
+                and isinstance(state, dict)
+                and isinstance(state.get("entries"), list)
+            ):
+                automations = state
         self.owners.claim(record.node_id, learn_owned_channels(root))
+        # Each automation, and each run in its history, is this node's.
+        self.owners.claim(record.node_id, learn_owned_channels(automations))
         node_id = record.node_id
 
         async def answer(method: str, params: Mapping[str, Any]) -> Any:
             return await self._node_request(node_id, method, params)
 
         link.set_request_handler(answer)
-        return _Node(link=link, sequence=sequence, root=root, path_root=path_root)
+        return _Node(
+            link=link, sequence=sequence, root=root, path_root=path_root, automations=automations
+        )
 
     def _agreed_handshake_fields(self) -> dict[str, Any]:
         """Handshake extras the whole fleet agrees on, and only those.
@@ -621,6 +661,17 @@ class _SurfaceConnection:
             values = [handshake.get(key) for handshake in handshakes]
             if values[0] is not None and all(value == values[0] for value in values):
                 agreed[key] = values[0]
+        capabilities = [
+            handshake["automations"]
+            for node, handshake in zip(self.nodes.values(), handshakes, strict=True)
+            if node.automations is not None and isinstance(handshake.get("automations"), Mapping)
+        ]
+        if capabilities:
+            # Unlike the fields above, advertised when ANY node hosts
+            # automations: the catalogue holds only theirs, and a new one is
+            # only ever sent to one of them, so nothing is promised that the
+            # fleet cannot keep. The options are those all of them offer.
+            agreed["automations"] = _common_capabilities(capabilities)
         if len(self.nodes) == 1:
             # One node: its root, directly.
             ((node_id, node),) = self.nodes.items()
@@ -636,6 +687,31 @@ class _SurfaceConnection:
         self.subscriptions.add(ROOT_URI)
         state = {**self.root, "_meta": {NODES_META_KEY: self._nodes_meta()}}
         return {"resource": ROOT_URI, "state": state, "fromSeq": self.clock.current}
+
+    def _merged_automations(self) -> dict[str, Any] | None:
+        """Every node's catalogue as one, or None when no node has one."""
+        catalogues = [n.automations for n in self.nodes.values() if n.automations is not None]
+        if not catalogues:
+            return None
+        entries: list[Any] = []
+        seen: set[Any] = set()
+        for catalogue in catalogues:
+            for entry in catalogue.get("entries") or []:
+                resource = entry.get("resource") if isinstance(entry, Mapping) else None
+                # Resources are client-chosen: two nodes could hold the same
+                # one. First node wins, as channel ownership does.
+                if resource in seen:
+                    continue
+                seen.add(resource)
+                entries.append(entry)
+        return {"entries": entries}
+
+    def _subscribe_automations(self) -> dict[str, Any] | None:
+        state = self._merged_automations()
+        if state is None:
+            return None
+        self.subscriptions.add(AUTOMATIONS_URI)
+        return {"resource": AUTOMATIONS_URI, "state": state, "fromSeq": self.clock.current}
 
     def _nodes_meta(self) -> list[dict[str, Any]]:
         """The machines behind this connection, for `RootState._meta`.
@@ -683,6 +759,11 @@ class _SurfaceConnection:
             raise invalid_params("channel is required")
         if channel == ROOT_URI:
             return {"snapshot": self._subscribe_root()}
+        if channel == AUTOMATIONS_URI:
+            catalogue = self._subscribe_automations()
+            # No node hosts automations: the answer a host gives for a channel
+            # it does not have.
+            return {"snapshot": catalogue} if catalogue is not None else {}
         snapshot = await self._subscribe_channel(channel, after)
         return {"snapshot": snapshot} if snapshot is not None else {}
 
@@ -898,7 +979,7 @@ class _SurfaceConnection:
     def _route(self, params: Mapping[str, Any]) -> str | None:
         for key in _CHANNEL_KEYS:
             value = params.get(key)
-            if isinstance(value, str) and value != ROOT_URI:
+            if isinstance(value, str) and value not in _MERGED:
                 owner = self.owners.owner_of(value)
                 if owner is None:
                     continue
@@ -959,7 +1040,12 @@ class _SurfaceConnection:
                 # The merged root has no config to change (see core.root), and
                 # no single node owns the others.
                 return
-            node_id = self._route(params)
+            if channel == AUTOMATIONS_URI:
+                node_id = self._node_for_automation_action(params)
+                if node_id is None:
+                    return
+            else:
+                node_id = self._route(params)
             if node_id is None:
                 _log.debug("dispatchAction for an unroutable channel: %r", channel)
                 return
@@ -977,6 +1063,41 @@ class _SurfaceConnection:
                 return
             target.link.notify("dispatchAction", outgoing)
         # Unknown notifications are ignored, per the additive-change guarantee.
+
+    def _node_for_automation_action(self, dispatch: Mapping[str, Any]) -> str | None:
+        """Where a catalogue action goes, or None having refused it out loud.
+
+        A new automation goes to the node its template's folder names, else
+        the one offering its provider, else the first that hosts automations -
+        exactly how a new session picks its machine, since each run is one.
+        Anything else goes to the automation's owner.
+        """
+        action = dispatch.get("action")
+        action = action if isinstance(action, Mapping) else {}
+        hosting = [node_id for node_id, node in self.nodes.items() if node.automations is not None]
+        if action.get("type") == "automation/createRequested":
+            definition = action.get("definition")
+            session = definition.get("session") if isinstance(definition, Mapping) else None
+            template = session if isinstance(session, Mapping) else {}
+            try:
+                node_id = self._node_named_by_files(template)
+            except AhpError as exc:
+                self._reject(dispatch, exc.message)
+                return None
+            if node_id is None:
+                node_id = self._default_node(template.get("provider"), automations=True)
+            if node_id is None or node_id not in hosting:
+                self._reject(dispatch, "no machine that runs automations can take this one")
+                return None
+            return node_id
+        resource = action.get("resource")
+        owner = self.owners.owner_of(resource) if isinstance(resource, str) else None
+        if owner is None and len(hosting) == 1:
+            owner = hosting[0]
+        if owner is None or owner not in self.nodes:
+            self._reject(dispatch, f"no connected machine has {resource}")
+            return None
+        return owner
 
     # ─── node -> surface ─────────────────────────────────────────────────
 
@@ -1008,6 +1129,8 @@ class _SurfaceConnection:
                 self._apply_root(node, envelope.get("action"))
                 return
             self.owners.claim(node_id, learn_owned_channels(envelope))
+            if channel == AUTOMATIONS_URI:
+                self._apply_automations(node, envelope)
             forwarded = {
                 "jsonrpc": "2.0",
                 "method": "action",
@@ -1033,6 +1156,19 @@ class _SurfaceConnection:
         node.root = reduced if isinstance(reduced, dict) else node.root
         self.owners.claim(node.link.node_id, learn_owned_channels(node.root))
         self._republish_root()
+
+    def _apply_automations(self, node: _Node, envelope: Mapping[str, Any]) -> None:
+        """Keep the node's catalogue current. The action itself is relayed as
+        it came: one node's `automation/set` or `automation/removed` is the
+        same change to the union, and an echo must reach its dispatcher."""
+        action = envelope.get("action")
+        if node.automations is None or not isinstance(action, Mapping):
+            return
+        if "rejectionReason" in envelope:
+            return
+        reduced = REDUCERS["automation"](node.automations, action)
+        if isinstance(reduced, dict):
+            node.automations = reduced
 
     def _reject(self, dispatch: Mapping[str, Any], reason: str) -> None:
         """Echo a surface's own dispatch back to it, refused.
@@ -1087,13 +1223,44 @@ class _SurfaceConnection:
 
     def _drop_node(self, node_id: str) -> None:
         _log.warning("node %s link closed", node_id)
-        self.nodes.pop(node_id, None)
+        node = self.nodes.pop(node_id, None)
+        if node is not None and node.automations is not None:
+            self._retract_automations(node.automations)
         # Ownership is kept on purpose: a request for one of this node's
         # channels must be refused as "not connected", not rerouted to
         # whichever node the fallback rules would pick.
         self._republish_root()
         if not self.closing and node_id in self.records:
             self._spawn(self._redial(node_id))
+
+    def _retract_automations(self, catalogue: Mapping[str, Any]) -> None:
+        """Take a departed node's automations out of the surface's catalogue.
+
+        The node's copy is what went, so `automation/removed` says exactly
+        that; they come back with the node, when the surface resyncs.
+        """
+        if AUTOMATIONS_URI not in self.subscriptions:
+            return
+        remaining = {
+            entry.get("resource")
+            for entry in (self._merged_automations() or {}).get("entries") or []
+            if isinstance(entry, Mapping)
+        }
+        for entry in catalogue.get("entries") or []:
+            resource = entry.get("resource") if isinstance(entry, Mapping) else None
+            if not isinstance(resource, str) or resource in remaining:
+                continue
+            self._send(
+                {
+                    "jsonrpc": "2.0",
+                    "method": "action",
+                    "params": {
+                        "channel": AUTOMATIONS_URI,
+                        "action": {"type": "automation/removed", "resource": resource},
+                        "serverSeq": self.clock.tick(),
+                    },
+                }
+            )
 
     # ─── node -> surface requests ────────────────────────────────────────
 
@@ -1141,3 +1308,31 @@ class _SurfaceConnection:
             )
         else:
             future.set_result(message.get("result"))
+
+
+def _common_capabilities(capabilities: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    """`AutomationCapabilities` every hosting node offers.
+
+    A presence capability (`create`, `schedules`, `runCancellation`) only if
+    all have it; the history limit is the smallest; a schedule interval floor
+    the largest - the promise every node can keep.
+    """
+    merged: dict[str, Any] = {}
+    for key in ("create", "runCancellation"):
+        if all(isinstance(each.get(key), Mapping) for each in capabilities):
+            merged[key] = {}
+    if all(isinstance(each.get("schedules"), Mapping) for each in capabilities):
+        floors: list[float] = [
+            each["schedules"].get("minIntervalMinutes")
+            for each in capabilities
+            if isinstance(each["schedules"].get("minIntervalMinutes"), int | float)
+        ]
+        merged["schedules"] = {"minIntervalMinutes": max(floors)} if floors else {}
+    limits: list[float] = [
+        each["runHistoryLimit"]
+        for each in capabilities
+        if isinstance(each.get("runHistoryLimit"), int | float)
+    ]
+    if limits:
+        merged["runHistoryLimit"] = min(limits)
+    return merged

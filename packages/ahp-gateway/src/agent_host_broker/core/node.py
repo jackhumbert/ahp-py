@@ -37,6 +37,7 @@ from agent_host_client.client.events import (
     SessionSummaryChanged,
 )
 from agent_host_protocol import ROOT_URI, AhpError, Transport
+from agent_host_protocol.channels import AUTOMATIONS_URI
 
 from agent_host_broker.registry import NodeRecord, Principal
 
@@ -157,8 +158,10 @@ class AhpNodeLink:
                 protocol_versions=[protocol_version],
                 # The broker always holds each node's root: it is where the
                 # fleet's agent list comes from, whether or not the surface
-                # has subscribed to the merged root yet.
-                initial_subscriptions=[ROOT_URI],
+                # has subscribed to the merged root yet. Likewise its
+                # automation catalogue; a node with none answers no snapshot
+                # for it, which is how a host says it has no such channel.
+                initial_subscriptions=[ROOT_URI, AUTOMATIONS_URI],
                 client_info=client_info,
             )
         except AhpClientError as exc:

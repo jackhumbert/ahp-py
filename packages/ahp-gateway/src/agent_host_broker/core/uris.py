@@ -41,6 +41,7 @@ from typing import Any, Final
 from urllib.parse import quote, unquote
 
 from agent_host_protocol import ROOT_URI
+from agent_host_protocol.channels import AUTOMATIONS_URI
 
 __all__ = [
     "SCHEME",
@@ -204,7 +205,11 @@ def learn_owned_channels(value: Any) -> set[str]:
     """
     found: set[str] = set()
     _walk(value, found)
+    # The two singletons every node has its own copy of. Claimed, the first
+    # node to mention one would own it, and every request for the merged
+    # channel would go there.
     found.discard(ROOT_URI)
+    found.discard(AUTOMATIONS_URI)
     return {uri for uri in found if not uri.startswith((_FILE_PREFIX, _PREFIX))}
 
 
