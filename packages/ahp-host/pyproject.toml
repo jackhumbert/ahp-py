@@ -1,0 +1,140 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "agent-host-server"
+description = "A host/server implementation of the Agent Host Protocol (AHP) for Python."
+# Single-sourced from the package, so the two cannot drift. There is no second
+# place to forget.
+dynamic = ["version"]
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.11"
+authors = [{ name = "agent-host-server contributors" }]
+keywords = ["ahp", "agent-host-protocol", "agent", "protocol", "json-rpc", "websocket"]
+# No license classifier: `license = "MIT"` above is the SPDX expression
+# (PEP 639), and the classifier route is deprecated for saying the same
+# thing a second way.
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Framework :: AsyncIO",
+  "Intended Audience :: Developers",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+  "Topic :: Software Development :: Libraries",
+  "Typing :: Typed",
+]
+# One runtime dependency, and it is the other half of this project -- plus,
+# on Windows only, the IANA time-zone database. Automation schedules are
+# evaluated in a named zone (`AutomationSchedule.timeZone`), `zoneinfo` reads
+# the operating system's database, and Windows does not have one.
+# `agent-host-protocol` holds the wire types, the seven reducers and the
+# vendored conformance corpora, so a host and a client share them rather than
+# forking 1,161 lines of reducer and detecting the drift afterwards.
+#
+# The pin is TIGHT on purpose: the spec lands breaking changes in MINOR bumps
+# and the protocol package's MINOR moves with the vendored tag, so a loose pin
+# would let a spec break arrive as a patch upgrade.
+dependencies = ["agent-host-protocol~=0.1.0", "tzdata; sys_platform == 'win32'"]
+
+[project.optional-dependencies]
+ws = ["websockets>=13"]
+dev = [
+  "pytest>=8",
+  "anyio>=4",
+  "websockets>=13",
+  "mypy>=1.11",
+  "ruff>=0.6",
+  "import-linter>=2",
+  # The upstream JSON Schemas -- which now arrive with the protocol package --
+  # are the only mechanical check that what we PUT ON THE WIRE matches what the
+  # spec declares. Dev-only: `jsonschema` is not a runtime dependency.
+  "jsonschema>=4",
+]
+
+[project.scripts]
+agent-host-server = "agent_host_server.__main__:main"
+agent-host-node = "agent_host_server.node.runner:main"
+
+[project.entry-points."agent_host_server.agents"]
+echo = "agent_host_server.node.builtin:echo"
+
+[project.urls]
+Homepage = "https://github.com/jackhumbert/agent-host-server-py"
+Repository = "https://github.com/jackhumbert/agent-host-server-py"
+Issues = "https://github.com/jackhumbert/agent-host-server-py/issues"
+Changelog = "https://github.com/jackhumbert/agent-host-server-py/blob/main/CHANGELOG.md"
+Security = "https://github.com/jackhumbert/agent-host-server-py/blob/main/SECURITY.md"
+
+[tool.hatch.version]
+path = "src/agent_host_server/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/agent_host_server"]
+# `.github/` inside the demo tree is DATA, not repo config, and build backends
+# skip dot-directories by default -- so the demo shipped with every
+# customization pointing at a file that was not in the wheel.
+artifacts = ["src/agent_host_server/provider/demo_tree/**"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q --strict-markers"
+markers = ["interop: requires Node and the published TypeScript client"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+files = ["src", "tests", "scripts"]
+# The vendored corpora are data, not code.
+exclude = "^vendor/"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N", "UP", "B", "A", "C4", "PT", "RET", "SIM", "TID", "RUF"]
+ignore = [
+  # The protocol's own field names are camelCase; mirroring them is correct.
+  "N815",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# TransportClosed signals end-of-stream, not a fault; the Error suffix would mislead.
+"src/agent_host_server/transport/base.py" = ["N818"]
+"tests/**" = ["RUF059"]
+
+[tool.importlinter]
+root_package = "agent_host_server"
+include_external_packages = true
+
+# The contract that used to keep `types` and `reducers` free of the runtime did
+# its job: they are a separate distribution now, and the boundary is enforced by
+# packaging rather than by a linter -- you cannot import upwards across a wheel.
+# What remains is the runtime's own layering.
+[[tool.importlinter.contracts]]
+name = "Layered: the host runtime is layered"
+type = "layers"
+# Parenthesised layers are optional, so the contract holds while a layer is
+# still being built out. `core` takes a transport ABSTRACTION (`Host.serve`
+# accepts one) and `ws` supplies a concrete implementation; the abstraction now
+# arrives from the dependency, so the core still never imports a concrete one.
+layers = [
+  "(agent_host_server.node)",
+  "(agent_host_server.ws)",
+  "agent_host_server.core",
+  "agent_host_server.provider",
+]
+
+# The dependency is the floor and must never reach back up. A violation here
+# means something protocol-shaped was written on the wrong side of the split and
+# should move down rather than being exempted.
+[[tool.importlinter.contracts]]
+name = "the protocol package does not import the host"
+type = "forbidden"
+source_modules = ["agent_host_protocol"]
+forbidden_modules = ["agent_host_server"]

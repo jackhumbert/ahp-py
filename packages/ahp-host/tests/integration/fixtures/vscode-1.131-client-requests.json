@@ -1,0 +1,438 @@
+{
+  "capturedFrom": "Visual Studio Code 1.131.0 (stable), macOS",
+  "capturedOn": "2026-08-01",
+  "against": "agent-host-server demo host, EchoProvider, ws://127.0.0.1:4321",
+  "note": "One representative request per (method, action type), in first-seen order. Home paths rewritten to /home/user and long strings truncated. Regenerate by running the demo host with --wire-log and connecting VS Code.",
+  "requests": [
+    {
+      "method": "reconnect",
+      "params": {
+        "clientId": "66a61b49-7068-4998-9225-91d13ea6fcd3",
+        "lastSeenServerSeq": 38,
+        "subscriptions": [
+          "ahp-root://",
+          "echo:/88c9e07f-3134-441b-b23f-a4c510227a57",
+          "echo:/88c9e07f-3134-441b-b23f-a4c510227a57/annotations"
+        ]
+      },
+      "id": 66
+    },
+    {
+      "method": "initialize",
+      "params": {
+        "channel": "ahp-root://",
+        "protocolVersions": [
+          "0.7.0"
+        ],
+        "clientId": "0a78fdaa-f198-495d-a5dc-16a73546cf40",
+        "clientInfo": {
+          "name": "vscode-agents-window",
+          "title": "VS Code Agents Window"
+        },
+        "initialSubscriptions": [
+          "ahp-root://"
+        ]
+      },
+      "id": 1
+    },
+    {
+      "method": "dispatchAction",
+      "params": {
+        "channel": "ahp-root://",
+        "clientSeq": 0,
+        "action": {
+          "type": "root/configChanged",
+          "config": {
+            "telemetryLevel": "all"
+          }
+        }
+      }
+    },
+    {
+      "method": "createResourceWatch",
+      "params": {
+        "channel": "ahp-root://",
+        "uri": "file:///.vscode/tasks.json",
+        "recursive": false
+      },
+      "id": 2
+    },
+    {
+      "method": "listSessions",
+      "params": {
+        "channel": "ahp-root://"
+      },
+      "id": 11
+    },
+    {
+      "method": "ping",
+      "params": {
+        "channel": "ahp-root://"
+      },
+      "id": 12
+    },
+    {
+      "method": "resolveSessionConfig",
+      "params": {
+        "channel": "ahp-root://",
+        "provider": "echo",
+        "workingDirectory": "file:///",
+        "config": {
+          "autoApprove": "default",
+          "mode": "interactive"
+        }
+      },
+      "id": 13
+    },
+    {
+      "method": "createSession",
+      "params": {
+        "channel": "echo:/af2d658f-61c0-4279-a549-ffb2d89517f2",
+        "provider": "echo",
+        "workingDirectories": [
+          "file:///"
+        ],
+        "config": {
+          "autoApprove": "default",
+          "mode": "interactive"
+        },
+        "activeClient": {
+          "clientId": "0a78fdaa-f198-495d-a5dc-16a73546cf40",
+          "tools": [
+            {
+              "name": "usages",
+              "title": "List Code Usages",
+              "description": "Find all usages (references, definitions, and implementations) of a code symbol across the workspace. This tool locates where a symbol is referenced, defined, or implemented.\n\nInput:\n- \"symbol\": The e\u2026",
+              "inputSchema": {
+                "type": "object",
+                "properties": {
+                  "symbol": {
+                    "type": "string",
+                    "description": "The exact name of the symbol (function, class, method, variable, type, etc.) to find usages of."
+                  },
+                  "uri": {
+                    "type": "string",
+                    "description": "A full URI of a file where the symbol appears (e.g. \"file:///path/to/file.ts\"). Provide either \"uri\" or \"filePath\"."
+                  },
+                  "filePath": {
+                    "type": "string",
+                    "description": "A workspace-relative file path where the symbol appears (e.g. \"src/utils/helpers.ts\"). Provide either \"uri\" or \"filePath\"."
+                  },
+                  "lineContent": {
+                    "type": "string",
+                    "description": "A substring of the line of code where the symbol appears. Used to locate the exact position. Must be actual text from the file."
+                  }
+                },
+                "required": [
+                  "symbol",
+                  "lineContent"
+                ]
+              }
+            },
+            {
+              "name": "rename",
+              "title": "Rename Symbol",
+              "description": "Rename a code symbol across the workspace using the language server's rename functionality. This performs a precise, semantics-aware rename that updates all references.\n\nInput:\n- \"symbol\": The exact c\u2026",
+              "inputSchema": {
+                "type": "object",
+                "properties": {
+                  "symbol": {
+                    "type": "string",
+                    "description": "The exact current name of the symbol to rename."
+                  },
+                  "newName": {
+                    "type": "string",
+                    "description": "The new name for the symbol."
+                  },
+                  "uri": {
+                    "type": "string",
+                    "description": "A full URI of a file where the symbol appears (e.g. \"file:///path/to/file.ts\"). Provide either \"uri\" or \"filePath\"."
+                  },
+                  "filePath": {
+                    "type": "string",
+                    "description": "A workspace-relative file path where the symbol appears (e.g. \"src/utils/helpers.ts\"). Provide either \"uri\" or \"filePath\"."
+                  },
+                  "lineContent": {
+                    "type": "string",
+                    "description": "A substring of the line of code where the symbol appears. Used to locate the exact position. Must be actual text from the file."
+                  }
+                },
+                "required": [
+                  "symbol",
+                  "newName",
+                  "lineContent"
+                ]
+              }
+            },
+            {
+              "name": "toolSearch",
+              "title": "Search Tools",
+              "description": "Search for relevant tools by describing what you need. Returns tool references for tools matching your query. Use this when you need to find a tool but aren't sure of its exact name. Check the availab\u2026",
+              "inputSchema": {
+                "type": "object",
+                "properties": {
+                  "query": {
+                    "type": "string",
+                    "description": "Natural language description of what tool capability you are looking for. Use broad queries to cover related tools in one search (e.g., \"github\" instead of separate searches for issues and PRs)."
+                  }
+                },
+                "required": [
+                  "query"
+                ]
+              }
+            }
+          ],
+          "customizations": [
+            {
+              "type": "plugin",
+              "id": "vscode-synced-customization:/remote-127.0.0.1__4321-echo",
+              "uri": "vscode-synced-customization:/remote-127.0.0.1__4321-echo",
+              "name": "VS Code Synced Data",
+              "enabled": true,
+              "nonce": "-467921786"
+            }
+          ]
+        },
+        "progressToken": "faab3eb0-ebd0-43ea-ad29-cf9d6d6eea34"
+      },
+      "id": 14
+    },
+    {
+      "method": "resourceRead",
+      "params": {
+        "channel": "ahp-root://",
+        "uri": "file:///.vscode/settings.json"
+      },
+      "id": 19
+    },
+    {
+      "method": "resourceResolve",
+      "params": {
+        "channel": "ahp-root://",
+        "uri": "file:///.vscode/settings.json"
+      },
+      "id": 23
+    },
+    {
+      "method": "subscribe",
+      "params": {
+        "channel": "echo:/af2d658f-61c0-4279-a549-ffb2d89517f2"
+      },
+      "id": 27
+    },
+    {
+      "method": "dispatchAction",
+      "params": {
+        "channel": "echo:/af2d658f-61c0-4279-a549-ffb2d89517f2",
+        "clientSeq": 1,
+        "action": {
+          "type": "session/activeClientSet",
+          "activeClient": {
+            "clientId": "0a78fdaa-f198-495d-a5dc-16a73546cf40",
+            "tools": [
+              {
+                "name": "usages",
+                "title": "List Code Usages",
+                "description": "Find all usages (references, definitions, and implementations) of a code symbol across the workspace. This tool locates where a symbol is referenced, defined, or implemented.\n\nInput:\n- \"symbol\": The e\u2026",
+                "inputSchema": {
+                  "type": "object",
+                  "properties": {
+                    "symbol": {
+                      "type": "string",
+                      "description": "The exact name of the symbol (function, class, method, variable, type, etc.) to find usages of."
+                    },
+                    "uri": {
+                      "type": "string",
+                      "description": "A full URI of a file where the symbol appears (e.g. \"file:///path/to/file.ts\"). Provide either \"uri\" or \"filePath\"."
+                    },
+                    "filePath": {
+                      "type": "string",
+                      "description": "A workspace-relative file path where the symbol appears (e.g. \"src/utils/helpers.ts\"). Provide either \"uri\" or \"filePath\"."
+                    },
+                    "lineContent": {
+                      "type": "string",
+                      "description": "A substring of the line of code where the symbol appears. Used to locate the exact position. Must be actual text from the file."
+                    }
+                  },
+                  "required": [
+                    "symbol",
+                    "lineContent"
+                  ]
+                }
+              },
+              {
+                "name": "rename",
+                "title": "Rename Symbol",
+                "description": "Rename a code symbol across the workspace using the language server's rename functionality. This performs a precise, semantics-aware rename that updates all references.\n\nInput:\n- \"symbol\": The exact c\u2026",
+                "inputSchema": {
+                  "type": "object",
+                  "properties": {
+                    "symbol": {
+                      "type": "string",
+                      "description": "The exact current name of the symbol to rename."
+                    },
+                    "newName": {
+                      "type": "string",
+                      "description": "The new name for the symbol."
+                    },
+                    "uri": {
+                      "type": "string",
+                      "description": "A full URI of a file where the symbol appears (e.g. \"file:///path/to/file.ts\"). Provide either \"uri\" or \"filePath\"."
+                    },
+                    "filePath": {
+                      "type": "string",
+                      "description": "A workspace-relative file path where the symbol appears (e.g. \"src/utils/helpers.ts\"). Provide either \"uri\" or \"filePath\"."
+                    },
+                    "lineContent": {
+                      "type": "string",
+                      "description": "A substring of the line of code where the symbol appears. Used to locate the exact position. Must be actual text from the file."
+                    }
+                  },
+                  "required": [
+                    "symbol",
+                    "newName",
+                    "lineContent"
+                  ]
+                }
+              },
+              {
+                "name": "toolSearch",
+                "title": "Search Tools",
+                "description": "Search for relevant tools by describing what you need. Returns tool references for tools matching your query. Use this when you need to find a tool but aren't sure of its exact name. Check the availab\u2026",
+                "inputSchema": {
+                  "type": "object",
+                  "properties": {
+                    "query": {
+                      "type": "string",
+                      "description": "Natural language description of what tool capability you are looking for. Use broad queries to cover related tools in one search (e.g., \"github\" instead of separate searches for issues and PRs)."
+                    }
+                  },
+                  "required": [
+                    "query"
+                  ]
+                }
+              }
+            ],
+            "customizations": [
+              {
+                "type": "plugin",
+                "id": "vscode-synced-customization:/remote-127.0.0.1__4321-echo",
+                "uri": "vscode-synced-customization:/remote-127.0.0.1__4321-echo",
+                "name": "VS Code Synced Data",
+                "enabled": true,
+                "nonce": "-467921786"
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "resourceList",
+      "params": {
+        "channel": "ahp-root://",
+        "uri": "file:///"
+      },
+      "id": 40
+    },
+    {
+      "method": "dispatchAction",
+      "params": {
+        "channel": "echo:/af2d658f-61c0-4279-a549-ffb2d89517f2",
+        "clientSeq": 3,
+        "action": {
+          "type": "session/isReadChanged",
+          "isRead": true
+        }
+      }
+    },
+    {
+      "method": "dispatchAction",
+      "params": {
+        "channel": "ahp-chat:/62b1c265-84b1-40b6-bba4-86b9cd404a84",
+        "clientSeq": 4,
+        "action": {
+          "type": "chat/turnStarted",
+          "turnId": "request_9426e744-ad56-4b1a-9552-b933bbc8aa38",
+          "startedAt": "2026-08-01T16:28:06.831Z",
+          "message": {
+            "text": "hello",
+            "origin": {
+              "kind": "user"
+            },
+            "model": {
+              "id": "echo-1"
+            }
+          }
+        }
+      }
+    },
+    {
+      "method": "createTerminal",
+      "params": {
+        "channel": "agenthost-terminal:/7dbd7b73-a98c-4d2c-a3ba-df474d870935",
+        "claim": {
+          "kind": "client",
+          "clientId": "0a78fdaa-f198-495d-a5dc-16a73546cf40"
+        },
+        "name": "Agent Host Terminal",
+        "cwd": "file:///home/user",
+        "cols": 80,
+        "rows": 30
+      },
+      "id": 48
+    },
+    {
+      "method": "dispatchAction",
+      "params": {
+        "channel": "agenthost-terminal:/7dbd7b73-a98c-4d2c-a3ba-df474d870935",
+        "clientSeq": 5,
+        "action": {
+          "type": "terminal/resized",
+          "cols": 80,
+          "rows": 30
+        }
+      }
+    },
+    {
+      "method": "disposeTerminal",
+      "params": {
+        "channel": "agenthost-terminal:/7dbd7b73-a98c-4d2c-a3ba-df474d870935"
+      },
+      "id": 49
+    },
+    {
+      "method": "unsubscribe",
+      "params": {
+        "channel": "echo:/af2d658f-61c0-4279-a549-ffb2d89517f2"
+      }
+    }
+  ],
+  "measured": {
+    "note": "Per-method call counts from a live VS Code 1.131 Agents-app session, counted from a --wire-log capture. METHOD NAMES AND COUNTS ONLY -- no params, no message content, no tokens. The capture itself is not committed because it is a full transcript of a real conversation. These exist so a prioritisation argument about which refused method matters most can be checked rather than taken on trust.",
+    "sessionsCreated": 3,
+    "clientToServer": {
+      "ping": 1057,
+      "resourceResolve": 86,
+      "dispatchAction": 38,
+      "resourceRead": 35,
+      "createResourceWatch": 27,
+      "resourceList": 16,
+      "subscribe": 8,
+      "unsubscribe": 6,
+      "disposeSession": 3,
+      "initialize": 3,
+      "listSessions": 3,
+      "resolveSessionConfig": 3,
+      "createSession": 3,
+      "reconnect": 2,
+      "createTerminal": 2,
+      "disposeTerminal": 2
+    },
+    "serverToClient": {
+      "action": 79,
+      "root/sessionAdded": 6,
+      "root/sessionRemoved": 4
+    }
+  }
+}

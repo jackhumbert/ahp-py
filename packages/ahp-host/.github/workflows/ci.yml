@@ -1,0 +1,177 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# Every job below checks out a sibling repository: the family is distributed
+# from GitHub rather than an index, so the siblings ARE the dependency source
+# and the default token is enough -- they are public.
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - uses: actions/checkout@v4
+        with:
+          repository: jackhumbert/agent-host-protocol-py
+          path: .protocol
+      # The pin in pyproject.toml is the real declaration; this supplies it
+      # from the working tree -- no index carries it, by design.
+      - run: pip install -e .protocol
+      - run: pip install -e '.[dev]'
+
+      - name: Lint
+        run: ruff check . && ruff format --check .
+
+      - name: Type-check
+        run: mypy
+
+      - name: Import contracts
+        run: lint-imports
+
+      # The whole suite runs offline: no model, no credentials, no network.
+      - name: Test
+        run: pytest
+
+  windows-jail:
+    # The Windows filesystem jail is a separate implementation (NT handles, not
+    # `openat`), so it is attacked on a real Windows runner: real junctions,
+    # real symlinks (the runner is an administrator, so they can be made), and
+    # a thread racing to swap a component for a junction mid-walk.
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/checkout@v4
+        with:
+          repository: jackhumbert/agent-host-protocol-py
+          path: .protocol
+      - run: pip install -e .protocol
+      - run: pip install -e '.[dev]'
+      - name: Resource jail tests
+        # Without this a symlink test that cannot create its symlink skips, and
+        # a skipped escape test looks exactly like a passing one.
+        env:
+          AHP_WINDOWS_JAIL_REQUIRED: "1"
+        run: >-
+          pytest -rs
+          tests/unit/test_resource_jail_windows.py
+          tests/unit/test_resource_jail_windows_paths.py
+          tests/unit/test_resource_jail.py
+      - name: Whole suite (informational)
+        # The rest of the library has never been run on Windows (the pty
+        # backend, for one, is POSIX by construction). Reported, not gating,
+        # until it has been.
+        continue-on-error: true
+        run: pytest
+
+  interop:
+    # Two independently-built clients against our host: the published Microsoft
+    # TypeScript one over a socket, and the sibling Python one in-process. The
+    # TypeScript client validates almost nothing; the Python one was written
+    # from the same spec by different hands, which makes disagreement between
+    # them evidence rather than opinion.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - uses: actions/checkout@v4
+        with:
+          repository: jackhumbert/agent-host-protocol-py
+          path: .protocol
+      - uses: actions/checkout@v4
+        with:
+          repository: jackhumbert/agent-host-client-py
+          path: .client
+      - run: pip install -e .protocol
+      - run: pip install -e .client
+      - run: pip install -e '.[dev,ws]'
+      # 0.7.0 (published 2026-08-06) is the newest client on npm and matches
+      # the vendored spec tag, so the interop run exercises the same protocol
+      # surface the reducers were ported from.
+      - run: npm i --no-save @microsoft/agent-host-protocol@0.9.0 ws
+      - name: Interop
+        # Without this the tests skip themselves when setup breaks, and a
+        # skipped interop suite looks exactly like a passing one.
+        env:
+          AHP_INTEROP_REQUIRED: "1"
+        run: pytest -m interop
+
+  wheel-is-installable:
+    # Three publication defects were invisible from a checkout and obvious from
+    # an install: missing exports, a demo tree resolving outside the package,
+    # and a missing py.typed. This is the check that would have caught all
+    # three -- from a directory that is not the repository, against a venv that
+    # has no source tree in it.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/checkout@v4
+        with:
+          repository: jackhumbert/agent-host-protocol-py
+          path: .protocol
+      - run: pip install build
+      - run: python -m build --wheel --outdir dist
+      - name: Install the wheel into a clean venv
+        run: |
+          python -m venv /tmp/fresh
+          # The dependency first, from the sibling checkout -- no index
+          # carries it, by design. `--no-deps` on the wheel so pip does not
+          # then try to resolve the same name from an index that lacks it.
+          /tmp/fresh/bin/pip install ./.protocol
+          /tmp/fresh/bin/pip install --no-deps "$(echo dist/*.whl)" websockets
+      - name: Smoke-test it from outside the checkout
+        run: cd /tmp && /tmp/fresh/bin/python "$GITHUB_WORKSPACE/scripts/smoke_wheel.py"
+
+  protocol-main:
+    # Non-blocking. The dependency is pinned `~=0.1.0`, so this repository is
+    # insulated from the protocol package's main branch -- which is exactly why
+    # drift there would otherwise be invisible until a release. This makes it
+    # visible the day it lands, without failing a PR for someone else's commit.
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: jackhumbert/agent-host-protocol-py
+          ref: main
+          path: .protocol
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e .protocol
+      - run: pip install -e '.[dev]'
+      - run: pytest
