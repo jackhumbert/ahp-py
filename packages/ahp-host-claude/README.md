@@ -55,6 +55,25 @@ Status: pre-alpha.
   restart reattaches to the same claude.ai session. Archiving the session here
   archives it there (and stops its Claude process), unarchiving brings it
   back, and deleting it here archives it there.
+- **The account's other Claude Code sessions** (opt-in, `claude_ai_sessions`):
+  every live Remote Control session on the Claude account - a terminal, the
+  desktop app, an IDE, on any machine - is listed here too, through the same
+  claude.ai endpoints the Claude apps use. Each shows its last couple of
+  exchanges, then follows along live; titles and busy/idle follow claude.ai.
+  A message sent from here runs there, stop stops it, and its approval
+  prompts can be answered here (or there; the other side's prompt is
+  withdrawn). One whose machine goes to sleep stays listed; one archived on
+  claude.ai goes; one deleted here is not listed again. Turn it on for **one**
+  machine: every machine that has it lists every session.
+
+  It signs in as Claude Code on this machine does, reading its login (the
+  macOS Keychain, or `~/.claude/.credentials.json`) and never refreshing it,
+  since Claude Code's refresh tokens rotate - Claude Code keeps it fresh as it
+  runs. claude.ai delivers what that login sends as coming from *another
+  Claude session*, not from you: Claude acts on it, but will not take it as
+  your OK for a pending prompt (answer the prompt itself instead) or as
+  permission to change its own settings. None of these endpoints is
+  documented; a Claude Code update can change them.
 - **In `claude --resume`**, like any other conversation on the machine:
   sessions are recorded as started by `agent-host`, not by the SDK, whose
   sessions the picker hides. Claude Code then offers them what it offers a
@@ -112,6 +131,7 @@ error, so a typo cannot silently fall back to a default.
 | `state_dir` / `--state-dir` | Persisted sessions and sequence counter. Default `~/.local/state/agent-host-server-claude`. |
 | `agent_name` / `--agent-name` | What clients call the agent. |
 | `remote_control` / `--[no-]remote-control` | Put new sessions on claude.ai (Remote Control). Default: whatever Claude Code does, i.e. your `remoteControlAtStartup` setting. |
+| `claude_ai_sessions` / `--[no-]claude-ai-sessions` | Also list the account's other Remote Control sessions, through claude.ai (default off). On one machine only. |
 | `provider_id` / `--provider-id` | The agent's id (default `claude`). Machines behind one broker share it: the broker merges them into one agent and the folder picks the machine. |
 
 Authentication is Claude Code's own: the SDK uses whatever login `claude` has
@@ -133,6 +153,11 @@ They can also switch the approval mode, to any of the four above; the
 session follows it (bypass permissions and anything else is refused and
 reset to Ask), and a plan approved there drops the session to Ask exactly as
 one approved here does.
+With `claude_ai_sessions`, whoever can reach this host can also drive every
+Remote Control session on that account, on every machine it runs on - read
+them, message them and answer their approval prompts. Treat such a host as
+holding the account.
+
 Turn it off (`remote_control = false`, or per session) where that is not the
 same set of people as those who can reach this host.
 

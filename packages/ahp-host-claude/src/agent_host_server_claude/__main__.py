@@ -26,6 +26,7 @@ from agent_host_server.core.store import FileSessionStore
 from agent_host_server.ws import serve_websocket
 
 from agent_host_server_claude import __version__
+from agent_host_server_claude.claude_ai import Api
 from agent_host_server_claude.config import ConfigError, Settings, load
 from agent_host_server_claude.provider import (
     ClaudeProvider,
@@ -59,6 +60,13 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=None,
         help="put new sessions on claude.ai (default: whatever Claude Code does, i.e. "
         "your remoteControlAtStartup setting)",
+    )
+    parser.add_argument(
+        "--claude-ai-sessions",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="also list this account's other Remote Control sessions (terminal, desktop app, "
+        "other machines), through claude.ai; on one machine only",
     )
     parser.add_argument("-v", "--verbose", action="store_true", default=None)
     return parser.parse_args(argv)
@@ -98,6 +106,8 @@ async def _run(settings: Settings) -> None:
             models=models,
             provider_id=settings.provider_id,
             remote_control=remote_control,
+            claude_ai=Api() if settings.claude_ai_sessions else None,
+            state_dir=state,
         ),
         LoopbackSingleUserPolicy(),
         info=HostInfo(name="agent-host-server-claude", version=__version__),

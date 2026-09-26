@@ -25,6 +25,8 @@ classifiers = [
 dependencies = [
   "agent-host-server[ws]~=0.1.0",
   "claude-agent-sdk>=0.2.159,<0.3",
+  # claude.ai's Remote Control endpoints, for sessions started elsewhere.
+  "httpx>=0.27,<1",
 ]
 
 [project.scripts]

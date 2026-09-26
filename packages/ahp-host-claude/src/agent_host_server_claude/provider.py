@@ -14,9 +14,11 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import logging
 import re
 import uuid
+import weakref
 from collections.abc import AsyncIterable, AsyncIterator, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -29,6 +31,7 @@ from agent_host_server.provider.base import (
     ConfigResolution,
     ConfigValue,
     ModelInfo,
+    SessionDirectory,
     ToolConfirmation,
     TurnSink,
     UserMessage,
@@ -51,6 +54,14 @@ from claude_agent_sdk import UserMessage as SdkUserMessage
 from claude_agent_sdk.types import StreamEvent
 
 from agent_host_server_claude.attachments import prompt_content
+from agent_host_server_claude.claude_ai import (
+    BACKFILL_EXCHANGES,
+    Api,
+    LoginError,
+    RemoteClient,
+    RemoteSession,
+    uri_of,
+)
 from agent_host_server_claude.paths import directory_of
 from agent_host_server_claude.permissions import (
     APPROVALS_PROPERTY,
@@ -283,8 +294,14 @@ class ClaudeSession:
         remote_control: bool = False,
         bridge_session_id: str | None = None,
         archived: bool = False,
+        mirror_of: str | None = None,
+        on_disposed: Callable[[], None] | None = None,
     ) -> None:
         self.context = context
+        #: The claude.ai session this one mirrors (`claude_ai.py`), if it is
+        #: one started elsewhere rather than here.
+        self.mirror_of = mirror_of
+        self._on_disposed = on_disposed
         #: Set when continuing another Claude Code conversation: its folder,
         #: which is what that conversation's context refers to.
         self.directory = directory
@@ -424,6 +441,8 @@ class ClaudeSession:
         the next start to reattach to. One already archived is already gone
         from there.
         """
+        if self._on_disposed is not None:
+            self._on_disposed()
         if self.bridge_session_id is None or self.archived:
             return
         self.archived = True
@@ -971,6 +990,9 @@ class ClaudeProvider:
         provider_id: str = PROVIDER_ID,
         sessions: ClaudeCodeSessions | None = None,
         remote_control: bool = False,
+        claude_ai: Api | None = None,
+        state_dir: Path | None = None,
+        poll_s: float = 15.0,
     ) -> None:
         if not is_valid_provider_id(provider_id):
             raise ValueError(f"invalid provider id: {provider_id!r}")
@@ -983,6 +1005,19 @@ class ClaudeProvider:
         self.sessions = sessions if sessions is not None else ClaudeCodeSessions(self.roots)
         #: Whether a new session is on claude.ai unless its creator says not.
         self.remote_control = remote_control
+        #: Set to list the account's other Remote Control sessions here too.
+        self._claude_ai = claude_ai
+        self._poll_s = poll_s
+        self._directory: SessionDirectory | None = None
+        self._poller: asyncio.Task[None] | None = None
+        #: This host's own sessions, so their claude.ai twins are not listed twice.
+        self._local: weakref.WeakSet[ClaudeSession] = weakref.WeakSet()
+        self._mirrors: dict[str, ClaudeSession] = {}
+        self._titles: dict[str, str] = {}
+        #: Mirrors this host closed itself, as opposed to a person deleting one.
+        self._closing: set[str] = set()
+        self._dismissed_file = state_dir / "claude-ai-dismissed.json" if state_dir else None
+        self._dismissed: set[str] = self._load_dismissed()
 
     @property
     def agent(self) -> AgentInfo:
@@ -1030,6 +1065,8 @@ class ClaudeProvider:
 
         Not an archived one: starting it would reattach, which unarchives it.
         """
+        if session.mirror_of is None:
+            self._local.add(session)
         if session.remote_control and not session.archived:
             session.start_soon()
         return session
@@ -1061,6 +1098,9 @@ class ClaudeProvider:
 
     async def resume_session(self, context: AgentSessionContext) -> ClaudeSession:
         state = context.resume_state or {}
+        mirrored = state.get(MIRROR_KEY)
+        if isinstance(mirrored, str):
+            return self._mirror(context, mirrored, backfill=state.get("backfill") is True)
         session_id = state.get("claudeSessionId")
         bridge = state.get("bridgeSessionId")
         return self._started(
@@ -1092,6 +1132,8 @@ class ClaudeProvider:
     async def resume_state_of(self, session: Any) -> Mapping[str, Any] | None:
         if not isinstance(session, ClaudeSession):
             return None
+        if session.mirror_of is not None:
+            return {MIRROR_KEY: session.mirror_of, CONFIG_KEY: session.approvals}
         if not session.claude_session_id and not session.bridge_session_id:
             return None
         state: dict[str, Any] = {
@@ -1107,3 +1149,158 @@ class ClaudeProvider:
         if session.directory is not None:
             state["cwd"] = str(session.directory)
         return state
+
+    # -- the account's other sessions, through claude.ai ------------------------
+
+    async def attach_directory(self, directory: SessionDirectory) -> None:
+        """The host's session list is ours to add to (`OpensSessions`).
+
+        First, sessions restored from the last run are brought back: the host
+        does that lazily, on a first turn, and one on claude.ai must be
+        reachable before anyone here touches it. Then, if claude.ai sessions
+        are wanted, they are watched.
+        """
+        self._directory = directory
+        for uri in directory.uris():
+            try:
+                await directory.open(uri, title="", resume_state={})
+            except Exception:
+                log.exception("could not bring back %s", uri)
+        if self._claude_ai is not None and self._poller is None:
+            self._poller = asyncio.create_task(self._watch_claude_ai())
+
+    async def aclose(self) -> None:
+        poller, self._poller = self._poller, None
+        if poller is not None:
+            poller.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await poller
+        if self._claude_ai is not None:
+            await self._claude_ai.aclose()
+
+    async def _watch_claude_ai(self) -> None:
+        warned = False
+        while True:
+            try:
+                await self.sync_claude_ai()
+                warned = False
+            except asyncio.CancelledError:
+                raise
+            except LoginError as error:
+                if not warned:
+                    log.warning("claude.ai sessions: %s", error)
+                    warned = True
+            except Exception:
+                log.exception("listing claude.ai sessions failed")
+            await asyncio.sleep(self._poll_s)
+
+    async def sync_claude_ai(self) -> None:
+        """Match the host's list to the account's live Remote Control sessions.
+
+        New ones are opened (with their last few exchanges), titles and
+        busy/idle follow claude.ai, and one archived or gone there is closed
+        here. One whose machine went away stays listed - its history is here -
+        but a new one appears only while its machine is connected. This
+        host's own sessions are skipped: they are listed already.
+        """
+        api, directory = self._claude_ai, self._directory
+        if api is None or directory is None:
+            return
+        rows = {row.id: row for row in await api.sessions()}
+        own = {s.bridge_session_id for s in list(self._local) if s.bridge_session_id}
+        listed = {
+            uri.removeprefix(_MIRROR_URI): uri
+            for uri in directory.uris()
+            if uri.startswith(_MIRROR_URI)
+        }
+        for remote_id, row in rows.items():
+            if remote_id in own or remote_id in self._dismissed:
+                continue
+            if row.environment_kind != "bridge" or row.status != "active":
+                continue
+            if remote_id not in listed:
+                if not row.live:
+                    continue
+                self._titles[remote_id] = row.title
+                await directory.open(
+                    uri_of(remote_id),
+                    title=row.title,
+                    resume_state={MIRROR_KEY: remote_id, "backfill": True},
+                )
+            await self._follow_row(row)
+        for remote_id, uri in listed.items():
+            found = rows.get(remote_id)
+            gone = found is None or found.status != "active" or remote_id in own
+            if gone:
+                self._closing.add(remote_id)
+                try:
+                    await directory.close(uri)
+                finally:
+                    self._closing.discard(remote_id)
+
+    async def _follow_row(self, row: RemoteSession) -> None:
+        session = self._mirrors.get(row.id)
+        publisher = session.context.publisher if session is not None else None
+        if publisher is None:
+            return
+        if self._titles.get(row.id) != row.title:
+            self._titles[row.id] = row.title
+            await publisher.title_changed(row.title)
+        await publisher.activity_changed(_ACTIVITY.get(row.worker_status))
+
+    def _mirror(
+        self, context: AgentSessionContext, remote_id: str, *, backfill: bool
+    ) -> ClaudeSession:
+        api = self._claude_ai
+        if api is None:
+            raise LookupError(f"{remote_id} is a claude.ai session, and claude.ai is off here")
+
+        def client(options: ClaudeAgentOptions) -> SdkClient:
+            return RemoteClient(
+                api, remote_id, options, backfill=BACKFILL_EXCHANGES if backfill else 0
+            )
+
+        def dismissed() -> None:
+            self._mirrors.pop(remote_id, None)
+            if remote_id not in self._closing:
+                # Deleted here by a person: not listed again next time round.
+                self._dismissed.add(remote_id)
+                self._save_dismissed()
+
+        session = ClaudeSession(
+            context,
+            root=self.roots,
+            client_factory=client,
+            mirror_of=remote_id,
+            on_disposed=dismissed,
+        )
+        self._mirrors[remote_id] = session
+        session.start_soon()
+        return session
+
+    def _load_dismissed(self) -> set[str]:
+        if self._dismissed_file is None:
+            return set()
+        try:
+            data = json.loads(self._dismissed_file.read_text())
+        except (OSError, ValueError):
+            return set()
+        return {item for item in data if isinstance(item, str)} if isinstance(data, list) else set()
+
+    def _save_dismissed(self) -> None:
+        if self._dismissed_file is None:
+            return
+        try:
+            self._dismissed_file.write_text(json.dumps(sorted(self._dismissed)))
+        except OSError:
+            log.warning("could not save %s", self._dismissed_file, exc_info=True)
+
+
+#: A mirrored session's resume state names its claude.ai session under this.
+MIRROR_KEY: Final = "claudeAi"
+_MIRROR_URI: Final = uri_of("")
+#: claude.ai's `worker_status`, as a session's activity line.
+_ACTIVITY: Final[Mapping[str, str]] = {
+    "running": "Working",
+    "requires_action": "Waiting for you",
+}

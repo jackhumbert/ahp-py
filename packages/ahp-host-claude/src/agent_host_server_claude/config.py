@@ -43,6 +43,7 @@ _KEYS = frozenset(
         "agent_name",
         "provider_id",
         "remote_control",
+        "claude_ai_sessions",
         "verbose",
     }
 )
@@ -64,6 +65,9 @@ class Settings:
     #: Put new sessions on claude.ai. None: whatever Claude Code itself does
     #: (the user's `remoteControlAtStartup`, then org policy).
     remote_control: bool | None = None
+    #: Also list the account's other Remote Control sessions, through
+    #: claude.ai. On one machine only: each would otherwise list them all.
+    claude_ai_sessions: bool = False
     verbose: bool = False
 
 
@@ -140,6 +144,9 @@ def load(args: argparse.Namespace) -> Settings:
     remote_control = pick(args.remote_control, "remote_control", None)
     if remote_control is not None and not isinstance(remote_control, bool):
         raise ConfigError("remote_control must be true or false")
+    claude_ai_sessions = pick(args.claude_ai_sessions, "claude_ai_sessions", False)
+    if not isinstance(claude_ai_sessions, bool):
+        raise ConfigError("claude_ai_sessions must be true or false")
     port = pick(args.port, "port", DEFAULT_PORT)
     if not isinstance(port, int) or isinstance(port, bool):
         raise ConfigError("port must be a number")
@@ -152,5 +159,6 @@ def load(args: argparse.Namespace) -> Settings:
         agent_name=str(pick(args.agent_name, "agent_name", DEFAULT_AGENT_NAME)),
         provider_id=str(pick(args.provider_id, "provider_id", DEFAULT_PROVIDER_ID)),
         remote_control=remote_control,
+        claude_ai_sessions=claude_ai_sessions,
         verbose=bool(args.verbose or data.get("verbose", False)),
     )

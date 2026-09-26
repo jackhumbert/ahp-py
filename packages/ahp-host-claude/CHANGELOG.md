@@ -4,6 +4,17 @@
 
 ### Added
 
+- The account's other Claude Code sessions, through claude.ai
+  (`claude_ai_sessions`, off by default; one machine only). Every live Remote
+  Control session - terminal, desktop app, IDE, any machine - is listed, with
+  its last exchanges, and followed live; messages, stop and approval answers
+  go back through claude.ai's Remote Control endpoints (`claude_ai.py`),
+  behind the same client interface as the Agent SDK's, so a mirrored session
+  is an ordinary `ClaudeSession`. Uses Claude Code's own login, read from the
+  Keychain or `~/.claude/.credentials.json` and never refreshed here.
+  claude.ai delivers messages sent with that login as from another Claude
+  session. Needs agent-host-server with `OpensSessions`.
+
 - Remote Control: sessions are also on claude.ai and in the Claude apps, like
   terminal sessions, when Claude Code's own would be (`remoteControlAtStartup`,
   read from the CLI at start-up). Override it with `remote_control` in the
@@ -68,6 +79,10 @@
 
 ### Fixed
 
+- A session with Remote Control on is reachable again right after a restart:
+  the host restores sessions lazily, on their first turn, so until something
+  here touched one it was offline on claude.ai. They are now brought back
+  when the host hands over its session list.
 - Sessions survive a restart: `python -m agent_host_server_claude` now calls
   `Host.restore()` at start-up. They were saved to `--state-dir` but never read
   back, so every restart emptied the session list.
