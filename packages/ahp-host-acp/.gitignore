@@ -11,3 +11,6 @@ build/
 .vscode/
 .DS_Store
 .idea/
+
+# Local, per-machine notes and config (AGENTS.local.md etc.)
+*.local.*
