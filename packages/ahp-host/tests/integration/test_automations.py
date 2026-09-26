@@ -422,7 +422,10 @@ class TestSchedules:
         try:
             client, _ = await _client(host)
             await _create(client, host, _definition(triggers=[_schedule("0 * * * *")]))
-            now = datetime.now(UTC) + timedelta(days=2, minutes=30)
+            # Half past an hour, whatever the wall clock: at :30-:34 past it,
+            # "now + 30 minutes" was within ON_TIME_GRACE of the hour and on time.
+            now = datetime.now(UTC).replace(minute=30, second=0, microsecond=0)
+            now += timedelta(days=2)
             assert await host.run_due_automations(now) == 1
             (summary,) = _entries(host)[0]["runs"]
             assert summary["origin"]["catchUp"] is True
@@ -436,7 +439,10 @@ class TestSchedules:
             await _create(
                 client, host, _definition(triggers=[_schedule("0 * * * *", misfirePolicy="skip")])
             )
-            now = datetime.now(UTC) + timedelta(days=2, minutes=30)
+            # Half past an hour, whatever the wall clock: at :30-:34 past it,
+            # "now + 30 minutes" was within ON_TIME_GRACE of the hour and on time.
+            now = datetime.now(UTC).replace(minute=30, second=0, microsecond=0)
+            now += timedelta(days=2)
             assert await host.run_due_automations(now) == 0
             assert _entries(host)[0]["nextRunAt"] > iso(now)
         finally:
