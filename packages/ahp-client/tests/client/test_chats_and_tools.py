@@ -14,12 +14,12 @@ import json
 from typing import Any
 
 import pytest
-from agent_host_protocol.conformance.corpus import CORPUS_ROOT
+from ahp_protocol.conformance.corpus import CORPUS_ROOT
 
-from agent_host_client.api import connect
-from agent_host_client.client.errors import AhpClientError
-from agent_host_client.serve import ClientToolHost
-from agent_host_client.testing import FakeHost, FakeToolCall, echo_host
+from ahp_client.api import connect
+from ahp_client.client.errors import AhpClientError
+from ahp_client.serve import ClientToolHost
+from ahp_client.testing import FakeHost, FakeToolCall, echo_host
 
 CHAT = "ahp-chat://c/s"
 

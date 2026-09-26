@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from agent_host_server_acp.tools import ToolCall
+from ahp_host_acp.tools import ToolCall
 
 
 def _call(**update: object) -> ToolCall:

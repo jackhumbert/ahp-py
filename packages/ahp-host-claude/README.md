@@ -1,12 +1,12 @@
-# agent-host-server-claude
+# ahp-host-claude
 
-Claude as an [Agent Host Protocol](https://github.com/jackhumbert/agent-host-protocol-py)
-(AHP) provider for [`agent-host-server`](https://github.com/jackhumbert/agent-host-server-py).
+Claude as an [Agent Host Protocol](https://github.com/jackhumbert/ahp-py/tree/main/packages/ahp-protocol)
+(AHP) provider for [`ahp-host`](https://github.com/jackhumbert/ahp-py/tree/main/packages/ahp-host).
 
 It wraps the [Claude Agent SDK](https://code.claude.com/docs/en/agent-sdk):
 Claude Code, running on this machine as the user who starts the host, with its
 built-in tools (read, search, edit, shell, web). Any AHP client - VS Code's
-Agent Sessions view, the Python client, a broker in front of several hosts -
+Agent Sessions view, the Python client, a gateway in front of several hosts -
 can then start and follow Claude sessions here.
 
 Status: pre-alpha.
@@ -36,7 +36,7 @@ Status: pre-alpha.
 
   The mode can be switched during a session (in VS Code or the iOS app); the
   running Claude client follows, and the choice survives a host restart.
-  Needs agent-host-server with `ReconfiguresSessions` and working session
+  Needs ahp-host with `ReconfiguresSessions` and working session
   resume. A switch made on claude.ai (Remote Control) is followed here too,
   and the setting shows it - except to a mode not listed above (such as
   bypass permissions), which puts the session back in Ask instead.
@@ -66,7 +66,7 @@ Status: pre-alpha.
   claude.ai goes; one deleted here is not listed again.
 
   Turn it on for every machine that runs this host: each lists the sessions
-  running on it, so a broker files them under the right machine and none is
+  running on it, so a gateway files them under the right machine and none is
   listed twice. A session is this machine's if Claude Code's registry here
   names it (`~/.claude/sessions`), or if it was started with
   `claude --remote-control` and its claude.ai environment names this machine.
@@ -83,7 +83,7 @@ Status: pre-alpha.
   permission to change its own settings. None of these endpoints is
   documented; a Claude Code update can change them.
 - **In `claude --resume`**, like any other conversation on the machine:
-  sessions are recorded as started by `agent-host`, not by the SDK, whose
+  sessions are recorded as started by `ahp-host`, not by the SDK, whose
   sessions the picker hides. Claude Code then offers them what it offers a
   terminal session (claude.ai artifacts among them), each tool behind the same
   approval gate.
@@ -117,23 +117,23 @@ Status: pre-alpha.
   with no client connected. Nobody is watching a scheduled run, so an approval
   prompt waits until someone answers it: give the automation's session
   template `config: {"permissionMode": "acceptEdits"}` or `"auto"` for work
-  that should finish on its own. Needs agent-host-server with automations.
+  that should finish on its own. Needs ahp-host with automations.
 
 ## Run it
 
 ```bash
 pip install -e .
-python -m agent_host_server_claude --config ~/.config/agent-host/node.toml
+python -m ahp_host_claude --config ~/.config/ahp/node.toml
 ```
 
 The config file (TOML; flags override it):
 
 ```toml
 agent_name = "Claude"
-token_file = "~/.config/agent-host/node.token"
+token_file = "~/.config/ahp/node.token"
 
 # Several named folders: clients see file:///llm/..., file:///projects/...
-# (behind a broker: <machine>/llm/..., <machine>/projects/...)
+# (behind a gateway: <machine>/llm/..., <machine>/projects/...)
 [roots]
 llm = 'G:\llm'
 projects = 'C:\Users\me\projects'
@@ -151,11 +151,11 @@ error, so a typo cannot silently fall back to a default.
 | `root` / `--root PATH` | One unnamed folder, served as itself. |
 | `token_file` / `--token-file` | Require this connection token. Read from a file so it never appears in `ps` or logs. |
 | `port`, `bind` / `--port`, `--bind` | Default `127.0.0.1:4321`. Loopback only. |
-| `state_dir` / `--state-dir` | Persisted sessions, automations and sequence counter. Default `~/.local/state/agent-host-server-claude`. |
+| `state_dir` / `--state-dir` | Persisted sessions, automations and sequence counter. Default `~/.local/state/ahp-host-claude`. |
 | `agent_name` / `--agent-name` | What clients call the agent. |
 | `remote_control` / `--[no-]remote-control` | Put new sessions on claude.ai (Remote Control). Default: whatever Claude Code does, i.e. your `remoteControlAtStartup` setting. |
 | `claude_ai_sessions` / `--claude-ai-sessions [all]` | Also list this machine's other Remote Control sessions, through claude.ai (default off; safe on every machine). `"all"`: every machine's, on one machine only. |
-| `provider_id` / `--provider-id` | The agent's id (default `claude`). Machines behind one broker share it: the broker merges them into one agent and the folder picks the machine. |
+| `provider_id` / `--provider-id` | The agent's id (default `claude`). Machines behind one gateway share it: the gateway merges them into one agent and the folder picks the machine. |
 
 Authentication is Claude Code's own: the SDK uses whatever login `claude` has
 on this machine (or `ANTHROPIC_API_KEY` if set).
@@ -165,7 +165,7 @@ on this machine (or `ANTHROPIC_API_KEY` if set).
 The agent runs as the host's OS user, so whatever that user can touch, an
 approved tool call can touch. The approval gate and the `--root` check are the
 boundary - Claude Code's shell is not confined to the session's folders - which
-is why a session with no folder gets no file or shell tools at all; see `agent-host-server`'s SECURITY.md for the host's own posture.
+is why a session with no folder gets no file or shell tools at all; see `ahp-host`'s SECURITY.md for the host's own posture.
 Never bind this off loopback without a proxy that authenticates peers.
 
 With Remote Control on, the session is also reachable through the Claude

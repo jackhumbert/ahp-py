@@ -14,13 +14,13 @@ import asyncio
 from typing import Any
 
 import pytest
-from agent_host_protocol.reducers import chat_reducer
+from ahp_protocol.reducers import chat_reducer
 
-from agent_host_client.api import ToolCallReady, connect
-from agent_host_client.api.events import ToolCallResultReview
-from agent_host_client.client import actions
-from agent_host_client.serve import ClientToolHost, InputResponder
-from agent_host_client.testing import FakeHost, echo_host
+from ahp_client.api import ToolCallReady, connect
+from ahp_client.api.events import ToolCallResultReview
+from ahp_client.client import actions
+from ahp_client.serve import ClientToolHost, InputResponder
+from ahp_client.testing import FakeHost, echo_host
 
 CHAT = "ahp-chat://c/s"
 TURN = "turn-1"

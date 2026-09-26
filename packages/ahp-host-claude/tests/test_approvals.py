@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from agent_host_server.provider.base import (
+from ahp_host.provider.base import (
     AgentSessionContext,
     ConfigRequest,
     ConfiguresSessions,
@@ -14,8 +14,8 @@ from agent_host_server.provider.base import (
 )
 from claude_agent_sdk import ClaudeAgentOptions, ResultMessage
 
-from agent_host_server_claude.permissions import pre_tool_use_decision
-from agent_host_server_claude.provider import ClaudeProvider, ClaudeSession, _Turn
+from ahp_host_claude.permissions import pre_tool_use_decision
+from ahp_host_claude.provider import ClaudeProvider, ClaudeSession, _Turn
 from tests.fakes import FakeClient, RecordingSink
 
 
@@ -30,7 +30,7 @@ def _session(tmp_path: Path, config: dict[str, Any] | None = None) -> ClaudeSess
 
 
 async def test_the_provider_offers_an_approvals_setting(tmp_path: Path) -> None:
-    from agent_host_server_claude.sessions import ClaudeCodeSessions
+    from ahp_host_claude.sessions import ClaudeCodeSessions
 
     provider = ClaudeProvider(tmp_path, sessions=ClaudeCodeSessions(tmp_path, list_fn=lambda: []))
     assert isinstance(provider, ConfiguresSessions)
@@ -134,7 +134,7 @@ async def test_a_resumed_session_keeps_its_mode(tmp_path: Path) -> None:
 async def test_plan_mode_shows_the_plan_and_drops_to_ask_once_approved(tmp_path: Path) -> None:
     from claude_agent_sdk import PermissionResultAllow, ToolPermissionContext
 
-    from agent_host_server_claude.permissions import APPROVALS_PROPERTY
+    from ahp_host_claude.permissions import APPROVALS_PROPERTY
 
     assert "plan" in APPROVALS_PROPERTY["enum"]
     session = _session(tmp_path, {"permissionMode": "plan"})

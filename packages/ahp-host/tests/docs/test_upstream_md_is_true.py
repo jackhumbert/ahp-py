@@ -12,14 +12,14 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from agent_host_protocol import DEFAULT_SUPPORTED_VERSIONS
+from ahp_protocol import DEFAULT_SUPPORTED_VERSIONS
 
 ROOT = Path(__file__).resolve().parents[2]
 UPSTREAM = (ROOT / "UPSTREAM.md").read_text()
 
 
 def test_it_does_not_describe_a_local_vendor_tree() -> None:
-    """The pin moved to `agent-host-protocol`; a vendored table here described
+    """The pin moved to `ahp-protocol`; a vendored table here described
     files that do not exist and a procedure nobody could run. If a `vendor/`
     directory ever reappears, the 'Nothing is vendored here' sentence goes
     false and this file needs rewriting before the directory lands."""

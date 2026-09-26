@@ -17,8 +17,8 @@ from typing import Any
 
 import pytest
 
-from agent_host_protocol.reducers import chat_reducer, root_reducer, session_reducer
-from agent_host_protocol.reducers.clock import frozen_clock
+from ahp_protocol.reducers import chat_reducer, root_reducer, session_reducer
+from ahp_protocol.reducers.clock import frozen_clock
 
 
 def _chat(**overrides: object) -> dict[str, object]:

@@ -7,7 +7,7 @@ the version it is given and will proceed on one it never offered
 
 from __future__ import annotations
 
-from agent_host_protocol.versions import is_compatible, negotiate, parse_version
+from ahp_protocol.versions import is_compatible, negotiate, parse_version
 
 
 class TestParse:

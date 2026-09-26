@@ -1,13 +1,13 @@
-"""Both edges over real sockets: surface -ws-> broker -ws-> node."""
+"""Both edges over real sockets: surface -ws-> gateway -ws-> node."""
 
 from __future__ import annotations
 
-from agent_host_client import connect
-from agent_host_server.ws.server import serve_websocket
+from ahp_client import connect
+from ahp_host.ws.server import serve_websocket
 
-from agent_host_broker.core import Broker
-from agent_host_broker.registry import NodeRecord, StaticInventory
-from agent_host_broker.ws import NodeCredentials, WebSocketNodeConnector, serve_broker
+from ahp_gateway.core import Gateway
+from ahp_gateway.registry import NodeRecord, StaticInventory
+from ahp_gateway.ws import NodeCredentials, WebSocketNodeConnector, serve_gateway
 from tests.fleet import DEV, echo_host, everyone_is_a_dev
 
 
@@ -21,11 +21,11 @@ async def test_a_prompt_crosses_two_websocket_hops() -> None:
             connector = WebSocketNodeConnector(
                 lambda record, principal: NodeCredentials("node-secret")
             )
-            broker = Broker(inventory, connector, everyone_is_a_dev)
+            gateway = Gateway(inventory, connector, everyone_is_a_dev)
             async with (
-                serve_broker(broker, connection_token="surface-secret") as broker_server,
+                serve_gateway(gateway, connection_token="surface-secret") as gateway_server,
                 connect(
-                    f"ws://127.0.0.1:{broker_server.bound_port}/",
+                    f"ws://127.0.0.1:{gateway_server.bound_port}/",
                     token="surface-secret",
                     reconnect=False,
                 ) as client,

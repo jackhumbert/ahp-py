@@ -2,7 +2,7 @@
 
 This project implements an external specification, but it no longer vendors it.
 Everything protocol-shaped — types, reducers, error codes, conformance fixtures
-— lives in [`agent-host-protocol`](https://github.com/jackhumbert/agent-host-protocol-py),
+— lives in [`ahp-protocol`](https://github.com/jackhumbert/ahp-py/tree/main/packages/ahp-protocol),
 which this package depends on, and **that repository's `UPSTREAM.md` is the
 authority on the pin**. Bumping the spec is no longer a change to this
 repository.
@@ -59,15 +59,15 @@ session lifecycle.
 
 Nothing is vendored here — this repository has no `vendor/` directory. The
 conformance corpora, the five schemas and the TypeScript codegen inputs are
-vendored once, in `agent-host-protocol`, and arrive as package data with the
-dependency (`agent_host_protocol.conformance.corpus.CORPUS_ROOT`). The
+vendored once, in `ahp-protocol`, and arrive as package data with the
+dependency (`ahp_protocol.conformance.corpus.CORPUS_ROOT`). The
 wire-schema gate in `tests/conformance/schemas.py` reads the dependency's copy
 for exactly that reason: a second copy here could pin a different tag, and the
 gate would then assert against a spec the reducers do not implement.
 
 The vendored-file inventory, the pin-bump procedure and the ledger of known
 upstream defects live in
-[`agent-host-protocol`'s `UPSTREAM.md`](https://github.com/jackhumbert/agent-host-protocol-py/blob/main/UPSTREAM.md)
+[`ahp-protocol`'s `UPSTREAM.md`](https://github.com/jackhumbert/ahp-py/blob/main/packages/ahp-protocol/UPSTREAM.md)
 — this file used to carry its own copies, and they went stale the first time
 the sibling's moved. One defect workaround is this host's own to keep: the
 TypeScript `AhpStateMirror` drops all `ahp-chat:` snapshots and actions, so

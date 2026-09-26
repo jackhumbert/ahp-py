@@ -63,7 +63,7 @@ release by release. Decisions are in `docs/decisions/`.
 constraints — things that must exist *before* a feature ships, not alongside it
 — and §10 lists what is permanently out of scope for this distribution.
 
-Run the demo host with `python -m agent_host_server`.
+Run the demo host with `python -m ahp_host`.
 
 ## Commands
 
@@ -81,31 +81,31 @@ needs Node; the Python one is an import:
 
 ```bash
 npm i --no-save @microsoft/agent-host-protocol@0.9.0 ws
-pip install -e ../agent-host-client-py
+pip install -e ../ahp-client
 pytest tests/interop
 ```
 
 **The upstream pin is not this repository's concern any more.** The vendored
 corpora, the generated tables, the JS-semantics oracle and the re-vendoring
 script all live in
-[`agent-host-protocol`](https://github.com/jackhumbert/agent-host-protocol-py),
+[`ahp-protocol`](https://github.com/jackhumbert/ahp-py/tree/main/packages/ahp-protocol),
 which this package depends on. Bump the spec there.
 
 It installs from its repository (no index carries it, by design) — or, for
 development, from the sibling checkout:
 
 ```bash
-pip install -e ../agent-host-protocol-py
+pip install -e ../ahp-protocol
 ```
 
 ## Layout
 
 | Path | Contents | May import |
 |---|---|---|
-| `agent_host_protocol` *(dependency)* | wire types, the nine reducers, transports, the vendored corpora | stdlib only |
-| `src/agent_host_server/core/` | sequencing, subscriptions, replay, policy, dispatch | the dependency |
-| `src/agent_host_server/provider/` | `AgentProvider` protocol + echo provider | the dependency |
-| `src/agent_host_server/ws/` | WebSocket implementation | `core`, the dependency |
+| `ahp_protocol` *(dependency)* | wire types, the nine reducers, transports, the vendored corpora | stdlib only |
+| `src/ahp_host/core/` | sequencing, subscriptions, replay, policy, dispatch | the dependency |
+| `src/ahp_host/provider/` | `AgentProvider` protocol + echo provider | the dependency |
+| `src/ahp_host/ws/` | WebSocket implementation | `core`, the dependency |
 | `scripts/` | `smoke_wheel.py` (checks an *installed* wheel) | — |
 
 ## If a feature is not documented, it does not exist
@@ -145,13 +145,13 @@ believes it.
 Each of these is load-bearing; breaking one produces silent, hard-to-diagnose
 failures in *clients*, not in our tests. Evidence for every item is in
 `docs/research.md`. The reducer-porting rules among them (2–6, 18–19) travel
-with the reducers, which now live in `agent-host-protocol` — that repo's
+with the reducers, which now live in `ahp-protocol` — that repo's
 `AGENTS.md` carries the authoritative copies. They stay listed here because
 host code calls the reducers and reviews touch both sides of that line.
 
 1. **The protocol layer performs no I/O and imports nothing from `core/`.**
    `types/` and `reducers/` are no longer directories here — they are the
-   `agent-host-protocol` distribution, and the boundary the retired
+   `ahp-protocol` distribution, and the boundary the retired
    `lint-imports` contract used to enforce is enforced by packaging: the
    dependency cannot import its consumer. (`pyproject.toml`'s import-linter
    note records the retirement.)
@@ -245,7 +245,7 @@ fixture, and our suite would stay green while diverging.
 
 ## Adding a provider adapter
 
-Adapters live in their own distribution (`agent-host-server-<name>`), never in the core —
+Adapters live in their own distribution (`ahp-host-<name>`), never in the core —
 the core must stay installable and fully testable with no adapter present.
 
 1. Implement `AgentProvider`; add `ResumableAgentProvider` if the runtime can

@@ -13,10 +13,10 @@ from collections.abc import Mapping
 from typing import Any
 
 import pytest
-from agent_host_protocol.channels import ROOT_URI
-from agent_host_protocol.transport import memory_pair
+from ahp_protocol.channels import ROOT_URI
+from ahp_protocol.transport import memory_pair
 
-from agent_host_client.client import (
+from ahp_client.client import (
     ActionEvent,
     AhpClient,
     ClientClosed,
@@ -27,19 +27,19 @@ from agent_host_client.client import (
     SessionAdded,
     TransportError,
 )
-from agent_host_client.client.errors import (
+from ahp_client.client.errors import (
     MethodNotFound,
     NotFound,
     UnsupportedProtocolVersion,
     is_session_gone,
 )
-from agent_host_client.client.events import (
+from ahp_client.client.events import (
     MalformedFrame,
     OtlpEvent,
     ProgressEvent,
     UnknownResponse,
 )
-from agent_host_client.testing import FakeRpcError, echo_host
+from ahp_client.testing import FakeRpcError, echo_host
 
 
 class _EagerTransport:
@@ -82,12 +82,12 @@ async def _connected(**config: Any) -> tuple[AhpClient, Any]:
 async def test_initialize_sends_client_info_and_capabilities() -> None:
     """The reference helper cannot send either, despite the types supporting them."""
     client, host = await _connected(
-        client_info={"name": "agent-host-client-py", "version": "0"},
+        client_info={"name": "ahp-client", "version": "0"},
         capabilities={},
     )
     await client.initialize(client_id="c1", initial_subscriptions=[ROOT_URI])
     sent = next(m for m in host.received if m.get("method") == "initialize")
-    assert sent["params"]["clientInfo"] == {"name": "agent-host-client-py", "version": "0"}
+    assert sent["params"]["clientInfo"] == {"name": "ahp-client", "version": "0"}
     assert sent["params"]["capabilities"] == {}
     await client.shutdown()
     await host.stop()
@@ -131,7 +131,7 @@ async def test_version_verification_can_be_switched_off_for_a_loose_host() -> No
 
 async def test_offered_versions_default_to_what_the_pin_covers() -> None:
     """Not upstream's constant, which advertises versions we have no tables for."""
-    from agent_host_protocol.types import UPSTREAM_SUPPORTED_PROTOCOL_VERSIONS
+    from ahp_protocol.types import UPSTREAM_SUPPORTED_PROTOCOL_VERSIONS
 
     client, host = await _connected()
     await client.initialize(client_id="c1")
@@ -629,7 +629,7 @@ async def test_a_raising_mirror_costs_one_frame_not_the_connection() -> None:
     """`_on_notification` documents that an exception must never escape; the
     per-frame guard is what enforces it. One bad envelope becomes a counted
     diagnostic under the malformed-frame policy, not the end of the reader."""
-    from agent_host_client.client.mirror import ApplyOutcome, StateMirror
+    from ahp_client.client.mirror import ApplyOutcome, StateMirror
 
     class _Faulty(StateMirror):
         def apply(self, envelope: Mapping[str, Any]) -> ApplyOutcome:

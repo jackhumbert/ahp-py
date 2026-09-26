@@ -7,7 +7,7 @@ from collections.abc import AsyncIterable, AsyncIterator, Awaitable, Callable, M
 from dataclasses import replace
 from typing import Any
 
-from agent_host_server.provider.base import (
+from ahp_host.provider.base import (
     AuthChallenge,
     ClientToolCall,
     InputOutcome,

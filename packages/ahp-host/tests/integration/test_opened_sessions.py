@@ -15,9 +15,9 @@ from typing import Any
 
 import pytest
 
-from agent_host_server.core import Host, LoopbackSingleUserPolicy
-from agent_host_server.core.store import FileSessionStore
-from agent_host_server.provider.base import (
+from ahp_host.core import Host, LoopbackSingleUserPolicy
+from ahp_host.core.store import FileSessionStore
+from ahp_host.provider.base import (
     AgentInfo,
     AgentSession,
     AgentSessionContext,

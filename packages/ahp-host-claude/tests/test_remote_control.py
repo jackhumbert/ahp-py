@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from agent_host_server.provider.base import AgentSessionContext, ConfigRequest, UserMessage
+from ahp_host.provider.base import AgentSessionContext, ConfigRequest, UserMessage
 from claude_agent_sdk import (
     AssistantMessage,
     ClaudeAgentOptions,
@@ -20,8 +20,8 @@ from claude_agent_sdk import (
 )
 from claude_agent_sdk import UserMessage as SdkUserMessage
 
-from agent_host_server_claude.provider import ClaudeProvider, ClaudeSession, _Turn, discover
-from agent_host_server_claude.remote_control import auto_enable, bridge_of
+from ahp_host_claude.provider import ClaudeProvider, ClaudeSession, _Turn, discover
+from ahp_host_claude.remote_control import auto_enable, bridge_of
 from tests.fakes import FakeClient, FakePublisher, RecordingSink, Step, eventually
 
 
@@ -685,8 +685,8 @@ async def test_a_plan_approved_here_shows_the_mode_it_drops_to(tmp_path: Path) -
 
 
 def test_the_config_file_and_flags_can_override_the_default(tmp_path: Path) -> None:
-    from agent_host_server_claude.__main__ import _parse_args
-    from agent_host_server_claude.config import ConfigError, load
+    from ahp_host_claude.__main__ import _parse_args
+    from ahp_host_claude.config import ConfigError, load
 
     config = tmp_path / "node.toml"
     config.write_text(f"root = '{tmp_path}'\n")

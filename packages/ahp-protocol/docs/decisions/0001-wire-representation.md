@@ -5,7 +5,7 @@
 ## Context
 
 The protocol imposes an unusual set of simultaneous requirements on a type
-layer (evidence in the sibling host repo's [`docs/research.md`](https://github.com/jackhumbert/agent-host-server-py/blob/main/docs/research.md) §2f, §5, where this decision was originally taken):
+layer (evidence in the sibling host repo's [`docs/research.md`](https://github.com/jackhumbert/ahp-py/blob/main/packages/ahp-host/docs/research.md) §2f, §5, where this decision was originally taken):
 
 1. **Unknown fields must survive verbatim.** No schema uses
    `additionalProperties: false`, and the reducer corpus tests preservation

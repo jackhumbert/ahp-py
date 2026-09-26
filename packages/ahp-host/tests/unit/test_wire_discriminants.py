@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import json
 
-from agent_host_server.core.changesets import (
+from ahp_host.core.changesets import (
     Changeset,
     ChangesetOperation,
     ContentStore,
@@ -32,7 +32,7 @@ from agent_host_server.core.changesets import (
     diff_counts,
     file_entry,
 )
-from agent_host_server.core.config import RootConfig
+from ahp_host.core.config import RootConfig
 
 
 class TestChangesetKeys:
@@ -73,7 +73,7 @@ class TestToolCallKeys:
     def test_tool_result_content_is_discriminated_by_type(self) -> None:
         """`ToolResultContentType`, not a `kind`. Every reader switches on
         `.type`, so a `kind` block is dropped and the output pane is empty."""
-        from agent_host_server.provider.echo import EchoSession
+        from ahp_host.provider.echo import EchoSession
 
         source = EchoSession.__module__
         assert source  # keep the import meaningful
@@ -81,7 +81,7 @@ class TestToolCallKeys:
         # demo only emits these under --confirm-tools.
         import inspect
 
-        import agent_host_server.provider.echo as echo
+        import ahp_host.provider.echo as echo
 
         text = inspect.getsource(echo)
         assert '{"kind": "text"' not in text, "a tool result content block used `kind`"
@@ -91,7 +91,7 @@ class TestToolCallKeys:
         """`ToolInput = string | ContentRef`. A bare object made the client
         abort the invocation and synthesise a failure, so client-contributed
         tools -- a feature this host advertises -- could never run."""
-        from agent_host_server.core.turn import _encoded_tool_input
+        from ahp_host.core.turn import _encoded_tool_input
 
         assert _encoded_tool_input({"text": "hi"}) == json.dumps({"text": "hi"})
         assert _encoded_tool_input("already a string") == "already a string"
@@ -101,7 +101,7 @@ class TestToolCallKeys:
     def test_a_result_always_carries_success_and_past_tense(self) -> None:
         """Both REQUIRED. Without them the client computes `completed &&
         success` as falsey and the row stays present-tense forever."""
-        from agent_host_server.core.turn import _tool_result
+        from ahp_host.core.turn import _tool_result
 
         assert _tool_result(None, True, None) == {
             "success": True,
@@ -121,7 +121,7 @@ class TestModelInfo:
     """
 
     def test_provider_defaults_to_the_owning_agent(self) -> None:
-        from agent_host_server.provider.base import AgentInfo, ModelInfo
+        from ahp_host.provider.base import AgentInfo, ModelInfo
 
         wire = AgentInfo(
             provider="echo",
@@ -134,7 +134,7 @@ class TestModelInfo:
     def test_a_raw_mapping_still_gets_a_provider(self) -> None:
         """An embedder already building wire dicts is not forced to migrate,
         but is not left publishing an ungroupable model either."""
-        from agent_host_server.provider.base import AgentInfo
+        from ahp_host.provider.base import AgentInfo
 
         wire = AgentInfo(
             provider="echo",
@@ -145,7 +145,7 @@ class TestModelInfo:
         assert wire["models"][0]["provider"] == "echo"
 
     def test_optional_fields_are_omitted_not_nulled(self) -> None:
-        from agent_host_server.provider.base import ModelInfo
+        from ahp_host.provider.base import ModelInfo
 
         assert ModelInfo(id="m", name="M").to_wire("p") == {
             "id": "m",
@@ -155,7 +155,7 @@ class TestModelInfo:
 
     def test_the_demo_model_carries_token_limits(self) -> None:
         """Their ABSENCE is what a reader of echo.py would copy."""
-        from agent_host_server.provider import EchoProvider
+        from ahp_host.provider import EchoProvider
 
         model = EchoProvider().agent.to_wire()["models"][0]
         assert model["maxPromptTokens"] > 0
@@ -167,7 +167,7 @@ class TestDemoRootConfig:
     """The keys a client really pushes, so they stop being dropped."""
 
     def test_every_observed_key_is_declared(self) -> None:
-        from agent_host_server.__main__ import DEMO_ROOT_CONFIG_PROPERTIES
+        from ahp_host.__main__ import DEMO_ROOT_CONFIG_PROPERTIES
 
         # Captured from real connections. `terminalAutoApproveRules` and the two
         # auto-approve booleans are the ONLY channel by which the user's
@@ -190,7 +190,7 @@ class TestDemoRootConfig:
 
     def test_an_undeclared_key_is_still_refused(self) -> None:
         """Accepting the ten does not mean accepting anything."""
-        from agent_host_server.__main__ import DEMO_ROOT_CONFIG_PROPERTIES
+        from ahp_host.__main__ import DEMO_ROOT_CONFIG_PROPERTIES
 
         config = RootConfig(properties=DEMO_ROOT_CONFIG_PROPERTIES)
         assert config.rejection("somethingElse", 1) is not None

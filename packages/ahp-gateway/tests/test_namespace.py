@@ -1,7 +1,7 @@
 """The `ahp-file` tree: a folder per node, each node's folder its own root.
 
 Real hosts serving real directories (`RootedFilesystemResourceProvider` with a
-`defaultDirectory`), reached through the broker by a raw AHP client, so the
+`defaultDirectory`), reached through the gateway by a raw AHP client, so the
 resource commands a folder picker sends are exercised end to end.
 """
 
@@ -12,14 +12,14 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from agent_host_client import AhpClient, RpcError
-from agent_host_client.client import ActionEvent, Subscription
-from agent_host_server import Host, LoopbackSingleUserPolicy
-from agent_host_server.core.resources import RootedFilesystemResourceProvider
-from agent_host_server.provider.echo import EchoProvider
+from ahp_client import AhpClient, RpcError
+from ahp_client.client import ActionEvent, Subscription
+from ahp_host import Host, LoopbackSingleUserPolicy
+from ahp_host.core.resources import RootedFilesystemResourceProvider
+from ahp_host.provider.echo import EchoProvider
 
-from agent_host_broker.core.root import merge_root
-from agent_host_broker.registry import NodeRecord
+from ahp_gateway.core.root import merge_root
+from ahp_gateway.registry import NodeRecord
 from tests.fleet import DEV, Fleet, everyone_is_a_dev
 
 
@@ -44,7 +44,7 @@ def _tree(base: Path, name: str, files: list[str]) -> Path:
 
 @pytest.fixture
 def two_machines(tmp_path: Path) -> Fleet:
-    mac = _tree(tmp_path, "mac", ["broker/README.md", "notes.txt"])
+    mac = _tree(tmp_path, "mac", ["gateway/README.md", "notes.txt"])
     box = _tree(tmp_path, "box", ["game/main.py"])
     return Fleet(
         {"mac": _rooted_host(mac), "box": _rooted_host(box)},
@@ -85,7 +85,7 @@ async def test_the_picker_starts_at_the_list_of_machines(two_machines: Fleet) ->
 async def test_each_machines_folder_is_its_root(two_machines: Fleet) -> None:
     try:
         raw, _ = await _connect(two_machines)
-        assert await _names(raw, "ahp-file:///mac") == ["broker", "notes.txt"]
+        assert await _names(raw, "ahp-file:///mac") == ["gateway", "notes.txt"]
         assert await _names(raw, "ahp-file:///box") == ["game"]
         assert await _names(raw, "ahp-file:///box/game") == ["main.py"]
         read = await raw.request("resourceRead", {"uri": "ahp-file:///mac/notes.txt"})
@@ -194,7 +194,7 @@ async def test_vscode_browses_the_tree_as_file_paths(two_machines: Fleet) -> Non
         raw, _ = await _connect(two_machines)
         top = await raw.request("resourceList", {"uri": "file:///"})
         assert [e["name"] for e in top["entries"]] == ["box", "mac"]
-        assert await _names(raw, "file:///mac") == ["broker", "notes.txt"]
+        assert await _names(raw, "file:///mac") == ["gateway", "notes.txt"]
         assert await _names(raw, "file:///box/game") == ["main.py"]
         await raw.request(
             "createSession",
@@ -213,7 +213,7 @@ async def test_vscode_browses_the_tree_as_file_paths(two_machines: Fleet) -> Non
 
 
 def test_only_a_node_named_first_segment_is_an_alias() -> None:
-    from agent_host_broker.core.uris import from_client_alias
+    from ahp_gateway.core.uris import from_client_alias
 
     nodes = {"mac", "box"}
     assert from_client_alias("file:///mac/x", nodes) == "ahp-file:///mac/x"
@@ -248,10 +248,10 @@ async def _echoes(subscription: Subscription, count: int) -> list[dict[str, Any]
 
 async def test_a_folder_on_another_machine_is_refused_out_loud(tmp_path: Path) -> None:
     # A session's agent loop lives on one node and cannot reach another's
-    # disk. The broker refuses, and echoes the refusal so the surface reverts
+    # disk. The gateway refuses, and echoes the refusal so the surface reverts
     # its optimistic prediction instead of showing a folder the agent lacks.
     multiroot = {"multipleWorkingDirectories": {"immutablePrimary": False}}
-    mac = _tree(tmp_path, "mac", ["broker/README.md"])
+    mac = _tree(tmp_path, "mac", ["gateway/README.md"])
     box = _tree(tmp_path, "box", ["game/main.py", "tools/x.py"])
     fleet = Fleet(
         {
@@ -274,11 +274,11 @@ async def test_a_folder_on_another_machine_is_refused_out_loud(tmp_path: Path) -
         )
         _, subscription = await raw.subscribe(channel)
         set_dir = "session/workingDirectorySet"
-        foreign = raw.dispatch(channel, {"type": set_dir, "directory": "ahp-file:///mac/broker"})
+        foreign = raw.dispatch(channel, {"type": set_dir, "directory": "ahp-file:///mac/gateway"})
         local = raw.dispatch(channel, {"type": set_dir, "directory": "ahp-file:///box/tools"})
         refused, accepted = await _echoes(subscription, 2)
 
-        assert refused["action"] == {"type": set_dir, "directory": "ahp-file:///mac/broker"}
+        assert refused["action"] == {"type": set_dir, "directory": "ahp-file:///mac/gateway"}
         assert refused["origin"] == {"clientId": "picker", "clientSeq": foreign.client_seq}
         assert "'mac'" in refused["rejectionReason"]
         assert "'box'" in refused["rejectionReason"]

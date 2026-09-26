@@ -1,7 +1,7 @@
-# agent-host-server
+# ahp-host
 
-[![CI](https://github.com/jackhumbert/agent-host-server-py/actions/workflows/ci.yml/badge.svg)](https://github.com/jackhumbert/agent-host-server-py/actions/workflows/ci.yml)
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/jackhumbert/agent-host-server-py/blob/main/LICENSE)
+[![CI](https://github.com/jackhumbert/ahp-py/actions/workflows/ci.yml/badge.svg)](https://github.com/jackhumbert/ahp-py/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/jackhumbert/ahp-py/blob/main/packages/ahp-host/LICENSE)
 
 A Python **host/server** library for the [Agent Host Protocol][ahp] (AHP) —
 Microsoft's protocol for synchronized multi-client state over AI agent sessions.
@@ -19,30 +19,30 @@ Microsoft's protocol for synchronized multi-client state over AI agent sessions.
 > `fetchTurns` is implemented, and a WebSocket transport is in place.
 > Distributed from this repository — deliberately not on PyPI. API not stable,
 > single-trust-domain only.
-> [`docs/roadmap.md`](https://github.com/jackhumbert/agent-host-server-py/blob/main/docs/roadmap.md) scopes everything that remains;
-> [`docs/decisions/`](https://github.com/jackhumbert/agent-host-server-py/tree/main/docs/decisions) records the decisions taken.
+> [`docs/roadmap.md`](https://github.com/jackhumbert/ahp-py/blob/main/packages/ahp-host/docs/roadmap.md) scopes everything that remains;
+> [`docs/decisions/`](https://github.com/jackhumbert/ahp-py/tree/main/packages/ahp-host/docs/decisions) records the decisions taken.
 
 ## Try it
 
 The wire types and the nine reducers live in a sibling package,
-[`agent-host-protocol`][protocol], which a client stands on too. This family
+[`ahp-protocol`][protocol], which a client stands on too. This family
 of packages installs from GitHub, not from PyPI, and the protocol package must
 go in first — on its own, the second line fails with
-`No matching distribution found for agent-host-protocol`, because pip asks an
+`No matching distribution found for ahp-protocol`, because pip asks an
 index that does not carry it.
 
 ```bash
-pip install "agent-host-protocol @ git+https://github.com/jackhumbert/agent-host-protocol-py"
-pip install "agent-host-server[ws] @ git+https://github.com/jackhumbert/agent-host-server-py"
-python -m agent_host_server
+pip install "ahp-protocol @ git+https://github.com/jackhumbert/ahp-py#subdirectory=packages/ahp-protocol"
+pip install "ahp-host[ws] @ git+https://github.com/jackhumbert/ahp-py#subdirectory=packages/ahp-host"
+python -m ahp_host
 ```
 
-No release is tagged yet — **`v0.1.0` is pending** — so these lines install
+No release is tagged yet — **`ahp-host/v0.1.0` is pending** — so these lines install
 `main`. Once the first tag lands, pin it by appending the tag
-(`…agent-host-server-py@v0.1.0`), and each
-[GitHub release](https://github.com/jackhumbert/agent-host-server-py/releases)
+(`…ahp-host@v0.1.0`), and each
+[GitHub release](https://github.com/jackhumbert/ahp-py/releases)
 will carry the built wheel and sdist. For development, editable installs from
-sibling checkouts work the same way: `pip install -e ../agent-host-protocol-py`
+sibling checkouts work the same way: `pip install -e ../ahp-protocol`
 then `pip install -e '.[ws]'`.
 
 That serves the offline echo provider on loopback and prints the VS Code
@@ -67,7 +67,7 @@ Connecting a third-party host is a supported, extension-free VS Code feature
 (1.131+). Verified working against **VS Code Stable 1.131.0**: handshake,
 session creation, and a full turn. The details of what it sends — and the three
 host bugs that finding out uncovered — are in
-[`docs/experiments.md`](https://github.com/jackhumbert/agent-host-server-py/blob/main/docs/experiments.md) §E12.
+[`docs/experiments.md`](https://github.com/jackhumbert/ahp-py/blob/main/packages/ahp-host/docs/experiments.md) §E12.
 
 ### Demo flags
 
@@ -103,13 +103,13 @@ demo provider takes the first one enabled and returns.
 A full exploration, against a scratch git repo you do not mind being edited:
 
 ```bash
-python -m agent_host_server --customizations --configurable --multi-chat   --serve-directory /tmp/scratch --writable --terminal --changes
+python -m ahp_host --customizations --configurable --multi-chat   --serve-directory /tmp/scratch --writable --terminal --changes
 ```
 
 To see the wire:
 
 ```bash
-python -m agent_host_server --token --wire-log /tmp/agent-host-demo.jsonl
+python -m ahp_host --token --wire-log /tmp/agent-host-demo.jsonl
 ```
 
 which writes [ahp-inspector](https://github.com/roblourens/ahp-inspector) JSONL —
@@ -167,7 +167,7 @@ All 32 commands, and none of them a stub:
 
 A provider can also **stop and wait for a human** — elicitation, tool-call
 confirmation, and handing a tool to a client to execute — all on one primitive
-([ADR 0005](https://github.com/jackhumbert/agent-host-server-py/blob/main/docs/decisions/0005-suspending-provider-requests.md)). That last one
+([ADR 0005](https://github.com/jackhumbert/ahp-py/blob/main/packages/ahp-host/docs/decisions/0005-suspending-provider-requests.md)). That last one
 is worth calling out: the host marks a tool call `contributor: {kind: "client"}`,
 the client runs it in its own process, and the client reports the result. **The
 agent gets the editor's own tools with no filesystem API on the host at all.**
@@ -175,7 +175,7 @@ agent gets the editor's own tools with no filesystem API on the host at all.**
 Try any of them against the demo host:
 
 ```bash
-python -m agent_host_server --elicit
+python -m ahp_host --elicit
 ```
 
 `--confirm-tools` asks before running a tool and honours a client's edits to the
@@ -235,7 +235,7 @@ other commands are, by `Policy`. **Resource watches** poll and coalesce.
 **Automations** are a saved prompt plus a session template, run by hand
 (`runAutomation`) or on a cron schedule the host evaluates in a named time
 zone. Pass `automations=FileAutomationStore(path)` to turn them on;
-`agent-host-node` does, under its state directory. Each run is an ordinary
+`ahp-node` does, under its state directory. Each run is an ordinary
 session whose `origin` points back at the run, with the saved message as its
 first turn, and the run's lifecycle follows that turn: `completed`, `failed`,
 or `cancelled` through `automationRun/cancelRequested`. A turn parked on a tool
@@ -302,7 +302,7 @@ offset or length), so a file above the bound is refused rather than truncated:
 unbounded, one 64 MiB file took host memory from 29 MB to 970 MB.
 
 ```bash
-python -m agent_host_server --serve-directory ./workspace
+python -m ahp_host --serve-directory ./workspace
 ```
 
 **Sessions can survive a restart.** Install a `FileSessionStore` and call
@@ -338,7 +338,7 @@ What is genuinely absent, and why:
   VS Code's own in-process host, with no channel, command, action or state
   field in the protocol.
 - **`pickle`, `eval`, or any `__reduce__`-capable store format**, permanently.
-  JSON only. See [`docs/roadmap.md`](https://github.com/jackhumbert/agent-host-server-py/blob/main/docs/roadmap.md) §10.
+  JSON only. See [`docs/roadmap.md`](https://github.com/jackhumbert/ahp-py/blob/main/packages/ahp-host/docs/roadmap.md) §10.
 - **Retracting a session-summary field over `root/sessionSummaryChanged`** —
   the wire cannot say it. "Only fields present in `changes` have new values;
   omitted fields are unchanged", and every property of `changes` is typed as
@@ -348,7 +348,7 @@ What is genuinely absent, and why:
   re-fetches. `listSessions` and every fresh subscriber always see the truth,
   and the chat catalogue does not have the problem — `session/chatAdded` is a
   documented upsert and this host retracts through it. Open question 11 in
-  [`docs/research.md`](https://github.com/jackhumbert/agent-host-server-py/blob/main/docs/research.md); this host will not invent an
+  [`docs/research.md`](https://github.com/jackhumbert/ahp-py/blob/main/packages/ahp-host/docs/research.md); this host will not invent an
   encoding for it unilaterally.
 
 Session state is in-memory by default: sessions do not survive a host restart
@@ -380,7 +380,7 @@ refusals, session creation, tool-call resolutions — with **no conversation
 content by construction**. Both are absent by default.
 
 One host runs **one provider**. `RootState.agents` is plural and this publishes
-one entry, deliberately: see [`docs/roadmap.md`](https://github.com/jackhumbert/agent-host-server-py/blob/main/docs/roadmap.md) §4a.
+one entry, deliberately: see [`docs/roadmap.md`](https://github.com/jackhumbert/ahp-py/blob/main/packages/ahp-host/docs/roadmap.md) §4a.
 
 ## ⚠️ Security: read this before exposing a host
 
@@ -425,8 +425,8 @@ Code uses a single connection token; the one third-party host states outright
 that remote and multi-tenant security are unimplemented — but that is context,
 not reassurance.
 
-[`SECURITY.md`](https://github.com/jackhumbert/agent-host-server-py/blob/main/SECURITY.md) has the scope and the disclosure path;
-[`docs/guide/deploying.md`](https://github.com/jackhumbert/agent-host-server-py/blob/main/docs/guide/deploying.md) has the long version, with
+[`SECURITY.md`](https://github.com/jackhumbert/ahp-py/blob/main/packages/ahp-host/SECURITY.md) has the scope and the disclosure path;
+[`docs/guide/deploying.md`](https://github.com/jackhumbert/ahp-py/blob/main/packages/ahp-host/docs/guide/deploying.md) has the long version, with
 examples the test suite executes.
 
 ## Conformance
@@ -435,7 +435,7 @@ examples the test suite executes.
 value is that other implementations can trust it. So:
 
 The reducers and the wire types now live in
-[`agent-host-protocol`](https://github.com/jackhumbert/agent-host-protocol-py),
+[`ahp-protocol`](https://github.com/jackhumbert/ahp-py/tree/main/packages/ahp-protocol),
 a separate package this one depends on, so that a Python *client* can share them
 rather than fork them. Its conformance gates are listed here because they are
 what this host stands on:
@@ -470,12 +470,12 @@ This project targets an external specification. Protocol changes come from
 upstream, not from contributors' preferences. Where something is underspecified,
 the question is filed upstream and recorded in `docs/research.md` — this project
 does not fork the spec or diverge privately. See
-[`CONTRIBUTING.md`](https://github.com/jackhumbert/agent-host-server-py/blob/main/CONTRIBUTING.md) and [`UPSTREAM.md`](https://github.com/jackhumbert/agent-host-server-py/blob/main/UPSTREAM.md).
+[`CONTRIBUTING.md`](https://github.com/jackhumbert/ahp-py/blob/main/packages/ahp-host/CONTRIBUTING.md) and [`UPSTREAM.md`](https://github.com/jackhumbert/ahp-py/blob/main/packages/ahp-host/UPSTREAM.md).
 
-Licensed **MIT**, matching upstream — [`agent-host-protocol`][protocol], which
+Licensed **MIT**, matching upstream — [`ahp-protocol`][protocol], which
 this package stands on, vendors upstream's MIT-licensed conformance fixtures and
 ports its reducers, so identical terms avoid any compatibility question.
 
-[ahp]: https://microsoft.github.io/agent-host-protocol/
-[protocol]: https://github.com/jackhumbert/agent-host-protocol-py
-[transport]: https://microsoft.github.io/agent-host-protocol/specification/transport
+[ahp]: https://microsoft.github.io/ahp-protocol/
+[protocol]: https://github.com/jackhumbert/ahp-py/tree/main/packages/ahp-protocol
+[transport]: https://microsoft.github.io/ahp-protocol/specification/transport

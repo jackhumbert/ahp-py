@@ -7,8 +7,8 @@ from pathlib import Path
 
 import pytest
 
-from agent_host_server.node.config import ConfigError, load
-from agent_host_server.node.runner import create_agents
+from ahp_host.node.config import ConfigError, load
+from ahp_host.node.runner import create_agents
 
 
 @pytest.fixture
@@ -100,7 +100,7 @@ async def test_an_agent_type_no_package_provides_is_named(tmp_path: Path) -> Non
 
 def test_log_file_and_tunnel_are_read(tmp_path: Path) -> None:
     body = """log_file = '~/node.log'
-tunnel = ["ssh", "-N", "-R", "127.0.0.1:4402:127.0.0.1:4321", "ahp-tunnel@broker"]
+tunnel = ["ssh", "-N", "-R", "127.0.0.1:4402:127.0.0.1:4321", "ahp-tunnel@gateway"]
 [[agents]]
 type = "echo"
 """

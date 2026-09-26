@@ -10,7 +10,7 @@ from typing import Any
 
 import pytest
 
-from agent_host_server.ws.transport import _MALFORMED_LIMIT, WebSocketTransport
+from ahp_host.ws.transport import _MALFORMED_LIMIT, WebSocketTransport
 
 pytestmark = pytest.mark.anyio
 

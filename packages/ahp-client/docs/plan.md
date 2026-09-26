@@ -5,7 +5,7 @@ is empty.
 
 Derived from a research pass over upstream's five reference clients, the AHP
 specification at the `spec/v0.7.0` pin, the sibling host
-[`agent-host-server-py`](../../agent-host-server-py), and the three real-world
+[`ahp-host`](../../ahp-host), and the three real-world
 AHP consumers (`ahpx`, `ahp-inspector`, VS Code 1.131). Three competing
 architectures were drafted and scored by three adversarial reviewers; this
 document is the synthesis, not any one of them. Where a reviewer found a factual
@@ -148,8 +148,8 @@ to make a table look complete.
 
 **Decision: extract `types/`, `reducers/`, `conformance/` (corpora included),
 `transport/`, and the pure parts of `core/{versions,errors,channels,seq}.py`
-out of `agent-host-server-py` into a third repository
-`agent-host-protocol-py`, publishing the distribution `agent-host-protocol`.
+out of `ahp-host` into a third repository
+`ahp-protocol`, publishing the distribution `ahp-protocol`.
 Both the host and this client depend on it.**
 
 ### 2.1 Why, and why now
@@ -174,11 +174,11 @@ Options weighed and rejected:
 |---|---|
 | Fork + `check_shared_drift.py` | **Rejected.** Drift becomes *detectable*, never impossible, and the failure mode is silent: the 247-fixture comparator normalises `null` away on both sides, so a `js.assign` null-passthrough fix landing in one repo leaves both suites green while they diverge. Six defects of exactly this class already lived inside that blind spot in the sibling. |
 | Git submodule / subtree into both repos | **Rejected.** Solves source identity, not *distribution* identity. Two wheels still ship two module objects, two `reducers/clock.py` globals, and `frozen_clock()` in one does not freeze the other — which breaks any application embedding both a host and a client. |
-| Client depends on `agent-host-server` | **Rejected.** Inverts the dependency and drags a 3,614-line `core/host.py`, a PTY backend and a filesystem jail along to get `chat_reducer`. |
+| Client depends on `ahp-host` | **Rejected.** Inverts the dependency and drags a 3,614-line `core/host.py`, a PTY backend and a filesystem jail along to get `chat_reducer`. |
 | Monorepo, two distributions | **Rejected, closest call.** Genuinely simplifies release coordination, but the repos already have separate `AGENTS.md`, `CHANGELOG.md`, ADR series and issue trackers, and it forces host consumers to track client releases. §11.4's cross-repo CI job recovers most of the benefit. |
 
-`agent-host-protocol`, `agent-host-protocol-types`, `agent-host-client` and
-`agent-host-server` are all confirmed free on PyPI. (`ahp` and `pyahp` are taken
+`ahp-protocol`, `ahp-protocol-types`, `ahp-client` and
+`ahp-host` are all confirmed free on PyPI. (`ahp` and `pyahp` are taken
 by Analytic Hierarchy Process packages — hence spelling everything out, per the
 sibling's existing rationale.)
 
@@ -186,17 +186,17 @@ sibling's existing rationale.)
 
 Six ordered steps. 1–3 in the new repo, 4–6 as one reviewable PR in the server.
 
-1. **Split with history.** `git subtree split --prefix=src/agent_host_server`,
+1. **Split with history.** `git subtree split --prefix=src/ahp_host`,
    then delete what is not extracted in a *first commit* so
-   `git log --follow src/agent_host_protocol/reducers/chat.py` still reaches the
+   `git log --follow src/ahp_protocol/reducers/chat.py` still reaches the
    commits that ported it. That history is the primary evidence for why each
    JS-semantics line reads the way it does; losing it forfeits the reason the
    port is trustworthy.
-2. **Rename the import root** `agent_host_server` → `agent_host_protocol`,
+2. **Rename the import root** `ahp_host` → `ahp_protocol`,
    mechanically.
 3. **Fix the corpus-in-wheel defect.** `conformance/corpus.py:26` resolves
    `CORPUS_ROOT` as `Path(__file__).resolve().parents[3] / "vendor" / "upstream"`
-   while `pyproject.toml` packages only `src/agent_host_server` — an installed
+   while `pyproject.toml` packages only `src/ahp_host` — an installed
    wheel ships the loader and none of the data. Ship the corpus as package data.
    *Mechanism superseded by the protocol repo's ADR 0002, requirement kept:*
    this step originally prescribed `importlib.resources`, whose `files()`
@@ -204,11 +204,11 @@ Six ordered steps. 1–3 in the new repo, 4–6 as one reviewable PR in the serv
    reaching a real path means `as_file()` inside an `ExitStack`, turning module
    constants into context managers for no gain. What shipped instead is hatch's
    `force-include` mapping `vendor/upstream/` into the wheel at
-   `agent_host_protocol/conformance/_upstream/`, with `corpus.py` preferring
+   `ahp_protocol/conformance/_upstream/`, with `corpus.py` preferring
    the packaged tree over the checkout, and
    `tests/unit/test_packaging.py` building a real wheel to prove the corpus is
    inside — the gate a source checkout structurally cannot provide.
-4. **Server PR** `feat!: depend on agent-host-protocol`. Delete the extracted
+4. **Server PR** `feat!: depend on ahp-protocol`. Delete the extracted
    subpackages, add the dependency, rewrite imports. `core/errors.py`,
    `core/channels.py` and `core/seq.py` are *partially* extracted and get hand
    edits, not `sed`.
@@ -225,19 +225,19 @@ Six ordered steps. 1–3 in the new repo, 4–6 as one reviewable PR in the serv
    win.
 
 Do **not** add the proposed `forbidden` contract banning
-`agent_host_protocol.types._generated` from the server: `import-linter`'s
+`ahp_protocol.types._generated` from the server: `import-linter`'s
 `ForbiddenContract.allow_indirect_imports` defaults to `False`, and
 `types/__init__.py` re-exports seven names from `._generated`, so every
-legitimate `from agent_host_protocol.types import ACTION_TYPES` trips it.
+legitimate `from ahp_protocol.types import ACTION_TYPES` trips it.
 
 ### 2.3 Version coupling
 
 The spec breaks in MINOR bumps, so loose pins are a trap.
 
-- `agent-host-protocol`'s SemVer is independent of the spec's (matching the
+- `ahp-protocol`'s SemVer is independent of the spec's (matching the
   sibling's ADR 0002), but its MINOR moves whenever the vendored spec tag's
   MINOR moves.
-- Both consumers pin `agent-host-protocol ~= 0.1.0`.
+- Both consumers pin `ahp-protocol ~= 0.1.0`.
 - `UPSTREAM_PROTOCOL_VERSION` is asserted in each consumer's `tests/docs/`
   suite (here, `test_upstream_pin_is_true.py`), so a docs claim of "speaks
   0.7.0" fails when the dependency moves under it.
@@ -295,9 +295,9 @@ there.
 
 | Repo | Distribution | Import package | Runtime deps |
 |---|---|---|---|
-| `agent-host-protocol-py` | `agent-host-protocol` | `agent_host_protocol` | none |
-| `agent-host-server-py` | `agent-host-server` | `agent_host_server` | `agent-host-protocol~=0.1.0` |
-| `agent-host-client-py` | `agent-host-client` | `agent_host_client` | `agent-host-protocol~=0.1.0` |
+| `ahp-protocol` | `ahp-protocol` | `ahp_protocol` | none |
+| `ahp-host` | `ahp-host` | `ahp_host` | `ahp-protocol~=0.1.0` |
+| `ahp-client` | `ahp-client` | `ahp_client` | `ahp-protocol~=0.1.0` |
 
 This mirrors the shape every other AHP ecosystem converged on — Rust's
 `ahp-types`/`ahp`/`ahp-ws`, Go's `ahptypes`/`ahp`/`ahpws`.
@@ -313,7 +313,7 @@ concrete WebSocket behind its own `[ws]` extra. Revisit if a third transport
 `requires-python = ">=3.11"`. Core has zero runtime dependencies, for the same
 reason the host does: a notebook user parsing a wire log should not pull a
 WebSocket stack. `py.typed` and the `Typing :: Typed` classifier ship in **all
-three** distributions — without it in `agent-host-protocol`, every re-exported
+three** distributions — without it in `ahp-protocol`, every re-exported
 type is `Any` downstream.
 
 Dev dependencies go in a **`[dependency-groups]` table (PEP 735)**, never
@@ -327,7 +327,7 @@ development-side concept and never ships.
 ## 4. Package layout and layering
 
 ```
-src/agent_host_client/
+src/ahp_client/
   client/     errors.py events.py queue.py client.py commands.py mirror.py outbox.py
               actions.py                             # the outbound action constructors
   serve/      router.py resources.py watch.py tools.py plugins.py inputs.py
@@ -345,14 +345,14 @@ src/agent_host_client/
 out):
 
 ```
-(agent_host_client.cli)
-(agent_host_client.sync)
-(agent_host_client.api)
-(agent_host_client.hosts)
-(agent_host_client.serve)
-agent_host_client.client
-(agent_host_client.ws)
-(agent_host_client.wirelog)
+(ahp_client.cli)
+(ahp_client.sync)
+(ahp_client.api)
+(ahp_client.hosts)
+(ahp_client.serve)
+ahp_client.client
+(ahp_client.ws)
+(ahp_client.wirelog)
 ```
 
 Two forbidden contracts beyond the layers:
@@ -450,7 +450,7 @@ restated:
   on any config that holds one.**
 
 These are candidates for the shared package's `_util` or for a small
-`agent-host-protocol.rpc` module. They are exactly the code most likely to be
+`ahp-protocol.rpc` module. They are exactly the code most likely to be
 subtly wrong when rewritten.
 
 ---
@@ -654,7 +654,7 @@ everything else serves it.
 
 ```python
 import asyncio
-from agent_host_client import connect, Delta, ToolCallReady, TurnCompleted
+from ahp_client import connect, Delta, ToolCallReady, TurnCompleted
 
 
 async def main() -> None:
@@ -1322,7 +1322,7 @@ is an array; the root snapshot's `resource` is byte-exactly `ahp-root://`;
 `listSessions` items are iterable; the reconnect result matches its declared
 shape. It tells a host author in twenty lines what they got wrong.
 
-**`agent_host_client.testing` is public API**, not a test-internal fixture.
+**`ahp_client.testing` is public API**, not a test-internal fixture.
 `FakeHost` with `.on()`/`.push()/.emit_turn()`, `echo_host()`,
 `tool_call_host()`, and a `connected()` pytest fixture. `FakeHost` simulates the
 awkward realities: folded first deltas, `serverSeq` gaps, snapshot-only
@@ -1349,7 +1349,7 @@ being dead weight.
 
 Each step is a reviewable PR with its gate green before the next starts.
 
-- **M0 — Extraction.** `agent-host-protocol-py` created by `git subtree split`;
+- **M0 — Extraction.** `ahp-protocol` created by `git subtree split`;
   import root renamed; corpus-in-wheel fixed; `reducer_name_for` replaced;
   malformed-frame recursion fixed; `py.typed` added. Server PR depends on it.
   **Gate: the server's existing suite passes with zero test-assertion edits.**
@@ -1404,7 +1404,7 @@ than the nine originally scoped:
 
 | ADR | Decision |
 |---|---|
-| [0001](decisions/0001-depend-on-the-shared-protocol-layer.md) | Depend on `agent-host-protocol`; never fork it |
+| [0001](decisions/0001-depend-on-the-shared-protocol-layer.md) | Depend on `ahp-protocol`; never fork it |
 | [0002](decisions/0002-lossless-per-channel-delivery.md) | Per-channel queues are lossless; only fan-in taps drop |
 | [0003](decisions/0003-supervised-by-default.md) | `connect()` is supervised by default |
 | [0004](decisions/0004-write-ahead-reconciliation.md) | Implement write-ahead reconciliation, following VS Code |

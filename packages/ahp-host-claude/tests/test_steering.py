@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from agent_host_server.provider.base import AgentSessionContext, UserMessage
+from ahp_host.provider.base import AgentSessionContext, UserMessage
 from claude_agent_sdk import (
     AssistantMessage,
     ClaudeAgentOptions,
@@ -14,7 +14,7 @@ from claude_agent_sdk import (
 )
 from claude_agent_sdk import UserMessage as SdkUserMessage
 
-from agent_host_server_claude.provider import ClaudeProvider, ClaudeSession
+from ahp_host_claude.provider import ClaudeProvider, ClaudeSession
 from tests.fakes import FakeClient, RecordingSink
 
 

@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import re
 
-from agent_host_client import AhpClient, RpcError
-from agent_host_protocol import ROOT_URI
+from ahp_client import AhpClient, RpcError
+from ahp_protocol import ROOT_URI
 
-from agent_host_broker.registry import NodeRecord
+from ahp_gateway.registry import NodeRecord
 from tests.fleet import (
     DEV,
     Fleet,
@@ -76,7 +76,7 @@ async def test_a_node_that_drops_is_redialed_and_the_surface_resyncs(fleet: Flee
 
         before = generation(client)
         await fleet.connector.sever("node-b")
-        # The broker redials node-b, finds it, and bounces the surface; the
+        # The gateway redials node-b, finds it, and bounces the surface; the
         # client's own reconnect brings node-b's state back from snapshots.
         await reconnected(client, before)
 
@@ -120,7 +120,7 @@ async def test_a_lost_nodes_session_is_refused_rather_than_rerouted() -> None:
         await raw.initialize(client_id="c1")
         await raw.request("createSession", {"channel": "beta:/s", "provider": "beta"})
         await fleet.connector.sever("node-b")
-        # Until the broker notices the drop, a request may still be in flight
+        # Until the gateway notices the drop, a request may still be in flight
         # on the dying link; either way it must fail, and node-a must never be
         # the one to answer it.
         failure = None

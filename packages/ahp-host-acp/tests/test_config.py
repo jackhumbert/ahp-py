@@ -4,8 +4,8 @@ from pathlib import Path
 
 import pytest
 
-from agent_host_server_acp.__main__ import _parse_args
-from agent_host_server_acp.config import ConfigError, load
+from ahp_host_acp.__main__ import _parse_args
+from ahp_host_acp.config import ConfigError, load
 
 
 def _write(tmp_path: Path, body: str) -> Path:

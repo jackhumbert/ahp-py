@@ -96,7 +96,7 @@ server stays absent.
 
 ## Channels (9)
 
-Reducers come from `agent-host-protocol`, so all nine are available to the
+Reducers come from `ahp-protocol`, so all nine are available to the
 mirror, which binds any of them by name at registration. The TypeScript
 `AhpStateMirror` wires four and silently ignores every `ahp-chat:` snapshot.
 

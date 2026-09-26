@@ -1,6 +1,6 @@
 # Agent guide
 
-An `agent-host-server` provider adapter, living in its own distribution as the
+An `ahp-host` provider adapter, living in its own distribution as the
 server's AGENTS.md requires ("Adding a provider adapter").
 
 - `provider.py` translates the Claude Agent SDK's message stream into the

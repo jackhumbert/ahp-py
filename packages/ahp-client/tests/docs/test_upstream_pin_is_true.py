@@ -1,6 +1,6 @@
 """The two version claims the docs make about the dependency, asserted.
 
-`AGENTS.md` says to pin `agent-host-protocol ~= 0.1.0` and assert
+`AGENTS.md` says to pin `ahp-protocol ~= 0.1.0` and assert
 `UPSTREAM_PROTOCOL_VERSION` here, so a dependency bump that moves the spec
 under us fails loudly; invariant 12 says to ship the offered-list subset test.
 Both claims described tests that did not exist — this file is them.
@@ -8,13 +8,13 @@ Both claims described tests that did not exist — this file is them.
 
 from __future__ import annotations
 
-from agent_host_protocol import (
+from ahp_protocol import (
     DEFAULT_SUPPORTED_VERSIONS,
     UPSTREAM_PROTOCOL_VERSION,
     UPSTREAM_SUPPORTED_PROTOCOL_VERSIONS,
 )
 
-from agent_host_client.client.client import ClientConfig
+from ahp_client.client.client import ClientConfig
 
 
 def test_the_pin_is_the_spec_revision_this_client_was_written_against() -> None:

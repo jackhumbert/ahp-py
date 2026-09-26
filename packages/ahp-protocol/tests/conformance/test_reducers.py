@@ -22,10 +22,10 @@ from __future__ import annotations
 
 import pytest
 
-from agent_host_protocol.conformance.corpus import ReducerFixture, reducer_fixtures
-from agent_host_protocol.reducers import REDUCERS
-from agent_host_protocol.reducers.clock import frozen_clock
-from agent_host_protocol.types import reduced_equal
+from ahp_protocol.conformance.corpus import ReducerFixture, reducer_fixtures
+from ahp_protocol.reducers import REDUCERS
+from ahp_protocol.reducers.clock import frozen_clock
+from ahp_protocol.types import reduced_equal
 
 #: Every channel in the corpus. v0.1 shipped root + session + chat; the
 #: remaining four were ported in v0.2 (docs/roadmap.md §2), which takes the

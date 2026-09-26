@@ -67,5 +67,5 @@ will be moderated.
 By contributing you agree that your contributions are licensed under the MIT
 licence, matching [LICENSE](LICENSE) and upstream.
 
-[ahp]: https://microsoft.github.io/agent-host-protocol/
+[ahp]: https://microsoft.github.io/ahp-protocol/
 [repo]: https://github.com/microsoft/agent-host-protocol

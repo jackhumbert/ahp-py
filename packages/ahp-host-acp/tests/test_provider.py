@@ -9,14 +9,14 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from agent_host_server.provider.base import (
+from ahp_host.provider.base import (
     AgentSessionContext,
     ModelInfo,
     ModelSelection,
     UserMessage,
 )
 
-from agent_host_server_acp.provider import AcpProvider, AcpSession, AgentSpec
+from ahp_host_acp.provider import AcpProvider, AcpSession, AgentSpec
 
 from .fakes import FAKE_AGENT, RecordingSink
 

@@ -13,8 +13,8 @@ from typing import Any
 
 import pytest
 
-from agent_host_server.core.seq import FileSequence
-from agent_host_server.core.sequencer import Sequencer
+from ahp_host.core.seq import FileSequence
+from ahp_host.core.sequencer import Sequencer
 
 pytestmark = pytest.mark.anyio
 

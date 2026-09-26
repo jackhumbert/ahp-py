@@ -96,7 +96,7 @@ the spec revision it targets.
 
 - **The distribution model is settled: these repositories are public, and the
   packages install from GitHub, not from an index.**
-  `pip install "agent-host-protocol @ git+https://…"`, with releases pinned by
+  `pip install "ahp-protocol @ git+https://…"`, with releases pinned by
   tag and the built wheel and sdist attached to each GitHub release. The
   `publish.yml` workflow is `release.yml` now: the same gates — tag must match
   `__version__`, the wheel is installed and run from outside the checkout, the
@@ -133,7 +133,7 @@ the spec revision it targets.
 
 ### Added
 
-- **`agent_host_protocol.conformance.schemas`** — the vendored JSON Schemas as
+- **`ahp_protocol.conformance.schemas`** — the vendored JSON Schemas as
   an assertion, shipped rather than kept in `tests/`. A host and a client each
   need to prove the same thing about opposite directions of the same wire, and
   two copies of that file is exactly the drift this package exists to prevent.
@@ -164,6 +164,7 @@ the spec revision it targets.
 
 ### Changed
 
+- **Renamed from `agent-host-protocol` to `ahp-protocol`** (import `agent_host_protocol` → `ahp_protocol`), and moved into the `ahp-py` monorepo as `packages/ahp-protocol`. Tags are now per package: `ahp-protocol/v<version>`.
 - The version is single-sourced from `__init__.py` through hatchling's dynamic
   version. It was declared in two places, which is how the sibling host shipped
   `0.0.0` twice.
@@ -223,7 +224,7 @@ reducers as the acceptance gate. Each fix is pinned by a test.
   null image where the reference's in-memory `undefined` dedupes; the
   reducer's comment records the trade.
 
-Extracted from [`agent-host-server-py`](https://github.com/jackhumbert/agent-host-server-py),
+Extracted from [`ahp-host`](https://github.com/jackhumbert/ahp-py/tree/main/packages/ahp-host),
 where all of this code was written. See [ADR 0002](docs/decisions/0002-extraction.md).
 
 ### Added
@@ -270,6 +271,6 @@ where all of this code was written. See [ADR 0002](docs/decisions/0002-extractio
 
 - Targets spec `spec/v0.7.0` (`ea6fae670c4012721fdc02d587b3a46ecdc871c0`).
   `DEFAULT_SUPPORTED_VERSIONS` is `0.7.0, 0.6.0`.
-- `agent-host-server-py` has since been migrated onto this package (the
+- `ahp-host` has since been migrated onto this package (the
   `check_sibling_drift.py` removal above records the moment the premise
   changed); both consumers now import the one copy.

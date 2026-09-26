@@ -10,9 +10,9 @@ from typing import Any
 
 import pytest
 
-from agent_host_client import connect
-from agent_host_client.client import AhpClient, ClientConfig
-from agent_host_client.client.errors import (
+from ahp_client import connect
+from ahp_client.client import AhpClient, ClientConfig
+from ahp_client.client.errors import (
     AlreadyExists,
     Conflict,
     InvalidParams,
@@ -20,8 +20,8 @@ from agent_host_client.client.errors import (
     NotFound,
     PermissionDenied,
 )
-from agent_host_client.client.mirror import StateMirror
-from agent_host_client.serve import (
+from ahp_client.client.mirror import StateMirror
+from ahp_client.serve import (
     ClientToolHost,
     FileResourceServer,
     InputResponder,
@@ -31,7 +31,7 @@ from agent_host_client.serve import (
     file_uri,
     pending_inputs,
 )
-from agent_host_client.testing import FakeHost, FakeRpcError, echo_host
+from ahp_client.testing import FakeHost, FakeRpcError, echo_host
 
 CHAT = "ahp-chat://c/s"
 SESSION = "copilot:/s"
@@ -735,7 +735,7 @@ async def test_a_content_ref_tool_input_is_resolved_before_the_executor_runs() -
 def test_detach_uses_an_action_that_really_is_client_dispatchable() -> None:
     """Verified against the generated table, contradicting the prose that says
     a client never unsets itself."""
-    from agent_host_protocol.types import IS_CLIENT_DISPATCHABLE
+    from ahp_protocol.types import IS_CLIENT_DISPATCHABLE
 
     host = ClientToolHost.__new__(ClientToolHost)
     host._client_id = "me"

@@ -3,7 +3,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "agent-host-protocol"
+name = "ahp-protocol"
 description = "Wire types, pure reducers and the conformance corpora for the Agent Host Protocol (AHP)."
 # Single-sourced from the package, so the two cannot drift. There is no second
 # place to forget -- the host learned this one the hard way, shipping `0.0.0`
@@ -12,7 +12,7 @@ dynamic = ["version"]
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.11"
-authors = [{ name = "agent-host-protocol-py contributors" }]
+authors = [{ name = "ahp-protocol contributors" }]
 keywords = ["ahp", "agent-host-protocol", "agent", "protocol", "json-rpc", "reducers"]
 classifiers = [
   "Development Status :: 3 - Alpha",
@@ -30,9 +30,9 @@ classifiers = [
 dependencies = []
 
 [project.urls]
-Homepage = "https://github.com/jackhumbert/agent-host-protocol-py"
-Repository = "https://github.com/jackhumbert/agent-host-protocol-py"
-Issues = "https://github.com/jackhumbert/agent-host-protocol-py/issues"
+Homepage = "https://github.com/jackhumbert/ahp-py/tree/main/packages/ahp-protocol"
+Repository = "https://github.com/jackhumbert/ahp-py/tree/main/packages/ahp-protocol"
+Issues = "https://github.com/jackhumbert/ahp-py/issues"
 
 # Dev requirements live in a PEP 735 dependency group, NOT in
 # [project.optional-dependencies]. An extra is baked into the wheel's
@@ -51,7 +51,7 @@ dev = [
 ]
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/agent_host_protocol"]
+packages = ["src/ahp_protocol"]
 
 # The vendored corpus has exactly one copy under version control
 # (`vendor/upstream/`, written by scripts/vendor_upstream.sh) and is mapped into
@@ -60,10 +60,10 @@ packages = ["src/agent_host_protocol"]
 # corpus, which is the defect this package was extracted partly to fix.
 # `conformance/corpus.py::_corpus_root` reads whichever exists.
 [tool.hatch.version]
-path = "src/agent_host_protocol/__init__.py"
+path = "src/ahp_protocol/__init__.py"
 
 [tool.hatch.build.targets.wheel.force-include]
-"vendor/upstream" = "agent_host_protocol/conformance/_upstream"
+"vendor/upstream" = "ahp_protocol/conformance/_upstream"
 
 [tool.hatch.build.targets.sdist]
 include = ["src", "tests", "scripts", "vendor", "docs", "*.md", "LICENSE"]
@@ -90,18 +90,18 @@ ignore = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
-"src/agent_host_protocol/types/_generated.py" = ["E501"]
+"src/ahp_protocol/types/_generated.py" = ["E501"]
 # TransportClosed signals end-of-stream, not a fault; the Error suffix would mislead.
-"src/agent_host_protocol/transport/base.py" = ["N818"]
+"src/ahp_protocol/transport/base.py" = ["N818"]
 "tests/**" = ["RUF059"]
 
 [tool.ruff.format]
 # The generator is the sole authority on this file's content; formatting it here
 # would break the `git diff --exit-code` reproducibility gate in CI.
-exclude = ["src/agent_host_protocol/types/_generated.py"]
+exclude = ["src/ahp_protocol/types/_generated.py"]
 
 [tool.importlinter]
-root_package = "agent_host_protocol"
+root_package = "ahp_protocol"
 include_external_packages = true
 
 # The whole reason this package exists as its own distribution: the layer below
@@ -110,19 +110,19 @@ include_external_packages = true
 name = "Layered: nothing below reaches up"
 type = "layers"
 layers = [
-  "agent_host_protocol.conformance",
-  "(agent_host_protocol.transport)",
-  "(agent_host_protocol.errors)",
-  "(agent_host_protocol.channels)",
-  "(agent_host_protocol.versions)",
-  "(agent_host_protocol.reducers)",
-  "agent_host_protocol.types",
+  "ahp_protocol.conformance",
+  "(ahp_protocol.transport)",
+  "(ahp_protocol.errors)",
+  "(ahp_protocol.channels)",
+  "(ahp_protocol.versions)",
+  "(ahp_protocol.reducers)",
+  "ahp_protocol.types",
 ]
 
 [[tool.importlinter.contracts]]
 name = "types performs no I/O"
 type = "forbidden"
-source_modules = ["agent_host_protocol.types"]
+source_modules = ["ahp_protocol.types"]
 forbidden_modules = ["asyncio", "socket", "pathlib", "json", "os", "websockets"]
 
 # Reducers are pure. `json` is absent deliberately: a reducer that serialises is
@@ -130,5 +130,5 @@ forbidden_modules = ["asyncio", "socket", "pathlib", "json", "os", "websockets"]
 [[tool.importlinter.contracts]]
 name = "reducers perform no I/O"
 type = "forbidden"
-source_modules = ["agent_host_protocol.reducers"]
+source_modules = ["ahp_protocol.reducers"]
 forbidden_modules = ["asyncio", "socket", "pathlib", "json", "os", "websockets"]

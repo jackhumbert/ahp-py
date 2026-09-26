@@ -6,10 +6,10 @@ import asyncio
 import contextlib
 from pathlib import Path
 
-from agent_host_client.client.client import AhpClient
-from agent_host_client.doctor import diagnose
-from agent_host_client.testing import FakeRpcError, echo_host
-from agent_host_client.wirelog.jsonl import WireLog, logged, read_jsonl
+from ahp_client.client.client import AhpClient
+from ahp_client.doctor import diagnose
+from ahp_client.testing import FakeRpcError, echo_host
+from ahp_client.wirelog.jsonl import WireLog, logged, read_jsonl
 
 from ._sibling import requires_sibling_host
 
@@ -263,11 +263,11 @@ async def test_a_full_turn_against_the_sibling_python_host() -> None:
     interoperate with a real host implementation rather than only with a fake we
     also wrote.
     """
-    from agent_host_protocol.transport import memory_pair
-    from agent_host_server.core import Host, LoopbackSingleUserPolicy
-    from agent_host_server.provider import EchoProvider
+    from ahp_host.core import Host, LoopbackSingleUserPolicy
+    from ahp_host.provider import EchoProvider
+    from ahp_protocol.transport import memory_pair
 
-    from agent_host_client.api import Delta, connect
+    from ahp_client.api import Delta, connect
 
     host = Host(provider=EchoProvider(), policy=LoopbackSingleUserPolicy())
     client_side, host_side = memory_pair()

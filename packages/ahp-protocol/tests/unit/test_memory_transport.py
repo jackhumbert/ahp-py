@@ -15,7 +15,7 @@ from typing import Any
 
 import pytest
 
-from agent_host_protocol.transport import MemoryTransport, TransportClosed, memory_pair
+from ahp_protocol.transport import MemoryTransport, TransportClosed, memory_pair
 
 
 async def _receive_soon(transport: MemoryTransport) -> dict[str, Any] | None:

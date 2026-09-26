@@ -9,8 +9,8 @@ from __future__ import annotations
 
 import pytest
 
-from agent_host_server import Denied
-from agent_host_server.core.policy import LoopbackSingleUserPolicy, reason_or
+from ahp_host import Denied
+from ahp_host.core.policy import LoopbackSingleUserPolicy, reason_or
 
 
 def test_denied_is_falsy_so_existing_policies_are_unaffected() -> None:
@@ -39,7 +39,7 @@ def test_reason_or_falls_back_for_a_plain_bool() -> None:
 def test_the_shipped_permissive_policy_still_returns_a_plain_bool(hook: str) -> None:
     """`Denied` is additive: nothing in the library started returning it."""
     policy = LoopbackSingleUserPolicy()
-    from agent_host_server.core.policy import ConnectionInfo
+    from ahp_host.core.policy import ConnectionInfo
 
     verdict = getattr(policy, hook)(ConnectionInfo(client_id="c"), {})
     assert verdict is True
@@ -57,8 +57,8 @@ def test_a_backend_that_runs_nothing_does_not_advertise_the_command_prefix() -> 
     `!` for such a backend turns a working input into a dead end, which is the same
     reason the refusing default does not advertise it.
     """
-    from agent_host_server import Host, LoopbackSingleUserPolicy
-    from agent_host_server.provider import EchoProvider
+    from ahp_host import Host, LoopbackSingleUserPolicy
+    from ahp_host.provider import EchoProvider
 
     class Inert:
         runs_commands = False
@@ -93,9 +93,9 @@ def test_connection_token_accepts_a_validator_for_per_user_tokens() -> None:
     import secrets as _secrets
     from collections.abc import Mapping
 
-    from agent_host_server import Host, LoopbackSingleUserPolicy
-    from agent_host_server.provider import EchoProvider
-    from agent_host_server.ws.server import WebSocketServer
+    from ahp_host import Host, LoopbackSingleUserPolicy
+    from ahp_host.provider import EchoProvider
+    from ahp_host.ws.server import WebSocketServer
 
     known = {"tok-a", "tok-b"}
 

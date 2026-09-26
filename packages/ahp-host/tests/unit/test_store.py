@@ -26,8 +26,8 @@ from typing import Any
 
 import pytest
 
-from agent_host_server.core import store as store_module
-from agent_host_server.core.store import (
+from ahp_host.core import store as store_module
+from ahp_host.core.store import (
     FileSessionStore,
     InMemorySessionStore,
     StoredSession,

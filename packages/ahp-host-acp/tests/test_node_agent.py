@@ -1,4 +1,4 @@
-"""`type = "acp"` in an agent-host-node config."""
+"""`type = "acp"` in an ahp-node config."""
 
 from __future__ import annotations
 
@@ -6,11 +6,11 @@ from importlib.metadata import entry_points
 from pathlib import Path
 
 import pytest
-from agent_host_server.node import NodeContext, Roots
-from agent_host_server.provider.base import ModelInfo
+from ahp_host.node import NodeContext, Roots
+from ahp_host.provider.base import ModelInfo
 
-from agent_host_server_acp.agent import create
-from agent_host_server_acp.config import ConfigError
+from ahp_host_acp.agent import create
+from ahp_host_acp.config import ConfigError
 
 
 def _node(tmp_path: Path) -> NodeContext:
@@ -18,8 +18,8 @@ def _node(tmp_path: Path) -> NodeContext:
 
 
 def test_the_package_registers_the_acp_agent_type() -> None:
-    names = {entry.name: entry.value for entry in entry_points(group="agent_host_server.agents")}
-    assert names.get("acp") == "agent_host_server_acp.agent:create"
+    names = {entry.name: entry.value for entry in entry_points(group="ahp_host.agents")}
+    assert names.get("acp") == "ahp_host_acp.agent:create"
 
 
 def test_an_agent_table_builds_a_provider_on_the_nodes_roots(tmp_path: Path) -> None:

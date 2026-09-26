@@ -10,7 +10,7 @@ from typing import Any
 
 import httpx
 import pytest
-from agent_host_server.provider.base import AgentSessionContext, UserMessage
+from ahp_host.provider.base import AgentSessionContext, UserMessage
 from claude_agent_sdk import (
     AssistantMessage,
     ClaudeAgentOptions,
@@ -19,7 +19,7 @@ from claude_agent_sdk import (
 )
 from claude_agent_sdk import UserMessage as SdkUserMessage
 
-from agent_host_server_claude.claude_ai import (
+from ahp_host_claude.claude_ai import (
     ALL,
     LOCAL,
     Api,
@@ -34,7 +34,7 @@ from agent_host_server_claude.claude_ai import (
     scope_of,
     uri_of,
 )
-from agent_host_server_claude.provider import ClaudeProvider, ClaudeSession
+from ahp_host_claude.provider import ClaudeProvider, ClaudeSession
 from tests.fakes import FakePublisher, RecordingSink, eventually
 
 
@@ -641,7 +641,7 @@ async def test_a_turn_typed_there_opens_one_here(tmp_path: Path) -> None:
 
 
 async def test_each_machine_lists_only_the_sessions_running_on_it(tmp_path: Path) -> None:
-    """So every machine's node can have it on: each lists its own, the broker
+    """So every machine's node can have it on: each lists its own, the gateway
     files them under the right machine, and none is listed twice."""
     api = FakeApi()
     api.machines = {

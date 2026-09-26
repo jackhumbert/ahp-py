@@ -26,10 +26,10 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from agent_host_protocol.errors import AhpError
+from ahp_protocol.errors import AhpError
 
-import agent_host_server.core.terminals
-from agent_host_server.core.terminals import (
+import ahp_host.core.terminals
+from ahp_host.core.terminals import (
     CLAIM_GATED_ACTIONS,
     STRICT_CLAIM_GATED_ACTIONS,
     CommandFinished,
@@ -663,7 +663,7 @@ def test_the_module_imports_nothing_that_can_start_a_process() -> None:
     the list too: a pty needs `os.forkpty`, so a module that never imports `os`
     cannot grow one by accident.
     """
-    source = agent_host_server.core.terminals.__file__
+    source = ahp_host.core.terminals.__file__
     assert source is not None
     tree = ast.parse(Path(source).read_text(encoding="utf-8"))
 

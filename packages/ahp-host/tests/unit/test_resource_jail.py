@@ -23,9 +23,9 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from agent_host_protocol.errors import AhpError
+from ahp_protocol.errors import AhpError
 
-from agent_host_server.core.resources import (
+from ahp_host.core.resources import (
     NullResourceProvider,
     RootedFilesystemResourceProvider,
     WritableResourceProvider,

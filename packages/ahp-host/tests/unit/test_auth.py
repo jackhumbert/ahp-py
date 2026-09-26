@@ -18,9 +18,9 @@ import json
 import traceback
 
 import pytest
-from agent_host_protocol.types import AHP_ERROR_CODES, ROOT_CHANNEL
+from ahp_protocol.types import AHP_ERROR_CODES, ROOT_CHANNEL
 
-from agent_host_server.core.auth import (
+from ahp_host.core.auth import (
     AUTH_REQUIRED_METHOD,
     BearerToken,
     ProtectedResource,

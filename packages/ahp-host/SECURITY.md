@@ -3,7 +3,7 @@
 ## Reporting a vulnerability
 
 Report privately through [GitHub's advisory
-form](https://github.com/jackhumbert/agent-host-server-py/security/advisories/new).
+form](https://github.com/jackhumbert/ahp-py/security/advisories/new).
 Please do not open a public issue for a vulnerability.
 
 Include what you did, what happened, and what you expected. A wire log

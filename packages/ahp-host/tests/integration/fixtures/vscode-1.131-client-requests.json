@@ -1,7 +1,7 @@
 {
   "capturedFrom": "Visual Studio Code 1.131.0 (stable), macOS",
   "capturedOn": "2026-08-01",
-  "against": "agent-host-server demo host, EchoProvider, ws://127.0.0.1:4321",
+  "against": "ahp-host demo host, EchoProvider, ws://127.0.0.1:4321",
   "note": "One representative request per (method, action type), in first-seen order. Home paths rewritten to /home/user and long strings truncated. Regenerate by running the demo host with --wire-log and connecting VS Code.",
   "requests": [
     {

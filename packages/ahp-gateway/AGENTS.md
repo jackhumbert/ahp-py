@@ -27,7 +27,7 @@ from it into a tracked file.
 
 ## What this project is
 
-The **broker** of the federated AHP fleet: the one component that implements
+The **gateway** of the federated AHP fleet: the one component that implements
 **both** AHP edges. It is an AHP host facing the surfaces (so web/Windows/CLI
 all speak plain AHP to one endpoint, one login) and an AHP client facing each
 node (because AHP is strictly client-dials-host and the agent loop, the
@@ -35,16 +35,16 @@ filesystem and the terminal are all host-side).
 
 - **Nodes** implement the AHP **server** only.
 - **Surfaces** implement the AHP **client** only.
-- **This broker** implements both - and is the only thing that does.
+- **This gateway** implements both - and is the only thing that does.
 
 ```
-                agent-host-protocol              ← the shared layer
+                ahp-protocol              ← the shared layer
                   ▲        ▲         ▲
                   │        │         │
-        agent-host-server │ agent-host-client
-                  ▲       │       ▲        ← the broker is BOTH
+        ahp-host │ ahp-client
+                  ▲       │       ▲        ← the gateway is BOTH
                   └───────┴───────┘
-                    agent-host-broker       ← this repo
+                    ahp-gateway       ← this repo
 ```
 
 **Current state: the multiplexer (plan §7 unit 1) exists**, with the
@@ -53,21 +53,21 @@ registry's interfaces and a declarative inventory behind it. `docs/plan.md`
 
 ## Depend on the shared layer; do not fork it
 
-`agent-host-protocol` holds the wire types, the reducers, version
+`ahp-protocol` holds the wire types, the reducers, version
 negotiation, the error taxonomy and the transport ABC. **Do not copy any of
-it into this repository.** The broker's client edge is `agent-host-client`'s
-`AhpClient`. Its host edge is a **frame router**, not `agent-host-server`'s
+it into this repository.** The gateway's client edge is `ahp-client`'s
+`AhpClient`. Its host edge is a **frame router**, not `ahp-host`'s
 `Host`: `Host` owns sessions, turns, terminals and resources itself, and a
-broker built on it would re-host every session instead of relaying the node's
-(plan §9). What the host edge does take from `agent-host-server` is its
+gateway built on it would re-host every session instead of relaying the node's
+(plan §9). What the host edge does take from `ahp-host` is its
 `ConnectionInfo` and its WebSocket server. If neither sibling exposes
-something the broker needs, extend the sibling, not this repo - the broker is
+something the gateway needs, extend the sibling, not this repo - the gateway is
 a control plane beside AHP, never a fork of it.
 
 ## Federation stays out of the AHP packages
 
 A lone node must stay speakable by a stock AHP client (VS Code). Nothing in
-`agent-host-{protocol,server,client}-py` may learn that a fleet exists, and
+`ahp-{protocol,host,client}` may learn that a fleet exists, and
 nothing in this repo may be needed to talk to one host. The only new wire
 contract this project owns is the dial-out node's registration + heartbeat
 handshake (`relay/`); everything session-level rides AHP untouched.
@@ -93,10 +93,10 @@ handshake (`relay/`); everything session-level rides AHP untouched.
 2. **Admission before AHP.** The identity check gates whether you may start
    a session on a node at all; the node's OS gates what that session can
    touch. Neither check is deferred into the other's layer.
-3. **Broker↔node is just AHP.** No private action types, no extension
+3. **Gateway↔node is just AHP.** No private action types, no extension
    handshake, no header the sibling host does not already speak.
 4. **Never advertise a capability we do not implement** - the family
-   invariant, and it doubles here: the broker advertises to the surfaces
+   invariant, and it doubles here: the gateway advertises to the surfaces
    what the fleet can do, not what one node can.
 
 ## Conventions

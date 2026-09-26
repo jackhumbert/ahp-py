@@ -15,8 +15,8 @@ import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
-from agent_host_client.client.events import ActionRejected, Diagnostic, SequenceGap
-from agent_host_client.client.mirror import (
+from ahp_client.client.events import ActionRejected, Diagnostic, SequenceGap
+from ahp_client.client.mirror import (
     ApplyOutcome,
     GapPolicy,
     PendingPolicy,

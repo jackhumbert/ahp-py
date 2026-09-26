@@ -3,17 +3,17 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "agent-host-broker"
-# The version lives in `src/agent_host_broker/__init__.py` as `__version__` and
+name = "ahp-gateway"
+# The version lives in `src/ahp_gateway/__init__.py` as `__version__` and
 # nowhere else; hatch reads it from there. Two spellings of a version agree
 # right up until the release where somebody bumps one of them.
 dynamic = ["version"]
-description = "A federated broker for the Agent Host Protocol (AHP): one AHP host for the surfaces, one AHP client per node."
+description = "A federated gateway for the Agent Host Protocol (AHP): one AHP host for the surfaces, one AHP client per node."
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.11"
-authors = [{ name = "agent-host-broker contributors" }]
-keywords = ["ahp", "agent-host-protocol", "agent", "broker", "federation", "json-rpc", "websocket"]
+authors = [{ name = "ahp-gateway contributors" }]
+keywords = ["ahp", "agent-host-protocol", "agent", "gateway", "federation", "json-rpc", "websocket"]
 classifiers = [
   "Development Status :: 2 - Pre-Alpha",
   "Intended Audience :: Developers",
@@ -27,9 +27,9 @@ classifiers = [
 ]
 
 # Three runtime dependencies, and every one of them is the rest of this family.
-# `agent-host-protocol` is the shared wire layer; `agent-host-server` supplies
-# the broker's host edge (what the surfaces dial); `agent-host-client` supplies
-# the broker's client edge (what dials each node). The broker is the only
+# `ahp-protocol` is the shared wire layer; `ahp-host` supplies
+# the gateway's host edge (what the surfaces dial); `ahp-client` supplies
+# the gateway's client edge (what dials each node). The gateway is the only
 # component in the family that stands on both sides at once.
 #
 # The siblings are distributed from GitHub, not from an index, so CI supplies
@@ -41,9 +41,9 @@ classifiers = [
 # (its tree says 0.1.0.dev0, which `~=0.1.0` excludes). Same 0.1 ceiling;
 # tighten it back to `~=0.1.0` once the client releases.
 dependencies = [
-  "agent-host-protocol~=0.1.0",
-  "agent-host-server~=0.1.0",
-  "agent-host-client>=0.1.0.dev0,<0.2",
+  "ahp-protocol~=0.1.0",
+  "ahp-host~=0.1.0",
+  "ahp-client>=0.1.0.dev0,<0.2",
 ]
 
 [project.optional-dependencies]
@@ -64,16 +64,16 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/jackhumbert/agent-host-broker-py"
-Repository = "https://github.com/jackhumbert/agent-host-broker-py"
-Issues = "https://github.com/jackhumbert/agent-host-broker-py/issues"
-Changelog = "https://github.com/jackhumbert/agent-host-broker-py/blob/main/CHANGELOG.md"
+Homepage = "https://github.com/jackhumbert/ahp-py/tree/main/packages/ahp-gateway"
+Repository = "https://github.com/jackhumbert/ahp-py/tree/main/packages/ahp-gateway"
+Issues = "https://github.com/jackhumbert/ahp-py/issues"
+Changelog = "https://github.com/jackhumbert/ahp-py/blob/main/packages/ahp-gateway/CHANGELOG.md"
 
 [tool.hatch.version]
-path = "src/agent_host_broker/__init__.py"
+path = "src/ahp_gateway/__init__.py"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/agent_host_broker"]
+packages = ["src/ahp_gateway"]
 
 # An allowlist, not an ignore list. Hatchling's default sdist selection honours
 # only the ROOT .gitignore, and the tool caches that self-ignore with a nested
@@ -121,7 +121,7 @@ ignore = [
 "tests/**" = ["RUF059"]
 
 [tool.importlinter]
-root_package = "agent_host_broker"
+root_package = "ahp_gateway"
 include_external_packages = true
 
 # Parenthesised layers are optional, so the contract holds while the upper
@@ -135,10 +135,10 @@ type = "layers"
 # carries AHP frames verbatim for nodes that cannot be dialed, and `ws`
 # supplies concrete transports, but neither is something the core imports.
 layers = [
-  "(agent_host_broker.relay)",
-  "(agent_host_broker.ws)",
-  "agent_host_broker.core",
-  "agent_host_broker.registry",
+  "(ahp_gateway.relay)",
+  "(ahp_gateway.ws)",
+  "ahp_gateway.core",
+  "ahp_gateway.registry",
 ]
 
 # The registry is a directory with admission logic, not a network component.
@@ -147,5 +147,5 @@ layers = [
 [[tool.importlinter.contracts]]
 name = "the registry stays offline"
 type = "forbidden"
-source_modules = ["agent_host_broker.registry"]
-forbidden_modules = ["agent_host_broker.ws", "agent_host_broker.relay", "websockets"]
+source_modules = ["ahp_gateway.registry"]
+forbidden_modules = ["ahp_gateway.ws", "ahp_gateway.relay", "websockets"]

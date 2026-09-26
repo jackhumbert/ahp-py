@@ -12,7 +12,7 @@ import asyncio
 
 import pytest
 
-from agent_host_server.core.pending import PendingRequests, RequestOutcome
+from ahp_host.core.pending import PendingRequests, RequestOutcome
 
 pytestmark = pytest.mark.anyio
 

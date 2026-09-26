@@ -2,7 +2,7 @@
 
 import pytest
 
-from agent_host_broker.core.uris import (
+from ahp_gateway.core.uris import (
     VIRTUAL_ROOT,
     ChannelOwners,
     ForeignUriError,
@@ -100,7 +100,7 @@ def test_the_virtual_root_is_not_a_file_on_any_node() -> None:
 
 
 def test_a_clients_own_file_uri_passes_through() -> None:
-    # `file:` is always the sender's own machine; the broker never claims it.
+    # `file:` is always the sender's own machine; the gateway never claims it.
     assert unqualify_file_uris("file:///tmp", "node-a", ROOT) == "file:///tmp"
 
 

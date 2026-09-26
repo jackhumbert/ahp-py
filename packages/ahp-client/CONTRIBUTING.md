@@ -19,18 +19,19 @@ same PR.
 ## Setup
 
 This family of packages installs from GitHub, deliberately not from PyPI; for
-development, the shared protocol layer comes from a sibling checkout, and the
-install order matters (its `~=` pin resolves against what is installed):
+development, the shared protocol layer is the sibling package
+`../ahp-protocol`. From the repository root, `uv sync --all-packages
+--all-extras` sets up every package at once; with pip, the install order
+matters (its `~=` pin resolves against what is installed):
 
 ```bash
-git clone https://github.com/jackhumbert/agent-host-protocol-py ../agent-host-protocol-py
 python -m venv .venv
-.venv/bin/pip install -e ../agent-host-protocol-py
+.venv/bin/pip install -e ../ahp-protocol
 .venv/bin/pip install -e '.[ws]'
 .venv/bin/pip install --group dev
 ```
 
-Optional, for the interop tests: `.venv/bin/pip install -e ../agent-host-server-py`.
+Optional, for the interop tests: `.venv/bin/pip install -e ../ahp-host`.
 Without it those modules skip; with `AHP_INTEROP_REQUIRED=1` a missing sibling
 is a hard error instead (that is what CI's host job sets).
 
@@ -69,7 +70,7 @@ Conventional commits (`fix:`, `feat:`, `docs:` …), small reviewable PRs.
 
 ## Reporting problems
 
-- A host behaving unexpectedly? `agent_host_client.doctor.diagnose()` produces
+- A host behaving unexpectedly? `ahp_client.doctor.diagnose()` produces
   a report where each failed check names the MUST or SHOULD it comes from —
   paste that into the issue.
 - A security concern? See [`SECURITY.md`](SECURITY.md) — please do not open a

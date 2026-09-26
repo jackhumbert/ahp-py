@@ -10,8 +10,8 @@ stamp with.
 
 from __future__ import annotations
 
-from agent_host_protocol.reducers import clock
-from agent_host_protocol.reducers.clock import MOCK_NOW_MS, frozen_clock, now_iso, to_iso
+from ahp_protocol.reducers import clock
+from ahp_protocol.reducers.clock import MOCK_NOW_MS, frozen_clock, now_iso, to_iso
 
 
 def test_now_iso_is_public() -> None:

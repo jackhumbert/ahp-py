@@ -1,6 +1,6 @@
-# agent-host-client
+# ahp-client
 
-[![CI](https://github.com/jackhumbert/agent-host-client-py/actions/workflows/ci.yml/badge.svg)](https://github.com/jackhumbert/agent-host-client-py/actions/workflows/ci.yml)
+[![CI](https://github.com/jackhumbert/ahp-py/actions/workflows/ci.yml/badge.svg)](https://github.com/jackhumbert/ahp-py/actions/workflows/ci.yml)
 
 A Python **client** for the [Agent Host Protocol][ahp] (AHP) — Microsoft's
 protocol for synchronized multi-client state over AI agent sessions.
@@ -21,24 +21,24 @@ protocol for synchronized multi-client state over AI agent sessions.
 
 From GitHub, protocol package first — its `~=` pin resolves against what is
 already installed, and no index carries these names, so on its own the second
-line fails with `No matching distribution found for agent-host-protocol`:
+line fails with `No matching distribution found for ahp-protocol`:
 
 ```bash
-pip install "agent-host-protocol @ git+https://github.com/jackhumbert/agent-host-protocol-py"
-pip install "agent-host-client[ws] @ git+https://github.com/jackhumbert/agent-host-client-py"
+pip install "ahp-protocol @ git+https://github.com/jackhumbert/ahp-py#subdirectory=packages/ahp-protocol"
+pip install "ahp-client[ws] @ git+https://github.com/jackhumbert/ahp-py#subdirectory=packages/ahp-client"
 ```
 
-No release is tagged yet — **`v0.1.0` is pending** — so these lines install
+No release is tagged yet — **`ahp-client/v0.1.0` is pending** — so these lines install
 `main`. Once the first tag lands, pin it by appending the tag
-(`…agent-host-client-py@v0.1.0`), and each
-[GitHub release](https://github.com/jackhumbert/agent-host-client-py/releases)
+(`…ahp-client@v0.1.0`), and each
+[GitHub release](https://github.com/jackhumbert/ahp-py/releases)
 will carry the built wheel and sdist. `[ws]` is the WebSocket transport —
 leave it off where a `Transport` comes from somewhere else, such as a notebook
 reading a wire log.
 
 ```python
 import asyncio
-from agent_host_client import connect, Delta, ToolCallReady, TurnCompleted
+from ahp_client import connect, Delta, ToolCallReady, TurnCompleted
 
 
 async def main() -> None:
@@ -127,14 +127,14 @@ absent while nothing is staged — and refuses an operation carrying a
 ## Why
 
 Upstream publishes AHP clients for Rust, TypeScript, Kotlin, Swift and Go. There
-is no Python client. There is a Python **host** — [`agent-host-server`][server]
+is no Python client. There is a Python **host** — [`ahp-host`][server]
 — and the two are meant to meet.
 
 ```
-                agent-host-protocol
+                ahp-protocol
                   ▲             ▲
                   │             │
-        agent-host-server   agent-host-client   ← this repo
+        ahp-host   ahp-client   ← this repo
 ```
 
 Python is where a large share of agent infrastructure already lives — harnesses,
@@ -168,7 +168,7 @@ The same install-order rule as above, from editable sibling checkouts:
 
 ```bash
 python -m venv .venv
-.venv/bin/pip install -e ../agent-host-protocol-py
+.venv/bin/pip install -e ../ahp-protocol
 .venv/bin/pip install -e '.[ws]' && .venv/bin/pip install --group dev
 .venv/bin/python -m pytest
 ```
@@ -177,7 +177,7 @@ The suite runs offline: no model, no credentials, no network. Modules that
 drive the sibling host guard themselves with `pytest.importorskip`, and the
 skip is module-wide — without the host installed, `test_m8.py` and
 `test_changesets.py` sit out entirely, their pure unit tests included. Install
-it (`pip install -e ../agent-host-server-py`) to run everything.
+it (`pip install -e ../ahp-host`) to run everything.
 
 [`CONTRIBUTING.md`](CONTRIBUTING.md) has the rest — the full gate, what a
 finished change includes, and the one rule that surprises people (protocol
@@ -188,7 +188,7 @@ questions go upstream). Releases are documented in
 
 Driving the sibling Python host is cheap, offline and high-coverage — and it is
 **not independent evidence**. Both peers share the same reducers from
-`agent-host-protocol` and were written from the same reading of the same spec,
+`ahp-protocol` and were written from the same reading of the same spec,
 so a wrong-but-symmetric reducer passes both suites. It proves that our framing,
 handshake, subscriptions and reconciliation interoperate with a real host rather
 than only with a fake we also wrote. It proves nothing about whether our reading
@@ -199,7 +199,7 @@ It has already earned that much: the interop run is what discovered
 test agreeing with it had happily asserted.
 
 The one mechanism here that yields genuinely independent data is
-`agent_host_client.doctor` — a conformance probe you point at somebody else's
+`ahp_client.doctor` — a conformance probe you point at somebody else's
 host. Each check names the MUST or SHOULD it comes from, so a failure is a bug
 report rather than an opinion.
 
@@ -212,6 +212,6 @@ says is declined however sensible it is.
 
 Licensed **MIT**, matching upstream.
 
-[ahp]: https://microsoft.github.io/agent-host-protocol/
-[protocol]: https://github.com/jackhumbert/agent-host-protocol-py
-[server]: https://github.com/jackhumbert/agent-host-server-py
+[ahp]: https://microsoft.github.io/ahp-protocol/
+[protocol]: https://github.com/jackhumbert/ahp-py/tree/main/packages/ahp-protocol
+[server]: https://github.com/jackhumbert/ahp-py/tree/main/packages/ahp-host

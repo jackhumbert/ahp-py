@@ -20,12 +20,12 @@ from collections.abc import AsyncIterator, Callable
 from typing import Any
 
 import pytest
-from agent_host_protocol.channels import ROOT_URI
-from agent_host_protocol.transport import memory_pair
+from ahp_protocol.channels import ROOT_URI
+from ahp_protocol.transport import memory_pair
 
-from agent_host_server.core import Host, LoopbackSingleUserPolicy
-from agent_host_server.core.host import _TITLE_LIMIT, _title_from
-from agent_host_server.provider import EchoProvider
+from ahp_host.core import Host, LoopbackSingleUserPolicy
+from ahp_host.core.host import _TITLE_LIMIT, _title_from
+from ahp_host.provider import EchoProvider
 from tests.conformance.schemas import assert_valid_action, assert_valid_state
 from tests.integration.test_host_end_to_end import FakeClient
 

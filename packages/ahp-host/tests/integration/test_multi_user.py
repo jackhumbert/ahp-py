@@ -17,12 +17,12 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 import pytest
-from agent_host_protocol.channels import ROOT_URI
-from agent_host_protocol.transport import memory_pair
+from ahp_protocol.channels import ROOT_URI
+from ahp_protocol.transport import memory_pair
 
-from agent_host_server.core import Host
-from agent_host_server.core.policies import OwnedSessionPolicy, principal_from_header
-from agent_host_server.provider import EchoProvider
+from ahp_host.core import Host
+from ahp_host.core.policies import OwnedSessionPolicy, principal_from_header
+from ahp_host.provider import EchoProvider
 
 from .test_host_end_to_end import FakeClient
 
@@ -304,7 +304,7 @@ class TestAudit:
 
     @staticmethod
     def _sink() -> Any:
-        from agent_host_server.core.audit import AuditEvent
+        from ahp_host.core.audit import AuditEvent
 
         class Recording:
             def __init__(self) -> None:

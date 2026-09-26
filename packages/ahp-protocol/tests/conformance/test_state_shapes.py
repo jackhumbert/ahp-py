@@ -15,9 +15,9 @@ from __future__ import annotations
 
 from collections import Counter
 
-from agent_host_protocol.channels import reducer_for_state
-from agent_host_protocol.conformance.corpus import reducer_fixtures
-from agent_host_protocol.reducers import REDUCERS
+from ahp_protocol.channels import reducer_for_state
+from ahp_protocol.conformance.corpus import reducer_fixtures
+from ahp_protocol.reducers import REDUCERS
 
 #: Measured, then pinned. A pin bump that changes the corpus's composition
 #: should be noticed rather than absorbed.

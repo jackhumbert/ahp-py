@@ -31,10 +31,10 @@ an external specification owned by Microsoft. We implement it; we do not design
 it.
 
 ```
-                agent-host-protocol          ← this repo
+                ahp-protocol          ← this repo
                   ▲             ▲
                   │             │
-        agent-host-server   agent-host-client
+        ahp-host   ahp-client
 ```
 
 It is **not** a host and **not** a client. It holds only the parts that must be
@@ -42,10 +42,10 @@ byte-identical on both ends: wire values, the nine reducers, version
 negotiation, the error taxonomy, the transport abstraction, and the vendored
 conformance corpora.
 
-Extracted from [`agent-host-server-py`][server], which is where all of this code
+Extracted from [`ahp-host`][server], which is where all of this code
 was written and where its git history lives. **The migration has landed:** the
-server depends on `agent-host-protocol ~= 0.1.0` and imports it throughout
-(its commit `0874225`, "feat!: depend on agent-host-protocol"), and the client
+server depends on `ahp-protocol ~= 0.1.0` and imports it throughout
+(its commit `0874225`, "feat!: depend on ahp-protocol"), and the client
 was built on this package from its first commit. There is exactly one copy of
 the extracted tree — this one — so "check whether the sibling's copy drifted"
 stopped being a job anyone has;
@@ -78,18 +78,18 @@ scripts/regenerate_js_semantics.sh      # needs Node + a checkout of upstream
 
 | Path | Contents | May import |
 |---|---|---|
-| `src/agent_host_protocol/types/` | wire values, `TypedDict` views, `TypeSpec`, generated tables | stdlib only, **not** `json`/`os`/`pathlib`/`asyncio` |
-| `src/agent_host_protocol/reducers/` | the nine reducers, injectable clock, `js.py` | `types` |
-| `src/agent_host_protocol/channels.py` | `ROOT_URI`, `classify`, `reducer_for_state` | stdlib |
-| `src/agent_host_protocol/versions.py` | `parse_version`, `is_compatible`, `negotiate` | stdlib |
-| `src/agent_host_protocol/errors.py` | `AhpError`, `to_json`/`from_json`, spec codes | `types` |
-| `src/agent_host_protocol/transport/` | the `Transport` protocol + in-memory pair | `types` |
-| `src/agent_host_protocol/conformance/` | fixture loaders over the vendored corpora | `types`, `reducers` |
+| `src/ahp_protocol/types/` | wire values, `TypedDict` views, `TypeSpec`, generated tables | stdlib only, **not** `json`/`os`/`pathlib`/`asyncio` |
+| `src/ahp_protocol/reducers/` | the nine reducers, injectable clock, `js.py` | `types` |
+| `src/ahp_protocol/channels.py` | `ROOT_URI`, `classify`, `reducer_for_state` | stdlib |
+| `src/ahp_protocol/versions.py` | `parse_version`, `is_compatible`, `negotiate` | stdlib |
+| `src/ahp_protocol/errors.py` | `AhpError`, `to_json`/`from_json`, spec codes | `types` |
+| `src/ahp_protocol/transport/` | the `Transport` protocol + in-memory pair | `types` |
+| `src/ahp_protocol/conformance/` | fixture loaders over the vendored corpora | `types`, `reducers` |
 | `vendor/upstream/` | pinned fixtures, schemas and TS sources of truth, **committed** | — |
 | `scripts/` | re-vendoring and codegen | — |
 
 The vendored tree has **exactly one copy under version control** and is mapped
-into the wheel at `agent_host_protocol/conformance/_upstream/` by hatch's
+into the wheel at `ahp_protocol/conformance/_upstream/` by hatch's
 `force-include`. Do not add a second copy under `src/`; two trees can disagree.
 `tests/unit/test_packaging.py` builds a real wheel and asserts the corpus is
 inside it, because a source checkout cannot catch the failure this fixes — the
@@ -203,9 +203,9 @@ Both consumers pin this package with `~=`, so a release here is a release for
 them. **This family of packages is public on GitHub and deliberately not on
 PyPI** — a release is a tag plus the GitHub release the workflow cuts from it,
 distributions attached; everyone installs with
-`pip install "agent-host-protocol @ git+https://…"`. Three steps, in order:
+`pip install "ahp-protocol @ git+https://…"`. Three steps, in order:
 
-1. **Bump `__version__`** in `src/agent_host_protocol/__init__.py`. That is the
+1. **Bump `__version__`** in `src/ahp_protocol/__init__.py`. That is the
    only place; `pyproject.toml` reads it from there. While a version's tag is
    still pending it stays the bare number (`0.1.0`), never `0.1.0.dev0`: both
    consumers pin `~=0.1.0`, and a dev pre-release sorts *below* `0.1.0` and is
@@ -215,7 +215,7 @@ distributions attached; everyone installs with
    not `## [Unreleased]`. The release job extracts the section by heading and
    **fails when it finds nothing**, deliberately: a release nobody described is
    worse than one that did not happen.
-3. **Tag `v<version>`.** The release workflow (`release.yml`) refuses a tag
+3. **Tag `ahp-protocol/v<version>`.** The release workflow (`release.yml`) refuses a tag
    that disagrees with the packaged version, builds, installs and *runs* the
    wheel from outside the checkout, and only then creates the GitHub release —
    every check that can fail runs before the step people will link to. A
@@ -224,11 +224,11 @@ distributions attached; everyone installs with
    replaced, and that permanence is part of why there is no PyPI step to
    configure, and no publisher trust to set up.
 
-There is no index-forced release order across the three repositories. There
+There is no index-forced release order across the packages. There
 *is* a documented install order for users: this package before either
 consumer, because their `~=` pins resolve against what is already installed —
 pip cannot fetch this package from an index that does not carry it, and the
-error it prints ("No matching distribution found for agent-host-protocol")
+error it prints ("No matching distribution found for ahp-protocol")
 does not say "install the protocol package first". Both consumers' READMEs do.
 
 ## Absorbing a new upstream spec release
@@ -238,7 +238,7 @@ Full procedure in [`UPSTREAM.md`](UPSTREAM.md). The step people skip: **diff
 reducer branch-coverage gate is vacuous, so a new branch can land with no
 fixture and our suite would stay green while diverging.
 
-Because both peers pin `agent-host-protocol ~= 0.1.0`, a MINOR bump here is a
+Because both peers pin `ahp-protocol ~= 0.1.0`, a MINOR bump here is a
 deliberate upgrade on each of them rather than something that arrives silently.
 
 ## Conventions
@@ -249,4 +249,4 @@ deliberate upgrade on each of them rather than something that arrives silently.
   test is a lie, and this package's whole value is that others can trust it.
 - Protocol questions go **upstream**, not into a private divergence.
 
-[server]: https://github.com/jackhumbert/agent-host-server-py
+[server]: https://github.com/jackhumbert/ahp-py/tree/main/packages/ahp-host

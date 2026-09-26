@@ -15,13 +15,13 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from agent_host_protocol.channels import ROOT_URI
-from agent_host_protocol.transport import memory_pair
+from ahp_protocol.channels import ROOT_URI
+from ahp_protocol.transport import memory_pair
 
-from agent_host_server.core import Host, LoopbackSingleUserPolicy
-from agent_host_server.core.store import FileSessionStore
-from agent_host_server.provider import EchoProvider
-from agent_host_server.provider.echo import EchoSession
+from ahp_host.core import Host, LoopbackSingleUserPolicy
+from ahp_host.core.store import FileSessionStore
+from ahp_host.provider import EchoProvider
+from ahp_host.provider.echo import EchoSession
 
 from .test_host_end_to_end import FakeClient
 

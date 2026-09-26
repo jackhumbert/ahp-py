@@ -14,20 +14,20 @@ import sys
 from pathlib import Path
 
 import pytest
-from agent_host_protocol.conformance.corpus import CORPUS_ROOT
-from agent_host_protocol.reducers import REDUCERS
-from agent_host_protocol.types import ACTION_TYPES, IS_CLIENT_DISPATCHABLE
+from ahp_protocol.conformance.corpus import CORPUS_ROOT
+from ahp_protocol.reducers import REDUCERS
+from ahp_protocol.types import ACTION_TYPES, IS_CLIENT_DISPATCHABLE
 
-from agent_host_client.client.commands import (
+from ahp_client.client.commands import (
     AUTOMATIONS_SCOPED,
     CALLER_SCOPED,
     COMMANDS,
     ROOT_SCOPED,
 )
-from agent_host_client.client.events import NOTIFICATION_METHODS
-from agent_host_client.client.mirror import REDUCER_NAMES
-from agent_host_client.serve.resources import _SNAKE, _VIRTUAL_METHODS
-from agent_host_client.serve.router import REVERSE_METHODS
+from ahp_client.client.events import NOTIFICATION_METHODS
+from ahp_client.client.mirror import REDUCER_NAMES
+from ahp_client.serve.resources import _SNAKE, _VIRTUAL_METHODS
+from ahp_client.serve.router import REVERSE_METHODS
 
 ROOT = Path(__file__).resolve().parents[2]
 MESSAGES = (CORPUS_ROOT / "ts" / "messages.ts").read_text(encoding="utf-8")

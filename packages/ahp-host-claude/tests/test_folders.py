@@ -6,14 +6,14 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from agent_host_server.provider.base import (
+from ahp_host.provider.base import (
     AgentSessionContext,
     FollowsWorkingDirectories,
     UserMessage,
 )
 from claude_agent_sdk import ClaudeAgentOptions, ResultMessage
 
-from agent_host_server_claude.provider import CHAT_PROMPT, CHAT_TOOLS, ClaudeProvider
+from ahp_host_claude.provider import CHAT_PROMPT, CHAT_TOOLS, ClaudeProvider
 from tests.fakes import FakeClient, RecordingSink, Step
 
 

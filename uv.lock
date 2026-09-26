@@ -10,62 +10,19 @@ resolution-markers = [
 
 [manifest]
 members = [
-    "agent-host-broker",
-    "agent-host-client",
-    "agent-host-protocol",
-    "agent-host-server",
-    "agent-host-server-acp",
-    "agent-host-server-claude",
+    "ahp-client",
+    "ahp-gateway",
+    "ahp-host",
+    "ahp-host-acp",
+    "ahp-host-claude",
+    "ahp-protocol",
 ]
 
 [[package]]
-name = "agent-host-broker"
-source = { editable = "packages/ahp-gateway" }
-dependencies = [
-    { name = "agent-host-client" },
-    { name = "agent-host-protocol" },
-    { name = "agent-host-server" },
-]
-
-[package.optional-dependencies]
-ws = [
-    { name = "websockets" },
-]
-
-[package.dev-dependencies]
-dev = [
-    { name = "import-linter" },
-    { name = "mypy" },
-    { name = "pytest" },
-    { name = "pytest-asyncio" },
-    { name = "ruff" },
-    { name = "websockets" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "agent-host-client", editable = "packages/ahp-client" },
-    { name = "agent-host-protocol", editable = "packages/ahp-protocol" },
-    { name = "agent-host-server", editable = "packages/ahp-host" },
-    { name = "websockets", marker = "extra == 'ws'", specifier = ">=13" },
-]
-provides-extras = ["ws"]
-
-[package.metadata.requires-dev]
-dev = [
-    { name = "import-linter", specifier = ">=2" },
-    { name = "mypy", specifier = ">=1.11" },
-    { name = "pytest", specifier = ">=8" },
-    { name = "pytest-asyncio", specifier = ">=0.24" },
-    { name = "ruff", specifier = ">=0.6" },
-    { name = "websockets", specifier = ">=13" },
-]
-
-[[package]]
-name = "agent-host-client"
+name = "ahp-client"
 source = { editable = "packages/ahp-client" }
 dependencies = [
-    { name = "agent-host-protocol" },
+    { name = "ahp-protocol" },
 ]
 
 [package.optional-dependencies]
@@ -86,7 +43,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "agent-host-protocol", editable = "packages/ahp-protocol" },
+    { name = "ahp-protocol", editable = "packages/ahp-protocol" },
     { name = "websockets", marker = "extra == 'ws'", specifier = ">=13" },
 ]
 provides-extras = ["ws"]
@@ -103,7 +60,145 @@ dev = [
 ]
 
 [[package]]
-name = "agent-host-protocol"
+name = "ahp-gateway"
+source = { editable = "packages/ahp-gateway" }
+dependencies = [
+    { name = "ahp-client" },
+    { name = "ahp-host" },
+    { name = "ahp-protocol" },
+]
+
+[package.optional-dependencies]
+ws = [
+    { name = "websockets" },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "import-linter" },
+    { name = "mypy" },
+    { name = "pytest" },
+    { name = "pytest-asyncio" },
+    { name = "ruff" },
+    { name = "websockets" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "ahp-client", editable = "packages/ahp-client" },
+    { name = "ahp-host", editable = "packages/ahp-host" },
+    { name = "ahp-protocol", editable = "packages/ahp-protocol" },
+    { name = "websockets", marker = "extra == 'ws'", specifier = ">=13" },
+]
+provides-extras = ["ws"]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "import-linter", specifier = ">=2" },
+    { name = "mypy", specifier = ">=1.11" },
+    { name = "pytest", specifier = ">=8" },
+    { name = "pytest-asyncio", specifier = ">=0.24" },
+    { name = "ruff", specifier = ">=0.6" },
+    { name = "websockets", specifier = ">=13" },
+]
+
+[[package]]
+name = "ahp-host"
+source = { editable = "packages/ahp-host" }
+dependencies = [
+    { name = "ahp-protocol" },
+    { name = "tzdata", marker = "sys_platform == 'win32'" },
+]
+
+[package.optional-dependencies]
+dev = [
+    { name = "anyio" },
+    { name = "import-linter" },
+    { name = "jsonschema" },
+    { name = "mypy" },
+    { name = "pytest" },
+    { name = "ruff" },
+    { name = "websockets" },
+]
+ws = [
+    { name = "websockets" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "ahp-protocol", editable = "packages/ahp-protocol" },
+    { name = "anyio", marker = "extra == 'dev'", specifier = ">=4" },
+    { name = "import-linter", marker = "extra == 'dev'", specifier = ">=2" },
+    { name = "jsonschema", marker = "extra == 'dev'", specifier = ">=4" },
+    { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.11" },
+    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8" },
+    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.6" },
+    { name = "tzdata", marker = "sys_platform == 'win32'" },
+    { name = "websockets", marker = "extra == 'dev'", specifier = ">=13" },
+    { name = "websockets", marker = "extra == 'ws'", specifier = ">=13" },
+]
+provides-extras = ["dev", "ws"]
+
+[[package]]
+name = "ahp-host-acp"
+source = { editable = "packages/ahp-host-acp" }
+dependencies = [
+    { name = "ahp-host", extra = ["ws"] },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "mypy" },
+    { name = "pytest" },
+    { name = "pytest-asyncio" },
+    { name = "ruff" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "ahp-host", extras = ["ws"], editable = "packages/ahp-host" }]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "mypy", specifier = ">=1.11" },
+    { name = "pytest", specifier = ">=8" },
+    { name = "pytest-asyncio", specifier = ">=0.24" },
+    { name = "ruff", specifier = ">=0.6" },
+]
+
+[[package]]
+name = "ahp-host-claude"
+source = { editable = "packages/ahp-host-claude" }
+dependencies = [
+    { name = "ahp-host", extra = ["ws"] },
+    { name = "claude-agent-sdk" },
+    { name = "httpx" },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "mypy" },
+    { name = "pytest" },
+    { name = "pytest-asyncio" },
+    { name = "ruff" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "ahp-host", extras = ["ws"], editable = "packages/ahp-host" },
+    { name = "claude-agent-sdk", specifier = ">=0.2.159,<0.3" },
+    { name = "httpx", specifier = ">=0.27,<1" },
+]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "mypy", specifier = ">=1.11" },
+    { name = "pytest", specifier = ">=8" },
+    { name = "pytest-asyncio", specifier = ">=0.24" },
+    { name = "ruff", specifier = ">=0.6" },
+]
+
+[[package]]
+name = "ahp-protocol"
 source = { editable = "packages/ahp-protocol" }
 
 [package.dev-dependencies]
@@ -128,101 +223,6 @@ dev = [
     { name = "pytest", specifier = ">=8" },
     { name = "ruff", specifier = ">=0.6" },
     { name = "types-jsonschema" },
-]
-
-[[package]]
-name = "agent-host-server"
-source = { editable = "packages/ahp-host" }
-dependencies = [
-    { name = "agent-host-protocol" },
-    { name = "tzdata", marker = "sys_platform == 'win32'" },
-]
-
-[package.optional-dependencies]
-dev = [
-    { name = "anyio" },
-    { name = "import-linter" },
-    { name = "jsonschema" },
-    { name = "mypy" },
-    { name = "pytest" },
-    { name = "ruff" },
-    { name = "websockets" },
-]
-ws = [
-    { name = "websockets" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "agent-host-protocol", editable = "packages/ahp-protocol" },
-    { name = "anyio", marker = "extra == 'dev'", specifier = ">=4" },
-    { name = "import-linter", marker = "extra == 'dev'", specifier = ">=2" },
-    { name = "jsonschema", marker = "extra == 'dev'", specifier = ">=4" },
-    { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.11" },
-    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8" },
-    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.6" },
-    { name = "tzdata", marker = "sys_platform == 'win32'" },
-    { name = "websockets", marker = "extra == 'dev'", specifier = ">=13" },
-    { name = "websockets", marker = "extra == 'ws'", specifier = ">=13" },
-]
-provides-extras = ["dev", "ws"]
-
-[[package]]
-name = "agent-host-server-acp"
-source = { editable = "packages/ahp-host-acp" }
-dependencies = [
-    { name = "agent-host-server", extra = ["ws"] },
-]
-
-[package.dev-dependencies]
-dev = [
-    { name = "mypy" },
-    { name = "pytest" },
-    { name = "pytest-asyncio" },
-    { name = "ruff" },
-]
-
-[package.metadata]
-requires-dist = [{ name = "agent-host-server", extras = ["ws"], editable = "packages/ahp-host" }]
-
-[package.metadata.requires-dev]
-dev = [
-    { name = "mypy", specifier = ">=1.11" },
-    { name = "pytest", specifier = ">=8" },
-    { name = "pytest-asyncio", specifier = ">=0.24" },
-    { name = "ruff", specifier = ">=0.6" },
-]
-
-[[package]]
-name = "agent-host-server-claude"
-source = { editable = "packages/ahp-host-claude" }
-dependencies = [
-    { name = "agent-host-server", extra = ["ws"] },
-    { name = "claude-agent-sdk" },
-    { name = "httpx" },
-]
-
-[package.dev-dependencies]
-dev = [
-    { name = "mypy" },
-    { name = "pytest" },
-    { name = "pytest-asyncio" },
-    { name = "ruff" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "agent-host-server", extras = ["ws"], editable = "packages/ahp-host" },
-    { name = "claude-agent-sdk", specifier = ">=0.2.159,<0.3" },
-    { name = "httpx", specifier = ">=0.27,<1" },
-]
-
-[package.metadata.requires-dev]
-dev = [
-    { name = "mypy", specifier = ">=1.11" },
-    { name = "pytest", specifier = ">=8" },
-    { name = "pytest-asyncio", specifier = ">=0.24" },
-    { name = "ruff", specifier = ">=0.6" },
 ]
 
 [[package]]

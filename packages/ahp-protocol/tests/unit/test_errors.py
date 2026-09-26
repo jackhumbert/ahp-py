@@ -11,13 +11,13 @@ from typing import Any
 
 import pytest
 
-from agent_host_protocol.errors import (
+from ahp_protocol.errors import (
     AhpError,
     from_json,
     method_not_found,
     unsupported_protocol_version,
 )
-from agent_host_protocol.types import AHP_ERROR_CODES, JSON_RPC_ERROR_CODES
+from ahp_protocol.types import AHP_ERROR_CODES, JSON_RPC_ERROR_CODES
 
 
 def test_round_trip_preserves_code_message_and_data() -> None:
@@ -98,7 +98,7 @@ def test_unsupported_protocol_version_data_uses_the_declared_field_name() -> Non
 def test_unsupported_protocol_version_data_validates_against_the_pinned_schema() -> None:
     """Field-name drift from the vendored schema must fail here, not in a peer."""
     pytest.importorskip("jsonschema")
-    from agent_host_protocol.conformance.schemas import validate_against
+    from ahp_protocol.conformance.schemas import validate_against
 
     err = unsupported_protocol_version(("0.7.0",))
     assert validate_against("errors", "UnsupportedProtocolVersionErrorData", err.data) == []

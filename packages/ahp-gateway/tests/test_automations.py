@@ -14,15 +14,15 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from agent_host_client import AhpClient
-from agent_host_client.client import ActionEvent, Subscription
-from agent_host_protocol.channels import AUTOMATIONS_URI
-from agent_host_server import Host, LoopbackSingleUserPolicy
-from agent_host_server.core import InMemoryAutomationStore
-from agent_host_server.core.resources import RootedFilesystemResourceProvider
-from agent_host_server.provider.echo import EchoProvider
+from ahp_client import AhpClient
+from ahp_client.client import ActionEvent, Subscription
+from ahp_host import Host, LoopbackSingleUserPolicy
+from ahp_host.core import InMemoryAutomationStore
+from ahp_host.core.resources import RootedFilesystemResourceProvider
+from ahp_host.provider.echo import EchoProvider
+from ahp_protocol.channels import AUTOMATIONS_URI
 
-from agent_host_broker.registry import NodeRecord
+from ahp_gateway.registry import NodeRecord
 from tests.fleet import DEV, Fleet, everyone_is_a_dev
 
 
@@ -112,7 +112,7 @@ async def test_one_catalogue_and_a_new_automation_goes_where_its_folder_is(
         assert _owned_by(fleet, "box") == {"ahp-automation:/on-box"}
         assert _owned_by(fleet, "mac") == set()
         (entry,) = [e["action"]["automation"] for e in watch.of("automation/set")]
-        # The node's own `file:` URI, qualified back into the broker's tree.
+        # The node's own `file:` URI, qualified back into the gateway's tree.
         assert entry["definition"]["session"]["workingDirectories"] == ["ahp-file:///box/project"]
         watch.close()
         await raw.shutdown()

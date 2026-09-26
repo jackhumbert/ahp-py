@@ -6,8 +6,8 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 
 import pytest
 
-from agent_host_server_claude.paths import directory_of, local_path_of
-from agent_host_server_claude.provider import ClaudeProvider, is_valid_provider_id
+from ahp_host_claude.paths import directory_of, local_path_of
+from ahp_host_claude.provider import ClaudeProvider, is_valid_provider_id
 
 
 @pytest.mark.parametrize(
@@ -16,7 +16,7 @@ from agent_host_server_claude.provider import ClaudeProvider, is_valid_provider_
         ("file:///C:/Users/me/proj", PureWindowsPath("C:/Users/me/proj")),
         ("file:///c:/Users/me/a%20b", PureWindowsPath("c:/Users/me/a b")),
         ("vscode-agent-host://my-pc/C:/Users/me/proj", PureWindowsPath("C:/Users/me/proj")),
-        # What a broker forwards once it has stripped its node name.
+        # What a gateway forwards once it has stripped its node name.
         ("file:///D:/work", PureWindowsPath("D:/work")),
     ],
 )
@@ -53,7 +53,7 @@ def test_folder_browsing_is_off_where_the_jail_cannot_run(
 ) -> None:
     import os
 
-    from agent_host_server_claude import __main__ as cli
+    from ahp_host_claude import __main__ as cli
 
     monkeypatch.setattr(os, "supports_dir_fd", set())
     assert cli._jail_supported() is False
@@ -65,12 +65,10 @@ def test_windows_uses_the_servers_windows_jail_when_it_has_one(
     import sys
     import types
 
-    from agent_host_server_claude import __main__ as cli
+    from ahp_host_claude import __main__ as cli
 
     monkeypatch.setattr(sys, "platform", "win32")
-    monkeypatch.setitem(
-        sys.modules, "agent_host_server.core.resources_windows", types.ModuleType("stub")
-    )
+    monkeypatch.setitem(sys.modules, "ahp_host.core.resources_windows", types.ModuleType("stub"))
     assert cli._jail_supported() is True
-    monkeypatch.setitem(sys.modules, "agent_host_server.core.resources_windows", None)
+    monkeypatch.setitem(sys.modules, "ahp_host.core.resources_windows", None)
     assert cli._jail_supported() is False

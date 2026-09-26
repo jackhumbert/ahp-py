@@ -1,8 +1,8 @@
 """A fleet in one process: real sibling hosts as nodes, the real client as a surface.
 
-Nothing here is a fake AHP peer. The nodes are `agent_host_server.Host` with
-its echo provider, and the surface is `agent_host_client.connect`, so a test
-that passes is evidence that stock peers on both edges accept the broker -
+Nothing here is a fake AHP peer. The nodes are `ahp_host.Host` with
+its echo provider, and the surface is `ahp_client.connect`, so a test
+that passes is evidence that stock peers on both edges accept the gateway -
 which is what docs/plan.md §8 says a milestone must prove.
 """
 
@@ -14,14 +14,14 @@ import time
 from collections.abc import AsyncIterator, Callable, Mapping
 from typing import Any
 
-from agent_host_client import Client, connect
-from agent_host_client.hosts import immediate_forever_policy
-from agent_host_protocol import Transport, memory_pair
-from agent_host_server import ConnectionInfo, Host, LoopbackSingleUserPolicy
-from agent_host_server.provider.echo import EchoProvider
+from ahp_client import Client, connect
+from ahp_client.hosts import immediate_forever_policy
+from ahp_host import ConnectionInfo, Host, LoopbackSingleUserPolicy
+from ahp_host.provider.echo import EchoProvider
+from ahp_protocol import Transport, memory_pair
 
-from agent_host_broker.core import Broker
-from agent_host_broker.registry import NodeRecord, Principal, StaticInventory
+from ahp_gateway.core import Gateway
+from ahp_gateway.registry import NodeRecord, Principal, StaticInventory
 
 DEV = frozenset({"dev"})
 
@@ -62,22 +62,22 @@ class Fleet:
         hosts: Mapping[str, Host],
         records: list[NodeRecord],
         authenticate: Callable[[ConnectionInfo], Principal | None],
-        **broker_options: Any,
+        **gateway_options: Any,
     ) -> None:
         self.hosts = dict(hosts)
         self.connector = HostConnector(hosts)
-        broker_options.setdefault("redial_backoff", (0.01, 0.05))
-        self.broker = Broker(
-            StaticInventory(records), self.connector, authenticate, **broker_options
+        gateway_options.setdefault("redial_backoff", (0.01, 0.05))
+        self.gateway = Gateway(
+            StaticInventory(records), self.connector, authenticate, **gateway_options
         )
         self._serving: list[asyncio.Task[None]] = []
-        #: The broker-side end of every surface connection, newest last.
+        #: The gateway-side end of every surface connection, newest last.
         self.surface_ends: list[Transport] = []
 
     def surface_transport(self) -> Transport:
-        client_end, broker_end = memory_pair()
-        self.surface_ends.append(broker_end)
-        self._serving.append(asyncio.create_task(self.broker.serve(broker_end)))
+        client_end, gateway_end = memory_pair()
+        self.surface_ends.append(gateway_end)
+        self._serving.append(asyncio.create_task(self.gateway.serve(gateway_end)))
         return client_end
 
     @contextlib.asynccontextmanager
@@ -106,7 +106,7 @@ class Fleet:
 
     @contextlib.asynccontextmanager
     async def direct(self, node_id: str) -> AsyncIterator[Client]:
-        """A stock client on a bare node, with no broker in the path."""
+        """A stock client on a bare node, with no gateway in the path."""
         client_end, server_end = memory_pair()
         task = asyncio.create_task(self.hosts[node_id].serve(server_end))
         async with connect(transport=client_end, reconnect=False, client_id="direct") as client:

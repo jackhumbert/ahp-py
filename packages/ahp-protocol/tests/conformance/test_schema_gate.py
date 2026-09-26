@@ -23,7 +23,7 @@ class TestStateGateCoversEverySnapshotKind:
     def test_the_automation_kinds_resolve_to_their_definitions(self) -> None:
         """0.9.0 added two channels; a snapshot of either must be gated, not
         `KeyError`."""
-        from agent_host_protocol.conformance.corpus import reducer_fixtures
+        from ahp_protocol.conformance.corpus import reducer_fixtures
 
         initial = {f.id: f.initial for f in reducer_fixtures()}
         assert_valid_state("automation", initial["264-automation-set-replaces"])
@@ -37,7 +37,7 @@ class TestStateGateCoversEverySnapshotKind:
     def test_every_reducer_kind_has_a_definition(self) -> None:
         """The gate's map and `REDUCERS` must not drift apart: a kind present
         in one and not the other is a `KeyError` at the first real snapshot."""
-        from agent_host_protocol.reducers import REDUCERS
+        from ahp_protocol.reducers import REDUCERS
 
         for kind in REDUCERS:
             with pytest.raises(AssertionError):

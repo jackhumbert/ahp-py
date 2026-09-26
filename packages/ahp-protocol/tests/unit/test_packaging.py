@@ -3,7 +3,7 @@
 This package's whole proposition is that another implementation can run the same
 gate we run. The sibling host shipped a `conformance` subpackage whose
 `CORPUS_ROOT` walked up to a `vendor/` directory the wheel did not contain --
-so `pip install agent-host-server` gave you a fixture loader and no fixtures,
+so `pip install ahp-host` gave you a fixture loader and no fixtures,
 and nobody noticed because every test ran from a source checkout where the
 fallback path resolves.
 
@@ -43,7 +43,7 @@ def test_wheel_ships_the_reducer_corpus(wheel: zipfile.ZipFile) -> None:
     fixtures = [
         n
         for n in names
-        if n.startswith("agent_host_protocol/conformance/_upstream/test-cases/reducers/")
+        if n.startswith("ahp_protocol/conformance/_upstream/test-cases/reducers/")
         and n.endswith(".json")
     ]
     assert len(fixtures) == 272
@@ -54,7 +54,7 @@ def test_wheel_ships_the_round_trip_corpus(wheel: zipfile.ZipFile) -> None:
     fixtures = [
         n
         for n in names
-        if n.startswith("agent_host_protocol/conformance/_upstream/test-cases/round-trips/")
+        if n.startswith("ahp_protocol/conformance/_upstream/test-cases/round-trips/")
         and n.endswith(".json")
     ]
     assert len(fixtures) == 44
@@ -62,16 +62,16 @@ def test_wheel_ships_the_round_trip_corpus(wheel: zipfile.ZipFile) -> None:
 
 def test_wheel_ships_the_pin_and_the_schemas(wheel: zipfile.ZipFile) -> None:
     names = set(wheel.namelist())
-    assert "agent_host_protocol/conformance/_upstream/PIN.json" in names
+    assert "ahp_protocol/conformance/_upstream/PIN.json" in names
     # The schemas cannot validate AHP traffic (see UPSTREAM.md), but two tests
     # pin *why*, and a downstream running our suite needs them present to do so.
-    assert "agent_host_protocol/conformance/_upstream/schema/actions.schema.json" in names
+    assert "ahp_protocol/conformance/_upstream/schema/actions.schema.json" in names
 
 
 def test_wheel_is_typed(wheel: zipfile.ZipFile) -> None:
     """PEP 561. Without the marker every re-exported type is `Any` downstream,
     which silently defeats the `mypy --strict` story both peers depend on."""
-    assert "agent_host_protocol/py.typed" in set(wheel.namelist())
+    assert "ahp_protocol/py.typed" in set(wheel.namelist())
 
 
 def test_installed_layout_resolves_without_the_source_checkout(wheel: zipfile.ZipFile) -> None:
@@ -81,4 +81,4 @@ def test_installed_layout_resolves_without_the_source_checkout(wheel: zipfile.Zi
     works in CI and fails for every installed user -- exactly the failure mode
     this module exists to prevent.
     """
-    assert any(n.startswith("agent_host_protocol/conformance/_upstream/") for n in wheel.namelist())
+    assert any(n.startswith("ahp_protocol/conformance/_upstream/") for n in wheel.namelist())

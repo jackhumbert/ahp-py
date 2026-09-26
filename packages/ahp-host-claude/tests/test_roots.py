@@ -7,13 +7,13 @@ import sys
 from pathlib import Path
 
 import pytest
-from agent_host_protocol.errors import AhpError
-from agent_host_server.provider.base import AgentSessionContext, UserMessage
+from ahp_host.provider.base import AgentSessionContext, UserMessage
+from ahp_protocol.errors import AhpError
 
-from agent_host_server_claude.__main__ import _parse_args
-from agent_host_server_claude.config import ConfigError, load
-from agent_host_server_claude.provider import ClaudeProvider
-from agent_host_server_claude.roots import (
+from ahp_host_claude.__main__ import _parse_args
+from ahp_host_claude.config import ConfigError, load
+from ahp_host_claude.provider import ClaudeProvider
+from ahp_host_claude.roots import (
     NamedRootsResourceProvider,
     Roots,
     parse_root_arg,
@@ -146,7 +146,7 @@ def test_config_file_with_named_roots(two_roots: Roots, tmp_path: Path) -> None:
         tmp_path / "node.toml",
         f"""
 agent_name = "Claude"
-token_file = "~/.config/agent-host/node.token"
+token_file = "~/.config/ahp/node.token"
 port = 4400
 
 [roots]
@@ -158,7 +158,7 @@ work = '{work}'
     assert settings.roots.names == ("llm", "work")
     assert settings.roots.paths == (llm, work)
     assert settings.port == 4400
-    assert settings.token_file == Path("~/.config/agent-host/node.token").expanduser()
+    assert settings.token_file == Path("~/.config/ahp/node.token").expanduser()
     assert settings.agent_name == "Claude"
 
 

@@ -1,12 +1,12 @@
 # Plan
 
-The design of the broker, captured from a design conversation about running
+The design of the gateway, captured from a design conversation about running
 agent fleets across many machines.
 
 ## 1. What this is
 
 A Python implementation of the one new component in a federated AHP fleet:
-the **broker**. It implements **both** AHP edges:
+the **gateway**. It implements **both** AHP edges:
 
 - an AHP **host** facing the surfaces (web, Windows, CLI), so every surface
   speaks plain AHP to one endpoint behind one login, and
@@ -15,10 +15,10 @@ the **broker**. It implements **both** AHP edges:
   host-side.
 
 Nodes implement the AHP server only. Surfaces implement the AHP client only.
-The broker implements both, and is the only thing in the family that does.
+The gateway implements both, and is the only thing in the family that does.
 
 ```
-web / windows / cli  ──AHP client──▶  agent-host-broker  ──AHP client──▶  dial-in node (server room / VM)
+web / windows / cli  ──AHP client──▶  ahp-gateway  ──AHP client──▶  dial-in node (server room / VM)
                                         │  SSO auth                      ──AHP client──▶  another reachable node
                                         │  node registry + per-node authz
                                         │  session→node routing / aggregation
@@ -34,8 +34,8 @@ in this **control plane**:
 | Layer | Concern | New protocol? |
 | --- | --- | --- |
 | Below AHP (transport) | relay / reverse-tunnel for NAT'd nodes | No - a tunnel carrying AHP frames verbatim (yamux / HTTP-CONNECT / `ssh -R` / wireguard) |
-| AHP itself (data plane) | turns, approvals, resources, terminal | **Unchanged** - broker↔node is just AHP |
-| Beside AHP (control plane) | registry, SSO authz, health, routing/aggregation | Not a wire protocol - a directory + REST the broker owns |
+| AHP itself (data plane) | turns, approvals, resources, terminal | **Unchanged** - gateway↔node is just AHP |
+| Beside AHP (control plane) | registry, SSO authz, health, routing/aggregation | Not a wire protocol - a directory + REST the gateway owns |
 
 The only new wire contract this project owns is the **dial-out node's
 registration + heartbeat handshake** ("I'm `<node>`, here's my
@@ -49,11 +49,11 @@ client to carry the extensions.
 
 ## 3. Reachability splits the nodes
 
-- **Datacenter / VM nodes** - dial-in. The broker connects to them as a
+- **Datacenter / VM nodes** - dial-in. The gateway connects to them as a
   client over the network, behind a reverse proxy; a PKI wildcard certificate
   covers the fleet's domain. Server-only on the node.
 - **Laptops / roaming VMs** - NAT'd, cannot be dialed. The node reaches
-  *out*: an outbound registrar dials the broker and the broker tunnels the
+  *out*: an outbound registrar dials the gateway and the gateway tunnels the
   AHP WS back through that pipe. The only place a node runs client-shaped
   code, and it is the relay, not AHP.
 
@@ -70,7 +70,7 @@ must ship read-only stubs: running as a service account and rooting the
 provider at a shared directory would leak that directory's secrets to every
 session.
 
-Division of authz: **the OS** gates files/shell on a node; **the broker's
+Division of authz: **the OS** gates files/shell on a node; **the gateway's
 identity check** gates whether you may start a session on that node at all.
 This also retires a static bearer token as the fleet's gate: per-node authz
 keys on identity-provider groups/app-roles, the same mechanism that gates
@@ -79,7 +79,7 @@ the surfaces.
 ## 5. Package layout
 
 ```
-src/agent_host_broker/
+src/ahp_gateway/
   core/       interfaces: node connection, session route, aggregated namespace
   registry/   node records + per-node admission (stays offline)
   ws/         concrete WebSocket transports for both edges
@@ -98,14 +98,14 @@ without ever importing a transport.
    needs the node encoded in session URIs (or the working-directory
    authority) and a merged `listSessions`. Lean: aggregated namespace.
 3. **Web client: JS AHP client vs. a thinner normalized WS/HTTP API behind
-   the broker.** Not this repo's decision alone - the JS client is its own
+   the gateway.** Not this repo's decision alone - the JS client is its own
    deliverable.
 
 ## 7. Build order (candidate)
 
 Each unit below is independently shippable:
 
-1. `agent-host-broker` multiplexer - host edge + client edge + routing.
+1. `ahp-gateway` multiplexer - host edge + client edge + routing.
 2. Node registry + per-node authz backed by the identity provider (a
    declarative node inventory).
 3. Real resource/terminal backends + per-user host launch on a node.
@@ -120,24 +120,24 @@ This repo is (1), with (2)'s interfaces stubbed in `core/` and `registry/`.
   leaks into the AHP packages.
 - The surfaces never learn federation exists: one endpoint, one login, one
   flat session list.
-- Broker↔node traffic is indistinguishable from any AHP client against any
+- Gateway↔node traffic is indistinguishable from any AHP client against any
   AHP host - conformance evidence comes from the sibling suites, not from
   new fixtures.
 
 ## 9. Milestone 1: the multiplexer (as built)
 
-`agent_host_broker.core.Broker` is §7 unit (1). What it does, and the
+`ahp_gateway.core.Gateway` is §7 unit (1). What it does, and the
 decisions it rests on:
 
-**The host edge is a frame router.** `agent-host-server`'s `Host` owns
+**The host edge is a frame router.** `ahp-host`'s `Host` owns
 sessions, turns, terminals and resources itself, and its only plug-in point
-is the agent loop. A broker built on it would re-host every session and
+is the agent loop. A gateway built on it would re-host every session and
 bridge the node's approvals, terminals and resources through that one seam.
-So `Broker.serve(transport, ...)` is its own AHP endpoint that relays JSON-RPC
-frames. It keeps `Host.serve`'s signature, so `agent-host-server`'s WebSocket
-server can serve it (`agent_host_broker.ws.serve_broker`).
+So `Gateway.serve(transport, ...)` is its own AHP endpoint that relays JSON-RPC
+frames. It keeps `Host.serve`'s signature, so `ahp-host`'s WebSocket
+server can serve it (`ahp_gateway.ws.serve_gateway`).
 
-**One node link per surface connection.** At `initialize`, the broker
+**One node link per surface connection.** At `initialize`, the gateway
 authenticates the peer, asks the registry which nodes admit the principal,
 and opens one `AhpClient` link to each. The handshake uses the surface's own
 `clientId` and the protocol version negotiated with the surface. Nodes the
@@ -145,15 +145,15 @@ principal is not admitted to are never dialed. A node that cannot be reached
 is left out; the connection still succeeds.
 
 **Routing (fork 2 settled: aggregated namespace).** Channel URIs are opaque
-and client-chosen, so they are never rewritten. The broker learns which node
+and client-chosen, so they are never rewritten. The gateway learns which node
 owns each one from the node's own payloads. File URIs are each node's own path
 space, so the surfaces never see them as `file:` at all - `file:` would promise
 a file on the client's machine, and a client's genuine `file:` URI (a local
-attachment) must never be mistaken for a node's. They see the broker's own
+attachment) must never be mistaken for a node's. They see the gateway's own
 scheme instead, translated back to the node's `file:///` on the way in:
 
 - `ahp-file:///<node>/<rel>` - under the node's root, the `defaultDirectory`
-  it advertised. `ahp-file:///` is a directory the broker answers itself, one
+  it advertised. `ahp-file:///` is a directory the gateway answers itself, one
   entry per connected node, and `ahp-file:///<node>` is that node's root, so a
   folder picker walks from "which machine" straight into its projects. It is
   the surfaces' `defaultDirectory` whenever more than one node is connected
@@ -167,7 +167,7 @@ scheme instead, translated back to the node's `file:///` on the way in:
 
 A request routes by, in order:
 
-1. a channel the broker knows the owner of;
+1. a channel the gateway knows the owner of;
 2. the node an `ahp-file` URI names (`workingDirectories`, `workingDirectory`,
    `uri`, `root`, `cwd`);
 3. the one node offering the named provider;
@@ -183,14 +183,14 @@ else is refused as ambiguous rather than guessed.
 
 A session lives on one node, so a `dispatchAction` naming another node's
 folder (a `session/workingDirectorySet` of `ahp-file:///<other>/...` on a
-session owned elsewhere) is refused, not relayed: the broker echoes the action
+session owned elsewhere) is refused, not relayed: the gateway echoes the action
 back to that surface with a `rejectionReason`, stamped from its own
 `serverSeq`, so the surface reverts its optimistic prediction. Moving a session
 between nodes is a separate feature, not built.
 
-**One `serverSeq`.** Every node action is restamped from the broker's own
+**One `serverSeq`.** Every node action is restamped from the gateway's own
 counter, and every snapshot's `fromSeq` is translated to the stamp of that
-link's last action at or before it. Actions that reach the broker for a
+link's last action at or before it. Actions that reach the gateway for a
 channel before its snapshot are held, and are released after the reply.
 
 **The root channel is merged**, not relayed: agents are the union (the first
@@ -200,7 +200,7 @@ is the concatenation. `config` is never advertised. The handshake extras
 when every node agrees on them (invariant 4).
 
 **The automation catalogue is merged too.** Each node hosts its own
-automations (AHP 0.9.0 `ahp-automations://`), and the broker subscribes to
+automations (AHP 0.9.0 `ahp-automations://`), and the gateway subscribes to
 every node's at the handshake, next to root. The surface's catalogue is the
 union of their entries (first node wins a shared resource), and each node's
 `automation/set` / `automation/removed` is relayed as the same change to the
@@ -222,7 +222,7 @@ comes back.
 node's own cursor and offset, so it is stateless and exact across page
 boundaries, including when a node returns short pages.
 
-**Reconnect: always the snapshot arm.** The broker keeps no replay log and
+**Reconnect: always the snapshot arm.** The gateway keeps no replay log and
 needs none. A `reconnect` is authenticated and admitted exactly like an
 `initialize`, links are opened to every admitted node, and every channel in
 `subscriptions` is re-read from its node. A channel no node has is left out,
@@ -231,13 +231,13 @@ starts at the surface's `lastSeenServerSeq`, because the reply carries no
 `serverSeq` of its own. A reconnecting connection has never seen which node
 owns which channel, so a channel no node has named yet is found by asking
 each node for it: a node that does not have a channel answers `subscribe`
-with no snapshot, which is plain AHP. The broker process therefore keeps no
-state, and a surface can reconnect to a different broker instance.
+with no snapshot, which is plain AHP. The gateway process therefore keeps no
+state, and a surface can reconnect to a different gateway instance.
 
 **A node known to be down gets a short dial.** Every handshake waits for
-its slowest node, so the broker remembers, across connections, which nodes
+its slowest node, so the gateway remembers, across connections, which nodes
 failed their last dial. At the handshake those get only
-`Broker(known_down_timeout=...)` (1 s), not the full `connect_timeout`. The
+`Gateway(known_down_timeout=...)` (1 s), not the full `connect_timeout`. The
 background redial still allows the full timeout, and any successful dial
 clears the mark. This is a cache about machines, not about any surface, so
 the statement above holds: a surface can still reconnect to any instance,
@@ -245,12 +245,12 @@ which at worst waits the full timeout once.
 
 **Node recovery: redial, then bounce.** A node whose link drops, or that was
 unreachable at the handshake, is redialed in the background with doubling
-backoff (`Broker(redial_backoff=(first, ceiling))`), each delay spread by
+backoff (`Gateway(redial_backoff=(first, ceiling))`), each delay spread by
 +/-25% (`redial_jitter`) so one recovery does not line up every surface's
 reconnect against the whole fleet at once. While it is gone its
 agents leave the merged root and requests for its channels are refused as
 "not connected", never rerouted to another node. When it answers again, the
-broker closes the surface's connection on purpose. The surface's own
+gateway closes the surface's connection on purpose. The surface's own
 reconnect then re-reads every channel, that node's included, from fresh
 snapshots. AHP has no server-pushed re-snapshot, so this is the only way to
 repair a surface's state without inventing wire semantics. The cost is a
@@ -273,6 +273,6 @@ of happening at the moment of loss.
   upstream method would be dropped at the node edge.
 - `AhpClient`'s `events()` tap is bounded. A drop closes the link rather than
   leave a surface on a silently wrong mirror.
-- `WebSocketServer` is typed to take a concrete `Host`. `serve_broker` casts
+- `WebSocketServer` is typed to take a concrete `Host`. `serve_gateway` casts
   around it; typing that parameter as a protocol with a `serve` method would
   remove the cast.

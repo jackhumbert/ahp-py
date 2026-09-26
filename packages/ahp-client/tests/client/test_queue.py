@@ -6,7 +6,7 @@ import asyncio
 
 import pytest
 
-from agent_host_client.client.queue import BroadcastQueue
+from ahp_client.client.queue import BroadcastQueue
 
 
 async def test_readers_are_independent() -> None:

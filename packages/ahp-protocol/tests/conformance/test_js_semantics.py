@@ -31,8 +31,8 @@ from typing import Any
 
 import pytest
 
-from agent_host_protocol.reducers import REDUCERS
-from agent_host_protocol.reducers.clock import frozen_clock
+from ahp_protocol.reducers import REDUCERS
+from ahp_protocol.reducers.clock import frozen_clock
 
 _FIXTURE = Path(__file__).parent / "fixtures" / "js-semantics.json"
 _CASES: list[dict[str, Any]] = json.loads(_FIXTURE.read_text(encoding="utf-8"))["cases"]

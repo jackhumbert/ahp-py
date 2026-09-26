@@ -473,7 +473,7 @@ It is worth reading in full, because it is the only document here written by
 somebody who does not already know how the library works. Its framing is also
 right: none of it asks the library to claim it is safe to expose. Every item is
 about giving an embedder the material to make its *own* trust decisions, which
-is the split [`policy.py`](../src/agent_host_server/core/policy.py) already
+is the split [`policy.py`](../src/ahp_host/core/policy.py) already
 declares.
 
 All five are now implemented. What each one found:

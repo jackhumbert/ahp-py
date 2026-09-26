@@ -6,7 +6,7 @@ import base64
 from pathlib import Path
 from typing import Any
 
-from agent_host_server.provider.base import (
+from ahp_host.provider.base import (
     AgentSessionContext,
     ModelInfo,
     ModelSelection,
@@ -14,8 +14,8 @@ from agent_host_server.provider.base import (
 )
 from claude_agent_sdk import ClaudeAgentOptions, ResultMessage
 
-from agent_host_server_claude.attachments import MAX_INLINE_TEXT, prompt_content
-from agent_host_server_claude.provider import (
+from ahp_host_claude.attachments import MAX_INLINE_TEXT, prompt_content
+from ahp_host_claude.provider import (
     ClaudeProvider,
     discover_models,
     models_from_server_info,

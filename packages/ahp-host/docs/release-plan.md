@@ -131,7 +131,7 @@ tests, so the shown pattern cannot rot.
 ## Tier 1 — what "published" means
 
 **All six landed.** The version is single-sourced from
-`src/agent_host_server/__init__.py` and reads `0.1.0`; the CHANGELOG's
+`src/ahp_host/__init__.py` and reads `0.1.0`; the CHANGELOG's
 `0.1.0` section is the complete first-release record (the release workflow
 refuses a tag whose version has no section); `release.yml` is tag-triggered —
 build, tag/version gate, a wheel smoke whose dependency installs from its
@@ -392,7 +392,7 @@ behind a flag.
 
 ## The extraction
 
-Landed after the parity work, per `agent-host-client-py/docs/plan.md` §2: the
+Landed after the parity work, per `ahp-client/docs/plan.md` §2: the
 protocol layer is a separate distribution so a Python client can share the
 reducers rather than fork them.
 
@@ -408,7 +408,7 @@ code they cover.
 Still open, deliberately not done unilaterally: `tests/conformance/schemas.py`
 is duplicated in the protocol repository. It is a test helper rather than the
 reducer, so it is not the drift the split existed to kill — but it should be
-promoted into `agent_host_protocol.conformance` and imported by both, once the
+promoted into `ahp_protocol.conformance` and imported by both, once the
 client work settles.
 
 ## Sequencing

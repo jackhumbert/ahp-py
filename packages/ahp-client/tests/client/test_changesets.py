@@ -7,7 +7,7 @@ params alone: the content ref rather than the file URI, the review capability
 read live off the catalogue entry, `operationId` and `target.kind` against the
 changeset's own declaration, and a `confirmation` the client MUST show.
 
-Driven off `agent_host_client.testing.fake_host` so the suite stays independent
+Driven off `ahp_client.testing.fake_host` so the suite stays independent
 of the sibling host; the last block drives the sibling for real, and says in its
 own docstring why that is not independent evidence.
 """
@@ -22,19 +22,19 @@ import re
 from typing import Any
 
 import pytest
-from agent_host_protocol.conformance.corpus import CORPUS_ROOT
+from ahp_protocol.conformance.corpus import CORPUS_ROOT
 
-from agent_host_client.api import connect, text_range
-from agent_host_client.api.changesets import (
+from ahp_client.api import connect, text_range
+from ahp_client.api.changesets import (
     ChangesetFile,
     ChangesetInfo,
     FileSide,
     _text_range,
 )
-from agent_host_client.client import actions
-from agent_host_client.client.commands import CommandsMixin
-from agent_host_client.client.errors import AhpClientError, InvalidArgument
-from agent_host_client.testing import FakeHost
+from ahp_client.client import actions
+from ahp_client.client.commands import CommandsMixin
+from ahp_client.client.errors import AhpClientError, InvalidArgument
+from ahp_client.testing import FakeHost
 
 from ._sibling import requires_sibling_host
 
@@ -776,10 +776,10 @@ async def test_a_real_changeset_against_the_sibling_host(tmp_path: Any) -> None:
     import contextlib
     import subprocess
 
-    from agent_host_protocol.transport import memory_pair
-    from agent_host_server.core import Host, LoopbackSingleUserPolicy
-    from agent_host_server.provider import EchoProvider
-    from agent_host_server.provider.demo_workspace import DemoWorkspace
+    from ahp_host.core import Host, LoopbackSingleUserPolicy
+    from ahp_host.provider import EchoProvider
+    from ahp_host.provider.demo_workspace import DemoWorkspace
+    from ahp_protocol.transport import memory_pair
 
     root = tmp_path / "work"
     (root / "src" / "greeter").mkdir(parents=True)

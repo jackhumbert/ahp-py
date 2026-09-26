@@ -985,9 +985,9 @@ PyPI availability, checked 2026-08-01 (`404` = available):
 |---|---|
 | `ahp` | **taken** (Analytic Hierarchy Process) |
 | `pyahp` | **taken** (Analytic Hierarchy Process) |
-| `agent-host-protocol` | available |
+| `ahp-protocol` | available |
 | `ahp-host`, `ahp-server`, `ahp-core`, `ahp-types`, `ahp-ws` | available (not taken — see plan.md §2 for why the spelled-out name won) |
-| `agent-host-server`, `agent-host-server-acp`, `agent-host-protocol-types` | available — **chosen** |
+| `ahp-host`, `ahp-host-acp`, `ahp-protocol-types` | available — **chosen** |
 | `ahp-protocol`, `python-ahp`, `agenthost` | available |
 
 The `ahp` search collision with Analytic Hierarchy Process is real and must be

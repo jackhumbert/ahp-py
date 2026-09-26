@@ -8,7 +8,7 @@ the prose does not, a test fails rather than a reader.
 import pathlib
 import re
 
-import agent_host_broker
+import ahp_gateway
 
 DOCS = pathlib.Path(__file__).parent.parent / "docs"
 README = pathlib.Path(__file__).parent.parent / "README.md"
@@ -16,7 +16,7 @@ README = pathlib.Path(__file__).parent.parent / "README.md"
 
 def test_readme_states_the_three_siblings() -> None:
     text = README.read_text(encoding="utf-8")
-    for sibling in ("agent-host-protocol", "agent-host-server", "agent-host-client"):
+    for sibling in ("ahp-protocol", "ahp-host", "ahp-client"):
         assert sibling in text, f"README does not name {sibling}"
 
 
@@ -26,7 +26,7 @@ def test_version_in_docs_matches_the_package() -> None:
     for path in (README, DOCS / "plan.md"):
         if not path.exists():
             continue
-        for match in re.findall(r"agent-host-broker==([\d.]+)", path.read_text(encoding="utf-8")):
-            assert match == agent_host_broker.__version__.split(".dev")[0], (
-                f"{path.name} pins {match}, package says {agent_host_broker.__version__}"
+        for match in re.findall(r"ahp-gateway==([\d.]+)", path.read_text(encoding="utf-8")):
+            assert match == ahp_gateway.__version__.split(".dev")[0], (
+                f"{path.name} pins {match}, package says {ahp_gateway.__version__}"
             )

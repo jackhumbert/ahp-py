@@ -1,0 +1,91 @@
+name: Release
+
+# One package per tag, named for it: `ahp-host/v0.1.0` releases
+# packages/ahp-host at 0.1.0.
+on:
+  push:
+    tags: ["*/v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    outputs:
+      package: ${{ steps.tag.outputs.package }}
+      version: ${{ steps.tag.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+
+      - name: Read the tag
+        id: tag
+        run: |
+          package="${GITHUB_REF_NAME%%/*}"
+          version="${GITHUB_REF_NAME#*/v}"
+          if [ ! -f "packages/$package/pyproject.toml" ]; then
+            echo "::error::tag $GITHUB_REF_NAME names no package under packages/"
+            exit 1
+          fi
+          echo "package=$package" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Build
+        run: uv build --package "${{ steps.tag.outputs.package }}" --out-dir dist
+
+      - name: The tag must match the packaged version
+        run: |
+          built="$(ls dist/*.whl | sed -E 's#^dist/[^-]+-([^-]+)-.*#\1#')"
+          if [ "$built" != "${{ steps.tag.outputs.version }}" ]; then
+            echo "::error::tag says ${{ steps.tag.outputs.version }}, the wheel is $built"
+            exit 1
+          fi
+
+      - name: Smoke-test the built wheel against the workspace at this tag
+        run: |
+          uv build --all-packages --out-dir /tmp/siblings
+          uv venv /tmp/fresh
+          uv pip install --python /tmp/fresh --find-links /tmp/siblings dist/*.whl websockets
+          script="packages/${{ steps.tag.outputs.package }}/scripts/smoke_wheel.py"
+          if [ -f "$script" ]; then
+            cd /tmp && /tmp/fresh/bin/python "$GITHUB_WORKSPACE/$script"
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - name: Draft the release from the package's CHANGELOG
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PACKAGE: ${{ needs.build.outputs.package }}
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          # The section for this version, verbatim. A release nobody described
+          # fails rather than publishing empty.
+          awk -v v="## [$VERSION]" '
+            index($0, v) == 1 { inside = 1; next }
+            inside && /^## \[/ { exit }
+            inside { print }
+          ' "packages/$PACKAGE/CHANGELOG.md" > notes.md
+          if [ ! -s notes.md ]; then
+            echo "::error::packages/$PACKAGE/CHANGELOG.md has no section for $VERSION"
+            exit 1
+          fi
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --title "$PACKAGE $VERSION" --notes-file notes.md

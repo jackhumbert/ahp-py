@@ -7,7 +7,7 @@ from typing import Any
 
 import pytest
 
-from agent_host_client.api import (
+from ahp_client.api import (
     Delta,
     InputRequested,
     ToolCallReady,
@@ -21,9 +21,9 @@ from agent_host_client.api import (
     deny_all,
     resolve_policy,
 )
-from agent_host_client.api.approvals import ManualPolicy
-from agent_host_client.client.errors import AhpClientError
-from agent_host_client.testing import FakeHost, FakeToolCall, echo_host
+from ahp_client.api.approvals import ManualPolicy
+from ahp_client.client.errors import AhpClientError
+from ahp_client.testing import FakeHost, FakeToolCall, echo_host
 
 CHAT = "ahp-chat://c/s"
 
@@ -806,8 +806,8 @@ async def test_connect_raises_when_the_handshake_is_permanently_refused() -> Non
     """The whole front door goes through `start(wait=True)`. A -32005 left it
     unsatisfiable, so `async with connect(...)` never returned and never
     raised."""
-    from agent_host_client.client.errors import UnsupportedProtocolVersion
-    from agent_host_client.testing import FakeRpcError
+    from ahp_client.client.errors import UnsupportedProtocolVersion
+    from ahp_client.testing import FakeRpcError
 
     host = echo_host()
 
@@ -987,8 +987,8 @@ async def test_dispose_on_exit_false_really_is_honoured() -> None:
     """A caller opting out of disposal is keeping the runtime alive past the
     `with`; closing it anyway shuts the connection down under whatever they
     kept it for."""
-    from agent_host_client.api.client import ClientContext
-    from agent_host_client.hosts.runtime import HostConfig, HostRuntime
+    from ahp_client.api.client import ClientContext
+    from ahp_client.hosts.runtime import HostConfig, HostRuntime
 
     host = echo_host()
     await host.start()

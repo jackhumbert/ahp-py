@@ -8,11 +8,11 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
-from agent_host_server.provider.base import AgentSessionContext, ConfigRequest, UserMessage
+from ahp_host.provider.base import AgentSessionContext, ConfigRequest, UserMessage
 from claude_agent_sdk import ClaudeAgentOptions, ResultMessage, SDKSessionInfo
 
-from agent_host_server_claude.provider import ClaudeProvider
-from agent_host_server_claude.sessions import ClaudeCodeSessions
+from ahp_host_claude.provider import ClaudeProvider
+from ahp_host_claude.sessions import ClaudeCodeSessions
 from tests.fakes import FakeClient, RecordingSink
 
 ORIGINAL = "11111111-2222-3333-4444-555555555555"

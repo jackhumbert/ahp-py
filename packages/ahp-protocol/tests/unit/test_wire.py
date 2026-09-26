@@ -6,9 +6,9 @@ TypeScript would be silently wrong. See docs/research.md §2f.
 
 from __future__ import annotations
 
-from agent_host_protocol.types import coalesce, drop_none, reduced_equal, wire_equal
-from agent_host_protocol.types.protocol import SessionStatus, session_status_flags
-from agent_host_protocol.types.wire import discriminator, json_equal
+from ahp_protocol.types import coalesce, drop_none, reduced_equal, wire_equal
+from ahp_protocol.types.protocol import SessionStatus, session_status_flags
+from ahp_protocol.types.wire import discriminator, json_equal
 
 
 class TestCoalesce:
@@ -150,7 +150,7 @@ class TestSessionStatusValuesMatchUpstream:
         """Parse the enum out of the pinned source, so a re-pin cannot drift."""
         import re
 
-        from agent_host_protocol.conformance.corpus import CORPUS_ROOT
+        from ahp_protocol.conformance.corpus import CORPUS_ROOT
 
         source = (CORPUS_ROOT / "ts" / "session-state.ts").read_text(encoding="utf-8")
         body = re.search(r"export const enum SessionStatus \{(.*?)\n\}", source, re.S)

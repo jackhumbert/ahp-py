@@ -1,11 +1,11 @@
 # ADR 0002 — The shared protocol layer is its own distribution
 
 **Status:** accepted · **Date:** 2026-08-02
-**Supersedes nothing. Extends `agent-host-server-py`'s `docs/plan.md` §2.**
+**Supersedes nothing. Extends `ahp-host`'s `docs/plan.md` §2.**
 
 ## Context
 
-`agent-host-server-py` is the only AHP host library in any language. A sibling
+`ahp-host` is the only AHP host library in any language. A sibling
 AHP *client* is now being built. Both need the same wire types, the same seven
 reducers, the same version negotiation, the same error codes, and the same
 transport abstraction — and, critically, both need them to behave *identically*,
@@ -20,7 +20,7 @@ The server's `docs/plan.md` §2 anticipated this exactly:
 
 and reserved the PyPI name:
 
-> `agent-host-protocol` … describes the *protocol*, not a host — taking it would
+> `ahp-protocol` … describes the *protocol*, not a host — taking it would
 > squat the name a future Python *client* or types package should have.
 
 The window is open and closing: the server is version `0.0.0` with no git tags
@@ -29,8 +29,8 @@ machine-proves the boundary being cut.
 
 ## Decision
 
-**Extract the pure layer into `agent-host-protocol-py`, publishing the
-distribution `agent-host-protocol`, and have both peers depend on it.**
+**Extract the pure layer into `ahp-protocol`, publishing the
+distribution `ahp-protocol`, and have both peers depend on it.**
 
 Extracted: `types/`, `reducers/`, `conformance/`, `transport/`, and
 `core/{versions,errors,channels}.py` promoted to the package root.
@@ -52,7 +52,7 @@ not *distribution* identity. Two wheels would still ship two module objects and
 two `reducers/clock.py` globals, so `frozen_clock()` in one would not freeze the
 other — which breaks any application embedding a host and a client together.
 
-**The client depending on `agent-host-server`.** Inverts the dependency and
+**The client depending on `ahp-host`.** Inverts the dependency and
 drags `core/host.py`, a PTY backend and a filesystem jail along to get
 `chat_reducer`.
 
@@ -109,7 +109,7 @@ moves the spec under it fails loudly.
 ## Postscript (2026-08-02)
 
 The migration described above as "not yet" landed the same day: the server's
-commit `0874225` ("feat!: depend on agent-host-protocol") deleted its copy of
+commit `0874225` ("feat!: depend on ahp-protocol") deleted its copy of
 the extracted tree, added the `~= 0.1.0` dependency, and met the acceptance
 criterion — its suite passed with zero test-assertion edits. The temporary
 two-trees-can-drift liability this ADR accepted no longer exists, and the

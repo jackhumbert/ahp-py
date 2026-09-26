@@ -6,7 +6,7 @@ from collections.abc import AsyncIterator
 
 import pytest
 
-from agent_host_broker.registry import NodeRecord
+from ahp_gateway.registry import NodeRecord
 from tests.fleet import DEV, Fleet, echo_host, everyone_is_a_dev
 
 

@@ -32,13 +32,13 @@ specification owned by Microsoft. We implement it; we do not design it.
 
 Upstream ships clients for Rust, TypeScript, Kotlin, Swift and Go, and a host
 library in no language at all. There is no Python client. There is a Python
-host — [`agent-host-server-py`][server] — and the two are meant to meet.
+host — [`ahp-host`][server] — and the two are meant to meet.
 
 ```
-                agent-host-protocol          ← the shared layer
+                ahp-protocol          ← the shared layer
                   ▲             ▲
                   │             │
-        agent-host-server   agent-host-client ← this repo
+        ahp-host   ahp-client ← this repo
 ```
 
 **Current state: M1–M8 of `docs/plan.md` §12 are done, with the two
@@ -46,7 +46,7 @@ exceptions below; M9 (release) is not.** The suite (count it from
 `pytest --collect-only`, never from prose — a number here went stale twice),
 `mypy --strict`, `ruff`, `ruff format` and three import-linter contracts
 green. A full turn runs against the sibling Python host. The shared layer
-([`agent-host-protocol-py`][protocol]) is green on 247 reducer fixtures,
+([`ahp-protocol`][protocol]) is green on 247 reducer fixtures,
 39 round-trips and the JS-semantics oracle.
 
 The two exceptions, so nobody re-discovers them: **`MultiHostStateMirror`
@@ -63,7 +63,7 @@ scopes and M9 has not reached.
 
 ## Depend on the shared layer; do not fork it
 
-`agent-host-protocol` holds the wire types, all seven reducers, version
+`ahp-protocol` holds the wire types, all seven reducers, version
 negotiation, the error taxonomy, the transport ABC and the conformance corpora.
 **Do not copy any of it into this repository**, and do not re-port a reducer.
 The reducers are ~2,500 lines of hand-ported JavaScript semantics with a
@@ -71,8 +71,8 @@ documented history of six defects an adversarial oracle had to find; the
 fixture corpus cannot see that class of bug, so two copies would stay green
 while diverging. See [ADR 0002][adr2] in the protocol repo.
 
-Pin `agent-host-protocol ~= 0.1.0` and assert
-`agent_host_protocol.UPSTREAM_PROTOCOL_VERSION` in `tests/docs/`, so a
+Pin `ahp-protocol ~= 0.1.0` and assert
+`ahp_protocol.UPSTREAM_PROTOCOL_VERSION` in `tests/docs/`, so a
 dependency bump that moves the spec under us fails loudly.
 
 ## What "fully featured" means here
@@ -259,10 +259,10 @@ A change is not finished until:
   sourced from the interop suite. A wrapper that exists but has never been
   exercised against a real host shows green otherwise.
 
-`agent_host_client.doctor.diagnose()` — a library call, not a CLI; the `ahp
+`ahp_client.doctor.diagnose()` — a library call, not a CLI; the `ahp
 doctor <url>` command is M9 ergonomics that does not exist yet — is the one
 mechanism that converts adoption into conformance evidence, and
-`agent_host_client.testing` ships as **public API** — the fastest way to lose
+`ahp_client.testing` ships as **public API** — the fastest way to lose
 an adopter is for them to be unable to test their app.
 
 ## Requests from an embedder
@@ -286,7 +286,7 @@ Its "deliberately not requested" section is as load-bearing as the requests.
   changes a wire type, action shape, state field or error code to anything other
   than what the pin says is declined however sensible it is.
 
-[server]: https://github.com/jackhumbert/agent-host-server-py
-[protocol]: https://github.com/jackhumbert/agent-host-protocol-py
-[adr2]: https://github.com/jackhumbert/agent-host-protocol-py/blob/main/docs/decisions/0002-extraction.md
+[server]: https://github.com/jackhumbert/ahp-py/tree/main/packages/ahp-host
+[protocol]: https://github.com/jackhumbert/ahp-py/tree/main/packages/ahp-protocol
+[adr2]: https://github.com/jackhumbert/ahp-py/blob/main/packages/ahp-protocol/docs/decisions/0002-extraction.md
 [adr8]: docs/decisions/0008-refusing-what-the-host-would-accept.md

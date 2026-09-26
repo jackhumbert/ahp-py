@@ -41,16 +41,16 @@ def fail(name: str, detail: object) -> None:
 # 1. Not the repository. An editable install or a stray package directory in
 #    the cwd would let every check below pass while proving nothing.
 cwd = Path.cwd().resolve()
-if (cwd / "pyproject.toml").is_file() and (cwd / "src" / "agent_host_protocol").is_dir():
+if (cwd / "pyproject.toml").is_file() and (cwd / "src" / "ahp_protocol").is_dir():
     sys.exit(f"run this from outside the repository; cwd is {cwd}")
 
 try:
-    import agent_host_protocol
-    from agent_host_protocol import __version__
+    import ahp_protocol
+    from ahp_protocol import __version__
 except Exception as exc:  # pragma: no cover - the failure is the output
-    sys.exit(f"FAIL  import agent_host_protocol: {exc!r}")
+    sys.exit(f"FAIL  import ahp_protocol: {exc!r}")
 
-installed = Path(agent_host_protocol.__file__).resolve().parent
+installed = Path(ahp_protocol.__file__).resolve().parent
 if "site-packages" not in installed.parts:
     sys.exit(f"not an installed copy -- imported from {installed}")
 check(f"imported from {installed} ({__version__})")
@@ -58,11 +58,11 @@ check(f"imported from {installed} ({__version__})")
 # 2. Everything `__all__` promises must resolve. A name in the list that is not
 #    bound is a wheel-only failure: `from x import *` raises, plain imports do
 #    not, and nothing in the suite does the former.
-missing = [n for n in agent_host_protocol.__all__ if not hasattr(agent_host_protocol, n)]
+missing = [n for n in ahp_protocol.__all__ if not hasattr(ahp_protocol, n)]
 if missing:
     fail("__all__ resolves", f"unbound: {missing}")
 else:
-    check(f"__all__ resolves ({len(agent_host_protocol.__all__)} names)")
+    check(f"__all__ resolves ({len(ahp_protocol.__all__)} names)")
 
 # 3. py.typed, or every downstream type-checker silently treats us as Any. Both
 #    consumers of this package are strict-mypy codebases.
@@ -74,7 +74,7 @@ else:
 # 4. THE ONE THAT MATTERS. The corpus has to be inside the wheel, and the
 #    loader has to find it there rather than by walking up from a source file.
 try:
-    from agent_host_protocol.conformance.corpus import (
+    from ahp_protocol.conformance.corpus import (
         CORPUS_ROOT,
         pin,
         reducer_fixtures,
@@ -113,7 +113,7 @@ except Exception as exc:
 # 5. The reducers actually run, against the packaged corpus. Importable is not
 #    the same as working, and this is cheap.
 try:
-    from agent_host_protocol.reducers import REDUCERS
+    from ahp_protocol.reducers import REDUCERS
 
     fixture = next(f for f in reducer_fixtures() if f.reducer == "chat")
     state = fixture.initial
@@ -126,7 +126,7 @@ except Exception as exc:
 # 6. The generated authorisation table. A wheel that shipped an empty one would
 #    make every host trusting it refuse every client action.
 try:
-    from agent_host_protocol.types import ACTION_TYPES, IS_CLIENT_DISPATCHABLE
+    from ahp_protocol.types import ACTION_TYPES, IS_CLIENT_DISPATCHABLE
 
     dispatchable = sum(1 for v in IS_CLIENT_DISPATCHABLE.values() if v)
     if len(ACTION_TYPES) < 80 or dispatchable < 30:
@@ -141,7 +141,7 @@ except Exception as exc:
 
 # 7. The transports, which both peers meet over.
 try:
-    from agent_host_protocol.transport import memory_pair
+    from ahp_protocol.transport import memory_pair
 
     a, b = memory_pair()
     check("memory_pair() constructs")

@@ -1,4 +1,4 @@
-# agent-host-protocol
+# ahp-protocol
 
 The [Agent Host Protocol][ahp] (AHP) as a Python library: wire types, the nine
 pure state reducers, version negotiation, the error taxonomy, the transport
@@ -12,7 +12,7 @@ wheel**.
 
 > ### ⚠️ Status: pre-alpha.
 >
-> Extracted from [`agent-host-server-py`][server], whose reducers this is. All
+> Extracted from [`ahp-host`][server], whose reducers this is. All
 > **272** upstream reducer fixtures, all **44** round-trip fixtures and the
 > 81-case JS-semantics oracle pass. Distributed from this repository —
 > deliberately not on PyPI — and the API is not stable.
@@ -24,10 +24,10 @@ on, so that the parts of AHP that must be *identical* on both ends exist exactly
 once:
 
 ```
-                agent-host-protocol
+                ahp-protocol
                   ▲             ▲
                   │             │
-        agent-host-server   agent-host-client
+        ahp-host   ahp-client
 ```
 
 That shape is not an invention — it is what every other AHP ecosystem converged
@@ -48,13 +48,13 @@ implementations disagree about what a peer just sent.
 Straight from this repository — the packages in this family are not on PyPI:
 
 ```bash
-pip install "agent-host-protocol @ git+https://github.com/jackhumbert/agent-host-protocol-py"
+pip install "ahp-protocol @ git+https://github.com/jackhumbert/ahp-py#subdirectory=packages/ahp-protocol"
 ```
 
-No release is tagged yet — **`v0.1.0` is pending** — so the line above
+No release is tagged yet — **`ahp-protocol/v0.1.0` is pending** — so the line above
 installs `main`. Once the first tag lands, pin it by appending the tag
-(`…agent-host-protocol-py@v0.1.0`), and each
-[GitHub release](https://github.com/jackhumbert/agent-host-protocol-py/releases)
+(`…ahp-protocol@v0.1.0`), and each
+[GitHub release](https://github.com/jackhumbert/ahp-py/releases)
 will carry the built wheel and sdist it was cut from.
 
 Zero runtime dependencies, permanently. Anything this package required, both
@@ -73,7 +73,7 @@ peers would inherit.
 | `conformance/` | fixture loaders over the vendored corpora |
 
 ```python
-from agent_host_protocol import REDUCERS, reducer_for_state
+from ahp_protocol import REDUCERS, reducer_for_state
 
 state = {"agents": [], "activeSessions": 0}
 name = reducer_for_state(state)
@@ -147,7 +147,7 @@ The corpora ship **inside the wheel**, so a downstream implementation can run
 the same gate:
 
 ```python
-from agent_host_protocol.conformance.corpus import reducer_fixtures
+from ahp_protocol.conformance.corpus import reducer_fixtures
 ```
 
 The suite runs offline with no network and no credentials. Regenerating the
@@ -183,5 +183,5 @@ Licensed **MIT**, matching upstream — this repository vendors upstream's
 MIT-licensed conformance fixtures and ports its reducers, so identical terms
 avoid any compatibility question.
 
-[ahp]: https://microsoft.github.io/agent-host-protocol/
-[server]: https://github.com/jackhumbert/agent-host-server-py
+[ahp]: https://microsoft.github.io/ahp-protocol/
+[server]: https://github.com/jackhumbert/ahp-py/tree/main/packages/ahp-host

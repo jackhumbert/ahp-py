@@ -17,8 +17,8 @@ import json
 
 import pytest
 
-from agent_host_protocol.conformance.corpus import RoundTripFixture, round_trip_fixtures
-from agent_host_protocol.types import SPECS, wire_equal
+from ahp_protocol.conformance.corpus import RoundTripFixture, round_trip_fixtures
+from ahp_protocol.types import SPECS, wire_equal
 
 FIXTURES = list(round_trip_fixtures())
 

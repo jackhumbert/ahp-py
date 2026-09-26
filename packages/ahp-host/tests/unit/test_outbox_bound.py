@@ -20,7 +20,7 @@ from typing import Any
 
 import pytest
 
-from agent_host_server.core.connection import DEFAULT_OUTBOX_LIMIT, Connection
+from ahp_host.core.connection import DEFAULT_OUTBOX_LIMIT, Connection
 
 pytestmark = pytest.mark.anyio
 

@@ -3,7 +3,7 @@
 ## Reporting a vulnerability
 
 Report privately through [GitHub's advisory
-form](https://github.com/jackhumbert/agent-host-protocol-py/security/advisories/new).
+form](https://github.com/jackhumbert/ahp-py/security/advisories/new).
 Please do not open a public issue for a vulnerability.
 
 ## What this package is, in security terms
@@ -55,7 +55,7 @@ Out of scope:
 
 - What a consumer does with the result. This package decides what the state
   *is*; it has no opinion on who may see it. Access control belongs to the
-  host — see [`agent-host-server-py`](https://github.com/jackhumbert/agent-host-server-py)'s
+  host — see [`ahp-host`](https://github.com/jackhumbert/ahp-py/tree/main/packages/ahp-host)'s
   own `SECURITY.md`.
 - Upstream's protocol design. AHP defines no authentication and says so; that
   is a property of the specification, not of this implementation of it. Report

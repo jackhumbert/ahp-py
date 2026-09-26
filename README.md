@@ -25,16 +25,24 @@ sessions. One repository, several independently installable packages:
 
 The native iOS client lives separately, in `ahp-client-ios`.
 
-> **Mid-migration.** Each package was imported with its full history and has
-> not been renamed inside yet: distributions, imports and commands are still
-> `agent-host-*` / `agent_host_*`, and each package's `.github/` is inert
-> until CI moves to the root.
+## Install
+
+Distributed from GitHub, not from a package index. `ahp-protocol` is the floor
+and installs first, because the others pin it and no index carries it:
+
+```bash
+pip install "ahp-protocol @ git+https://github.com/jackhumbert/ahp-py#subdirectory=packages/ahp-protocol"
+pip install "ahp-host[ws] @ git+https://github.com/jackhumbert/ahp-py#subdirectory=packages/ahp-host"
+```
+
+Each package's README has its own install lines.
 
 ## Develop
 
 ```bash
-uv sync --all-packages --all-extras
-cd packages/ahp-host && uv run pytest
+uv sync --all-packages --all-extras --all-groups
+scripts/check.sh                  # the CI gate: lint, format, types, contracts, tests
+scripts/check.sh ahp-host         # one package
 ```
 
 Sibling dependencies resolve to the workspace (`[tool.uv.sources]` in the root

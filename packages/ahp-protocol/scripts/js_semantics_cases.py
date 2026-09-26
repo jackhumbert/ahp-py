@@ -605,7 +605,7 @@ case(
 
 # ── 0.9.0: chat turn errors, resume and derived modifiedAt ───────────────────
 
-_ERRORED = {
+_ERRORED: dict[str, Any] = {
     "resource": "ahp-chat:/c",
     "title": "t",
     "status": 2,

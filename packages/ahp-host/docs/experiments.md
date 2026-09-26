@@ -444,7 +444,7 @@ JSON-RPC `MethodNotFound` (`-32601`).
 
 ## E12 — A real VS Code 1.131 connected to this host
 
-The decisive experiment, run 2026-08-01 against `python -m agent_host_server`
+The decisive experiment, run 2026-08-01 against `python -m ahp_host`
 over WebSocket on loopback with a connection token. VS Code Stable **1.131.0**,
 macOS. Full frame capture via `--wire-log` (275 frames).
 

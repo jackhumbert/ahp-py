@@ -7,7 +7,7 @@ import sys
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
-from agent_host_server.node.service import (
+from ahp_host.node.service import (
     Supervisor,
     launchd_plist,
     node_command,
@@ -60,7 +60,7 @@ def test_a_command_that_cannot_start_is_retried_not_fatal(tmp_path: Path) -> Non
 
 def test_the_task_runs_the_supervisor_at_logon_and_keeps_it_up() -> None:
     command = node_command(
-        Path(r"C:\Users\me\.config\agent-host\node.toml"),
+        Path(r"C:\Users\me\.config\ahp\node.toml"),
         Path(r"C:\Users\me\logs\node.log"),
         python=r"C:\venv\Scripts\pythonw.exe",
         verb="supervise",
@@ -79,7 +79,7 @@ def test_the_task_runs_the_supervisor_at_logon_and_keeps_it_up() -> None:
     assert exec_ is not None
     assert exec_.findtext("t:Command", namespaces=_NS) == r"C:\venv\Scripts\pythonw.exe"
     assert exec_.findtext("t:Arguments", namespaces=_NS) == (
-        r"-m agent_host_server.node supervise --config C:\Users\me\.config\agent-host\node.toml"
+        r"-m ahp_host.node supervise --config C:\Users\me\.config\ahp\node.toml"
         r" --log-file C:\Users\me\logs\node.log"
     )
 
@@ -98,16 +98,14 @@ def test_the_launchd_agent_keeps_the_supervisor_alive(tmp_path: Path) -> None:
     command = node_command(
         tmp_path / "node.toml", None, python="/venv/bin/python", verb="supervise"
     )
-    spec = plistlib.loads(
-        launchd_plist(command, label="io.agent-host.node", log=tmp_path / "s.log")
-    )
-    assert spec["Label"] == "io.agent-host.node"
+    spec = plistlib.loads(launchd_plist(command, label="io.ahp.node", log=tmp_path / "s.log"))
+    assert spec["Label"] == "io.ahp.node"
     assert spec["KeepAlive"] is True
     assert spec["RunAtLoad"] is True
     assert spec["ProgramArguments"][:4] == [
         "/venv/bin/python",
         "-m",
-        "agent_host_server.node",
+        "ahp_host.node",
         "supervise",
     ]
     assert spec["StandardErrorPath"] == str(tmp_path / "s.log")

@@ -83,7 +83,7 @@ version it can speak, or refuse.
   would have dropped the list against anything conformant — which is the failure
   mode this whole file is about, since a client that cannot read the list can
   only say "the handshake failed". Built in `core/host.py` rather than taken
-  from `agent_host_protocol.errors`, whose emitter still writes the old name;
+  from `ahp_protocol.errors`, whose emitter still writes the old name;
   pinned by `tests/conformance/test_error_data_schema.py`, which validates the
   payload against the vendored schema rather than against our own spelling.
 - **`protocolVersions` element types are checked before negotiation.** Every

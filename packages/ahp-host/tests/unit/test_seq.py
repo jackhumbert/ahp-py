@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from agent_host_server.core.seq import FileSequence, InMemorySequence
+from ahp_host.core.seq import FileSequence, InMemorySequence
 
 
 class TestInMemory:

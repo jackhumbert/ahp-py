@@ -32,13 +32,13 @@ from functools import cache
 from typing import Any
 
 import pytest
-from agent_host_protocol.conformance.corpus import CORPUS_ROOT
+from ahp_protocol.conformance.corpus import CORPUS_ROOT
 
 jsonschema = pytest.importorskip("jsonschema")
 
 #: From the DEPENDENCY's copy of the corpus, not from a `vendor/` tree of our
 #: own. There is exactly one vendored spec now and it lives in
-#: `agent-host-protocol`; a second copy here could pin a different tag and this
+#: `ahp-protocol`; a second copy here could pin a different tag and this
 #: gate would then be asserting against a spec the reducers do not implement.
 SCHEMA_DIR = CORPUS_ROOT / "schema"
 

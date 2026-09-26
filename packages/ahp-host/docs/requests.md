@@ -9,7 +9,7 @@ correctly — "a Python library that *looks* safe to expose would be worse than
 one that says it is not." None of these requests asks the library to change that
 stance. Every one of them is about the library being *usable* by an embedder
 that supplies the trust decisions itself, which is exactly the split
-[`core/policy.py`](../src/agent_host_server/core/policy.py) already declares.
+[`core/policy.py`](../src/ahp_host/core/policy.py) already declares.
 
 Ordered by whether it blocks. Items 1–3 are general to any multi-user
 deployment; 4 and 5 are smaller.

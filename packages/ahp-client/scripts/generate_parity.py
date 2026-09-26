@@ -2,9 +2,9 @@
 """Generate `docs/parity.md` from the code, never from a hand-kept list.
 
 Every row here is derived: the command table from
-`agent_host_client.client.commands`, the notification set from
+`ahp_client.client.commands`, the notification set from
 `client.events.NOTIFICATION_METHODS`, the reducer set from
-`agent_host_protocol.reducers.REDUCERS`, the mirrored-channel column from the
+`ahp_protocol.reducers.REDUCERS`, the mirrored-channel column from the
 mirror's bindable reducer set, the reverse direction from the serve router's
 `REVERSE_METHODS` and the shipped servers' own dispatch tables, the
 dispatchable actions from the generated upstream table, and the totals from the
@@ -27,15 +27,15 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
-from agent_host_protocol.conformance.corpus import CORPUS_ROOT
-from agent_host_protocol.reducers import REDUCERS
-from agent_host_protocol.types import ACTION_TYPES, IS_CLIENT_DISPATCHABLE
+from ahp_protocol.conformance.corpus import CORPUS_ROOT
+from ahp_protocol.reducers import REDUCERS
+from ahp_protocol.types import ACTION_TYPES, IS_CLIENT_DISPATCHABLE
 
-from agent_host_client.client.commands import AUTOMATIONS_SCOPED, COMMANDS, ROOT_SCOPED
-from agent_host_client.client.events import NOTIFICATION_METHODS
-from agent_host_client.client.mirror import REDUCER_NAMES
-from agent_host_client.serve.resources import _SNAKE, _VIRTUAL_METHODS
-from agent_host_client.serve.router import REVERSE_METHODS
+from ahp_client.client.commands import AUTOMATIONS_SCOPED, COMMANDS, ROOT_SCOPED
+from ahp_client.client.events import NOTIFICATION_METHODS
+from ahp_client.client.mirror import REDUCER_NAMES
+from ahp_client.serve.resources import _SNAKE, _VIRTUAL_METHODS
+from ahp_client.serve.router import REVERSE_METHODS
 
 #: What a shipped server can actually answer, from the dispatch tables the
 #: servers themselves route on -- `FileResourceServer` looks handlers up in
@@ -184,7 +184,7 @@ server stays absent.
 
 ## Channels ({len(channels)})
 
-Reducers come from `agent-host-protocol`, so all nine are available to the
+Reducers come from `ahp-protocol`, so all nine are available to the
 mirror, which binds any of them by name at registration. The TypeScript
 `AhpStateMirror` wires four and silently ignores every `ahp-chat:` snapshot.
 

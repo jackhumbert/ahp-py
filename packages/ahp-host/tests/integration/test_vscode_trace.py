@@ -28,8 +28,8 @@ from typing import Any
 
 import pytest
 
-from agent_host_server.core import Host, LoopbackSingleUserPolicy
-from agent_host_server.provider import EchoProvider
+from ahp_host.core import Host, LoopbackSingleUserPolicy
+from ahp_host.provider import EchoProvider
 
 from .test_host_end_to_end import FakeClient
 
@@ -136,7 +136,7 @@ class TestReplay:
         host = Host(EchoProvider(), LoopbackSingleUserPolicy())
         import asyncio
 
-        from agent_host_protocol.transport import memory_pair
+        from ahp_protocol.transport import memory_pair
 
         client_transport, server_transport = memory_pair()
         serve = asyncio.create_task(host.serve(server_transport))
@@ -173,7 +173,7 @@ class TestReplay:
         """The end the user sees: create the session VS Code's way, run its turn."""
         import asyncio
 
-        from agent_host_protocol.transport import memory_pair
+        from ahp_protocol.transport import memory_pair
 
         host = Host(EchoProvider(), LoopbackSingleUserPolicy())
         client_transport, server_transport = memory_pair()

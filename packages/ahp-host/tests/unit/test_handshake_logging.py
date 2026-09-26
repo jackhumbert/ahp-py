@@ -17,9 +17,9 @@ from typing import Any
 
 import pytest
 
-from agent_host_server import Host, LoopbackSingleUserPolicy
-from agent_host_server.provider import EchoProvider
-from agent_host_server.ws.server import WebSocketServer, _safe_path
+from ahp_host import Host, LoopbackSingleUserPolicy
+from ahp_host.provider import EchoProvider
+from ahp_host.ws.server import WebSocketServer, _safe_path
 
 pytestmark = pytest.mark.anyio
 
@@ -64,7 +64,7 @@ async def test_a_refused_handshake_logs_no_token(caplog: pytest.LogCaptureFixtur
     server = WebSocketServer(host, connection_token="the-real-one")
     connection = _Connection()
 
-    with caplog.at_level(logging.DEBUG, logger="agent_host_server.ws.server"):
+    with caplog.at_level(logging.DEBUG, logger="ahp_host.ws.server"):
         await server._process_request(connection, _Request(f"/?tkn={SECRET}"))
 
     assert connection.responded is not None, "the handshake was not refused"
@@ -86,7 +86,7 @@ async def test_an_accepted_handshake_logs_no_token_either(
     server = WebSocketServer(host, connection_token=SECRET)
     connection = _Connection()
 
-    with caplog.at_level(logging.DEBUG, logger="agent_host_server.ws.server"):
+    with caplog.at_level(logging.DEBUG, logger="ahp_host.ws.server"):
         result = await server._process_request(connection, _Request(f"/?tkn={SECRET}"))
 
     assert result is None, "a valid token was refused"

@@ -3,8 +3,8 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "agent-host-client"
-# The version lives in `src/agent_host_client/__init__.py` as `__version__` and
+name = "ahp-client"
+# The version lives in `src/ahp_client/__init__.py` as `__version__` and
 # nowhere else; hatch reads it from there. Two spellings of a version agree
 # right up until the release where somebody bumps one of them.
 dynamic = ["version"]
@@ -12,7 +12,7 @@ description = "A client implementation of the Agent Host Protocol (AHP) for Pyth
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.11"
-authors = [{ name = "agent-host-client contributors" }]
+authors = [{ name = "ahp-client contributors" }]
 keywords = ["ahp", "agent-host-protocol", "agent", "protocol", "json-rpc", "websocket"]
 classifiers = [
   "Development Status :: 2 - Pre-Alpha",
@@ -33,7 +33,7 @@ classifiers = [
 # Compatible-release, not exact: a patch fix flows without a release here, while
 # a spec-shaped change is a deliberate upgrade. The spec breaks in MINOR bumps,
 # so a looser pin would be a trap.
-dependencies = ["agent-host-protocol~=0.1.0"]
+dependencies = ["ahp-protocol~=0.1.0"]
 
 [project.optional-dependencies]
 # The core speaks to a `Transport`; a socket is one implementation of one. A
@@ -41,10 +41,10 @@ dependencies = ["agent-host-protocol~=0.1.0"]
 ws = ["websockets>=13"]
 
 [project.urls]
-Homepage = "https://github.com/jackhumbert/agent-host-client-py"
-Repository = "https://github.com/jackhumbert/agent-host-client-py"
-Issues = "https://github.com/jackhumbert/agent-host-client-py/issues"
-Changelog = "https://github.com/jackhumbert/agent-host-client-py/blob/main/CHANGELOG.md"
+Homepage = "https://github.com/jackhumbert/ahp-py/tree/main/packages/ahp-client"
+Repository = "https://github.com/jackhumbert/ahp-py/tree/main/packages/ahp-client"
+Issues = "https://github.com/jackhumbert/ahp-py/issues"
+Changelog = "https://github.com/jackhumbert/ahp-py/blob/main/packages/ahp-client/CHANGELOG.md"
 
 # PEP 735, not [project.optional-dependencies]: an extra is baked into the
 # wheel's Requires-Dist and rides along to every installer forever, and the
@@ -61,10 +61,10 @@ dev = [
 ]
 
 [tool.hatch.version]
-path = "src/agent_host_client/__init__.py"
+path = "src/ahp_client/__init__.py"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/agent_host_client"]
+packages = ["src/ahp_client"]
 
 # An allowlist, not an ignore list. Hatchling's default sdist selection honours
 # only the ROOT .gitignore -- the tool caches that self-ignore with a nested
@@ -121,18 +121,18 @@ ignore = [
 # `SessionNotFound` is -32001, `AuthRequired` is -32007. An `Error` suffix would
 # make every one of them differ from the vocabulary the rest of the library
 # mirrors, for no gain: they all subclass `RpcError`, which has the suffix.
-"src/agent_host_client/client/errors.py" = ["N818"]
+"src/ahp_client/client/errors.py" = ["N818"]
 # `HostShutDown` and `HostNotConnected` name a supervisor *state*, not a fault
 # type; both subclass `AhpClientError`, which carries the suffix.
-"src/agent_host_client/hosts/runtime.py" = ["N818"]
+"src/ahp_client/hosts/runtime.py" = ["N818"]
 # `TerminalNotHeld` names the claim *state* the caller is in, not a fault class,
 # and it reads as the sentence it raises: the terminal is not held by you. Same
 # reasoning as `HostNotConnected`, and it subclasses `AhpClientError`.
-"src/agent_host_client/api/terminals.py" = ["N818"]
+"src/ahp_client/api/terminals.py" = ["N818"]
 "tests/**" = ["RUF059"]
 
 [tool.importlinter]
-root_package = "agent_host_client"
+root_package = "ahp_client"
 include_external_packages = true
 
 # Parenthesised layers are optional, so the contract holds while the upper
@@ -146,14 +146,14 @@ type = "layers"
 # `ws` -- it takes a `Transport` from the shared package -- so the arrow only
 # points one way, and it points up.
 layers = [
-  "(agent_host_client.cli)",
-  "(agent_host_client.sync)",
-  "(agent_host_client.api)",
-  "(agent_host_client.hosts)",
-  "(agent_host_client.serve)",
-  "(agent_host_client.ws)",
-  "agent_host_client.client",
-  "(agent_host_client.wirelog)",
+  "(ahp_client.cli)",
+  "(ahp_client.sync)",
+  "(ahp_client.api)",
+  "(ahp_client.hosts)",
+  "(ahp_client.serve)",
+  "(ahp_client.ws)",
+  "ahp_client.client",
+  "(ahp_client.wirelog)",
 ]
 
 # `client` DEFINES the inbound-request handler protocol; `serve` implements it;
@@ -163,13 +163,13 @@ layers = [
 [[tool.importlinter.contracts]]
 name = "client does not reach up into its own callers"
 type = "forbidden"
-source_modules = ["agent_host_client.client"]
-forbidden_modules = ["agent_host_client.serve", "agent_host_client.hosts"]
+source_modules = ["ahp_client.client"]
+forbidden_modules = ["ahp_client.serve", "ahp_client.hosts"]
 
 # A downstream test suite must stay offline. `testing` shipping a WebSocket
 # import would make every consumer's unit tests depend on a socket stack.
 [[tool.importlinter.contracts]]
 name = "the testing kit stays offline"
 type = "forbidden"
-source_modules = ["agent_host_client.testing"]
-forbidden_modules = ["agent_host_client.cli", "agent_host_client.ws", "websockets"]
+source_modules = ["ahp_client.testing"]
+forbidden_modules = ["ahp_client.cli", "ahp_client.ws", "websockets"]

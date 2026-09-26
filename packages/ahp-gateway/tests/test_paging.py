@@ -4,9 +4,9 @@ from collections.abc import Mapping
 from typing import Any
 
 import pytest
-from agent_host_protocol import AhpError
+from ahp_protocol import AhpError
 
-from agent_host_broker.core.paging import (
+from ahp_gateway.core.paging import (
     check_limit,
     decode_cursor,
     encode_cursor,

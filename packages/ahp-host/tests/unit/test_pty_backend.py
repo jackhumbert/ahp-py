@@ -19,10 +19,10 @@ import time
 from pathlib import Path
 
 import pytest
-from agent_host_protocol.errors import AhpError
+from ahp_protocol.errors import AhpError
 
-from agent_host_server.core.pty_backend import PtyTerminalBackend
-from agent_host_server.core.terminals import TerminalRequest, TerminalSessionClaim
+from ahp_host.core.pty_backend import PtyTerminalBackend
+from ahp_host.core.terminals import TerminalRequest, TerminalSessionClaim
 
 pytestmark = [
     pytest.mark.anyio,
@@ -221,19 +221,19 @@ class TestReportedCwdBecomesAUri:
     """The mirror image: OSC 633 reports a PATH and the action declares a URI."""
 
     def test_an_absolute_path_is_converted(self) -> None:
-        from agent_host_server.core.host import _cwd_uri
+        from ahp_host.core.host import _cwd_uri
 
         assert _cwd_uri("/Users/someone/work") == "file:///Users/someone/work"
 
     def test_a_uri_is_left_alone(self) -> None:
-        from agent_host_server.core.host import _cwd_uri
+        from ahp_host.core.host import _cwd_uri
 
         assert _cwd_uri("file:///already/a/uri") == "file:///already/a/uri"
 
     def test_a_relative_path_is_not_invented_into_a_uri(self) -> None:
         """A shell reporting a relative cwd has told us something we cannot
         convert. Passing it through beats inventing a root to resolve it."""
-        from agent_host_server.core.host import _cwd_uri
+        from ahp_host.core.host import _cwd_uri
 
         assert _cwd_uri("relative/dir") == "relative/dir"
 
@@ -306,8 +306,8 @@ class TestTerminalsDieWithTheHost:
     """
 
     async def test_aclose_takes_the_shells_with_it(self) -> None:
-        from agent_host_server.core import Host, LoopbackSingleUserPolicy
-        from agent_host_server.provider import EchoProvider
+        from ahp_host.core import Host, LoopbackSingleUserPolicy
+        from ahp_host.provider import EchoProvider
 
         host = Host(EchoProvider(), LoopbackSingleUserPolicy(), terminals=PtyTerminalBackend())
         started = set()
@@ -337,8 +337,8 @@ class TestTerminalsDieWithTheHost:
         session before that finally runs, so a host stopping in that window has
         this registry and nothing else.
         """
-        from agent_host_server.core import Host, LoopbackSingleUserPolicy
-        from agent_host_server.provider import EchoProvider
+        from ahp_host.core import Host, LoopbackSingleUserPolicy
+        from ahp_host.provider import EchoProvider
 
         host = Host(EchoProvider(), LoopbackSingleUserPolicy(), terminals=PtyTerminalBackend())
         uri = "ahp-terminal:/one-shot"

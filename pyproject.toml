@@ -3,9 +3,8 @@
 [tool.uv.workspace]
 members = ["packages/*"]
 
-# Sibling dependencies resolve to the workspace, never an index. Keyed by the
-# distribution names the packages still declare; rename these with them.
+# Sibling dependencies resolve to the workspace, never an index.
 [tool.uv.sources]
-agent-host-protocol = { workspace = true }
-agent-host-server = { workspace = true }
-agent-host-client = { workspace = true }
+ahp-protocol = { workspace = true }
+ahp-host = { workspace = true }
+ahp-client = { workspace = true }

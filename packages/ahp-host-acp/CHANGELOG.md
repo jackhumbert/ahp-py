@@ -4,8 +4,8 @@
 
 ### Added
 
-- `type = "acp"` for `agent-host-node` (agent-host-server): the package
-  registers an `acp` entry in the `agent_host_server.agents` group, so one node
+- `type = "acp"` for `ahp-node` (ahp-host): the package
+  registers an `acp` entry in the `ahp_host.agents` group, so one node
   can serve several ACP agents (goose, opencode) beside Claude from one host,
   port and folder tree. Options are the config file's per-agent settings:
   `provider_id`, `agent_name`, `description`, `command`, `env`, `models`,
@@ -21,9 +21,10 @@
   offers one (opencode).
 - `[config_options]`: ACP session config options set on every session
   (OpenClaw: `thought_level`).
-- A TOML config file and named roots, as in agent-host-server-claude.
+- A TOML config file and named roots, as in ahp-host-claude.
 
 ### Changed
 
-- `roots` and `paths` re-export `agent_host_server.node`'s instead of keeping
-  copies. `python -m agent_host_server_acp` still runs a one-agent host.
+- **Renamed from `agent-host-server-acp` to `ahp-host-acp`** (import `agent_host_server_acp` → `ahp_host_acp`), and moved into the `ahp-py` monorepo as `packages/ahp-host-acp`. Command: `agent-host-server-acp` → `ahp-host-acp`. Tags are now per package: `ahp-host-acp/v<version>`.
+- `roots` and `paths` re-export `ahp_host.node`'s instead of keeping
+  copies. `python -m ahp_host_acp` still runs a one-agent host.

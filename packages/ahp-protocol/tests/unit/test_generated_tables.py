@@ -8,8 +8,8 @@ import subprocess
 import sys
 from pathlib import Path
 
-from agent_host_protocol.conformance.corpus import CORPUS_ROOT, pin, reducer_fixtures
-from agent_host_protocol.types import (
+from ahp_protocol.conformance.corpus import CORPUS_ROOT, pin, reducer_fixtures
+from ahp_protocol.types import (
     ACTION_INTRODUCED_IN,
     ACTION_TYPES,
     AHP_ERROR_CODES,
@@ -104,7 +104,7 @@ def test_vendored_pin_matches_upstream_md() -> None:
 
 def test_generated_file_is_reproducible() -> None:
     """CI guard: the checked-in table must match what the generator emits today."""
-    target = ROOT / "src" / "agent_host_protocol" / "types" / "_generated.py"
+    target = ROOT / "src" / "ahp_protocol" / "types" / "_generated.py"
     before = target.read_text(encoding="utf-8")
     subprocess.run(
         [sys.executable, str(ROOT / "scripts" / "generate_tables.py")],

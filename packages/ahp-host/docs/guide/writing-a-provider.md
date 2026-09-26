@@ -11,8 +11,8 @@ does drift, so none of this is allowed to.
 ## The smallest host that works
 
 ```python
-from agent_host_server import AgentProvider, Host, LoopbackSingleUserPolicy
-from agent_host_server.provider.base import (
+from ahp_host import AgentProvider, Host, LoopbackSingleUserPolicy
+from ahp_host.provider.base import (
     AgentInfo,
     AgentSession,
     AgentSessionContext,
@@ -69,7 +69,7 @@ subclass anything: if your object has the methods, it is one.
 ```python
 import asyncio
 
-from agent_host_protocol.transport import memory_pair
+from ahp_protocol.transport import memory_pair
 
 
 async def main() -> None:
@@ -83,11 +83,11 @@ async def main() -> None:
 Over a real socket, use the `ws` extra:
 
 ```
-pip install "agent-host-server[ws]"
+pip install "ahp-host[ws]"
 ```
 
 ```python
-from agent_host_server.ws import serve_websocket  # noqa: F401
+from ahp_host.ws import serve_websocket  # noqa: F401
 ```
 
 ## Starting a session against it (the non-obvious part)
@@ -216,7 +216,7 @@ So the host refuses `chat/truncated` unless the session implements
 `history_truncated`:
 
 ```python
-from agent_host_server.provider.base import TruncatesHistory
+from ahp_host.provider.base import TruncatesHistory
 
 
 class ForgetfulSession:
@@ -260,7 +260,7 @@ host converts that into a `chat/error` with `errorType` `agent.turn` and the
 exception's text.
 
 ```python
-from agent_host_server import AhpError
+from ahp_host import AhpError
 
 error = AhpError(-32009, "Not permitted")
 assert error.code == -32009
@@ -272,7 +272,7 @@ ProviderNotFound`, `-32003 SessionAlreadyExists`, `-32007 AuthRequired`,
 `-32011 Conflict`.
 
 ```python
-from agent_host_protocol.types import AHP_ERROR_CODES
+from ahp_protocol.types import AHP_ERROR_CODES
 
 assert AHP_ERROR_CODES["PermissionDenied"] == -32009
 assert AHP_ERROR_CODES["NotFound"] == -32008
@@ -282,7 +282,7 @@ assert AHP_ERROR_CODES["NotFound"] == -32008
 
 - [deploying.md](deploying.md) — the security posture, and what to do before
   exposing a host.
-- `src/agent_host_server/provider/echo.py` — the reference adapter. It is the
+- `src/ahp_host/provider/echo.py` — the reference adapter. It is the
   smallest complete example of every optional surface, and it is what the demo
   runs.
 - [ADR 0003](../decisions/0003-provider-emits-neutral-events.md) — why a

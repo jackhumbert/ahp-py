@@ -7,7 +7,7 @@ proves a client built independently from the same spec, by people who read it
 separately, agrees with what we PUT ON THE WIRE.
 
 Reducer agreement is deliberately NOT the evidence here -- both peers import
-`agent_host_protocol`, so the reducers are literally the same code. What is
+`ahp_protocol`, so the reducers are literally the same code. What is
 independent is every command shape, every published action, and the two
 directions of the `resource*` family.
 
@@ -19,7 +19,7 @@ driver can only do by serialising a report.
 
 Skipped unless the client is installed:
 
-    pip install -e ../agent-host-client-py
+    pip install -e ../ahp-client
 """
 
 from __future__ import annotations
@@ -32,15 +32,15 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 import pytest
-from agent_host_protocol.transport import memory_pair
+from ahp_protocol.transport import memory_pair
 
-from agent_host_server.core import Host, LoopbackSingleUserPolicy
-from agent_host_server.provider import EchoProvider
+from ahp_host.core import Host, LoopbackSingleUserPolicy
+from ahp_host.provider import EchoProvider
 
 pytestmark = [pytest.mark.interop, pytest.mark.anyio]
 
-SETUP = "needs the sibling client: pip install -e ../agent-host-client-py"
-_AVAILABLE = importlib.util.find_spec("agent_host_client") is not None
+SETUP = "needs the sibling client: pip install -e ../ahp-client"
+_AVAILABLE = importlib.util.find_spec("ahp_client") is not None
 
 if os.environ.get("AHP_INTEROP_REQUIRED") and not _AVAILABLE:
     # Same rule as the TypeScript interop suite: in CI the client IS installed,
@@ -75,7 +75,7 @@ class _Paired:
         self._ctx: Any = None
 
     async def __aenter__(self) -> Any:
-        from agent_host_client import connect
+        from ahp_client import connect
 
         client_transport, server_transport = memory_pair()
         self._serve = asyncio.create_task(self.host.serve(server_transport))
@@ -104,7 +104,7 @@ async def test_the_clients_conformance_probe_passes(host: Host) -> None:
     data, which makes it the closest thing to an external audit this project
     has -- so a regression here is a bug report someone else would have filed.
     """
-    from agent_host_client.doctor import diagnose
+    from ahp_client.doctor import diagnose
 
     client_transport, server_transport = memory_pair()
     serve = asyncio.create_task(host.serve(server_transport))
@@ -123,7 +123,7 @@ async def test_the_clients_conformance_probe_passes(host: Host) -> None:
 async def test_a_turn_streams_through_the_high_level_api(host: Host) -> None:
     """The whole point: an independently built client drives a turn end to end
     and reassembles exactly the text we sent."""
-    from agent_host_client import Delta, TurnCompleted
+    from ahp_client import Delta, TurnCompleted
 
     async with (
         _Paired(host) as client,
@@ -149,7 +149,7 @@ async def test_the_clients_mirror_matches_our_state(host: Host) -> None:
     it worth asserting. The reducers are covered by the fixture corpus; the
     wire between them is covered by nothing else.
     """
-    from agent_host_client import TurnCompleted
+    from ahp_client import TurnCompleted
 
     async with (
         _Paired(host) as client,

@@ -7,11 +7,11 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from agent_host_protocol.channels import ROOT_URI
-from agent_host_protocol.transport import Transport
+from ahp_protocol.channels import ROOT_URI
+from ahp_protocol.transport import Transport
 
-from agent_host_client.client.mirror import PendingPolicy
-from agent_host_client.hosts import (
+from ahp_client.client.mirror import PendingPolicy
+from ahp_client.hosts import (
     Backoff,
     FileClientIdStore,
     HostConfig,
@@ -24,7 +24,7 @@ from agent_host_client.hosts import (
     immediate_forever_policy,
     link,
 )
-from agent_host_client.testing import FakeHost, echo_host
+from ahp_client.testing import FakeHost, echo_host
 
 
 class _Factory:
@@ -164,8 +164,8 @@ async def test_a_permanent_refusal_raises_from_start_rather_than_hanging() -> No
     and the supervisor reaches `failed`. This is the release half: `wait=True`
     is the default and what `connect()` uses, so without it every caller hitting
     a version disagreement blocks with no exception and nothing to observe."""
-    from agent_host_client.client.errors import UnsupportedProtocolVersion
-    from agent_host_client.testing import FakeRpcError
+    from ahp_client.client.errors import UnsupportedProtocolVersion
+    from ahp_client.testing import FakeRpcError
 
     def refuse(_params: Any) -> Any:
         raise FakeRpcError({"code": -32005, "message": "no mutually supported version"})
@@ -212,7 +212,7 @@ async def test_a_refusal_the_policy_retries_keeps_waiting() -> None:
     """The other half of the same rule. A -32009 with an unlimited budget is
     still trying, so `start(wait=True)` blocking is correct -- releasing on
     every failed *attempt* would turn a reconnect into an error."""
-    from agent_host_client.testing import FakeRpcError
+    from ahp_client.testing import FakeRpcError
 
     def refuse(_params: Any) -> Any:
         raise FakeRpcError({"code": -32009, "message": "not permitted"})
@@ -339,7 +339,7 @@ async def test_reconnect_is_attempted_only_once_state_exists_to_resume() -> None
 async def test_a_refused_reconnect_falls_back_to_initialize() -> None:
     """An RPC-level refusal means the host cannot resume us. A transport error
     is a different thing and must reach the retry loop instead."""
-    from agent_host_client.testing import FakeRpcError
+    from ahp_client.testing import FakeRpcError
 
     factory = _Factory()
     runtime = HostRuntime(
@@ -410,7 +410,7 @@ async def test_link_detaches_its_waiters() -> None:
 
 
 async def test_race_awaits_the_loser_so_asyncio_never_reports_an_orphan() -> None:
-    from agent_host_client.hosts.runtime import race
+    from ahp_client.hosts.runtime import race
 
     signal = ShutdownSignal("s")
     async with link(signal) as waiters:
@@ -555,8 +555,8 @@ async def test_a_refused_subscribe_leaves_nothing_behind_in_either_half() -> Non
     did not, so a -32009 left a bound, snapshot-less channel in the mirror and a
     subscription re-requested on every reconnect, where it can only be declined
     again."""
-    from agent_host_client.client.errors import RpcError
-    from agent_host_client.testing import FakeRpcError
+    from ahp_client.client.errors import RpcError
+    from ahp_client.testing import FakeRpcError
 
     chat = "ahp-chat://c/refused"
     factory = _Factory()

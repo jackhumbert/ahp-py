@@ -1,14 +1,14 @@
-# agent-host-server-acp
+# ahp-host-acp
 
 Any [Agent Client Protocol](https://agentclientprotocol.com/) (ACP) agent as an
-[Agent Host Protocol](https://github.com/jackhumbert/agent-host-protocol-py)
-(AHP) provider for [`agent-host-server`](https://github.com/jackhumbert/agent-host-server-py).
+[Agent Host Protocol](https://github.com/jackhumbert/ahp-py/tree/main/packages/ahp-protocol)
+(AHP) provider for [`ahp-host`](https://github.com/jackhumbert/ahp-py/tree/main/packages/ahp-host).
 
 ACP is what editors such as Zed use to drive coding agents: the agent runs as
 a subprocess and speaks JSON-RPC over stdio. This adapter is the editor's half.
 Each AHP session starts the configured agent command (`openclaw acp`, or any
 other ACP agent), and any AHP client (VS Code's Agent Sessions view, the Python
-client, a broker in front of several hosts) can then start and follow sessions
+client, a gateway in front of several hosts) can then start and follow sessions
 with it.
 
 Status: pre-alpha. Tested against opencode (`opencode acp`) and OpenClaw's ACP
@@ -42,7 +42,7 @@ methods are deliberately not offered.
 
 ```bash
 pip install -e .
-python -m agent_host_server_acp --config ~/.config/agent-host/openclaw.toml
+python -m ahp_host_acp --config ~/.config/ahp/openclaw.toml
 ```
 
 ### opencode
@@ -52,7 +52,7 @@ opencode keeps its own settings; point it at a file of its own for these
 sessions with `OPENCODE_CONFIG`:
 
 ```jsonc
-// ~/.config/agent-host/opencode.json
+// ~/.config/ahp/opencode.json
 {
   "$schema": "https://opencode.ai/config.json",
   "provider": {
@@ -71,17 +71,17 @@ sessions with `OPENCODE_CONFIG`:
 ```
 
 ```toml
-# ~/.config/agent-host/opencode.toml
+# ~/.config/ahp/opencode.toml
 agent_name = "opencode (GLM 5.3 Flash)"
 provider_id = "opencode"
 port = 4323
-token_file = "~/.config/agent-host/opencode.token"
-state_dir = "~/.local/state/agent-host-server-acp/opencode"
+token_file = "~/.config/ahp/opencode.token"
+state_dir = "~/.local/state/ahp-host-acp/opencode"
 
 command = ["opencode", "acp"]
 
 [env]
-OPENCODE_CONFIG = 'C:\Users\me\.config\agent-host\opencode.json'
+OPENCODE_CONFIG = 'C:\Users\me\.config\ahp\opencode.json'
 
 [[models]]
 id = "ollama/glm-5.3-flash:cloud"
@@ -104,8 +104,8 @@ OpenClaw on the same model, through the local signed-in Ollama:
 agent_name = "OpenClaw (GLM 5.3 Flash)"
 provider_id = "openclaw"
 port = 4322
-token_file = "~/.config/agent-host/openclaw.token"
-state_dir = "~/.local/state/agent-host-server-acp/openclaw"
+token_file = "~/.config/ahp/openclaw.token"
+state_dir = "~/.local/state/ahp-host-acp/openclaw"
 
 command = ["openclaw", "acp"]
 model_command = "/model {model} -s"
@@ -145,9 +145,9 @@ ollama.com with `OLLAMA_API_KEY`.
 | `root` / `--root PATH` | One unnamed folder, served as itself. |
 | `token_file` / `--token-file` | Require this connection token. Read from a file so it never appears in `ps` or logs. |
 | `port`, `bind` / `--port`, `--bind` | Default `127.0.0.1:4322` (4321 is the Claude host's). Loopback only. |
-| `state_dir` / `--state-dir` | Persisted sessions and sequence counter. Default `~/.local/state/agent-host-server-acp`. Give each host its own. |
+| `state_dir` / `--state-dir` | Persisted sessions and sequence counter. Default `~/.local/state/ahp-host-acp`. Give each host its own. |
 | `agent_name`, `description` / `--agent-name` | What clients call the agent. |
-| `provider_id` / `--provider-id` | The agent's id (default `acp`). Hosts behind one broker with the same id are merged into one agent. |
+| `provider_id` / `--provider-id` | The agent's id (default `acp`). Hosts behind one gateway with the same id are merged into one agent. |
 
 Unknown settings are an error, so a typo cannot silently fall back to a
 default.
@@ -171,7 +171,7 @@ this off loopback without a proxy that authenticates peers.
 
 ```bash
 python -m venv .venv
-.venv/bin/pip install -e ../agent-host-protocol-py -e "../agent-host-server-py[ws]" -e .
+.venv/bin/pip install -e ../ahp-protocol -e "../ahp-host[ws]" -e .
 .venv/bin/pip install --group dev
 .venv/bin/pytest && .venv/bin/mypy && .venv/bin/ruff check . && .venv/bin/ruff format --check .
 ```

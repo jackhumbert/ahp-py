@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from agent_host_server.provider.base import (
+from ahp_host.provider.base import (
     AgentProvider,
     AgentSessionContext,
     ModelSelection,
@@ -28,9 +28,9 @@ from claude_agent_sdk import (
 from claude_agent_sdk import UserMessage as SdkUserMessage
 from claude_agent_sdk.types import StreamEvent
 
-from agent_host_server_claude.paths import directory_of
-from agent_host_server_claude.permissions import needs_approval, pre_tool_use_decision
-from agent_host_server_claude.provider import ClaudeProvider, ClaudeSession
+from ahp_host_claude.paths import directory_of
+from ahp_host_claude.permissions import needs_approval, pre_tool_use_decision
+from ahp_host_claude.provider import ClaudeProvider, ClaudeSession
 from tests.fakes import FakeClient, RecordingSink, Step, text_of
 
 

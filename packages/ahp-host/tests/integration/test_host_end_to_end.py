@@ -12,13 +12,13 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from agent_host_protocol.channels import ROOT_URI
-from agent_host_protocol.transport import memory_pair
-from agent_host_protocol.types import AHP_ERROR_CODES
+from ahp_protocol.channels import ROOT_URI
+from ahp_protocol.transport import memory_pair
+from ahp_protocol.types import AHP_ERROR_CODES
 
-from agent_host_server.core import Host, LoopbackSingleUserPolicy
-from agent_host_server.core.resources import RootedFilesystemResourceProvider
-from agent_host_server.provider import EchoProvider
+from ahp_host.core import Host, LoopbackSingleUserPolicy
+from ahp_host.core.resources import RootedFilesystemResourceProvider
+from ahp_host.provider import EchoProvider
 
 pytestmark = pytest.mark.anyio
 

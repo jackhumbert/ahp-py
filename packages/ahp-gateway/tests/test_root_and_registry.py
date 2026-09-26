@@ -1,11 +1,11 @@
 """The merged root channel, and admission in the registry."""
 
 import pytest
-from agent_host_protocol import REDUCERS
+from ahp_protocol import REDUCERS
 
-from agent_host_broker.core.broker import Broker, jittered
-from agent_host_broker.core.root import merge_root, node_details, root_actions
-from agent_host_broker.registry import NodeRecord, Principal, StaticInventory, is_valid_node_id
+from ahp_gateway.core.gateway import Gateway, jittered
+from ahp_gateway.core.root import merge_root, node_details, root_actions
+from ahp_gateway.registry import NodeRecord, Principal, StaticInventory, is_valid_node_id
 
 
 def test_agents_merge_with_the_first_node_winning_a_shared_provider() -> None:
@@ -66,7 +66,7 @@ def test_redial_delay_is_spread_by_the_jitter() -> None:
 @pytest.mark.parametrize("jitter", [-0.1, 1.0, 1.5])
 def test_a_jitter_outside_zero_to_one_is_refused(jitter: float) -> None:
     with pytest.raises(ValueError, match="redial_jitter"):
-        Broker(StaticInventory([]), None, lambda info: None, redial_jitter=jitter)  # type: ignore[arg-type]
+        Gateway(StaticInventory([]), None, lambda info: None, redial_jitter=jitter)  # type: ignore[arg-type]
 
 
 def test_root_actions_reduce_the_surface_to_the_merged_state() -> None:

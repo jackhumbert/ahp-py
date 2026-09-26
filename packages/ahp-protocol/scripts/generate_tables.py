@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate src/agent_host_protocol/types/_generated.py from the vendored upstream
+"""Generate src/ahp_protocol/types/_generated.py from the vendored upstream
 TypeScript source of truth.
 
 Upstream generates every client -- Go, Rust, Kotlin, Swift -- and its own JSON
@@ -23,7 +23,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 VENDOR = ROOT / "vendor" / "upstream" / "ts"
-OUT = ROOT / "src" / "agent_host_protocol" / "types" / "_generated.py"
+OUT = ROOT / "src" / "ahp_protocol" / "types" / "_generated.py"
 
 
 def read(name: str) -> str:
@@ -154,7 +154,7 @@ from __future__ import annotations
 from typing import Final
 
 #: The protocol version upstream's own source tree declares at the pinned tag.
-#: This is NOT what we speak -- see agent_host_protocol.types.versions.
+#: This is NOT what we speak -- see ahp_protocol.types.versions.
 UPSTREAM_PROTOCOL_VERSION: Final = {current!r}
 
 #: Every version the upstream client at the pinned tag will negotiate.

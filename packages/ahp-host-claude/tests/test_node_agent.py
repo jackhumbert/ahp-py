@@ -1,4 +1,4 @@
-"""`type = "claude"` in an agent-host-node config."""
+"""`type = "claude"` in an ahp-node config."""
 
 from __future__ import annotations
 
@@ -6,14 +6,14 @@ from importlib.metadata import entry_points
 from pathlib import Path
 
 import pytest
-from agent_host_server.node import NodeContext, Roots
+from ahp_host.node import NodeContext, Roots
 
-from agent_host_server_claude.agent import create
+from ahp_host_claude.agent import create
 
 
 def test_the_package_registers_the_claude_agent_type() -> None:
-    names = {entry.name: entry.value for entry in entry_points(group="agent_host_server.agents")}
-    assert names.get("claude") == "agent_host_server_claude.agent:create"
+    names = {entry.name: entry.value for entry in entry_points(group="ahp_host.agents")}
+    assert names.get("claude") == "ahp_host_claude.agent:create"
 
 
 async def test_an_unknown_option_is_refused_before_claude_starts(tmp_path: Path) -> None:

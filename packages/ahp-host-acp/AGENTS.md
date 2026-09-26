@@ -1,6 +1,6 @@
 # Agent guide
 
-An `agent-host-server` provider adapter, living in its own distribution as the
+An `ahp-host` provider adapter, living in its own distribution as the
 server's AGENTS.md requires ("Adding a provider adapter"). It is the ACP
 *client*: it spawns an ACP agent per session and speaks JSON-RPC over stdio.
 
@@ -11,9 +11,9 @@ server's AGENTS.md requires ("Adding a provider adapter"). It is the ACP
   and the wire.
 - `_request_permission` is the approval policy (grant once, never always).
   Changing it is a security decision: say so in the commit, and test it.
-- `roots.py` and `paths.py` re-export `agent_host_server.node`'s; fix bugs
+- `roots.py` and `paths.py` re-export `ahp_host.node`'s; fix bugs
   there.
-- `agent.py` is the `acp` agent type for `agent-host-node`; keep its options
+- `agent.py` is the `acp` agent type for `ahp-node`; keep its options
   in step with `config.py`'s per-agent keys.
 - Tests run `tests/fake_agent.py` as a real subprocess; no network, no real
   agent.

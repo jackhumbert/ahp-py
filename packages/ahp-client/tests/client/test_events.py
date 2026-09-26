@@ -14,9 +14,9 @@ either direction.
 from __future__ import annotations
 
 import pytest
-from agent_host_protocol import ACTION_TYPES
+from ahp_protocol import ACTION_TYPES
 
-from agent_host_client import (
+from ahp_client import (
     InputRequested,
     Reasoning,
     ToolCallCompleted,
@@ -29,7 +29,7 @@ from agent_host_client import (
     TurnFailed,
     event_for,
 )
-from agent_host_client.api.events import _BY_TYPE, _NOT_MODELLED, is_modelled
+from ahp_client.api.events import _BY_TYPE, _NOT_MODELLED, is_modelled
 
 CHAT = "ahp-chat:/c"
 

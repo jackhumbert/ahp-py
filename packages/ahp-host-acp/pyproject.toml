@@ -3,13 +3,13 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "agent-host-server-acp"
+name = "ahp-host-acp"
 dynamic = ["version"]
-description = "Any Agent Client Protocol (ACP) agent as a provider for agent-host-server."
+description = "Any Agent Client Protocol (ACP) agent as a provider for ahp-host."
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.11"
-authors = [{ name = "agent-host-server-acp contributors" }]
+authors = [{ name = "ahp-host-acp contributors" }]
 keywords = ["ahp", "agent-host-protocol", "acp", "agent-client-protocol", "agent"]
 classifiers = [
   "Development Status :: 2 - Pre-Alpha",
@@ -22,14 +22,14 @@ classifiers = [
 # ACP is newline-delimited JSON-RPC over the agent's stdio, small enough to
 # speak directly; no ACP SDK, so the only pin is the host's protocol version.
 dependencies = [
-  "agent-host-server[ws]~=0.1.0",
+  "ahp-host[ws]~=0.1.0",
 ]
 
 [project.scripts]
-agent-host-server-acp = "agent_host_server_acp.__main__:main"
+ahp-host-acp = "ahp_host_acp.__main__:main"
 
-[project.entry-points."agent_host_server.agents"]
-acp = "agent_host_server_acp.agent:create"
+[project.entry-points."ahp_host.agents"]
+acp = "ahp_host_acp.agent:create"
 
 [dependency-groups]
 dev = [
@@ -40,10 +40,10 @@ dev = [
 ]
 
 [tool.hatch.version]
-path = "src/agent_host_server_acp/__init__.py"
+path = "src/ahp_host_acp/__init__.py"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/agent_host_server_acp"]
+packages = ["src/ahp_host_acp"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

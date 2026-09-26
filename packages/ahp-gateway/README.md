@@ -1,29 +1,29 @@
-# agent-host-broker
+# ahp-gateway
 
-A federated broker for the [Agent Host Protocol](https://github.com/jackhumbert/agent-host-protocol-py)
+A federated gateway for the [Agent Host Protocol](https://github.com/jackhumbert/ahp-py/tree/main/packages/ahp-protocol)
 (AHP): one endpoint and one login behind which a developer sees a single flat
 "my sessions everywhere" view across every box that runs an agent for them.
 
 It is an AHP **host** facing the surfaces (web, Windows, CLI) and an AHP
 **client** facing each node. Nodes implement the AHP server only; surfaces
-implement the AHP client only; the broker implements both, and is the only
+implement the AHP client only; the gateway implements both, and is the only
 component that does. The data plane is AHP, unmodified - a stock AHP client
 still works against a bare node with no fleet in sight.
 
 It is the newest member of the family:
 
 ```
-                agent-host-protocol              ← the shared layer
+                ahp-protocol              ← the shared layer
                   ▲        ▲         ▲
                   │        │         │
-        agent-host-server │ agent-host-client
-                  ▲       │       ▲        ← the broker is BOTH
+        ahp-host │ ahp-client
+                  ▲       │       ▲        ← the gateway is BOTH
                   └───────┴───────┘
-                    agent-host-broker       ← this repo
+                    ahp-gateway       ← this repo
 ```
 
 Status: pre-alpha. The multiplexer (build-order unit 1) works end to end:
-stock clients through the broker to stock hosts, in-process and over
+stock clients through the gateway to stock hosts, in-process and over
 WebSocket. [`docs/plan.md`](docs/plan.md) is the design; §9 records what is
 built and what is not.
 
@@ -33,10 +33,10 @@ The family is distributed from GitHub, not from an index. The protocol package
 is the floor and installs first:
 
 ```bash
-pip install "agent-host-protocol @ git+https://github.com/jackhumbert/agent-host-protocol-py"
-pip install "agent-host-server @ git+https://github.com/jackhumbert/agent-host-server-py"
-pip install "agent-host-client @ git+https://github.com/jackhumbert/agent-host-client-py"
-pip install "agent-host-broker @ git+https://github.com/jackhumbert/agent-host-broker-py"
+pip install "ahp-protocol @ git+https://github.com/jackhumbert/ahp-py#subdirectory=packages/ahp-protocol"
+pip install "ahp-host @ git+https://github.com/jackhumbert/ahp-py#subdirectory=packages/ahp-host"
+pip install "ahp-client @ git+https://github.com/jackhumbert/ahp-py#subdirectory=packages/ahp-client"
+pip install "ahp-gateway @ git+https://github.com/jackhumbert/ahp-py#subdirectory=packages/ahp-gateway"
 ```
 
 ## Development

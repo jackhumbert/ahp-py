@@ -13,12 +13,12 @@ from pathlib import Path
 
 import pytest
 
-from agent_host_protocol import (
+from ahp_protocol import (
     DEFAULT_SUPPORTED_VERSIONS,
     REDUCERS,
     UPSTREAM_PROTOCOL_VERSION,
 )
-from agent_host_protocol.conformance.corpus import reducer_fixtures, round_trip_fixtures
+from ahp_protocol.conformance.corpus import reducer_fixtures, round_trip_fixtures
 
 ROOT = Path(__file__).resolve().parents[2]
 README = (ROOT / "README.md").read_text(encoding="utf-8")
@@ -72,7 +72,7 @@ def test_readme_does_not_advertise_a_uri_reducer_lookup() -> None:
     If it ever comes back, the README section explaining why it must not exist
     is the thing most likely to be left behind.
     """
-    import agent_host_protocol.channels as channels
+    import ahp_protocol.channels as channels
 
     assert not hasattr(channels, "reducer_name_for")
     assert "reducer_name_for" in README, "the README should still explain the absence"

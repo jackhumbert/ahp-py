@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import pytest
 
-from agent_host_protocol.reducers.clock import add_milliseconds_to_timestamp
+from ahp_protocol.reducers.clock import add_milliseconds_to_timestamp
 
 CASES = [
     ("2024-02-29T23:59:59.750-05:00", 500, "2024-03-01T05:00:00.250Z"),

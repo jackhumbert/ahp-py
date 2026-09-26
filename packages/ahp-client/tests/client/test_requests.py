@@ -13,16 +13,16 @@ from typing import Any
 
 import pytest
 
-from agent_host_client import ChatWatch, TurnInProgress, event_for
-from agent_host_client.api import Delta, TurnCompleted, TurnFailed, TurnStarted, connect
-from agent_host_client.client.errors import RpcError, TransportError
-from agent_host_client.hosts.policy import (
+from ahp_client import ChatWatch, TurnInProgress, event_for
+from ahp_client.api import Delta, TurnCompleted, TurnFailed, TurnStarted, connect
+from ahp_client.client.errors import RpcError, TransportError
+from ahp_client.hosts.policy import (
     ReconnectPolicy,
     default_should_retry,
     exponential_policy,
     retry_everything,
 )
-from agent_host_client.testing import FakeHost, echo_host
+from ahp_client.testing import FakeHost, echo_host
 
 CHAT = "ahp-chat://c/s"
 
@@ -60,7 +60,7 @@ async def test_watch_sees_a_turn_started_by_someone_else() -> None:
         # No `defaultChat` on an opened session's snapshot here, so watch the
         # chat directly -- which is the shape a second client is in anyway.
         await client._runtime.subscribe(CHAT, "chat")
-        from agent_host_client.api.client import Chat
+        from ahp_client.api.client import Chat
 
         watch = Chat(client, session, CHAT).watch()
 
@@ -486,7 +486,7 @@ async def test_a_rejected_connection_reaches_failed_without_burning_attempts() -
         attempts += 1
         raise TransportError("rejected", "refused with HTTP 401", status=401)
 
-    from agent_host_client.hosts import HostConfig, HostRuntime
+    from ahp_client.hosts import HostConfig, HostRuntime
 
     runtime = HostRuntime(
         HostConfig(refusing_factory, label="h", reconnect_policy=ReconnectPolicy())
@@ -511,8 +511,8 @@ async def test_a_transient_failure_still_retries() -> None:
         attempts += 1
         raise TransportError("io", "connection reset")
 
-    from agent_host_client.hosts import HostConfig, HostRuntime
-    from agent_host_client.hosts.policy import Backoff
+    from ahp_client.hosts import HostConfig, HostRuntime
+    from ahp_client.hosts.policy import Backoff
 
     runtime = HostRuntime(
         HostConfig(
@@ -541,7 +541,7 @@ def test_connect_accepts_an_ssl_context() -> None:
     this library taking a position on certificate trust."""
     import inspect
 
-    from agent_host_client.ws.transport import WebSocketClientTransport
+    from ahp_client.ws.transport import WebSocketClientTransport
 
     signature = inspect.signature(WebSocketClientTransport.connect)
     assert "ssl" in signature.parameters

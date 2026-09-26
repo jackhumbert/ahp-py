@@ -6,10 +6,10 @@ single pinned upstream revision. **The spec moves weekly and lands breaking
 changes in MINOR bumps, so an unpinned implementation is unmaintainable.**
 
 This repository owns the pin for the whole Python AHP ecosystem. A peer that
-depends on `agent-host-protocol` does not vendor anything, does not run
+depends on `ahp-protocol` does not vendor anything, does not run
 `vendor_upstream.sh`, and does not maintain its own copy of this document — it
 pins a version of this distribution and asserts
-`agent_host_protocol.UPSTREAM_PROTOCOL_VERSION` in its own `tests/docs/`
+`ahp_protocol.UPSTREAM_PROTOCOL_VERSION` in its own `tests/docs/`
 suite, so a dependency bump that moves the spec under it fails loudly.
 
 ## Current pin
@@ -65,7 +65,7 @@ the same tag this pin vendors.
 ## What is vendored, and from where
 
 Written by `scripts/vendor_upstream.sh` into `vendor/upstream/`, committed, and
-mapped into the wheel at `agent_host_protocol/conformance/_upstream/` by hatch's
+mapped into the wheel at `ahp_protocol/conformance/_upstream/` by hatch's
 `force-include`. There is exactly one copy under version control.
 
 | Vendored | Source | Why not fetched at runtime |
@@ -105,7 +105,7 @@ suite must pass offline.
 9. Record the bump in `CHANGELOG.md` under a `Changed` entry naming both the old
    and new spec version, and bump this distribution's MINOR.
 
-Because both peers pin `agent-host-protocol ~= 0.1.0`, a MINOR bump here is a
+Because both peers pin `ahp-protocol ~= 0.1.0`, a MINOR bump here is a
 deliberate, visible upgrade on each of them rather than something that arrives
 silently.
 

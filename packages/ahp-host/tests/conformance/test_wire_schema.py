@@ -19,15 +19,15 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from agent_host_protocol.channels import AUTOMATIONS_URI, ROOT_URI
-from agent_host_protocol.transport import memory_pair
+from ahp_protocol.channels import AUTOMATIONS_URI, ROOT_URI
+from ahp_protocol.transport import memory_pair
 
-from agent_host_server.core import Host, LoopbackSingleUserPolicy
-from agent_host_server.core.automations import InMemoryAutomationStore
-from agent_host_server.core.pty_backend import PtyTerminalBackend
-from agent_host_server.core.resources import RootedFilesystemResourceProvider
-from agent_host_server.core.watches import PollingResourceWatcher
-from agent_host_server.provider import EchoProvider
+from ahp_host.core import Host, LoopbackSingleUserPolicy
+from ahp_host.core.automations import InMemoryAutomationStore
+from ahp_host.core.pty_backend import PtyTerminalBackend
+from ahp_host.core.resources import RootedFilesystemResourceProvider
+from ahp_host.core.watches import PollingResourceWatcher
+from ahp_host.provider import EchoProvider
 
 from .schemas import assert_valid_action, assert_valid_result, assert_valid_state
 

@@ -18,12 +18,12 @@ import asyncio
 from typing import Any
 
 import pytest
-from agent_host_protocol.channels import ROOT_URI
-from agent_host_protocol.transport import memory_pair
+from ahp_protocol.channels import ROOT_URI
+from ahp_protocol.transport import memory_pair
 
-from agent_host_server.core import Host
-from agent_host_server.core.policies import OwnedSessionPolicy
-from agent_host_server.provider import EchoProvider
+from ahp_host.core import Host
+from ahp_host.core.policies import OwnedSessionPolicy
+from ahp_host.provider import EchoProvider
 
 from .test_host_end_to_end import FakeClient
 
@@ -160,7 +160,7 @@ class TestOwnershipSurvivesARestart:
     """
 
     async def test_a_restored_session_still_belongs_to_its_owner(self, tmp_path: Any) -> None:
-        from agent_host_server.core.store import FileSessionStore
+        from ahp_host.core.store import FileSessionStore
 
         store_dir = tmp_path / "sessions"
 
@@ -206,7 +206,7 @@ class TestOwnershipSurvivesARestart:
         """A ghost in everyone's session list is worse than an absence."""
         import json
 
-        from agent_host_server.core.store import FileSessionStore
+        from ahp_host.core.store import FileSessionStore
 
         store_dir = tmp_path / "sessions"
         store_dir.mkdir(parents=True)

@@ -18,6 +18,8 @@ one for every package you touch.
 - Each package keeps its own `pyproject.toml`, `CHANGELOG.md` and version.
 - Tags are namespaced by package: `ahp-host/v0.1.0`, not `v0.1.0`.
 - Conventional commits, scoped by package where it helps: `fix(ahp-host): …`.
+- `scripts/check.sh [package…]` is the CI gate; run it for every package a
+  change touches (all of them, for anything in `ahp-protocol`).
 
 ## Keep it generic
 

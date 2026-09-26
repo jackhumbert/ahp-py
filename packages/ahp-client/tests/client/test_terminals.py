@@ -16,11 +16,11 @@ import json
 from typing import Any
 
 import pytest
-from agent_host_protocol.conformance.corpus import CORPUS_ROOT
-from agent_host_protocol.types import ACTION_TYPES
+from ahp_protocol.conformance.corpus import CORPUS_ROOT
+from ahp_protocol.types import ACTION_TYPES
 
-from agent_host_client.api import connect
-from agent_host_client.api.terminals import (
+from ahp_client.api import connect
+from ahp_client.api.terminals import (
     _BY_TYPE,
     _NOT_MODELLED,
     ClientClaim,
@@ -36,9 +36,9 @@ from agent_host_client.api.terminals import (
     split_terminal_command,
     terminal_uris,
 )
-from agent_host_client.client.errors import AhpClientError, InvalidArgument, RequestTimeout
-from agent_host_client.testing import FakeHost
-from agent_host_client.testing.fake_host import FakeRpcError
+from ahp_client.client.errors import AhpClientError, InvalidArgument, RequestTimeout
+from ahp_client.testing import FakeHost
+from ahp_client.testing.fake_host import FakeRpcError
 
 from ._sibling import requires_sibling_pty
 
@@ -607,7 +607,7 @@ def test_a_rejected_envelope_never_decodes_as_the_action_it_names() -> None:
     """Decoded by type first, a refused `terminal/claimed` becomes a
     `TerminalClaimed` -- telling the caller the terminal changed hands when the
     host's own state says it did not."""
-    from agent_host_client.api.terminals import terminal_event_for
+    from ahp_client.api.terminals import terminal_event_for
 
     envelope = {
         "channel": TERMINAL,
@@ -632,10 +632,10 @@ async def test_a_real_terminal_against_the_sibling_host() -> None:
     leaked pty outlives the test process, reparents to init, and keeps a shell
     running that nothing can name.
     """
-    from agent_host_protocol.transport import memory_pair
-    from agent_host_server.core import Host, LoopbackSingleUserPolicy
-    from agent_host_server.core.pty_backend import PtyTerminalBackend
-    from agent_host_server.provider import EchoProvider
+    from ahp_host.core import Host, LoopbackSingleUserPolicy
+    from ahp_host.core.pty_backend import PtyTerminalBackend
+    from ahp_host.provider import EchoProvider
+    from ahp_protocol.transport import memory_pair
 
     host = Host(
         EchoProvider(),
@@ -710,12 +710,12 @@ async def test_the_bang_shorthand_runs_on_the_host_and_not_on_the_agent() -> Non
     reports it back as a tool call named `terminal`, which is why the client
     needs no second code path for a `!` turn -- only a way to know in advance.
     """
-    from agent_host_protocol.transport import memory_pair
-    from agent_host_server.core import Host, LoopbackSingleUserPolicy
-    from agent_host_server.core.pty_backend import PtyTerminalBackend
-    from agent_host_server.provider import EchoProvider
+    from ahp_host.core import Host, LoopbackSingleUserPolicy
+    from ahp_host.core.pty_backend import PtyTerminalBackend
+    from ahp_host.provider import EchoProvider
+    from ahp_protocol.transport import memory_pair
 
-    from agent_host_client.api.events import ToolCallStarted
+    from ahp_client.api.events import ToolCallStarted
 
     host = Host(
         EchoProvider(),
@@ -1057,7 +1057,7 @@ def test_the_whole_terminal_event_family_is_importable_from_the_top_level() -> N
     """A caller writing `case TerminalResized()` must not need a different
     import path than the siblings the README example uses -- the terminal
     event family is one union, exported as one."""
-    import agent_host_client as pkg
+    import ahp_client as pkg
 
     for name in (
         "TerminalClaimed",

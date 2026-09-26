@@ -17,10 +17,10 @@ import sys
 from pathlib import Path
 
 import pytest
-from agent_host_protocol.errors import AhpError
+from ahp_protocol.errors import AhpError
 
-from agent_host_server.core.resources import RootedFilesystemResourceProvider
-from agent_host_server.core.resources_windows import (
+from ahp_host.core.resources import RootedFilesystemResourceProvider
+from ahp_host.core.resources_windows import (
     IO_REPARSE_TAG_MOUNT_POINT,
     IO_REPARSE_TAG_SYMLINK,
     WindowsRootedFilesystemResourceProvider,
@@ -318,7 +318,7 @@ class TestConstruction:
 
 
 def test_windows_serves_is_drive_aware_and_case_insensitive() -> None:
-    from agent_host_server.core.resources_windows import windows_serves
+    from ahp_host.core.resources_windows import windows_serves
 
     root = ("D:", ["work"])
     assert windows_serves("file:///D:/work", *root)
@@ -333,7 +333,7 @@ def test_windows_serves_is_drive_aware_and_case_insensitive() -> None:
 
 
 def test_posix_serves_matches_the_hosts_old_rule(tmp_path: Path) -> None:
-    from agent_host_server.core.resources import RootedFilesystemResourceProvider
+    from ahp_host.core.resources import RootedFilesystemResourceProvider
 
     if sys.platform == "win32":
         pytest.skip("POSIX provider")

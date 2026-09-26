@@ -31,9 +31,9 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from agent_host_protocol.errors import AhpError
+from ahp_protocol.errors import AhpError
 
-from agent_host_server.core.resources import RootedFilesystemResourceProvider
+from ahp_host.core.resources import RootedFilesystemResourceProvider
 
 pytestmark = [
     pytest.mark.anyio,
@@ -106,7 +106,7 @@ def jail(base: Path) -> Jail:
 
 class TestConstruction:
     def test_the_windows_implementation_is_selected(self, jail: Jail) -> None:
-        from agent_host_server.core.resources_windows import (
+        from ahp_host.core.resources_windows import (
             WindowsRootedFilesystemResourceProvider,
         )
 

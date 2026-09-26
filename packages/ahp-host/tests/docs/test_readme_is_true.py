@@ -22,7 +22,7 @@ def _cli_flags() -> set[str]:
     import sys
 
     printed = subprocess.run(
-        [sys.executable, "-m", "agent_host_server", "--help"],
+        [sys.executable, "-m", "ahp_host", "--help"],
         capture_output=True,
         text=True,
         cwd=ROOT,
@@ -77,10 +77,10 @@ def test_every_flag_we_own_is_documented() -> None:
 
 
 def test_the_public_import_works() -> None:
-    """`from agent_host_server import Host` raised ImportError against an
+    """`from ahp_host import Host` raised ImportError against an
     installed wheel until this was noticed -- it is the first line anyone
     writes."""
-    from agent_host_server import AgentProvider, Host, Policy
+    from ahp_host import AgentProvider, Host, Policy
 
     assert Host is not None
     assert AgentProvider is not None
@@ -94,7 +94,7 @@ def test_upstream_pin_matches_what_we_negotiate() -> None:
     A pin document that drifts is worse than none: it is the file someone reads
     to find out what this implementation actually speaks.
     """
-    from agent_host_protocol.versions import DEFAULT_SUPPORTED_VERSIONS
+    from ahp_protocol.versions import DEFAULT_SUPPORTED_VERSIONS
 
     upstream = (ROOT / "UPSTREAM.md").read_text()
     preferred = DEFAULT_SUPPORTED_VERSIONS[0]
@@ -115,7 +115,7 @@ def _answered_commands() -> set[str]:
     the flag check is derived from `--help`: a hand-kept list never contains
     the thing someone just added, which is the only case that matters.
     """
-    source = (ROOT / "src" / "agent_host_server" / "core" / "host.py").read_text()
+    source = (ROOT / "src" / "ahp_host" / "core" / "host.py").read_text()
     found = set(re.findall(r'if method == "([a-zA-Z]+)"', source))
     # The two frozensets span lines, so match across them. An earlier version
     # of this parse missed `resourceRead` and `resourceCopy` and then blamed
@@ -166,9 +166,9 @@ def test_the_typed_marker_ships() -> None:
     py.typed marker" and typed every export as `Any`. Verified against a real
     installed wheel, not the source tree -- from a checkout it works either
     way, which is why nobody noticed."""
-    import agent_host_server
+    import ahp_host
 
-    package = Path(agent_host_server.__file__).parent
+    package = Path(ahp_host.__file__).parent
     assert (package / "py.typed").is_file()
 
     classifiers = (ROOT / "pyproject.toml").read_text()
@@ -224,26 +224,26 @@ def test_the_readme_does_not_call_an_action_absent_that_the_host_publishes() -> 
 
 def test_the_install_block_supplies_every_sibling_dependency() -> None:
     """`pip install -e '.[ws]'` was the README's only install line, and it
-    failed: `agent-host-protocol` is not on PyPI — by design, now — so pip
+    failed: `ahp-protocol` is not on PyPI — by design, now — so pip
     resolved it from an index that has never heard of it and stopped.
 
     Derived from `pyproject.toml` rather than from a list here, so a second
     sibling dependency cannot be added without the README learning about it.
-    The repository name is what both supported forms contain — the
-    `git+https://…/<name>-py` install and the `-e ../<name>-py` checkout — so
-    the assertion covers either.
+    The package directory is what both supported forms contain — the
+    `git+https://…#subdirectory=packages/<name>` install and the
+    `-e ../<name>` checkout — so the assertion covers either.
     """
     pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
     block = re.search(r"^dependencies\s*=\s*\[(.*?)\]", pyproject, re.S | re.M)
     assert block is not None, "pyproject declares no dependencies; this test has drifted"
 
-    siblings = re.findall(r"[\"'](agent-host-[a-z-]+)", block.group(1))
+    siblings = re.findall(r"[\"'](ahp-[a-z-]+)", block.group(1))
     assert siblings, "no sibling dependency found; if that is real, delete this test"
 
     start = README.index("## Try it")
     try_it = README[start : README.index("\n## ", start)]
     for name in siblings:
-        repository = name + "-py"
+        repository = "packages/" + name
         assert repository in try_it, (
             f"{name} is a dependency and no index carries it, so the install block "
             f"has to supply it from its repository ({repository}) before the line "

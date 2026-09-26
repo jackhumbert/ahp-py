@@ -62,8 +62,8 @@ Upstream splits types / core / transport (`ahp-types`, `ahp`, `ahp-ws` in Rust;
 one distribution for v0.1.**
 
 ```
-agent-host-server-py/             repo
-  src/agent_host_server/
+ahp-host/             repo
+  src/ahp_host/
     types/       wire types, actions, state, errors      (no I/O)
     reducers/    the seven pure reducers + clock         (no I/O)
     conformance/ fixture runners over the vendored corpora
@@ -88,10 +88,10 @@ search collision.
 
 | Thing | Name | Note |
 |---|---|---|
-| PyPI distribution | **`agent-host-server`** | available |
-| import package | **`agent_host_server`** | |
-| GitHub repo | **`agent-host-server-py`** | the `-py` suffix disambiguates from the TypeScript/Go/Rust ecosystem |
-| first adapter | `agent-host-server-acp` | separate distribution |
+| PyPI distribution | **`ahp-host`** | available |
+| import package | **`ahp_host`** | |
+| GitHub repo | **`ahp-host`** | the `-py` suffix disambiguates from the TypeScript/Go/Rust ecosystem |
+| first adapter | `ahp-host-acp` | separate distribution |
 
 The repo name does **not** need to match the distribution name — plenty of
 projects differ, and PyPI has no opinion about it. The `-py` suffix is worth
@@ -99,9 +99,9 @@ having on the repo (where it sits next to same-named projects in other
 languages) and worth omitting from the distribution (where the index is already
 Python-only and the suffix is noise).
 
-`agent-host-protocol` is also available and is the tidier name, but it describes
+`ahp-protocol` is also available and is the tidier name, but it describes
 the *protocol*, not a host — taking it would squat the name a future Python
-*client* or types package should have. Reserve it, and `agent-host-protocol-types`,
+*client* or types package should have. Reserve it, and `ahp-protocol-types`,
 without publishing.
 
 ---
@@ -221,7 +221,7 @@ schema's action list.
   answer (measured, E3). No overlap ⇒ `UnsupportedProtocolVersion` (`-32005`)
   and close.
 - **Our SemVer is independent of the spec's**, exactly as upstream's clients
-  are. `agent-host-server` `0.x` tracks our own API. Every release states the protocol
+  are. `ahp-host` `0.x` tracks our own API. Every release states the protocol
   versions it speaks in the changelog and in a `release-metadata.json`, mirroring
   upstream's convention.
 - **Support policy:** at most two spec MINORs at once, and the older is dropped
@@ -434,7 +434,7 @@ Errors use the spec's codes (`research.md` E11). No parallel taxonomy.
 4. `initialize` / `ping` / `subscribe` / `unsubscribe` / `listSessions` + root.
 5. Session + chat channels; echo provider; the four-action minimal turn.
 6. WebSocket transport; then the interop test against the real client.
-7. `agent-host-server-acp` in a separate distribution, so the core stays neutral.
+7. `ahp-host-acp` in a separate distribution, so the core stays neutral.
 
 Each step is a reviewable PR with its gate green before the next starts.
 
@@ -451,6 +451,6 @@ Each step is a reviewable PR with its gate green before the next starts.
 4. **Reduce all 60 actions in v0.1**, even though the echo provider exercises
    ~6 — driven by the corpus being all-or-nothing per reducer. The alternative
    is skipping fixtures, which forfeits the conformance claim.
-5. **`agent-host-server`** as the PyPI distribution, repo `agent-host-server-py`.
+5. **`ahp-host`** as the PyPI distribution, repo `ahp-host`.
 6. Whether to **file the seven open questions** in `research.md` §11 upstream
    now, and whether to offer a `scripts/generate-python.ts` contribution.

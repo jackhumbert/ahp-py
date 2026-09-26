@@ -20,8 +20,8 @@ import pytest
 import websockets
 from websockets.asyncio.server import ServerConnection, serve
 
-from agent_host_client.client.errors import TransportError
-from agent_host_client.ws.transport import _redact, _with_token
+from ahp_client.client.errors import TransportError
+from ahp_client.ws.transport import _redact, _with_token
 
 pytestmark = pytest.mark.filterwarnings("ignore::DeprecationWarning")
 
@@ -70,7 +70,7 @@ async def test_round_trip_over_a_real_socket() -> None:
         async for message in connection:
             await connection.send(message)
 
-    from agent_host_client.ws.transport import WebSocketClientTransport
+    from ahp_client.ws.transport import WebSocketClientTransport
 
     async with _echo_server(handler) as url:
         transport = await WebSocketClientTransport.connect(url)
@@ -88,7 +88,7 @@ async def test_a_clean_close_ends_the_stream_rather_than_raising() -> None:
     async def handler(connection: ServerConnection) -> None:
         await connection.close(1000, "done")
 
-    from agent_host_client.ws.transport import WebSocketClientTransport
+    from ahp_client.ws.transport import WebSocketClientTransport
 
     async with _echo_server(handler) as url:
         transport = await WebSocketClientTransport.connect(url)
@@ -101,7 +101,7 @@ async def test_an_abnormal_close_raises_so_the_supervisor_can_tell_them_apart() 
     async def handler(connection: ServerConnection) -> None:
         await connection.close(1011, "internal error")
 
-    from agent_host_client.ws.transport import WebSocketClientTransport
+    from ahp_client.ws.transport import WebSocketClientTransport
 
     async with _echo_server(handler) as url:
         transport = await WebSocketClientTransport.connect(url)
@@ -129,7 +129,7 @@ async def test_a_malformed_frame_raises_rather_than_hiding_itself() -> None:
         await connection.send(json.dumps({"jsonrpc": "2.0", "id": 1, "result": {}}))
         await asyncio.sleep(0.1)
 
-    from agent_host_client.ws.transport import WebSocketClientTransport
+    from ahp_client.ws.transport import WebSocketClientTransport
 
     async with _echo_server(handler) as url:
         transport = await WebSocketClientTransport.connect(url)
@@ -155,7 +155,7 @@ async def test_a_json_scalar_is_not_a_json_rpc_message() -> None:
         await connection.send(json.dumps({"jsonrpc": "2.0", "id": 1, "result": {}}))
         await asyncio.sleep(0.1)
 
-    from agent_host_client.ws.transport import WebSocketClientTransport
+    from ahp_client.ws.transport import WebSocketClientTransport
 
     async with _echo_server(handler) as url:
         transport = await WebSocketClientTransport.connect(url)
@@ -192,9 +192,9 @@ async def test_a_flood_of_garbage_gives_up_instead_of_recursing() -> None:
     that budget being paid, and the absence of a ResourceWarning afterwards is
     the regression test for the abort actually releasing the socket.
     """
-    from agent_host_client.client.client import MALFORMED_FRAME_LIMIT, AhpClient
-    from agent_host_client.client.errors import ClientClosed
-    from agent_host_client.ws.transport import WebSocketClientTransport
+    from ahp_client.client.client import MALFORMED_FRAME_LIMIT, AhpClient
+    from ahp_client.client.errors import ClientClosed
+    from ahp_client.ws.transport import WebSocketClientTransport
 
     async def handler(connection: ServerConnection) -> None:
         with contextlib.suppress(Exception):
@@ -226,8 +226,8 @@ async def test_a_flood_of_garbage_gives_up_instead_of_recursing() -> None:
 async def test_a_burst_under_the_limit_is_survived() -> None:
     """The other half, and the one that makes the limit a policy rather than a
     hair trigger: a peer with an encoding hiccup keeps its session."""
-    from agent_host_client.client.client import MALFORMED_FRAME_LIMIT, AhpClient
-    from agent_host_client.ws.transport import WebSocketClientTransport
+    from ahp_client.client.client import MALFORMED_FRAME_LIMIT, AhpClient
+    from ahp_client.ws.transport import WebSocketClientTransport
 
     async def handler(connection: ServerConnection) -> None:
         with contextlib.suppress(websockets.exceptions.ConnectionClosed):
@@ -250,7 +250,7 @@ async def test_a_burst_under_the_limit_is_survived() -> None:
 
 
 async def test_connect_failure_is_a_transport_error() -> None:
-    from agent_host_client.ws.transport import WebSocketClientTransport
+    from ahp_client.ws.transport import WebSocketClientTransport
 
     with pytest.raises(TransportError) as caught:
         # Port 1 on loopback is not listening.
@@ -259,7 +259,7 @@ async def test_connect_failure_is_a_transport_error() -> None:
 
 
 async def test_connect_failure_redacts_the_token() -> None:
-    from agent_host_client.ws.transport import WebSocketClientTransport
+    from ahp_client.ws.transport import WebSocketClientTransport
 
     with pytest.raises(TransportError) as caught:
         await WebSocketClientTransport.connect("ws://127.0.0.1:1", token="s3cret", open_timeout=1.0)
@@ -286,8 +286,8 @@ async def test_the_transport_is_usable_by_the_client_end_to_end() -> None:
                 )
             )
 
-    from agent_host_client.client import AhpClient
-    from agent_host_client.ws.transport import WebSocketClientTransport
+    from ahp_client.client import AhpClient
+    from ahp_client.ws.transport import WebSocketClientTransport
 
     async with _echo_server(handler) as url:
         transport = await WebSocketClientTransport.connect(url)
@@ -301,7 +301,7 @@ async def test_the_transport_is_usable_by_the_client_end_to_end() -> None:
 
 async def test_websockets_is_not_imported_by_the_testing_kit() -> None:
     """Enforced by import-linter too, but this fails with a readable message."""
-    import agent_host_client.testing as testing
+    import ahp_client.testing as testing
 
     assert "websockets" not in getattr(testing, "__dict__", {})
     assert websockets is not None  # the import above is real, this is the contrast
@@ -317,7 +317,7 @@ async def test_closing_against_a_dead_peer_does_not_wait_out_the_handshake() -> 
     bound; a polite close the peer will never read is worth nothing to either
     side.
     """
-    from agent_host_client.ws.transport import _CLOSE_TIMEOUT, WebSocketClientTransport
+    from ahp_client.ws.transport import _CLOSE_TIMEOUT, WebSocketClientTransport
 
     async def handler(connection: ServerConnection) -> None:
         # Accept, then contribute nothing at the application level. Waiting on
@@ -338,7 +338,7 @@ async def test_closing_against_a_dead_peer_does_not_wait_out_the_handshake() -> 
 async def test_a_healthy_close_is_immediate() -> None:
     """The bound must not cost anything when the peer IS answering -- otherwise
     every ordinary shutdown pays for the pathological case."""
-    from agent_host_client.ws.transport import WebSocketClientTransport
+    from ahp_client.ws.transport import WebSocketClientTransport
 
     async def handler(connection: ServerConnection) -> None:
         with contextlib.suppress(Exception):
@@ -401,10 +401,10 @@ async def test_an_absent_ssl_is_omitted_not_forwarded_as_none(
     It reads the key's *presence*: absent means "build the default verifying
     context", ``None`` means "no TLS", which for wss:// is a ``ValueError``
     before any socket opens. Every caller that leaves ``ssl`` at its default --
-    ``connect()``'s dial closure, the broker's node connector -- lands here,
+    ``connect()``'s dial closure, the gateway's node connector -- lands here,
     so the check is on the kwargs that actually reach ``websockets.connect``.
     """
-    from agent_host_client.ws import transport as module
+    from ahp_client.ws import transport as module
 
     seen: list[dict[str, Any]] = []
 
@@ -414,17 +414,17 @@ async def test_an_absent_ssl_is_omitted_not_forwarded_as_none(
 
     monkeypatch.setattr(websockets, "connect", fake_connect)
 
-    await module.WebSocketClientTransport.connect("wss://broker.example/")
+    await module.WebSocketClientTransport.connect("wss://gateway.example/")
     assert "ssl" not in seen[-1]
 
     context = _trusting_context()
-    await module.WebSocketClientTransport.connect("wss://broker.example/", ssl=context)
+    await module.WebSocketClientTransport.connect("wss://gateway.example/", ssl=context)
     assert seen[-1]["ssl"] is context
 
 
 async def test_wss_with_an_explicit_context_round_trips() -> None:
     """A private CA's context is honoured end to end, not just accepted."""
-    from agent_host_client.ws.transport import WebSocketClientTransport
+    from ahp_client.ws.transport import WebSocketClientTransport
 
     async with _tls_echo_server() as url:
         transport = await WebSocketClientTransport.connect(url, ssl=_trusting_context())
@@ -441,7 +441,7 @@ async def test_wss_without_a_context_uses_the_default_trust_store(
     this is the default context doing the verifying, not one the test built.
     Before the fix this raised ``ssl=None is incompatible with a wss:// URI``.
     """
-    from agent_host_client.ws.transport import WebSocketClientTransport
+    from ahp_client.ws.transport import WebSocketClientTransport
 
     monkeypatch.setenv("SSL_CERT_FILE", str(_CERT))
     async with _tls_echo_server() as url:
@@ -455,7 +455,7 @@ async def test_wss_without_a_context_still_verifies() -> None:
     Guards the fix against the tempting wrong version of it -- an unverified
     context would also have made the error go away.
     """
-    from agent_host_client.ws.transport import WebSocketClientTransport
+    from ahp_client.ws.transport import WebSocketClientTransport
 
     async with _tls_echo_server() as url:
         with pytest.raises(TransportError) as caught:

@@ -21,9 +21,9 @@ from pathlib import Path
 
 import pytest
 
-from agent_host_server.core import Host, LoopbackSingleUserPolicy
-from agent_host_server.provider import EchoProvider
-from agent_host_server.ws import serve_websocket
+from ahp_host.core import Host, LoopbackSingleUserPolicy
+from ahp_host.provider import EchoProvider
+from ahp_host.ws import serve_websocket
 
 pytestmark = [pytest.mark.interop, pytest.mark.anyio]
 
@@ -37,7 +37,7 @@ SETUP = "needs node + `npm i --no-save @microsoft/agent-host-protocol@0.9.0 ws`"
 def _client_available() -> bool:
     if shutil.which("node") is None:
         return False
-    return (ROOT / "node_modules" / "@microsoft" / "agent-host-protocol").is_dir()
+    return (ROOT / "node_modules" / "@microsoft" / "ahp-protocol").is_dir()
 
 
 if os.environ.get("AHP_INTEROP_REQUIRED") and not _client_available():

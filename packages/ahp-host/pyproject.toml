@@ -3,7 +3,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "agent-host-server"
+name = "ahp-host"
 description = "A host/server implementation of the Agent Host Protocol (AHP) for Python."
 # Single-sourced from the package, so the two cannot drift. There is no second
 # place to forget.
@@ -11,7 +11,7 @@ dynamic = ["version"]
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.11"
-authors = [{ name = "agent-host-server contributors" }]
+authors = [{ name = "ahp-host contributors" }]
 keywords = ["ahp", "agent-host-protocol", "agent", "protocol", "json-rpc", "websocket"]
 # No license classifier: `license = "MIT"` above is the SPDX expression
 # (PEP 639), and the classifier route is deprecated for saying the same
@@ -31,14 +31,14 @@ classifiers = [
 # on Windows only, the IANA time-zone database. Automation schedules are
 # evaluated in a named zone (`AutomationSchedule.timeZone`), `zoneinfo` reads
 # the operating system's database, and Windows does not have one.
-# `agent-host-protocol` holds the wire types, the seven reducers and the
+# `ahp-protocol` holds the wire types, the seven reducers and the
 # vendored conformance corpora, so a host and a client share them rather than
 # forking 1,161 lines of reducer and detecting the drift afterwards.
 #
 # The pin is TIGHT on purpose: the spec lands breaking changes in MINOR bumps
 # and the protocol package's MINOR moves with the vendored tag, so a loose pin
 # would let a spec break arrive as a patch upgrade.
-dependencies = ["agent-host-protocol~=0.1.0", "tzdata; sys_platform == 'win32'"]
+dependencies = ["ahp-protocol~=0.1.0", "tzdata; sys_platform == 'win32'"]
 
 [project.optional-dependencies]
 ws = ["websockets>=13"]
@@ -56,28 +56,28 @@ dev = [
 ]
 
 [project.scripts]
-agent-host-server = "agent_host_server.__main__:main"
-agent-host-node = "agent_host_server.node.runner:main"
+ahp-host = "ahp_host.__main__:main"
+ahp-node = "ahp_host.node.runner:main"
 
-[project.entry-points."agent_host_server.agents"]
-echo = "agent_host_server.node.builtin:echo"
+[project.entry-points."ahp_host.agents"]
+echo = "ahp_host.node.builtin:echo"
 
 [project.urls]
-Homepage = "https://github.com/jackhumbert/agent-host-server-py"
-Repository = "https://github.com/jackhumbert/agent-host-server-py"
-Issues = "https://github.com/jackhumbert/agent-host-server-py/issues"
-Changelog = "https://github.com/jackhumbert/agent-host-server-py/blob/main/CHANGELOG.md"
-Security = "https://github.com/jackhumbert/agent-host-server-py/blob/main/SECURITY.md"
+Homepage = "https://github.com/jackhumbert/ahp-py/tree/main/packages/ahp-host"
+Repository = "https://github.com/jackhumbert/ahp-py/tree/main/packages/ahp-host"
+Issues = "https://github.com/jackhumbert/ahp-py/issues"
+Changelog = "https://github.com/jackhumbert/ahp-py/blob/main/packages/ahp-host/CHANGELOG.md"
+Security = "https://github.com/jackhumbert/ahp-py/blob/main/packages/ahp-host/SECURITY.md"
 
 [tool.hatch.version]
-path = "src/agent_host_server/__init__.py"
+path = "src/ahp_host/__init__.py"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/agent_host_server"]
+packages = ["src/ahp_host"]
 # `.github/` inside the demo tree is DATA, not repo config, and build backends
 # skip dot-directories by default -- so the demo shipped with every
 # customization pointing at a file that was not in the wheel.
-artifacts = ["src/agent_host_server/provider/demo_tree/**"]
+artifacts = ["src/ahp_host/provider/demo_tree/**"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -105,11 +105,11 @@ ignore = [
 
 [tool.ruff.lint.per-file-ignores]
 # TransportClosed signals end-of-stream, not a fault; the Error suffix would mislead.
-"src/agent_host_server/transport/base.py" = ["N818"]
+"src/ahp_host/transport/base.py" = ["N818"]
 "tests/**" = ["RUF059"]
 
 [tool.importlinter]
-root_package = "agent_host_server"
+root_package = "ahp_host"
 include_external_packages = true
 
 # The contract that used to keep `types` and `reducers` free of the runtime did
@@ -124,10 +124,10 @@ type = "layers"
 # accepts one) and `ws` supplies a concrete implementation; the abstraction now
 # arrives from the dependency, so the core still never imports a concrete one.
 layers = [
-  "(agent_host_server.node)",
-  "(agent_host_server.ws)",
-  "agent_host_server.core",
-  "agent_host_server.provider",
+  "(ahp_host.node)",
+  "(ahp_host.ws)",
+  "ahp_host.core",
+  "ahp_host.provider",
 ]
 
 # The dependency is the floor and must never reach back up. A violation here
@@ -136,5 +136,5 @@ layers = [
 [[tool.importlinter.contracts]]
 name = "the protocol package does not import the host"
 type = "forbidden"
-source_modules = ["agent_host_protocol"]
-forbidden_modules = ["agent_host_server"]
+source_modules = ["ahp_protocol"]
+forbidden_modules = ["ahp_host"]

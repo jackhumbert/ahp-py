@@ -10,6 +10,10 @@ versions each release speaks.
 
 ## [Unreleased]
 
+### Changed
+
+- **Renamed from `agent-host-server` to `ahp-host`** (import `agent_host_server` → `ahp_host`), and moved into the `ahp-py` monorepo as `packages/ahp-host`. Commands: `agent-host-server` → `ahp-host`, `agent-host-node` → `ahp-node`; the node's launchd label is `io.ahp.node`, and example configs live under `~/.config/ahp/`. Tags are now per package: `ahp-host/v<version>`.
+
 ### Added
 
 - **Automations** (protocol 0.9.0), behind `Host(automations=...)`:
@@ -24,10 +28,10 @@ versions each release speaks.
   evaluated by a scheduler the host starts itself, with `misfirePolicy`
   honoured across restarts. Event triggers are refused: this host defines no
   event types. `FileAutomationStore` and `InMemoryAutomationStore` in
-  `agent_host_server.core`; `Host.run_due_automations(now)` drives schedules
+  `ahp_host.core`; `Host.run_due_automations(now)` drives schedules
   by hand. Off without a store, which is what an absent `automations`
   capability means.
-- `agent-host-node` keeps automations under `<state_dir>/automations`.
+- `ahp-node` keeps automations under `<state_dir>/automations`.
 - On Windows, a dependency on `tzdata`: `zoneinfo` needs a time-zone database
   and Windows has none.
 - `SessionSummary.origin` in `listSessions` and `root/sessionAdded`, for a
@@ -37,7 +41,7 @@ versions each release speaks.
   claude.ai) is given a `SessionDirectory` - `open`, `close` and `uris`,
   scoped to that provider - once `Host.restore()` has brought back what was
   saved. Until now only an embedder holding the `Host` could open a session,
-  and an agent plugged into `agent-host-node` never holds it.
+  and an agent plugged into `ahp-node` never holds it.
 - `FollowsWorkingDirectories.working_directories_changed(directories)`: an
   agent session that implements it is told the session's whole folder set
   after a client adds, removes or replaces one
@@ -75,15 +79,15 @@ versions each release speaks.
   provider id this host no longer serves (so renaming an agent keeps its old
   sessions working). `Host.providers` maps id to provider; `Host.provider` is
   still the default. `open_session` takes `provider_id`.
-- `agent-host-node` (`python -m agent_host_server.node`): a machine's node --
+- `ahp-node` (`python -m ahp_host.node`): a machine's node --
   one port, folder tree, session store and token -- serving every agent listed
   in its config's `[[agents]]` tables. Agent packages plug in through the
-  `agent_host_server.agents` entry-point group (`create(options, NodeContext)`);
+  `ahp_host.agents` entry-point group (`create(options, NodeContext)`);
   `type = "echo"` is built in. The folder tree (`[roots]`, named or single)
-  moved here from agent-host-server-claude as `agent_host_server.node.roots`.
-- `agent-host-node supervise | install | uninstall`: keeping a node running
+  moved here from ahp-host-claude as `ahp_host.node.roots`.
+- `ahp-node supervise | install | uninstall`: keeping a node running
   without wrapper scripts. `supervise` runs the node as a child and restarts
-  it (and the config's `tunnel` command, e.g. an `ssh -N -R` to a broker)
+  it (and the config's `tunnel` command, e.g. an `ssh -N -R` to a gateway)
   with backoff, logging each exit to `<log_file>.supervisor.log`. `install`
   starts the supervisor at login as the current user -- a Scheduled Task
   running `pythonw.exe` directly on Windows (no console, no PowerShell), a
@@ -158,7 +162,7 @@ versions each release speaks.
 
 ### Changed — protocol 0.9.0
 
-- **Depends on `agent-host-protocol` at `spec/v0.9.0`, and offers `0.9.0`,
+- **Depends on `ahp-protocol` at `spec/v0.9.0`, and offers `0.9.0`,
   `0.8.0`, `0.7.0` and `0.6.0`, preferring `0.9.0`.** The interop suite drives
   `@microsoft/agent-host-protocol@0.9.0` from npm, negotiates `0.9.0`, and the
   official 0.9.0 reducers agree with the host's state.
@@ -180,7 +184,7 @@ versions each release speaks.
   host automations.
 ### Changed — protocol 0.8.0
 
-- **Depends on `agent-host-protocol` at `spec/v0.8.0`, and offers `0.8.0`,
+- **Depends on `ahp-protocol` at `spec/v0.8.0`, and offers `0.8.0`,
   `0.7.0` and `0.6.0`, preferring `0.8.0`.** The interop suite drives
   `@microsoft/agent-host-protocol@0.8.0` from npm, and negotiates `0.8.0`.
 - **`session/workingDirectoryReplaced` is accepted and validated.** It needs
@@ -217,7 +221,7 @@ in CI.
 
 It will be released on GitHub, deliberately not on PyPI: install the protocol
 package from its repository first, then
-`pip install "agent-host-server[ws] @ git+https://github.com/jackhumbert/agent-host-server-py@v0.1.0"`.
+`pip install "ahp-host[ws] @ git+https://github.com/jackhumbert/ahp-py@ahp-host/v0.1.0#subdirectory=packages/ahp-host"`.
 The built wheel and sdist will be attached to the GitHub release.
 
 What it is: a library you embed, and a demo host that exercises every surface so
@@ -295,7 +299,7 @@ no model in here — you write a provider, and routing is yours.
   has the methods it is one, and there is nothing to subclass.
 - One primitive for provider requests that wait on a client — elicitation, tool
   confirmation and client tool execution are the same shape (ADR 0005).
-- `python -m agent_host_server`, a demo host with a flag per surface, which
+- `python -m ahp_host`, a demo host with a flag per surface, which
   prints the VS Code settings block to paste.
 - **`Denied("reason")`, returnable from any `may_*` policy hook**, so a refusal can
   carry the message a person actually reads. It is **falsy**, so every existing
@@ -340,11 +344,11 @@ no model in here — you write a provider, and routing is yours.
   the v0.1 plan (`docs/plan.md`) and ADRs 0001–0004.
 - Vendoring of the upstream conformance corpora and schemas at `spec/v0.7.0`
   (`scripts/vendor_upstream.sh`), committed under `vendor/upstream/`.
-  **Since moved** to `agent-host-protocol`; neither path exists here now.
+  **Since moved** to `ahp-protocol`; neither path exists here now.
 - Generation of the upstream data tables — action types, `IS_CLIENT_DISPATCHABLE`,
   `ACTION_INTRODUCED_IN`, error codes — from the vendored TypeScript source of
   truth (`scripts/generate_tables.py`), reproducibility enforced in CI.
-  **Since moved** to `agent-host-protocol`, where CI still enforces it.
+  **Since moved** to `ahp-protocol`, where CI still enforces it.
 - Wire value representation: plain dicts with `TypedDict` views, the `??`
   equivalent, a type-aware deep comparator, and the two opposing null-comparison
   rules the upstream corpora require (ADR 0001).
@@ -363,16 +367,16 @@ no model in here — you write a provider, and routing is yours.
 
 - **The protocol layer is now a separate package.** Wire types, the seven
   reducers, the transports and the vendored conformance corpora moved to
-  [`agent-host-protocol`](https://github.com/jackhumbert/agent-host-protocol-py),
+  [`ahp-protocol`](https://github.com/jackhumbert/ahp-py/tree/main/packages/ahp-protocol),
   which this package depends on (`~=0.1.0`, tight because the spec lands
   breaking changes in MINOR bumps). The reason is a Python *client*: the
   1,161-line chat reducer has to exist exactly once, and a fork with
   drift detection makes drift *detectable* rather than impossible.
 
-  Embedders importing `agent_host_server.types`, `.reducers`, `.transport`,
+  Embedders importing `ahp_host.types`, `.reducers`, `.transport`,
   `.core.errors`, `.core.channels` or `.core.versions` should import
-  `agent_host_protocol.…` instead. Everything re-exported from
-  `agent_host_server` itself is unchanged.
+  `ahp_protocol.…` instead. Everything re-exported from
+  `ahp_host` itself is unchanged.
 
   Bumping the spec pin is no longer a change to this repository.
 
@@ -610,7 +614,7 @@ sources, the spec prose and VS Code's client. Each fix is pinned by a test.
   what works once the siblings are public: right in both worlds, no second edit.
 
 - **The README's only install line could not work.** `pip install -e '.[ws]'`
-  resolves `agent-host-protocol~=0.1.0` from an index that has never heard of
+  resolves `ahp-protocol~=0.1.0` from an index that has never heard of
   it and stops. It now installs the sibling checkout first, and a new derived
   check in `tests/docs/test_readme_is_true.py` reads the dependency list from
   `pyproject.toml`, so a second sibling dependency cannot be added without the
@@ -627,7 +631,7 @@ sources, the spec prose and VS Code's client. Each fix is pinned by a test.
   ever cut and nothing was uploaded, so its two link definitions pointed at a
   tag and a release page that do not exist, and two of its entries described
   `vendor/upstream/` and `scripts/generate_tables.py` as things this package
-  has — both moved to `agent-host-protocol` in the extraction above.
+  has — both moved to `ahp-protocol` in the extraction above.
 
 ### Documentation
 
@@ -660,5 +664,5 @@ sources, the spec prose and VS Code's client. Each fix is pinned by a test.
      the branch until the tag is real; RELEASING.md's release-day steps flip
      them to the compare and tag URLs. -->
 
-[Unreleased]: https://github.com/jackhumbert/agent-host-server-py/commits/main
-[0.1.0]: https://github.com/jackhumbert/agent-host-server-py/commits/main
+[Unreleased]: https://github.com/jackhumbert/ahp-py/commits/main/packages/ahp-host
+[0.1.0]: https://github.com/jackhumbert/ahp-py/commits/main/packages/ahp-host

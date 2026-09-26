@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from agent_host_server.core.wirelog import REDACTED, WireLog, redact
+from ahp_host.core.wirelog import REDACTED, WireLog, redact
 
 
 def test_writes_the_verbatim_message_plus_a_sidecar(tmp_path: Path) -> None:

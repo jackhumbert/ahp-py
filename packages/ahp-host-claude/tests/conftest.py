@@ -9,4 +9,4 @@ import pytest
 
 @pytest.fixture(autouse=True)
 def _state_in_tmp(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("agent_host_server_claude.provider.DEFAULT_STATE", tmp_path / "state")
+    monkeypatch.setattr("ahp_host_claude.provider.DEFAULT_STATE", tmp_path / "state")

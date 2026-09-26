@@ -15,14 +15,14 @@ Every release states the protocol versions it speaks.
   `ssl` makes it build the default verifying context. `ssl` is now omitted
   when it is `None`, and an explicit context is still passed through. Every
   caller that leaves `ssl` at its default is covered by the one change:
-  `connect()`'s dial closure and `agent-host-broker`'s `WebSocketNodeConnector`.
-  Found against a real deployed broker; the suite now speaks real TLS offline,
+  `connect()`'s dial closure and `ahp-gateway`'s `WebSocketNodeConnector`.
+  Found against a real deployed gateway; the suite now speaks real TLS offline,
   over a checked-in self-signed fixture certificate (`tests/client/tls/`), and
   pins that the default context both connects and still verifies.
 
 ### Changed — protocol 0.9.0
 
-- **Built on `agent-host-protocol` at `spec/v0.9.0`.** The default offer is
+- **Built on `ahp-protocol` at `spec/v0.9.0`.** The default offer is
   `0.9.0`, `0.8.0`, `0.7.0`, `0.6.0`; against the sibling host this client
   negotiates `0.9.0`. Where 0.9.0 moved a shape this client reads, it reads
   both, because it still negotiates older hosts:
@@ -46,7 +46,7 @@ Every release states the protocol versions it speaks.
 
 ### Changed — protocol 0.8.0
 
-- **Built on `agent-host-protocol` at `spec/v0.8.0`.** The default offer
+- **Built on `ahp-protocol` at `spec/v0.8.0`.** The default offer
   follows the pin's `DEFAULT_SUPPORTED_VERSIONS` and is now `0.8.0`, `0.7.0`,
   `0.6.0`; against the sibling host this client negotiates `0.8.0`. None of the
   0.8.0 wire changes touch a shape this client sends or reads — it has no
@@ -65,7 +65,7 @@ Under construction. `docs/plan.md` is the design and its §12 is the build order
   ran on no push and no pull request, while both sibling repositories checked
   *this* one out to prove they still worked with it. Four jobs now: `check`
   across 3.11 through 3.14 with the client alone, `against-the-sibling-host`
-  with the real `agent-host-server` installed, `distributions-are-installable`,
+  with the real `ahp-host` installed, `distributions-are-installable`,
   and a non-blocking `protocol-main` that surfaces drift the `~=0.1.0` pin
   hides.
 
@@ -80,7 +80,7 @@ Under construction. `docs/plan.md` is the design and its §12 is the build order
   checkout and runs the conformance probe through it, which is the only way to
   catch a name in `__all__` that is never bound, a subpackage the backend did
   not collect, or an absent `py.typed`. It found something immediately:
-  `agent_host_client.ws` is the `[ws]` extra, so a `--no-deps` install cannot
+  `ahp_client.ws` is the `[ws]` extra, so a `--no-deps` install cannot
   import it and the job has to supply `websockets` by hand — otherwise "not
   packaged" and "not installed" are the same red.
 
@@ -88,14 +88,14 @@ Under construction. `docs/plan.md` is the design and its §12 is the build order
 
 - **The distribution model is settled: public on GitHub, deliberately not on
   PyPI.** Installs are two git lines, protocol package first —
-  `pip install "agent-host-client[ws] @ git+https://…"` — pinned by tag for a
+  `pip install "ahp-client[ws] @ git+https://…"` — pinned by tag for a
   release, with the built wheel and sdist attached to each GitHub release.
   There is no index upload, no trusted publisher, no `pypi` environment, and
   no secret anywhere in the pipeline; CI checks out the public siblings with
   the default token.
 - **The release is a tag push.** `release.yml`: rebuild, `twine check
   --strict`, a tag-must-equal-`__version__` guard, a smoke install that
-  supplies `agent-host-protocol` from its repository and then installs the
+  supplies `ahp-protocol` from its repository and then installs the
   wheel with `[ws]` — exactly the documented install path, proven before the
   release exists — and a GitHub release whose notes are the changelog section
   verbatim, refused if the section is missing. `RELEASING.md` is the
@@ -270,7 +270,7 @@ pinned by a test.
 
 ### Fixed — the first interop run against a real host
 
-Driven against the sibling [`agent-host-server-py`](https://github.com/jackhumbert/agent-host-server-py)
+Driven against the sibling [`ahp-host`](https://github.com/jackhumbert/ahp-py/tree/main/packages/ahp-host)
 across ten protocol surfaces. Two implementations built independently from the
 same spec, meeting for the first time; every disagreement adjudicated against
 the vendored schema rather than against what the other peer happened to want.
@@ -318,7 +318,7 @@ the reducer then refuses while the sender believes it succeeded.
 - **M2 — transport and client core.** `AhpClient` (single-shot, one reader and
   one writer task), the `BroadcastQueue` behind lossless per-channel delivery,
   the error taxonomy with `is_session_gone()`, all nine server notifications
-  surfaced, a connecting WebSocket transport, and `agent_host_client.testing`
+  surfaced, a connecting WebSocket transport, and `ahp_client.testing`
   as public API.
 - **M3 — commands and parity.** All 27 client→server wrappers with channel
   scoping derived from upstream's own `*Params` types, and a generated
@@ -341,7 +341,7 @@ the reducer then refuses while the sender believes it succeeded.
   `virtual://` plugin content, client-owned tool execution, and the elicitation
   surfaces including `chat/toolCallResultConfirmed`.
 - **M8 — logs, doctor, interop.** ahp-inspector-compatible wire logs with
-  credential redaction and no opt-out, `agent_host_client.doctor` as a
+  credential redaction and no opt-out, `ahp_client.doctor` as a
   conformance probe for someone else's host, and a full turn against the sibling
   Python host.
 - **Watching a turn this client did not start** — `Chat.watch()` /
@@ -426,6 +426,7 @@ the reducer then refuses while the sender believes it succeeded.
 
 ### Changed
 
+- **Renamed from `agent-host-client` to `ahp-client`** (import `agent_host_client` → `ahp_client`), and moved into the `ahp-py` monorepo as `packages/ahp-client`. Tags are now per package: `ahp-client/v<version>`.
 - An action the client deliberately does not surface — mostly its own writes
   echoing back — is now skipped rather than delivered as `UnknownEvent`.
   `UnknownEvent` is forward compatibility, and conflating the two meant a

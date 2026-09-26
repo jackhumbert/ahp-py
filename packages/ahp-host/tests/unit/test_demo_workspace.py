@@ -16,7 +16,7 @@ from urllib.parse import unquote, urlparse
 
 import pytest
 
-from agent_host_server.provider.demo_workspace import (
+from ahp_host.provider.demo_workspace import (
     DemoWorkspace,
     available_operations,
     changeset_uris,

@@ -7,7 +7,7 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
-from agent_host_server.provider.base import (
+from ahp_host.provider.base import (
     AuthChallenge,
     ClientToolCall,
     InputOutcome,
@@ -71,6 +71,11 @@ class RecordingSink:
     ) -> None:
         self.outputs[call_id] = list(content)
         self.events.append(("output", call_id))
+
+    async def tool_call_confirmed(
+        self, call_id: str, *, approved: bool, reason_message: str | None = None
+    ) -> None:
+        self.events.append(("confirmed_elsewhere", call_id))
 
     async def usage(
         self,

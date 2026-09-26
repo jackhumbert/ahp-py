@@ -13,13 +13,13 @@ from collections.abc import AsyncIterator, Mapping
 from typing import Any
 
 import pytest
-from agent_host_protocol import AhpError, memory_pair
+from ahp_protocol import AhpError, memory_pair
 
-from agent_host_broker.core.broker import Broker, _Node, _SurfaceConnection
-from agent_host_broker.core.node import NodeRequestHandler
-from agent_host_broker.core.paging import has_more, merge_pages
-from agent_host_broker.core.sequence import LinkSequence
-from agent_host_broker.registry import StaticInventory
+from ahp_gateway.core.gateway import Gateway, _Node, _SurfaceConnection
+from ahp_gateway.core.node import NodeRequestHandler
+from ahp_gateway.core.paging import has_more, merge_pages
+from ahp_gateway.core.sequence import LinkSequence
+from ahp_gateway.registry import StaticInventory
 
 
 class ScriptedLink:
@@ -67,9 +67,9 @@ class Unused:
 
 
 def connection() -> _SurfaceConnection:
-    broker = Broker(StaticInventory([]), Unused(), lambda info: None)
-    _, broker_end = memory_pair()
-    conn = _SurfaceConnection(broker, broker_end, peer=None, headers=None, token=None)
+    gateway = Gateway(StaticInventory([]), Unused(), lambda info: None)
+    _, gateway_end = memory_pair()
+    conn = _SurfaceConnection(gateway, gateway_end, peer=None, headers=None, token=None)
     conn.initialized = True
     return conn
 
@@ -156,9 +156,9 @@ async def test_a_channel_whose_node_left_is_refused_not_rerouted() -> None:
 
 
 async def test_one_node_failing_to_close_does_not_skip_the_rest() -> None:
-    surface_end, broker_end = memory_pair()
-    broker = Broker(StaticInventory([]), Unused(), lambda info: None)
-    conn = _SurfaceConnection(broker, broker_end, peer=None, headers=None, token=None)
+    surface_end, gateway_end = memory_pair()
+    gateway = Gateway(StaticInventory([]), Unused(), lambda info: None)
+    conn = _SurfaceConnection(gateway, gateway_end, peer=None, headers=None, token=None)
     bad, good = ScriptedLink("bad", fail_close=True), ScriptedLink("good")
     attach(conn, bad, set())
     attach(conn, good, set())
@@ -180,7 +180,7 @@ async def test_a_node_repeating_an_empty_cursor_ends_its_own_listing() -> None:
 
 
 async def test_what_the_owner_streams_while_being_probed_is_not_lost() -> None:
-    # A reconnect's subscribe for a channel no node has named yet: the broker
+    # A reconnect's subscribe for a channel no node has named yet: the gateway
     # asks each node in turn. An action the owner streams while the probe is
     # still asking must reach the surface behind the snapshot, not vanish.
     conn = connection()

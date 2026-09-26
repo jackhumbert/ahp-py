@@ -21,10 +21,10 @@ one decision it cannot make — *who is this peer* — in a `Policy` you write.
 Verified here rather than asserted:
 
 ```python
-from agent_host_server import Host, LoopbackSingleUserPolicy
-from agent_host_server.core.resources import NullResourceProvider
-from agent_host_server.core.terminals import RefusingTerminalBackend
-from agent_host_server.provider import EchoProvider
+from ahp_host import Host, LoopbackSingleUserPolicy
+from ahp_host.core.resources import NullResourceProvider
+from ahp_host.core.terminals import RefusingTerminalBackend
+from ahp_host.provider import EchoProvider
 
 host = Host(EchoProvider(), LoopbackSingleUserPolicy())
 
@@ -120,9 +120,9 @@ constructor argument, because an embedder serving large assets has to be able to
 lift it:
 
 ```python
-from agent_host_server import Host, LoopbackSingleUserPolicy
-from agent_host_server.core.host import DEFAULT_MAX_READ_BYTES
-from agent_host_server.provider import EchoProvider
+from ahp_host import Host, LoopbackSingleUserPolicy
+from ahp_host.core.host import DEFAULT_MAX_READ_BYTES
+from ahp_host.provider import EchoProvider
 
 assert DEFAULT_MAX_READ_BYTES == 16 * 1024 * 1024
 assert Host(EchoProvider(), LoopbackSingleUserPolicy()).max_read_bytes == DEFAULT_MAX_READ_BYTES
@@ -163,9 +163,9 @@ connection, whichever is first — so call `restore()` at startup if schedules
 must fire before anyone connects:
 
 ```python
-from agent_host_server import Host, LoopbackSingleUserPolicy
-from agent_host_server.core import InMemoryAutomationStore
-from agent_host_server.provider import EchoProvider
+from ahp_host import Host, LoopbackSingleUserPolicy
+from ahp_host.core import InMemoryAutomationStore
+from ahp_host.provider import EchoProvider
 
 # `FileAutomationStore(path)` in production; an automation outlives the process
 # by definition, so there is no default store.
@@ -184,7 +184,7 @@ base rather than from scratch — otherwise you have to answer questions you hav
 no opinion about, and the ones you forget are the ones that matter.
 
 ```python
-from agent_host_server import ConnectionInfo, LoopbackSingleUserPolicy, Policy
+from ahp_host import ConnectionInfo, LoopbackSingleUserPolicy, Policy
 
 
 class OnlyAlice(LoopbackSingleUserPolicy):
@@ -219,7 +219,7 @@ absence of one.
 
 ## The demo is a demo
 
-`python -m agent_host_server` uses `LoopbackSingleUserPolicy`, binds to
+`python -m ahp_host` uses `LoopbackSingleUserPolicy`, binds to
 `127.0.0.1`, and refuses to bind elsewhere without `--allow-remote`. The
 connection token it prints is a convenience against other local processes, not
 an authentication scheme — it is a shared secret in a URL, visible in process
@@ -233,9 +233,9 @@ previous run persisted come back only when you ask, before you serve:
 ```python
 import asyncio
 
-from agent_host_server import Host, LoopbackSingleUserPolicy
-from agent_host_server.core.store import FileSessionStore
-from agent_host_server.provider import EchoProvider
+from ahp_host import Host, LoopbackSingleUserPolicy
+from ahp_host.core.store import FileSessionStore
+from ahp_host.provider import EchoProvider
 
 
 async def start(path: str) -> tuple[Host, int]:
@@ -308,7 +308,7 @@ laptop, a wedged renderer, a client behind a stalled proxy — hits the limit an
 blocking.
 
 ```python
-from agent_host_server.core.connection import DEFAULT_OUTBOX_LIMIT
+from ahp_host.core.connection import DEFAULT_OUTBOX_LIMIT
 
 assert DEFAULT_OUTBOX_LIMIT >= 1024
 host = Host(EchoProvider(), LoopbackSingleUserPolicy(), outbox_limit=4096)
