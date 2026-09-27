@@ -34,7 +34,7 @@ Status: pre-alpha.
     then shows its plan and asks to start. Approving drops the session to Ask,
     so the work itself is still approved call by call.
 
-  The mode can be switched during a session (in VS Code or the iOS app); the
+  The mode can be switched during a session (in VS Code or the [iOS app](https://github.com/jackhumbert/ahp-client-ios)); the
   running Claude client follows, and the choice survives a host restart.
   Needs ahp-host with `ReconfiguresSessions` and working session
   resume. A switch made on claude.ai (Remote Control) is followed here too,

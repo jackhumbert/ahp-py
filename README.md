@@ -7,7 +7,7 @@ sessions. One repository, several independently installable packages:
 | Package | What it is |
 |---|---|
 | [`ahp-protocol`](packages/ahp-protocol) | Wire types, pure state reducers and upstream's conformance corpora. The shared floor; no runtime dependencies. |
-| [`ahp-host`](packages/ahp-host) | The host: serves sessions to any AHP client (VS Code's Agent Sessions view, the Python client, the iOS app). |
+| [`ahp-host`](packages/ahp-host) | The host: serves sessions to any AHP client (VS Code's Agent Sessions view, the Python client, the [iOS app][ios]). |
 | [`ahp-host-claude`](packages/ahp-host-claude) | Claude, via the Claude Agent SDK, as a host provider. |
 | [`ahp-host-acp`](packages/ahp-host-acp) | Any [Agent Client Protocol](https://agentclientprotocol.com/) agent as a host provider. |
 | [`ahp-client`](packages/ahp-client) | The client. |
@@ -23,7 +23,9 @@ sessions. One repository, several independently installable packages:
   ahp-host-claude, ahp-host-acp
 ```
 
-The native iOS client lives separately, in `ahp-client-ios`.
+The native iPhone and iPad client, **Agent Host**, lives in its own repository:
+[`ahp-client-ios`][ios]. It speaks the same spec revision and lists the
+machines behind an `ahp-gateway`.
 
 ## Install
 
@@ -51,3 +53,5 @@ tests against.
 
 Each package's own README and AGENTS.md describe it; [`AGENTS.md`](AGENTS.md)
 covers the repository as a whole.
+
+[ios]: https://github.com/jackhumbert/ahp-client-ios
