@@ -45,6 +45,7 @@ _KEYS = frozenset(
         "provider_id",
         "remote_control",
         "claude_ai_sessions",
+        "chat_tools",
         "verbose",
     }
 )
@@ -70,6 +71,9 @@ class Settings:
     #: claude.ai. On one machine only: each would otherwise list them all.
     #: None (off), `"local"` (this machine's) or `"all"`: see `claude_ai.scope_of`.
     claude_ai_sessions: str | None = None
+    #: What a session with no folder may use; None keeps the default
+    #: (`provider.CHAT_TOOLS`). May only narrow it.
+    chat_tools: tuple[str, ...] | None = None
     verbose: bool = False
 
 
@@ -109,6 +113,22 @@ def _roots_from_file(data: Mapping[str, Any]) -> Roots | None:
             raise ConfigError("[roots] must be a table of name = path")
         return _named({name: _path(path, f"roots.{name}") for name, path in table.items()})
     return None
+
+
+def _chat_tools(flag: str | None, value: Any) -> tuple[str, ...] | None:
+    """`--chat-tools A,B` (empty for none) or `chat_tools = ["A"]`; the flag wins."""
+    from ahp_host_claude.provider import chat_tools_subset
+
+    if flag is not None:
+        value = [name.strip() for name in flag.split(",") if name.strip()]
+    elif value is None:
+        return None
+    elif not isinstance(value, list) or not all(isinstance(v, str) for v in value):
+        raise ConfigError("chat_tools must be a list of tool names")
+    try:
+        return chat_tools_subset(value)
+    except ValueError as exc:
+        raise ConfigError(str(exc)) from exc
 
 
 def load(args: argparse.Namespace) -> Settings:
@@ -151,6 +171,7 @@ def load(args: argparse.Namespace) -> Settings:
         claude_ai_sessions = scope_of(False if chosen == "off" else chosen)
     except ValueError as exc:
         raise ConfigError(str(exc)) from exc
+    chat_tools = _chat_tools(args.chat_tools, data.get("chat_tools"))
     port = pick(args.port, "port", DEFAULT_PORT)
     if not isinstance(port, int) or isinstance(port, bool):
         raise ConfigError("port must be a number")
@@ -164,5 +185,6 @@ def load(args: argparse.Namespace) -> Settings:
         provider_id=str(pick(args.provider_id, "provider_id", DEFAULT_PROVIDER_ID)),
         remote_control=remote_control,
         claude_ai_sessions=claude_ai_sessions,
+        chat_tools=chat_tools,
         verbose=bool(args.verbose or data.get("verbose", False)),
     )

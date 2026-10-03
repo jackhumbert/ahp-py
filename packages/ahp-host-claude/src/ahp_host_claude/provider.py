@@ -141,6 +141,28 @@ DEFAULT_MODEL = "default"
 #: user's config (which can reach anything). The web tools still pass the
 #: approval gate like any other.
 CHAT_TOOLS: Final = ("WebSearch", "WebFetch")
+
+
+def chat_tools_subset(names: Sequence[str]) -> tuple[str, ...]:
+    """`names`, checked to be a subset of `CHAT_TOOLS` (order kept, duplicates dropped).
+
+    A host can take a web tool away from folderless sessions - one that cannot
+    reach the internet has no use for WebFetch - but never add one: anything
+    outside `CHAT_TOOLS` would touch the machine.
+    """
+    if isinstance(names, str):
+        raise ValueError("chat_tools must be a list of tool names, not a string")
+    out: list[str] = []
+    for name in names:
+        if name not in CHAT_TOOLS:
+            raise ValueError(
+                f"chat_tools: {name!r} is not allowed; choose from {', '.join(CHAT_TOOLS)}"
+            )
+        if name not in out:
+            out.append(name)
+    return tuple(out)
+
+
 #: Told to Claude in a session with no folder, so it says why it cannot look
 #: at a file rather than trying tools that are not there.
 CHAT_PROMPT: Final = (
@@ -333,8 +355,12 @@ class ClaudeSession:
         on_disposed: Callable[[], None] | None = None,
         chat_dir: Path | None = None,
         status_on_claude_ai: Callable[[str], Awaitable[str | None]] | None = None,
+        chat_tools: Sequence[str] = CHAT_TOOLS,
     ) -> None:
         self.context = context
+        #: What a session with no folder may use (`CHAT_TOOLS`, or the subset the
+        #: host was configured with).
+        self._chat_tools = tuple(chat_tools)
         #: Asks claude.ai whether a session is archived there (`start`).
         self._status_on_claude_ai = status_on_claude_ai
         #: The folders the session has now: the context's are only the ones it
@@ -480,7 +506,7 @@ class ClaudeSession:
         options: dict[str, Any] = {}
         prompt: dict[str, Any] = {"type": "preset", "preset": "claude_code"}
         if not tools:
-            options = {"tools": list(CHAT_TOOLS), "strict_mcp_config": True}
+            options = {"tools": list(self._chat_tools), "strict_mcp_config": True}
             prompt["append"] = CHAT_PROMPT
         if self._client_tools:
             # Tools that run in a client, not here: offered with or without a
@@ -1268,6 +1294,7 @@ class ClaudeProvider:
         machine: str | None = None,
         running_here: Callable[[], Mapping[str, str]] = running_here,
         status_on_claude_ai: Callable[[str], Awaitable[str | None]] | None = None,
+        chat_tools: Sequence[str] = CHAT_TOOLS,
     ) -> None:
         if not is_valid_provider_id(provider_id):
             raise ValueError(f"invalid provider id: {provider_id!r}")
@@ -1309,6 +1336,9 @@ class ClaudeProvider:
         #: Where sessions with no folder run. Kept, not temporary: a chat's
         #: conversation is stored under it, and resuming needs it again.
         self.chat_dir = chat_dir or (state_dir or DEFAULT_STATE) / "chat"
+        #: May only narrow `CHAT_TOOLS`: a session with no folder must never be
+        #: handed a tool that touches the machine.
+        self.chat_tools = chat_tools_subset(chat_tools)
         self._dismissed: set[str] = self._load_dismissed()
 
     @property
@@ -1387,6 +1417,7 @@ class ClaudeProvider:
                     client_factory=self._client_factory,
                     remote_control=remote_control,
                     chat_dir=self.chat_dir,
+                    chat_tools=self.chat_tools,
                 )
             )
         continuation = await self.sessions.continue_from(chosen)
@@ -1400,6 +1431,7 @@ class ClaudeProvider:
                 recap=continuation.recap,
                 remote_control=remote_control,
                 chat_dir=self.chat_dir,
+                chat_tools=self.chat_tools,
             )
         )
 
@@ -1434,6 +1466,7 @@ class ClaudeProvider:
                 bridge_session_id=bridge if isinstance(bridge, str) else None,
                 archived=state.get("archived") is True,
                 chat_dir=self.chat_dir,
+                chat_tools=self.chat_tools,
             )
         )
 
@@ -1625,6 +1658,7 @@ class ClaudeProvider:
             mirror_of=remote_id,
             on_disposed=dismissed,
             chat_dir=self.chat_dir,
+            chat_tools=self.chat_tools,
         )
         self._mirrors[remote_id] = session
         session.start_soon()

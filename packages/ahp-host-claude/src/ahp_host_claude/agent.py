@@ -6,6 +6,7 @@
     agent_name = "Claude"      # the default
     remote_control = true      # default: whatever Claude Code does
     claude_ai_sessions = true  # this machine's other sessions; "all": every machine's
+    chat_tools = ["WebSearch"] # default both web tools; may only narrow the list
 
 Registered as the `claude` entry in the `ahp_host.agents` group, so
 `ahp-node` can serve Claude beside other agents from one host.
@@ -21,9 +22,17 @@ from ahp_host.node import NodeContext
 
 from ahp_host_claude.claude_ai import LOCAL, Api, scope_of
 from ahp_host_claude.config import DEFAULT_AGENT_NAME, DEFAULT_PROVIDER_ID
-from ahp_host_claude.provider import ClaudeProvider, discover, is_valid_provider_id
+from ahp_host_claude.provider import (
+    CHAT_TOOLS,
+    ClaudeProvider,
+    chat_tools_subset,
+    discover,
+    is_valid_provider_id,
+)
 
-_OPTIONS = frozenset({"provider_id", "agent_name", "remote_control", "claude_ai_sessions"})
+_OPTIONS = frozenset(
+    {"provider_id", "agent_name", "remote_control", "claude_ai_sessions", "chat_tools"}
+)
 
 
 async def create(options: Mapping[str, Any], node: NodeContext) -> ClaudeProvider:
@@ -36,6 +45,13 @@ async def create(options: Mapping[str, Any], node: NodeContext) -> ClaudeProvide
     remote_control = options.get("remote_control")
     if remote_control is not None and not isinstance(remote_control, bool):
         raise ValueError("claude agent: remote_control must be true or false")
+    chat_tools = options.get("chat_tools", CHAT_TOOLS)
+    if not isinstance(chat_tools, (list, tuple)):
+        raise ValueError("claude agent: chat_tools must be a list of tool names")
+    try:
+        chat_tools = chat_tools_subset(chat_tools)
+    except ValueError as exc:
+        raise ValueError(f"claude agent: {exc}") from exc
     try:
         claude_ai_sessions = scope_of(options.get("claude_ai_sessions", False))
     except ValueError as exc:
@@ -60,4 +76,5 @@ async def create(options: Mapping[str, Any], node: NodeContext) -> ClaudeProvide
         claude_ai=Api() if claude_ai_sessions else None,
         claude_ai_scope=claude_ai_sessions or LOCAL,
         state_dir=node.state_dir,
+        chat_tools=chat_tools,
     )

@@ -204,3 +204,34 @@ async def test_a_folder_outside_the_root_fails_the_next_turn(tmp_path: Path, out
     events: list[Any] = [event[0] for event in sink.events]
     assert events == ["failed"]
     assert harness.clients == []
+
+
+async def test_a_host_can_narrow_a_chats_web_tools(tmp_path: Path) -> None:
+    """A host whose sessions cannot reach the internet can drop WebFetch."""
+    root = tmp_path / "root"
+    root.mkdir()
+    clients: list[FakeClient] = []
+
+    def factory(options: ClaudeAgentOptions) -> FakeClient:
+        client = FakeClient(options, [[_result()]])
+        clients.append(client)
+        return client
+
+    provider = ClaudeProvider(
+        root, client_factory=factory, chat_dir=tmp_path / "chat", chat_tools=["WebSearch"]
+    )
+    session = await provider.create_session(_context())
+    await session.send_user_message(UserMessage(text="hi"), RecordingSink())
+    assert clients[0].options.tools == ["WebSearch"]
+    assert clients[0].options.strict_mcp_config is True
+
+
+@pytest.mark.parametrize("tools", [["Bash"], ["WebSearch", "Read"], "WebSearch"])
+def test_chat_tools_may_only_narrow_the_default(tmp_path: Path, tools: Any) -> None:
+    """Security: a folderless session must never be handed a tool that touches the machine."""
+    with pytest.raises(ValueError, match="chat_tools"):
+        ClaudeProvider(tmp_path, chat_tools=tools)
+
+
+def test_chat_tools_can_leave_none(tmp_path: Path) -> None:
+    assert ClaudeProvider(tmp_path, chat_tools=[]).chat_tools == ()

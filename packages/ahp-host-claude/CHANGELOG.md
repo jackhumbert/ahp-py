@@ -4,6 +4,11 @@
 
 ### Added
 
+- `chat_tools` (`--chat-tools`): narrow the web tools a session with no folder
+  is offered, e.g. drop WebFetch where sessions cannot reach the internet. It
+  can only remove tools from the default (`WebSearch`, `WebFetch`), never add
+  one, so a chat still gets nothing that touches the machine.
+
 - Client tools. Tools a client publishes on `activeClient.tools` are offered to
   Claude as an in-process MCP server (`mcp__client__<name>`), and each call runs
   in that client through the host's `run_client_tool`, under Claude's own tool

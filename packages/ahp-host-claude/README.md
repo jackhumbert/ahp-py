@@ -161,6 +161,7 @@ error, so a typo cannot silently fall back to a default.
 | `agent_name` / `--agent-name` | What clients call the agent. |
 | `remote_control` / `--[no-]remote-control` | Put new sessions on claude.ai (Remote Control). Default: whatever Claude Code does, i.e. your `remoteControlAtStartup` setting. |
 | `claude_ai_sessions` / `--claude-ai-sessions [all]` | Also list this machine's other Remote Control sessions, through claude.ai (default off; safe on every machine). `"all"`: every machine's, on one machine only. |
+| `chat_tools` / `--chat-tools A,B` | The web tools a session with no folder may use. Default `WebSearch` and `WebFetch`; may only narrow that list (empty leaves none). For a host whose sessions cannot reach the internet, `["WebSearch"]`. |
 | `provider_id` / `--provider-id` | The agent's id (default `claude`). Machines behind one gateway share it: the gateway merges them into one agent and the folder picks the machine. |
 
 Authentication is Claude Code's own: the SDK uses whatever login `claude` has

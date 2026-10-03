@@ -29,6 +29,7 @@ from ahp_host_claude import __version__
 from ahp_host_claude.claude_ai import LOCAL, Api
 from ahp_host_claude.config import ConfigError, Settings, load
 from ahp_host_claude.provider import (
+    CHAT_TOOLS,
     ClaudeProvider,
     discover,
     is_valid_provider_id,
@@ -68,6 +69,12 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         choices=["local", "all", "off"],
         help="also list this machine's other Remote Control sessions (terminal, desktop app) "
         "through claude.ai; 'all' lists every machine's (on one machine only)",
+    )
+    parser.add_argument(
+        "--chat-tools",
+        metavar="TOOLS",
+        help="comma-separated web tools a session with no folder may use (default: "
+        "WebSearch,WebFetch); may only narrow that list, and an empty value leaves none",
     )
     parser.add_argument("-v", "--verbose", action="store_true", default=None)
     return parser.parse_args(argv)
@@ -110,6 +117,7 @@ async def _run(settings: Settings) -> None:
             claude_ai=Api() if settings.claude_ai_sessions else None,
             claude_ai_scope=settings.claude_ai_sessions or LOCAL,
             state_dir=state,
+            chat_tools=CHAT_TOOLS if settings.chat_tools is None else settings.chat_tools,
         ),
         LoopbackSingleUserPolicy(),
         info=HostInfo(name="ahp-host-claude", version=__version__),

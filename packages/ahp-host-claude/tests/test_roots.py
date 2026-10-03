@@ -253,3 +253,13 @@ def test_a_byte_order_mark_is_tolerated(tmp_path: Path) -> None:
     config = tmp_path / "node.toml"
     config.write_bytes("\ufeff".encode() + f"root = '{tmp_path}'\n".encode())
     assert load(_parse_args(["--config", str(config)])).roots.primary == tmp_path.resolve()
+
+
+def test_chat_tools_from_a_flag_or_the_config_file(tmp_path: Path) -> None:
+    config = tmp_path / "ahp.toml"
+    config.write_text(f'root = "{tmp_path}"\nchat_tools = ["WebSearch"]\n')
+    assert load(_parse_args(["--config", str(config)])).chat_tools == ("WebSearch",)
+    assert load(_parse_args(["--config", str(config), "--chat-tools", ""])).chat_tools == ()
+    assert load(_parse_args(["--root", str(tmp_path)])).chat_tools is None
+    with pytest.raises(ConfigError, match="chat_tools"):
+        load(_parse_args(["--root", str(tmp_path), "--chat-tools", "WebSearch,Bash"]))
