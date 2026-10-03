@@ -77,6 +77,10 @@ from ahp_host_claude.claude_ai import (
 )
 from ahp_host_claude.client_tools import ClientTool, is_client_tool
 from ahp_host_claude.config import DEFAULT_STATE
+from ahp_host_claude.effort import CONFIG_KEY as EFFORT_KEY
+from ahp_host_claude.effort import DEFAULT as EFFORT_DEFAULT
+from ahp_host_claude.effort import PROPERTY as EFFORT_PROPERTY
+from ahp_host_claude.effort import effort_level, sdk_effort
 from ahp_host_claude.paths import directory_of
 from ahp_host_claude.permissions import (
     APPROVALS_PROPERTY,
@@ -356,8 +360,12 @@ class ClaudeSession:
         chat_dir: Path | None = None,
         status_on_claude_ai: Callable[[str], Awaitable[str | None]] | None = None,
         chat_tools: Sequence[str] = CHAT_TOOLS,
+        effort: str | None = None,
     ) -> None:
         self.context = context
+        #: Chosen at creation (or restored on resume); a client may change it
+        #: later (`config_changed`), which restarts Claude on the conversation.
+        self.effort = effort_level(effort if effort is not None else context.config.get(EFFORT_KEY))
         #: What a session with no folder may use (`CHAT_TOOLS`, or the subset the
         #: host was configured with).
         self._chat_tools = tuple(chat_tools)
@@ -519,6 +527,7 @@ class ClaudeSession:
             add_dirs=list(extra),
             resume=self.claude_session_id,
             model=None if self._model == DEFAULT_MODEL else self._model,
+            effort=sdk_effort(self.effort),  # type: ignore[arg-type]
             permission_mode=PERMISSION_MODES[self.approvals],  # type: ignore[arg-type]
             disallowed_tools=list(DISALLOWED_TOOLS),
             can_use_tool=self._can_use_tool,
@@ -807,6 +816,8 @@ class ClaudeSession:
         """
         if RC_CONFIG_KEY in values:
             await self._set_remote_control(values[RC_CONFIG_KEY] is True)
+        if EFFORT_KEY in values:
+            await self._set_effort(effort_level(values[EFFORT_KEY]))
         if CONFIG_KEY not in values:
             return
         mode = approval_mode(values[CONFIG_KEY])
@@ -815,6 +826,18 @@ class ClaudeSession:
         self.approvals = mode
         if self._client is not None:
             await self._client.set_permission_mode(PERMISSION_MODES[mode])
+
+    async def _set_effort(self, level: str) -> None:
+        """Claude Code reads effort only at start-up: restart on the same
+        conversation, now if idle, else once the turn in flight is over."""
+        if level == self.effort:
+            return
+        self.effort = level
+        if self.mirror_of is not None or self._client is None:
+            return
+        self._restart_pending = True
+        if not self._lock.locked() and self._turn is None:
+            await self._restart_client()
 
     async def _pre_tool_use(self, hook_input: Any, tool_use_id: str | None, context: Any) -> Any:
         name = str(hook_input.get("tool_name", ""))
@@ -1363,11 +1386,13 @@ class ClaudeProvider:
                 CONFIG_KEY: APPROVALS_PROPERTY,
                 CONTINUE_KEY: self.sessions.picker_property(await self.sessions.recent()),
                 RC_CONFIG_KEY: rc_property(self.remote_control),
+                EFFORT_KEY: dict(EFFORT_PROPERTY),
             },
             values={
                 CONFIG_KEY: approval_mode(request.values.get(CONFIG_KEY)),
                 CONTINUE_KEY: chosen if is_session_id(chosen) else NEW,
                 RC_CONFIG_KEY: self._remote_control(request.values.get(RC_CONFIG_KEY)),
+                EFFORT_KEY: effort_level(request.values.get(EFFORT_KEY)),
             },
         )
 
@@ -1465,6 +1490,7 @@ class ClaudeProvider:
                 ),
                 bridge_session_id=bridge if isinstance(bridge, str) else None,
                 archived=state.get("archived") is True,
+                effort=effort_level(context.config.get(EFFORT_KEY, state.get(EFFORT_KEY))),
                 chat_dir=self.chat_dir,
                 chat_tools=self.chat_tools,
             )
@@ -1481,6 +1507,8 @@ class ClaudeProvider:
             CONFIG_KEY: session.approvals,
             RC_CONFIG_KEY: session.remote_control,
         }
+        if session.effort != EFFORT_DEFAULT:
+            state[EFFORT_KEY] = session.effort
         if session.claude_session_id:
             state["claudeSessionId"] = session.claude_session_id
         if session.bridge_session_id:

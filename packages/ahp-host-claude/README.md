@@ -40,6 +40,12 @@ Status: pre-alpha.
   resume. A switch made on claude.ai (Remote Control) is followed here too,
   and the setting shows it - except to a mode not listed above (such as
   bypass permissions), which puts the session back in Ask instead.
+- **Effort**, a session setting (`effort`: Default, Low, Medium, High, Extra
+  high, Max), passed to Claude Code at start-up. Claude Code cannot change it
+  on a running client, so a change mid-session restarts Claude on the same
+  conversation - straight away if idle, else after the turn in flight. Which
+  levels a model takes is in its `supportedEffortLevels` metadata on the model
+  list, for a client to offer only those.
 - **Steering**: a message sent while Claude is working joins the turn at
   its next tool call (Claude Code's own "next" queue slot) instead of waiting
   for it to finish; queued messages still run afterwards.

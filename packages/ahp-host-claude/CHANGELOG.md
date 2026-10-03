@@ -4,6 +4,10 @@
 
 ### Added
 
+- `effort`, a session setting (Default, Low, Medium, High, Extra high, Max)
+  passed to Claude Code at start-up; changing it mid-session restarts Claude
+  on the same conversation. Kept in the resume state when not the default.
+
 - `chat_tools` (`--chat-tools`): narrow the web tools a session with no folder
   is offered, e.g. drop WebFetch where sessions cannot reach the internet. It
   can only remove tools from the default (`WebSearch`, `WebFetch`), never add
