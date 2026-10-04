@@ -228,7 +228,11 @@ class TestUnimplemented:
     async def test_move_chat_is_declined_with_a_reason(
         self, connected: tuple[Host, FakeClient]
     ) -> None:
-        """1.0.0's `moveChat` requires `movable: true`, which no chat here has."""
+        """1.0.0's `moveChat` requires `movable: true`, which a default chat never has.
+
+        The full behaviour is `test_move_chat.py`; this pins the refusal order:
+        an unknown chat, then malformed params, then a chat that cannot move.
+        """
         _, client = connected
         await _initialize(client)
         destination = {"kind": "newSession"}

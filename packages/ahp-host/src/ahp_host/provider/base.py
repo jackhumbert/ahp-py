@@ -58,6 +58,7 @@ __all__ = [
     "ToolConfirmation",
     "ToolConfirmationOutcome",
     "ToolResult",
+    "TransfersChats",
     "TurnSink",
     "UserMessage",
 ]
@@ -702,6 +703,28 @@ class BackgroundsMcpServers(Protocol):
     """
 
     async def background_mcp_server(self, customization_id: str) -> bool: ...
+
+
+@runtime_checkable
+class TransfersChats(Protocol):
+    """A provider that can follow a chat moving to another session (`moveChat`).
+
+    Implemented on the **provider**, not the session: either side's agent
+    session may not be running (restored sessions resume lazily). The host asks
+    before it commits a cross-session move, with every chat that moves -- the
+    requested chat and the side and tool chats under it -- and the source and
+    destination session URIs. Return ``False`` to refuse; the move then fails
+    and nothing changes.
+
+    A provider without this cannot have its chats moved between sessions, only
+    reordered within one: a turn on a moved chat runs on the destination's
+    agent, and only the provider knows whether that agent can carry the
+    conversation on.
+    """
+
+    async def chats_transferred(
+        self, chats: Sequence[str], source_session: str, destination_session: str
+    ) -> bool: ...
 
 
 @runtime_checkable

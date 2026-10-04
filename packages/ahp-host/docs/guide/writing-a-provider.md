@@ -277,6 +277,17 @@ too, until its chat or session is disposed — 1.0.0 requires that of a terminal
 a tool result references. It is not in the root terminal catalogue, which is
 for interactive shells a client re-attaches to.
 
+## Chats that move
+
+A client can move a chat to another session with `moveChat` (1.0.0). Within one
+session that only reorders the catalogue and needs nothing from you. Between
+sessions, or into a new session, later turns on the chat run on *another*
+session's agent, so the host asks first: implement `TransfersChats` on your
+provider, and `chats_transferred(chats, source_session, destination_session)`
+is called with every chat that moves, its side chats included, before
+anything changes. Return `False` and the move is refused. Without the protocol
+your chats can still be reordered, but not moved out.
+
 ## Truncation, and the one thing you must not fake
 
 `chat/truncated` is how edit-and-resend works: a client drops the turns after a

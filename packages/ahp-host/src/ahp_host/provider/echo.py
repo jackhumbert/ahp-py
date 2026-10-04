@@ -412,6 +412,8 @@ class EchoProvider:
         capabilities: Mapping[str, Any] | None = None,
     ) -> None:
         self._configurable = configurable
+        #: Every `moveChat` transfer this provider agreed to, for tests.
+        self.transfers: list[tuple[tuple[str, ...], str, str]] = []
         self._delay = delay
         self._customizations = customizations
         self._elicit = elicit
@@ -543,6 +545,13 @@ class EchoProvider:
 
     async def resume_state_of(self, session: AgentSession) -> Mapping[str, Any] | None:
         return {}
+
+    async def chats_transferred(
+        self, chats: Sequence[str], source_session: str, destination_session: str
+    ) -> bool:
+        """`TransfersChats`: echo keeps no conversation, so any chat may move."""
+        self.transfers.append((tuple(chats), source_session, destination_session))
+        return True
 
     async def create_session(self, context: AgentSessionContext) -> EchoSession:
         return EchoSession(

@@ -104,8 +104,8 @@ code they justify.
 ## Verified surface (count from the code, never from prose)
 
 - **31** client→server requests, **2** client notifications. The sibling host
-  dispatches all 33, and declines `moveChat` (1.0.0) with `PermissionDenied`
-  because no chat it hosts advertises `movable`
+  dispatches all 33; `moveChat` (1.0.0) moves a chat between sessions only
+  when its provider implements `TransfersChats`
 - **10** server→client requests, **9** server→client notifications
 - **106** action types, **47** client-dispatchable
 - **308** reducer fixtures, **67** round-trips

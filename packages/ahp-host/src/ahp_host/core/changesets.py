@@ -110,7 +110,23 @@ class ContentStore:
         return ResourceContent(data=data)
 
     def owns(self, uri: str) -> bool:
-        return uri.startswith(CONTENT_SCHEME)
+        """Whether this store holds *uri* -- the blob itself, not just the scheme.
+
+        Every session's store shares the scheme, so a scheme test made the
+        first session answer for every session's content: with two sessions
+        publishing changesets, the second's diffs were refused as missing.
+        """
+        return (
+            uri.startswith(CONTENT_SCHEME) and uri.removeprefix(f"{CONTENT_SCHEME}/") in self._blobs
+        )
+
+    def absorb(self, other: ContentStore) -> None:
+        """Take every blob *other* holds -- for a chat moving between sessions.
+
+        Copied rather than moved: the source session may still reference the
+        same bytes from its own changesets, since identical content is shared.
+        """
+        self._blobs.update(other._blobs)
 
 
 def diff_counts(before: bytes | None, after: bytes | None) -> dict[str, int]:

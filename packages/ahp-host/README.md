@@ -158,7 +158,7 @@ All 33 commands, and none of them a stub:
 `initialize` · `ping` · `subscribe` · `unsubscribe` · `reconnect` ·
 `listSessions` (paginated) · `createSession` (with `fork`) · `disposeSession` ·
 `dispatchAction` · `fetchTurns` · `createChat` · `disposeChat` ·
-`moveChat` (declined: no chat advertises `movable` yet) ·
+`moveChat` (reorder, or move to another session with the agent's consent) ·
 `resolveSessionConfig` · `sessionConfigCompletions` · `completions` ·
 `authenticate` · `createTerminal` · `disposeTerminal` · `createResourceWatch` ·
 `invokeChangesetOperation` · `resourceResolve` · `resourceRead` ·

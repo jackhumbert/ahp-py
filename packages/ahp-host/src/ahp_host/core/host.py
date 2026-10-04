@@ -71,6 +71,7 @@ from ahp_host.core.automations import (
     run_count_after_update,
 )
 from ahp_host.core.changesets import (
+    CONTENT_SCHEME,
     Changeset,
     ContentStore,
     FileChange,
@@ -145,6 +146,7 @@ from ahp_host.provider.base import (
     ResumableAgentProvider,
     SessionPublisher,
     SteersTurns,
+    TransfersChats,
     TruncatesHistory,
     TurnSink,
     UserMessage,
@@ -1005,6 +1007,31 @@ class _Publisher:
         await host.sequencer.publish(channel, started)
         await host._start_turn(session, channel, started, _ExternalTurn(run))
         return True
+
+
+@dataclass
+class _HandedOver:
+    """What `moveChat` carries from one session to another, per chat."""
+
+    chats: list[str] = field(default_factory=list)
+    chat_changes: dict[str, dict[str, int]] = field(default_factory=dict)
+    changesets: dict[str, tuple[Changeset, str]] = field(default_factory=dict)
+    reviewed: dict[str, set[str]] = field(default_factory=dict)
+    terminals: dict[str, str] = field(default_factory=dict)
+    canvases: dict[tuple[str, str], str] = field(default_factory=dict)
+    content: ContentStore | None = None
+
+
+def _placed(order: Sequence[str], moving: Sequence[str], after: str | None) -> list[str]:
+    """*order* with *moving* taken out and put back together, after *after*.
+
+    "`after` places the requested chat immediately after another chat ...
+    when it is absent, the requested chat is placed first." Its descendants
+    follow it, so a moved hierarchy stays contiguous.
+    """
+    rest = [uri for uri in order if uri not in moving]
+    index = rest.index(after) + 1 if after is not None and after in rest else 0
+    return [*rest[:index], *moving, *rest[index:]]
 
 
 class _ProviderTerminal:
@@ -2338,6 +2365,16 @@ class Host:
             state = self.sequencer.state_of(chat_uri)
             if not isinstance(state, Mapping):
                 continue
+            # `ChatState.movable` (1.0.0) is derived, never stored: the default
+            # chat and a descendant are not movable, anything else is. Kept in
+            # step here, so every change that could move it -- a chat added,
+            # a move, a new default -- is caught by the same sweep.
+            movable = self._movable(session, chat_uri)
+            if (state.get("movable") is True) != movable:
+                await self.sequencer.publish(
+                    chat_uri, {"type": "chat/movableChanged", "movable": movable}
+                )
+                state = self.sequencer.state_of(chat_uri) or state
             # `is not None`, not `in`: `chat/activityChanged` reduces as a plain
             # JS spread, so clearing the activity leaves the key present holding
             # `undefined` -- `None` here. A wire frame carrying it would be a
@@ -2541,6 +2578,11 @@ class Host:
                 # directory. Same answer the filesystem provider gives.
                 raise errors.invalid_params(f"{uri} is not a directory")
             return _read_result(owner.content.get(uri), params.get("encoding"))
+
+        if uri.startswith(CONTENT_SCHEME):
+            # Host content no session holds (any more): not a path for the
+            # filesystem provider to interpret.
+            raise errors.AhpError(-32008, f"No such content: {uri}")
 
         operation = {"resourceResolve": "resolve", "resourceRead": "read"}.get(method, "list")
         # `followSymlinks` is declared on `ResourceResolveParams` and on nothing
@@ -3748,15 +3790,90 @@ class Host:
         await self._mirror_summary(session)
         return
 
-    async def _move_chat(self, connection: Connection, params: Mapping[str, Any]) -> Any:
-        """`moveChat` (1.0.0): declined, with the reason the spec itself gives.
+    # ─── moving chats (1.0.0) ────────────────────────────────────────────
 
-        "Clients MUST only request a move when the source chat advertises
-        `movable: true`", and the host MUST validate that before committing.
-        This host never advertises `movable`, so every request fails that check
-        -- but the method is defined, so it is answered with a specific refusal
-        rather than `MethodNotFound` (invariant 14). Validation runs in the
-        spec's order so a client learns the first thing it got wrong.
+    def _chat_entry(self, session: _Session, chat: str) -> tuple[dict[str, Any], dict[str, Any]]:
+        """A full `ChatSummary` for *chat*, and the projection `published_chats` keeps.
+
+        Built from the chat channel itself, so an entry restated in another
+        session -- a moved chat -- carries everything it had, `origin`
+        included, rather than a freshly minted one's defaults.
+        """
+        state = self.sequencer.state_of(chat)
+        state = state if isinstance(state, Mapping) else {}
+        projected = {key: state[key] for key in _CHAT_SUMMARY_FIELDS if state.get(key) is not None}
+        if chat in session.chat_changes:
+            projected["changes"] = session.chat_changes[chat]
+        projected.setdefault("title", _DEFAULT_CHAT_TITLE)
+        projected.setdefault("status", _STATUS_IDLE)
+        projected.setdefault("modifiedAt", session.created_at)
+        entry: dict[str, Any] = {"resource": chat}
+        if isinstance(state.get("origin"), Mapping):
+            entry["origin"] = dict(state["origin"])
+        entry.update(projected)
+        return entry, projected
+
+    def _chat_parent(self, session: _Session, chat: str) -> str | None:
+        """The chat *chat* hangs under in the host's hierarchy, if any.
+
+        Side chats and tool-spawned chats belong to the chat that made them,
+        and move with it; a fork is a peer. Derived from the immutable
+        `ChatOrigin`, so it survives a restart without being stored -- and a
+        parent that has since been disposed leaves the child top-level.
+        """
+        state = self.sequencer.state_of(chat)
+        origin = state.get("origin") if isinstance(state, Mapping) else None
+        if not isinstance(origin, Mapping) or origin.get("kind") not in ("sideChat", "tool"):
+            return None
+        parent = origin.get("chat")
+        return parent if isinstance(parent, str) and parent in session.chat_uris else None
+
+    def _descendants(self, session: _Session, chat: str) -> list[str]:
+        """Every chat under *chat*, breadth first, in catalogue order."""
+        found: list[str] = []
+        frontier = [chat]
+        while frontier:
+            parent = frontier.pop(0)
+            for entry in self._catalogue_order(session):
+                if (
+                    entry not in found
+                    and entry != chat
+                    and self._chat_parent(session, entry) == parent
+                ):
+                    found.append(entry)
+                    frontier.append(entry)
+        return found
+
+    def _catalogue_order(self, session: _Session) -> list[str]:
+        state = self.sequencer.state_of(session.uri)
+        chats = state.get("chats") if isinstance(state, Mapping) else None
+        return (
+            [
+                entry["resource"]
+                for entry in chats
+                if isinstance(chats, list)
+                if isinstance(entry, Mapping) and isinstance(entry.get("resource"), str)
+            ]
+            if isinstance(chats, list)
+            else []
+        )
+
+    def _movable(self, session: _Session, chat: str) -> bool:
+        """`ChatState.movable`: "A chat referenced by its owning session's
+        `defaultChat` MUST NOT be movable" -- and a descendant moves only with
+        the chat it belongs to, never on its own."""
+        return chat != session.chat_uri and self._chat_parent(session, chat) is None
+
+    async def _move_chat(self, connection: Connection, params: Mapping[str, Any]) -> Any:
+        """`moveChat` (1.0.0): reorder within a session, or transfer a chat.
+
+        Validated whole before anything changes, in the spec's order: the
+        source exists and is movable, the destination and anchor resolve, and
+        the source does not anchor itself. A same-session move only reorders
+        the catalogue. A cross-session or `newSession` move takes the chat and
+        its side and tool chats with it, and needs the provider's consent
+        (`TransfersChats`), since a turn on a moved chat runs on another
+        session's agent.
         """
         chat_uri = params.get("channel")
         if not isinstance(chat_uri, str):
@@ -3764,11 +3881,220 @@ class Host:
         destination = params.get("destination")
         if not isinstance(destination, Mapping) or not isinstance(destination.get("kind"), str):
             raise errors.invalid_params("destination with a kind is required")
-        if not any(chat_uri in s.chat_uris for s in self._sessions.values()):
+        source = next((s for s in self._sessions.values() if chat_uri in s.chat_uris), None)
+        if source is None:
             raise errors.AhpError(-32008, f"No such chat: {chat_uri}")
         if not self.policy.may_see_channel(connection.info, chat_uri):
             raise errors.AhpError(-32009, f"Not permitted to move {chat_uri}")
-        raise errors.AhpError(-32009, f"{chat_uri} is not movable")
+        if not self._movable(source, chat_uri):
+            raise errors.AhpError(-32009, f"{chat_uri} is not movable")
+
+        kind = destination["kind"]
+        if kind == "newSession":
+            created = await self._move_to_new_session(connection, source, chat_uri)
+            return {"session": created.uri}
+        if kind != "session":
+            raise errors.invalid_params(f"unsupported destination kind {kind!r}")
+
+        target_uri = destination.get("session")
+        if not isinstance(target_uri, str):
+            raise errors.invalid_params("destination.session is required")
+        target = self._sessions.get(target_uri)
+        if target is None:
+            raise errors.session_not_found(target_uri)
+        if not self.policy.may_see_channel(connection.info, target_uri):
+            raise errors.AhpError(-32009, f"Not permitted to move a chat into {target_uri}")
+        after = destination.get("after")
+        if after is not None:
+            if not isinstance(after, str):
+                raise errors.invalid_params("destination.after must be a chat URI")
+            if after == chat_uri:
+                raise errors.invalid_params("a chat cannot be placed after itself")
+            if after not in target.chat_uris:
+                raise errors.AhpError(-32008, f"{after} is not a chat of {target_uri}")
+
+        if target is source:
+            await self._reorder_chat(source, chat_uri, after)
+        else:
+            await self._transfer_chats(source, target, chat_uri, after)
+        self._audit("chat.moved", connection, channel=chat_uri)
+        return {"session": target.uri}
+
+    async def _reorder_chat(self, session: _Session, chat: str, after: str | None) -> None:
+        """Only the requested entry moves; `defaultChat` pins nothing."""
+        order = self._catalogue_order(session)
+        await self._publish_order(session, _placed(order, [chat], after))
+        await self._mirror_summary(session)
+
+    async def _publish_order(self, session: _Session, order: list[str]) -> None:
+        """`session/chatsReordered` with the complete order, if it changed."""
+        if order != self._catalogue_order(session):
+            await self.sequencer.publish(
+                session.uri, {"type": "session/chatsReordered", "chats": order}
+            )
+
+    async def _consent_to_move(
+        self, source: _Session, moving: Sequence[str], destination_uri: str
+    ) -> None:
+        """Everything that can refuse a cross-session move, before any of it happens."""
+        for chat in moving:
+            if source.running(chat):
+                # A transient source condition the spec lets a host refuse:
+                # the turn's runner, sink and parked requests are this
+                # session's, and would be stranded halfway across.
+                raise errors.AhpError(
+                    AHP_ERROR_CODES["Conflict"], f"{chat} has a turn running; move it afterwards"
+                )
+        provider = self._provider_of(source)
+        if not isinstance(provider, TransfersChats):
+            raise errors.AhpError(
+                -32009, f"the {source.provider_id} agent cannot move chats between sessions"
+            )
+        try:
+            agreed = await provider.chats_transferred(list(moving), source.uri, destination_uri)
+        except Exception:
+            _log.exception("chats_transferred failed")
+            agreed = False
+        if not agreed:
+            raise errors.AhpError(-32009, f"the {source.provider_id} agent refused the move")
+
+    async def _transfer_chats(
+        self, source: _Session, target: _Session, chat: str, after: str | None
+    ) -> None:
+        if target.provider_id != source.provider_id:
+            raise errors.AhpError(-32009, "a chat cannot move to a session of another agent")
+        moving = [chat, *self._descendants(source, chat)]
+        await self._consent_to_move(source, moving, target.uri)
+        # Committed, then announced: every catalogue entry is captured while
+        # the chat still belongs to the source, the ownership moves, and only
+        # then do the synchronization actions go out.
+        entries = {c: self._chat_entry(source, c) for c in moving}
+        handed = self._hand_over(source, target, moving)
+        for c in moving:
+            await self.sequencer.publish(source.uri, {"type": "session/chatRemoved", "chat": c})
+        for c in moving:
+            entry, projected = entries[c]
+            target.published_chats[c] = projected
+            await self.sequencer.publish(
+                target.uri, {"type": "session/chatAdded", "summary": entry}
+            )
+        await self._publish_order(target, _placed(self._catalogue_order(target), moving, after))
+        await self._reclaim_terminals(target, list(handed.terminals))
+        await self._mirror_summary(source)
+        await self._mirror_summary(target)
+        await self._persist(source)
+        await self._persist(target)
+
+    async def _move_to_new_session(
+        self, connection: Connection, source: _Session, chat: str
+    ) -> _Session:
+        """`newSession`: a session allocated for the chat, which becomes its default."""
+        moving = [chat, *self._descendants(source, chat)]
+        uri = f"{source.provider_id}:/{uuid.uuid4()}"
+        await self._consent_to_move(source, moving, uri)
+        source_state = self.sequencer.state_of(source.uri)
+        params: dict[str, Any] = {"channel": uri, "provider": source.provider_id}
+        if isinstance(source_state, Mapping):
+            # The moved chat's own working-directory subset "MUST already be in
+            # the session's", so the new session starts with the source's set.
+            if isinstance(source_state.get("workingDirectories"), list):
+                params["workingDirectories"] = list(source_state["workingDirectories"])
+            config = source_state.get("config")
+            if isinstance(config, Mapping) and isinstance(config.get("values"), Mapping):
+                params["config"] = dict(config["values"])
+        chat_state = self.sequencer.state_of(chat)
+        title = chat_state.get("title") if isinstance(chat_state, Mapping) else None
+        # Removed from the source first, then adopted -- not the other way
+        # round: `_new_session` makes it the new session's default chat, and a
+        # chat in two catalogues at once would answer to both.
+        source.published_chats.pop(chat, None)
+        handed = self._hand_over(source, None, [chat])
+        await self.sequencer.publish(source.uri, {"type": "session/chatRemoved", "chat": chat})
+        bring_up = await self._new_session(
+            connection, params, title=title if isinstance(title, str) else None, adopt_chat=chat
+        )
+        created = self._sessions[uri]
+        self._adopt(created, handed)
+        await bring_up
+        descendants = moving[1:]
+        if descendants:
+            entries = {c: self._chat_entry(source, c) for c in descendants}
+            under = self._hand_over(source, created, descendants)
+            for c in descendants:
+                await self.sequencer.publish(source.uri, {"type": "session/chatRemoved", "chat": c})
+            for c in descendants:
+                entry, projected = entries[c]
+                created.published_chats[c] = projected
+                await self.sequencer.publish(
+                    created.uri, {"type": "session/chatAdded", "summary": entry}
+                )
+            await self._reclaim_terminals(created, list(under.terminals))
+        await self._reclaim_terminals(created, list(handed.terminals))
+        await self._mirror_summary(source)
+        await self._mirror_summary(created)
+        await self._persist(source)
+        await self._persist(created)
+        return created
+
+    def _hand_over(
+        self, source: _Session, target: _Session | None, chats: Sequence[str]
+    ) -> _HandedOver:
+        """Move everything the host keeps per chat from *source* to *target*.
+
+        With no *target* yet (a `newSession` move, before the session exists),
+        the pieces are returned for :meth:`_adopt` to place.
+        """
+        handed = _HandedOver()
+        for chat in chats:
+            source.chat_uris.discard(chat)
+            source.published_chats.pop(chat, None)
+            handed.chats.append(chat)
+            if chat in source.chat_changes:
+                handed.chat_changes[chat] = source.chat_changes.pop(chat)
+            for uri, owner in list(source.changeset_chats.items()):
+                if owner == chat:
+                    handed.changesets[uri] = (source.changesets.pop(uri), owner)
+                    del source.changeset_chats[uri]
+                    if uri in source.reviewed:
+                        handed.reviewed[uri] = source.reviewed.pop(uri)
+            for uri, owner in list(source.terminals.items()):
+                if owner == chat:
+                    handed.terminals[uri] = owner
+                    del source.terminals[uri]
+            for key, channel in list(source.canvases.items()):
+                if key[0] == chat:
+                    handed.canvases[key] = channel
+                    del source.canvases[key]
+        handed.content = source.content
+        if target is not None:
+            self._adopt(target, handed)
+        return handed
+
+    def _adopt(self, target: _Session, handed: _HandedOver) -> None:
+        target.chat_uris.update(handed.chats)
+        target.chat_changes.update(handed.chat_changes)
+        for uri, (changeset, owner) in handed.changesets.items():
+            target.changesets[uri] = changeset
+            target.changeset_chats[uri] = owner
+        target.reviewed.update(handed.reviewed)
+        target.terminals.update(handed.terminals)
+        target.canvases.update(handed.canvases)
+        if handed.content is not None and handed.changesets:
+            # A moved changeset's diffs are bytes in the source's store.
+            target.content.absorb(handed.content)
+
+    async def _reclaim_terminals(self, target: _Session, terminals: Sequence[str]) -> None:
+        """A moved chat's terminals now belong to its new session; say so."""
+        for channel in terminals:
+            state = self.sequencer.state_of(channel)
+            claim = claim_from_wire(state.get("claim") if isinstance(state, Mapping) else None)
+            if isinstance(claim, TerminalSessionClaim) and claim.session != target.uri:
+                moved = TerminalSessionClaim(
+                    target.uri, claim.chat, claim.turn_id, claim.tool_call_id
+                )
+                await self.sequencer.publish(
+                    channel, {"type": "terminal/claimed", "claim": moved.to_wire()}
+                )
 
     # ─── changesets ──────────────────────────────────────────────────────
 
@@ -4910,8 +5236,13 @@ class Host:
         *,
         origin: Mapping[str, Any] | None = None,
         title: str | None = None,
+        adopt_chat: str | None = None,
     ) -> asyncio.Task[None]:
         """`createSession`, and the host creating one of its own.
+
+        *adopt_chat* makes an existing chat channel the new session's default
+        chat instead of minting one -- `moveChat` to a `newSession`. Its
+        channel, state and ownership are kept as they are.
 
         `connection` is `None` only for an automation run: the host is the
         creator, so there is no peer to ask `Policy` about, no `activeClient`
@@ -5014,7 +5345,7 @@ class Host:
             source_state = self.sequencer.state_of(forked[0].uri)
             if isinstance(source_state, Mapping) and "config" in source_state:
                 session_config = copy.deepcopy(source_state["config"])
-        chat_uri = f"ahp-chat:/{uuid.uuid4()}"
+        chat_uri = adopt_chat if adopt_chat is not None else f"ahp-chat:/{uuid.uuid4()}"
         created_at = now_iso()
         session = _Session(
             uri=channel,
@@ -5067,25 +5398,8 @@ class Host:
         # channels never has a window in which the peer's own session is
         # unreachable.
         self._channel_created(connection, channel)
-        await self.sequencer.register_channel(
-            chat_uri,
-            {
-                "resource": chat_uri,
-                # A CHAT's name, not the session's. `ChatState` inlines every
-                # field of the catalogue entry, so the two have to agree -- and
-                # `session.title` here made the default chat's tab read "New
-                # Session", which is the name of the thing that contains it.
-                "title": _DEFAULT_CHAT_TITLE,
-                "status": _STATUS_IDLE,
-                "modifiedAt": created_at,
-                # THE point of a fork. The client reads the transcript off the
-                # chat channel, so an empty list here is a fork that visibly
-                # lost the conversation while every command reported success.
-                "turns": forked[1] if forked is not None else [],
-            },
-            "chat",
-        )
-        self._channel_created(connection, chat_uri, session=channel)
+        if adopt_chat is None:
+            await self._register_default_chat(connection, session, forked, created_at)
         # "Each session owns at most one annotations channel. The channel URI is
         # derived from the session URI by appending `/annotations`."
         #
@@ -5109,6 +5423,34 @@ class Host:
         self._background.add(task)
         task.add_done_callback(self._background.discard)
         return task
+
+    async def _register_default_chat(
+        self,
+        connection: Connection | None,
+        session: _Session,
+        forked: tuple[_Session, list[Any]] | None,
+        created_at: str,
+    ) -> None:
+        chat_uri = session.chat_uri
+        await self.sequencer.register_channel(
+            chat_uri,
+            {
+                "resource": chat_uri,
+                # A CHAT's name, not the session's. `ChatState` inlines every
+                # field of the catalogue entry, so the two have to agree -- and
+                # `session.title` here made the default chat's tab read "New
+                # Session", which is the name of the thing that contains it.
+                "title": _DEFAULT_CHAT_TITLE,
+                "status": _STATUS_IDLE,
+                "modifiedAt": created_at,
+                # THE point of a fork. The client reads the transcript off the
+                # chat channel, so an empty list here is a fork that visibly
+                # lost the conversation while every command reported success.
+                "turns": forked[1] if forked is not None else [],
+            },
+            "chat",
+        )
+        self._channel_created(connection, chat_uri, session=session.uri)
 
     async def _bring_up(
         self,
@@ -5168,20 +5510,10 @@ class Host:
             ROOT_URI,
             {"type": "root/activeSessionsChanged", "activeSessions": len(self._sessions)},
         )
-        chat_summary = {
-            "resource": session.chat_uri,
-            # Not `session.title`. A chat tab reading "New Session" is a tab
-            # labelled with the name of the thing that contains it, and
-            # `ChatSummary.title` is REQUIRED so it cannot simply be omitted.
-            "title": _DEFAULT_CHAT_TITLE,
-            "status": _STATUS_IDLE,
-            "modifiedAt": session.created_at,
-        }
-        session.published_chats[session.chat_uri] = {
-            "title": _DEFAULT_CHAT_TITLE,
-            "status": _STATUS_IDLE,
-            "modifiedAt": session.created_at,
-        }
+        # Read from the chat channel, which for a new session holds the
+        # defaults and for one adopted by `moveChat` holds what it already had.
+        chat_summary, projected = self._chat_entry(session, session.chat_uri)
+        session.published_chats[session.chat_uri] = projected
         await self.sequencer.publish(
             session.uri, {"type": "session/chatAdded", "summary": chat_summary}
         )
