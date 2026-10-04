@@ -219,6 +219,53 @@ turn until a human answers, and they raise `asyncio.CancelledError` if the turn
 ends first, which is the same way ordinary cancellation reaches you. An adapter
 that already handles cancellation needs no new code for them.
 
+## Out of turn: the session publisher
+
+`AgentSessionContext.publisher` is a `SessionPublisher`, for what changes when
+no turn is running. Hold it for the life of the session.
+
+| Method | What it does |
+|---|---|
+| `customizations_changed(customizations, server_tools=)` | Republish the session's customization tree. |
+| `mcp_server_changed(id, state, channel=)` | An MCP server's lifecycle. Publish `{"kind": "starting", "blocking": True}` if its startup holds back the next message, and implement `BackgroundsMcpServers` to let a client stop waiting. |
+| `activity_changed(activity)` / `title_changed(title)` / `config_changed(values)` | Session metadata that moved on its own. |
+| `changes_published(changeset, changes)` | Publish or refresh a changeset; a refresh shows as `recomputing`. |
+| `background_work_set(work, chat=)` / `background_work_removed(id, chat=)` | Work running in the background for a chat. |
+| `external_turn(text, run)` | A turn that happened somewhere else. |
+| `progress(progress, total=, message=)` | Report against `createSession.progressToken`. |
+
+**Background work** is a shell left running or a subagent still going: work
+that outlives the turn that started it, so it goes through the publisher, not
+the turn sink. Each entry is a `BackgroundWork`, upserted by `id`, and stays
+listed until you remove it — the host never removes one when a turn ends,
+because a turn ending says nothing about whether the work stopped. A restored
+chat starts with no inventory, so publish what is actually still running once
+the runtime is back.
+
+```python
+from ahp_host.provider.base import BackgroundWork
+
+shell = BackgroundWork(
+    id="shell:42",
+    kind="shell",
+    label="Start the dev server",
+    started_at="2026-10-04T12:00:00.000Z",
+    command="npm run dev",
+    meta={"attached": True},
+)
+assert shell.to_wire() == {
+    "id": "shell:42",
+    "kind": "shell",
+    "label": "Start the dev server",
+    "startedAt": "2026-10-04T12:00:00.000Z",
+    "command": "npm run dev",
+    "_meta": {"attached": True},
+}
+```
+
+A shell needs its `command`, and a subagent needs its own `chat`; `to_wire`
+raises rather than publish an entry every client would reject.
+
 ## Truncation, and the one thing you must not fake
 
 `chat/truncated` is how edit-and-resend works: a client drops the turns after a

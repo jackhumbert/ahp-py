@@ -17,6 +17,8 @@ from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Protocol, runtime_checkable
 
+from ahp_protocol.reducers.clock import now_iso
+
 __all__ = [
     "AgentInfo",
     "AgentProvider",
@@ -24,6 +26,7 @@ __all__ = [
     "AgentSessionContext",
     "ArchivesSessions",
     "AuthChallenge",
+    "BackgroundWork",
     "BackgroundsMcpServers",
     "ClientToolCall",
     "Completes",
@@ -449,6 +452,21 @@ class SessionPublisher(Protocol):
         """
         ...
 
+    async def background_work_set(self, work: BackgroundWork, *, chat: str | None = None) -> None:
+        """Report work running in the background for a chat (1.0.0).
+
+        Upsert by ``work.id``: call again with the same id to change the label.
+        *chat* defaults to the session's default chat. The entry stays until
+        :meth:`background_work_removed` -- turns ending, being cancelled or
+        truncated say nothing about whether the work stopped, so the host never
+        removes one on its own.
+        """
+        ...
+
+    async def background_work_removed(self, work_id: str, *, chat: str | None = None) -> None:
+        """The background work *work_id* finished or is no longer tracked."""
+        ...
+
     async def external_turn(self, text: str, run: Callable[[TurnSink], Awaitable[None]]) -> bool:
         """Start a turn on the default chat that no client asked for.
 
@@ -461,6 +479,60 @@ class SessionPublisher(Protocol):
         ends; ``False`` if the chat already has a turn running.
         """
         ...
+
+
+@dataclass(frozen=True)
+class BackgroundWork:
+    """One entry of `ChatState.backgroundWork` (1.0.0): unfinished work that
+    outlives the turn that started it.
+
+    ``kind`` is ``"shell"`` or ``"subagent"``, and the set is non-exhaustive,
+    so another string passes through for clients to render from the common
+    fields. A shell needs ``command`` and may name the ``terminal`` carrying
+    its output; a subagent needs ``chat``, the subagent's own chat. Whether a
+    shell is attached to the agent's lifetime, and anything else
+    provider-specific, goes in ``meta``.
+
+    ``id`` is opaque to clients and unique within the chat across kinds --
+    derive it from the runtime's own task id.
+    """
+
+    id: str
+    kind: str
+    label: str
+    #: ISO 8601. Defaults to when the value was built.
+    started_at: str = field(default_factory=now_iso)
+    command: str | None = None
+    terminal: str | None = None
+    chat: str | None = None
+    meta: Mapping[str, Any] | None = None
+
+    def to_wire(self) -> dict[str, Any]:
+        """The `BackgroundWork` union member. Raises on a missing required field.
+
+        Raised rather than published: a shell without its command or a subagent
+        without its chat is a schema violation every client would receive.
+        """
+        if self.kind == "shell" and self.command is None:
+            raise ValueError("a shell's background work needs its command")
+        if self.kind == "subagent" and self.chat is None:
+            raise ValueError("a subagent's background work needs its chat")
+        wire: dict[str, Any] = {
+            "id": self.id,
+            "kind": self.kind,
+            "label": self.label,
+            "startedAt": self.started_at,
+        }
+        for key, value in (
+            ("command", self.command),
+            ("terminal", self.terminal),
+            ("chat", self.chat),
+        ):
+            if value is not None:
+                wire[key] = value
+        if self.meta is not None:
+            wire["_meta"] = dict(self.meta)
+        return wire
 
 
 @dataclass(frozen=True)

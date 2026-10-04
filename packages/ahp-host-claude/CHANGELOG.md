@@ -4,6 +4,13 @@
 
 ### Added
 
+- Background shells (AHP 1.0.0 chat background work). A `Bash` command left
+  running in the background is listed on the chat with its command line while
+  it runs, and withdrawn when Claude Code reports it finished, failed or
+  stopped, or when the Claude process goes. Background subagents are not
+  listed: that entry needs the subagent's own chat, and subagents here have
+  none.
+
 - `effort`, a session setting (Default, Low, Medium, High, Extra high, Max)
   passed to Claude Code at start-up; changing it mid-session restarts Claude
   on the same conversation. Kept in the resume state when not the default.

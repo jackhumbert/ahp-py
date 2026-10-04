@@ -68,7 +68,8 @@ Everything 1.0.0 added is additive. Where each host-side feature stands:
 | `AuthenticateParams.expiresIn` | The token is dropped at expiry and `auth/required` goes out with reason `expired`; an empty token revokes |
 | `McpServerStartingState.blocking`, `session/mcpServerBackgroundRequested` | Routed to `BackgroundsMcpServers`; a provider that refuses, or lacks it, gets `blocking: true` reasserted |
 | `moveChat`, `ChatState.movable` | Declined with `PermissionDenied`: no chat is movable yet |
-| Chat background work, per-chat `changes` and changesets, canvases, automation `disableConditions` and `customizations`, historical terminal results | Not yet |
+| Chat background work | `SessionPublisher.background_work_set` / `background_work_removed`; dropped on restore |
+| Per-chat `changes` and changesets, canvases, automation `disableConditions` and `customizations`, historical terminal results | Not yet |
 
 What the host *publishes* is 0.9.0-shaped for everyone: errors as response
 parts, terminal `lifecycle`, session claims with `chat`, and a `failed`

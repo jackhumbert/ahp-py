@@ -122,6 +122,7 @@ from ahp_host.provider.base import (
     AgentSessionContext,
     ArchivesSessions,
     BackgroundsMcpServers,
+    BackgroundWork,
     Completes,
     CompletionRequest,
     ConfigRequest,
@@ -906,6 +907,41 @@ class _Publisher:
         )
         await self._host._persist(self._session)
 
+    def _chat_of(self, chat: str | None) -> str | None:
+        """*chat*, if this session owns it, or the default chat for ``None``.
+
+        A chat the session does not own is refused rather than published to:
+        a provider holding a stale URI must not write into another session's
+        chat, or into one a client disposed.
+        """
+        if chat is None:
+            return self._session.chat_uri
+        return chat if chat in self._session.chat_uris else None
+
+    async def background_work_set(self, work: BackgroundWork, *, chat: str | None = None) -> None:
+        channel = self._chat_of(chat)
+        if channel is None:
+            return
+        await self._host.sequencer.publish(
+            channel, {"type": "chat/backgroundWorkSet", "work": work.to_wire()}
+        )
+
+    async def background_work_removed(self, work_id: str, *, chat: str | None = None) -> None:
+        channel = self._chat_of(chat)
+        if channel is None:
+            return
+        state = self._host.sequencer.state_of(channel)
+        listed = state.get("backgroundWork") if isinstance(state, Mapping) else None
+        if not isinstance(listed, list) or not any(
+            isinstance(w, Mapping) and w.get("id") == work_id for w in listed
+        ):
+            # The reducer would no-op; not publishing keeps a removal for work
+            # the host never listed (or already removed) out of the replay log.
+            return
+        await self._host.sequencer.publish(
+            channel, {"type": "chat/backgroundWorkRemoved", "id": work_id}
+        )
+
     async def external_turn(self, text: str, run: Callable[[TurnSink], Awaitable[None]]) -> bool:
         host, session = self._host, self._session
         channel = session.chat_uri
@@ -1569,6 +1605,12 @@ class Host:
                 # because a turn nothing is running is not active.
                 restored_state.pop("activeTurn", None)
                 restored_state["turns"] = _turns_with_message_origins(restored_state.get("turns"))
+                # "Hosts must reconcile the runtime's current inventory after
+                # restoring a chat, rather than replaying historical work as
+                # running." Absent means "no inventory published yet", which is
+                # the truth until the provider -- resumed lazily -- says what
+                # is actually still running.
+                restored_state.pop("backgroundWork", None)
                 session.chat_uris.add(uri)
             elif uri == stored.uri:
                 await self._refresh_config_schema(stored.provider, restored_state)

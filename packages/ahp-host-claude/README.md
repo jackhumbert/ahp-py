@@ -46,6 +46,10 @@ Status: pre-alpha.
   conversation - straight away if idle, else after the turn in flight. Which
   levels a model takes is in its `supportedEffortLevels` metadata on the model
   list, for a client to offer only those.
+- **Background shells**: a command Claude leaves running in the background is
+  listed on the chat (AHP 1.0.0 background work) with its command line until it
+  finishes or is stopped, so a client can show what is still going after the
+  turn has ended.
 - **Steering**: a message sent while Claude is working joins the turn at
   its next tool call (Claude Code's own "next" queue slot) instead of waiting
   for it to finish; queued messages still run afterwards.

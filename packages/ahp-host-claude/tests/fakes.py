@@ -9,6 +9,7 @@ from typing import Any
 
 from ahp_host.provider.base import (
     AuthChallenge,
+    BackgroundWork,
     ClientToolCall,
     InputOutcome,
     InputRequest,
@@ -243,6 +244,8 @@ class FakePublisher:
         self.tasks: list[asyncio.Task[None]] = []
         self.refusals = 0
         self.config_changes: list[dict[str, Any]] = []
+        #: The chat's background work as the host would hold it, by id.
+        self.background: dict[str, dict[str, Any]] = {}
 
     async def external_turn(self, text: str, run: Callable[[Any], Awaitable[None]]) -> bool:
         if any(not task.done() for task in self.tasks):
@@ -285,6 +288,12 @@ class FakePublisher:
 
     async def config_changed(self, values: Mapping[str, Any]) -> None:
         self.config_changes.append(dict(values))
+
+    async def background_work_set(self, work: BackgroundWork, *, chat: str | None = None) -> None:
+        self.background[work.id] = work.to_wire()
+
+    async def background_work_removed(self, work_id: str, *, chat: str | None = None) -> None:
+        self.background.pop(work_id, None)
 
 
 async def eventually(condition: Callable[[], bool], timeout: float = 2.0) -> None:

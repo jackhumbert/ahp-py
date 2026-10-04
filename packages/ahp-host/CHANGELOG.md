@@ -31,6 +31,12 @@ versions each release speaks.
 
 ### Added
 
+- **Chat background work** (1.0.0): `SessionPublisher.background_work_set` /
+  `background_work_removed` and the `BackgroundWork` value publish
+  `chat/backgroundWorkSet` / `chat/backgroundWorkRemoved` on a chat the session
+  owns (the default chat unless named). A restored chat drops its stored
+  inventory instead of replaying it as running. Documented in
+  `docs/guide/writing-a-provider.md`, "Out of turn".
 - **AHP 1.0.0 session catalogue:** every `SessionSummary` (in `listSessions`,
   `root/sessionAdded` and `root/sessionSummaryChanged`) carries `chats`, the
   ordered compact chat catalogue with each chat's status bits, and

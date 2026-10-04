@@ -61,7 +61,7 @@ from claude_agent_sdk import (
 from claude_agent_sdk import UserMessage as SdkUserMessage
 from claude_agent_sdk.types import StreamEvent
 
-from ahp_host_claude import client_tools
+from ahp_host_claude import background, client_tools
 from ahp_host_claude.attachments import prompt_content
 from ahp_host_claude.claude_ai import (
     ALL,
@@ -341,6 +341,10 @@ class _Turn:
     model: str | None = None
 
 
+#: The `system` subtypes that carry a task's lifecycle (`background.py`).
+_TASK_SUBTYPES: Final = frozenset({"task_started", "task_updated", "task_notification"})
+
+
 class ClaudeSession:
     def __init__(
         self,
@@ -447,6 +451,10 @@ class ClaudeSession:
         #: Claude's id for each client tool call about to run, in order, keyed
         #: by tool: the MCP handler is not told it, and the hook before it is.
         self._client_calls: dict[str, list[tuple[str, dict[str, Any]]]] = {}
+        #: Claude Code's tasks that have started and not ended, by task id --
+        #: the ones shown as chat background work and the ones that may yet
+        #: be (`background.py`).
+        self._tasks: dict[str, background.Task] = {}
 
     @property
     def _sink(self) -> TurnSink | None:
@@ -635,6 +643,9 @@ class ClaudeSession:
             return self._client
 
     async def aclose(self) -> None:
+        # The process and its background shells are going; say so while the
+        # chat can still hear it.
+        await self._forget_tasks()
         client, self._client = self._client, None
         reader, self._reader = self._reader, None
         if reader is not None:
@@ -706,6 +717,8 @@ class ClaudeSession:
 
     async def _stop_client(self) -> None:
         """Let the Claude process go; the next turn starts one again."""
+        # Its background shells go with it.
+        await self._forget_tasks()
         client, self._client = self._client, None
         reader, self._reader = self._reader, None
         self._starting = None
@@ -1141,11 +1154,90 @@ class ClaudeSession:
             if self._client is client:
                 # The next turn starts a new one, resuming this conversation.
                 self._client = None
+                # And whatever it was running in the background died with it.
+                await self._forget_tasks()
             turn = self._turn
             if turn is not None and not turn.done.is_set():
                 if turn.sink is not None:
                     await turn.sink.turn_failed("Claude Code stopped", error_type="claude.exited")
                 self._finish(turn)
+
+    # -- background work -----------------------------------------------------
+
+    async def _on_task(self, subtype: str, data: Mapping[str, Any]) -> None:
+        """One task lifecycle message, as chat background work (1.0.0)."""
+        task_id = data.get("task_id")
+        if not isinstance(task_id, str) or not task_id:
+            return
+        if subtype == "task_started":
+            tool_use_id = data.get("tool_use_id")
+            started = background.Task(
+                task_id=task_id,
+                task_type=data.get("task_type") if isinstance(data.get("task_type"), str) else None,
+                description=str(data.get("description") or ""),
+                started_at=background.now_iso(),
+                tool_use_id=tool_use_id if isinstance(tool_use_id, str) else None,
+                command=self._command_of(tool_use_id),
+                backgrounded=background.backgrounded(data),
+            )
+            self._tasks[task_id] = started
+            await self._show_task(started)
+            return
+        known = self._tasks.get(task_id)
+        if known is None:
+            return
+        task = known
+        status = data.get("status")
+        if subtype == "task_updated":
+            patch = data.get("patch")
+            patch = patch if isinstance(patch, Mapping) else {}
+            status = patch.get("status")
+            flag = background.backgrounded(patch)
+            if flag is not None and status not in background.TERMINAL_STATUSES:
+                task.backgrounded = flag
+                await self._show_task(task)
+        if status in background.TERMINAL_STATUSES:
+            del self._tasks[task_id]
+            await self._hide_task(task)
+
+    def _command_of(self, tool_use_id: object) -> str | None:
+        """The command line of the `Bash` call *tool_use_id*, if this session saw it."""
+        if not isinstance(tool_use_id, str):
+            return None
+        name, tool_input = self._inputs.get(tool_use_id, ("", {}))
+        command = tool_input.get("command") if name == "Bash" else None
+        return command if isinstance(command, str) else None
+
+    async def _show_task(self, task: background.Task) -> None:
+        work = background.work_for(task)
+        if work is None:
+            await self._hide_task(task)
+            return
+        publisher = self.context.publisher
+        if publisher is None:
+            return
+        try:
+            await publisher.background_work_set(work)
+        except Exception:
+            log.exception("publishing background work failed")
+            return
+        task.published = True
+
+    async def _hide_task(self, task: background.Task) -> None:
+        publisher = self.context.publisher
+        if not task.published or publisher is None:
+            return
+        task.published = False
+        try:
+            await publisher.background_work_removed(task.work_id)
+        except Exception:
+            log.exception("withdrawing background work failed")
+
+    async def _forget_tasks(self) -> None:
+        """Every task ended at once: the Claude Code process running them is gone."""
+        tasks, self._tasks = list(self._tasks.values()), {}
+        for task in tasks:
+            await self._hide_task(task)
 
     def _is_elsewhere(self, item: SdkUserMessage) -> bool:
         """A replayed message we did not send: typed on claude.ai, or injected."""
@@ -1163,6 +1255,10 @@ class ClaudeSession:
                 self.claude_session_id = session_id
             elif item.subtype == "status" and "permissionMode" in item.data:
                 await self._on_mode_elsewhere(item.data["permissionMode"])
+            elif item.subtype in _TASK_SUBTYPES:
+                # Before the turn check below: a background task ends whenever
+                # it ends, usually with no turn running.
+                await self._on_task(item.subtype, item.data)
         elif isinstance(item, ResultMessage):
             self.claude_session_id = item.session_id or self.claude_session_id
             if self._stale_results:
