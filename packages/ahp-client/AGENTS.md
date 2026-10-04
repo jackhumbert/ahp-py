@@ -46,8 +46,8 @@ exceptions below; M9 (release) is not.** The suite (count it from
 `pytest --collect-only`, never from prose — a number here went stale twice),
 `mypy --strict`, `ruff`, `ruff format` and three import-linter contracts
 green. A full turn runs against the sibling Python host. The shared layer
-([`ahp-protocol`][protocol]) is green on 247 reducer fixtures,
-39 round-trips and the JS-semantics oracle.
+([`ahp-protocol`][protocol]) is green on 308 reducer fixtures,
+67 round-trips and the JS-semantics oracle.
 
 The two exceptions, so nobody re-discovers them: **`MultiHostStateMirror`
 (§6.3) was never built** — `hosts/` supervises one host per runtime, and an
