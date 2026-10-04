@@ -10,6 +10,7 @@ from typing import Any
 from ahp_host.provider.base import (
     AuthChallenge,
     BackgroundWork,
+    Canvas,
     ClientToolCall,
     InputOutcome,
     InputRequest,
@@ -308,6 +309,12 @@ class FakePublisher:
 
     async def config_changed(self, values: Mapping[str, Any]) -> None:
         self.config_changes.append(dict(values))
+
+    async def canvas_set(self, canvas: Canvas, *, chat: str | None = None) -> str:
+        return f"ahp-canvas:/{canvas.instance_id}"
+
+    async def canvas_removed(self, instance_id: str, *, chat: str | None = None) -> None:
+        return
 
     async def open_terminal(
         self,

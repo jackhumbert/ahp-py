@@ -31,6 +31,12 @@ versions each release speaks.
 
 ### Added
 
+- **Canvases** (1.0.0, experimental): `SessionPublisher.canvas_set` /
+  `canvas_removed` and the `Canvas` value register an `ahp-canvas:` channel,
+  list it in the chat's `ChatState.canvases`, and replace its state with
+  `canvas/stateChanged`. Canvases are runtime-only: never persisted, dropped
+  with their chat, and a restored chat has none. The wire log redacts a
+  canvas's source `url`.
 - **Provider terminals, retained** (1.0.0): `SessionPublisher.open_terminal`
   gives a provider a read-only terminal channel, held by the session and a
   chat, for a tool result or background shell to reference. It stays

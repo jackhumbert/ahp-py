@@ -231,6 +231,7 @@ no turn is running. Hold it for the life of the session.
 | `activity_changed(activity)` / `title_changed(title)` / `config_changed(values)` | Session metadata that moved on its own. |
 | `changes_published(changeset, changes, chat=)` | Publish or refresh a changeset; a refresh shows as `recomputing`. With `chat`, it belongs to that chat's catalogue and roll-up. |
 | `background_work_set(work, chat=)` / `background_work_removed(id, chat=)` | Work running in the background for a chat. |
+| `canvas_set(canvas, chat=)` / `canvas_removed(instance_id, chat=)` | A live canvas on a chat (experimental): an `ahp-canvas:` channel the chat references. Its `url` is never persisted and is redacted from wire logs. |
 | `open_terminal(title, chat=, cwd=, turn_id=, tool_call_id=)` | A read-only terminal for output the agent produces; returns a handle with `resource`, `write(data)` and `exited(code)`. |
 | `external_turn(text, run)` | A turn that happened somewhere else. |
 | `progress(progress, total=, message=)` | Report against `createSession.progressToken`. |

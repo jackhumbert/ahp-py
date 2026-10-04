@@ -37,6 +37,10 @@ Three properties this deliberately keeps:
 * **There is no opt-out.** A flag to log credentials verbatim is a flag someone
   eventually sets on a machine they do not control.
 
+A canvas's live source `url` is redacted too, wherever a `CanvasState` appears
+(it is the object carrying `canvasId`): "Source URLs MUST be redacted from
+diagnostic logs" (1.0.0). A URL elsewhere is ordinary data and stays.
+
 The key list is deliberately broader than AHP's own surface (`token` is the only
 one the protocol defines today) because a provider adapter may put its own
 credentials in `_meta`, and a log is the wrong place to discover that it did.
@@ -90,9 +94,11 @@ def redact(value: Any) -> Any:
     live outbound frame.
     """
     if isinstance(value, Mapping):
+        canvas = "canvasId" in value
         return {
             key: REDACTED
-            if isinstance(key, str) and key.lower().replace("-", "_") in _SENSITIVE_KEYS
+            if (isinstance(key, str) and key.lower().replace("-", "_") in _SENSITIVE_KEYS)
+            or (canvas and key == "url")
             else redact(item)
             for key, item in value.items()
         }

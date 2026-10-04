@@ -127,6 +127,7 @@ from ahp_host.provider.base import (
     ArchivesSessions,
     BackgroundsMcpServers,
     BackgroundWork,
+    Canvas,
     Completes,
     CompletionRequest,
     ConfigRequest,
@@ -953,6 +954,18 @@ class _Publisher:
             channel, {"type": "chat/backgroundWorkRemoved", "id": work_id}
         )
 
+    async def canvas_set(self, canvas: Canvas, *, chat: str | None = None) -> str:
+        owner = self._chat_of(chat)
+        if owner is None:
+            raise errors.AhpError(-32008, f"No such chat: {chat}")
+        return await self._host._set_canvas(self._session, owner, canvas)
+
+    async def canvas_removed(self, instance_id: str, *, chat: str | None = None) -> None:
+        owner = self._chat_of(chat)
+        if owner is None:
+            return
+        await self._host._remove_canvases(self._session, owner, [instance_id])
+
     async def open_terminal(
         self,
         title: str,
@@ -1161,6 +1174,11 @@ class _Session:
     #: channel URI -> owning chat. Persisted and restored with the session, so
     #: a tool result's terminal stays subscribable after it exits (1.0.0).
     terminals: dict[str, str] = field(default_factory=dict)
+    #: Live canvases (1.0.0): (chat, provider's instance id) -> `ahp-canvas:`
+    #: channel, in the order they were added. Runtime only -- a canvas's
+    #: source URL "MUST NOT be reused from persisted state after a provider
+    #: or host restart", so neither the channels nor the references persist.
+    canvases: dict[tuple[str, str], str] = field(default_factory=dict)
     #: Opaque provider state a previous run persisted. Round-tripped, never
     #: interpreted: only the provider knows what it means.
     resume_state: Mapping[str, Any] | None = None
@@ -1686,6 +1704,9 @@ class Host:
                 # the truth until the provider -- resumed lazily -- says what
                 # is actually still running.
                 restored_state.pop("backgroundWork", None)
+                # Canvases are runtime-only (their channels are never stored),
+                # so a stored reference would point at nothing.
+                restored_state.pop("canvases", None)
                 session.chat_uris.add(uri)
             elif reducer == "terminal":
                 # Whatever was running died with the previous process: a
@@ -3140,6 +3161,55 @@ class Host:
         session.terminals[channel] = claim.chat
         return _ProviderTerminal(self, session, channel)
 
+    async def _set_canvas(self, session: _Session, chat: str, canvas: Canvas) -> str:
+        """Register a canvas channel, or replace its state (`canvas/stateChanged`)."""
+        state = canvas.to_wire()
+        key = (chat, canvas.instance_id)
+        channel = session.canvases.get(key)
+        if channel is not None:
+            if self.sequencer.state_of(channel) != state:
+                await self.sequencer.publish(
+                    channel, {"type": "canvas/stateChanged", "canvas": state}
+                )
+            return channel
+        channel = f"ahp-canvas:/{uuid.uuid4()}"
+        await self.sequencer.register_channel(channel, state, "canvas")
+        self._channel_created(None, channel, session=session.uri)
+        session.canvases[key] = channel
+        await self._publish_canvas_references(session, chat)
+        return channel
+
+    async def _remove_canvases(
+        self, session: _Session, chat: str, instance_ids: Sequence[str] | None = None
+    ) -> None:
+        """Withdraw some of *chat*'s canvases, or all of them for ``None``."""
+        removed = False
+        for key, channel in list(session.canvases.items()):
+            if key[0] != chat or (instance_ids is not None and key[1] not in instance_ids):
+                continue
+            del session.canvases[key]
+            await self.sequencer.drop_channel(channel)
+            self._channel_dropped(channel)
+            removed = True
+        if removed and chat in session.chat_uris:
+            await self._publish_canvas_references(session, chat)
+
+    async def _publish_canvas_references(self, session: _Session, chat: str) -> None:
+        """`chat/canvasesChanged`: the chat's whole list, or absent when empty.
+
+        Absent rather than `[]`: the reducer re-adds the key only for a truthy
+        value, and "no canvases" is what an absent list already says.
+        """
+        references = [
+            {"resource": channel}
+            for (owner, _), channel in session.canvases.items()
+            if owner == chat
+        ]
+        action: dict[str, Any] = {"type": "chat/canvasesChanged"}
+        if references:
+            action["canvases"] = references
+        await self.sequencer.publish(chat, action)
+
     async def _drop_provider_terminals(self, session: _Session, chat: str | None = None) -> None:
         """Drop the provider terminals of *chat*, or of the whole session.
 
@@ -3671,6 +3741,7 @@ class Host:
             session, [u for u, c in session.changeset_chats.items() if c == chat_uri]
         )
         await self._drop_provider_terminals(session, chat_uri)
+        await self._remove_canvases(session, chat_uri)
         await self.sequencer.drop_channel(chat_uri)
         self._channel_dropped(chat_uri)
         self._audit("chat.disposed", connection, channel=chat_uri)
@@ -5199,6 +5270,8 @@ class Host:
             await self.sequencer.drop_channel(changeset_uri)
             self._channel_dropped(changeset_uri)
         await self._drop_provider_terminals(session)
+        for owned_chat in list(session.chat_uris):
+            await self._remove_canvases(session, owned_chat)
         for owned_chat in session.chat_uris:
             await self.sequencer.drop_channel(owned_chat)
             self._channel_dropped(owned_chat)

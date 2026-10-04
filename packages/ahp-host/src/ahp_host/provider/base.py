@@ -28,6 +28,7 @@ __all__ = [
     "AuthChallenge",
     "BackgroundWork",
     "BackgroundsMcpServers",
+    "Canvas",
     "ClientToolCall",
     "Completes",
     "CompletionItem",
@@ -475,6 +476,19 @@ class SessionPublisher(Protocol):
         """The background work *work_id* finished or is no longer tracked."""
         ...
 
+    async def canvas_set(self, canvas: Canvas, *, chat: str | None = None) -> str:
+        """Expose or update a live canvas on a chat. Returns its channel URI.
+
+        The first call for an ``instance_id`` adds an `ahp-canvas:` channel to
+        the chat's `ChatState.canvases`; later calls replace its state.
+        Experimental upstream ("1 - Experimental"), like the channel itself.
+        """
+        ...
+
+    async def canvas_removed(self, instance_id: str, *, chat: str | None = None) -> None:
+        """Withdraw a canvas: its reference leaves the chat and its channel goes."""
+        ...
+
     async def open_terminal(
         self,
         title: str,
@@ -512,6 +526,43 @@ class SessionPublisher(Protocol):
         ends; ``False`` if the chat already has a turn running.
         """
         ...
+
+
+@dataclass(frozen=True)
+class Canvas:
+    """A live canvas a chat exposes (`CanvasState`, 1.0.0, experimental).
+
+    ``instance_id`` is stable and yours: publish again with the same one to
+    update the canvas. ``url`` is its current absolute HTTP(S) source; leave it
+    ``None`` while the source is unavailable -- the spec requires clearing it
+    then. It is never persisted and is redacted from wire logs.
+    """
+
+    instance_id: str
+    extension_id: str
+    canvas_id: str
+    extension_name: str | None = None
+    title: str | None = None
+    status: str | None = None
+    url: str | None = None
+
+    def to_wire(self) -> dict[str, Any]:
+        if self.url is not None and not self.url.startswith(("https://", "http://")):
+            raise ValueError("a canvas url must be an absolute HTTP(S) URL")
+        wire: dict[str, Any] = {
+            "instanceId": self.instance_id,
+            "extensionId": self.extension_id,
+            "canvasId": self.canvas_id,
+        }
+        for key, value in (
+            ("extensionName", self.extension_name),
+            ("title", self.title),
+            ("status", self.status),
+            ("url", self.url),
+        ):
+            if value is not None:
+                wire[key] = value
+        return wire
 
 
 class ProviderTerminal(Protocol):

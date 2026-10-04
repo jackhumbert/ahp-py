@@ -72,7 +72,8 @@ Everything 1.0.0 added is additive. Where each host-side feature stands:
 | Per-chat `changes` and changesets | `publish_changeset(..., chat=)`; `ChatSummary.changes` travels in the catalogue, since no chat action carries `ChatState.changes` |
 | Automation `disableConditions`, `runCount` | Validated, persisted and enforced by the scheduler |
 | Historical terminal results | `SessionPublisher.open_terminal`: retained after exit and persisted with the session. A client's own `createTerminal` shells are kept in memory, not on disk |
-| Canvases, automation `customizations` | Not yet |
+| Canvases | `SessionPublisher.canvas_set` / `canvas_removed`; runtime-only, and the source `url` is redacted from wire logs |
+| Automation `customizations` | Not yet |
 
 What the host *publishes* is 0.9.0-shaped for everyone: errors as response
 parts, terminal `lifecycle`, session claims with `chat`, and a `failed`
