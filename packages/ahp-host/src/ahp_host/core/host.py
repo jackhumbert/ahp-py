@@ -139,6 +139,7 @@ from ahp_host.provider.base import (
     HandlesCustomizations,
     ManagesMcpServers,
     OpensSessions,
+    ProviderTerminal,
     ReconfiguresSessions,
     ResumableAgentProvider,
     SessionPublisher,
@@ -639,6 +640,10 @@ def _reducer_for_restored(uri: str, state: Mapping[str, Any], session_uri: str) 
         return "annotations"
     if "turns" in state:
         return "chat"
+    if "claim" in state and "content" in state:
+        # A provider's terminal (1.0.0 retention): `claim` is TerminalState's
+        # alone, and a session never carries `content`.
+        return "terminal"
     return "session"
 
 
@@ -948,6 +953,25 @@ class _Publisher:
             channel, {"type": "chat/backgroundWorkRemoved", "id": work_id}
         )
 
+    async def open_terminal(
+        self,
+        title: str,
+        *,
+        chat: str | None = None,
+        cwd: str | None = None,
+        turn_id: str | None = None,
+        tool_call_id: str | None = None,
+    ) -> ProviderTerminal:
+        owner = self._chat_of(chat)
+        if owner is None:
+            raise errors.AhpError(-32008, f"No such chat: {chat}")
+        return await self._host._open_provider_terminal(
+            self._session,
+            TerminalSessionClaim(self._session.uri, owner, turn_id, tool_call_id),
+            title=title,
+            cwd=cwd,
+        )
+
     async def external_turn(self, text: str, run: Callable[[TurnSink], Awaitable[None]]) -> bool:
         host, session = self._host, self._session
         channel = session.chat_uri
@@ -968,6 +992,38 @@ class _Publisher:
         await host.sequencer.publish(channel, started)
         await host._start_turn(session, channel, started, _ExternalTurn(run))
         return True
+
+
+class _ProviderTerminal:
+    """`ProviderTerminal`: a read-only terminal channel fed by the agent."""
+
+    def __init__(self, host: Host, session: _Session, resource: str) -> None:
+        self._host = host
+        self._session = session
+        self._resource = resource
+        self._done = False
+
+    @property
+    def resource(self) -> str:
+        return self._resource
+
+    async def write(self, data: str) -> None:
+        if self._done or not data:
+            return
+        await self._host.sequencer.publish(self._resource, {"type": "terminal/data", "data": data})
+        self._host._trim_terminal(self._resource)
+
+    async def exited(self, exit_code: int | None = None) -> None:
+        if self._done:
+            return
+        self._done = True
+        action: dict[str, Any] = {"type": "terminal/exited"}
+        if exit_code is not None:
+            action["exitCode"] = exit_code
+        await self._host.sequencer.publish(self._resource, action)
+        # Retained from here on: written with the session, so the output is
+        # still there for a subscriber after a restart.
+        await self._host._persist(self._session)
 
 
 class _Directory:
@@ -1101,6 +1157,10 @@ class _Session:
     #: `changes`: no chat action carries it, so it travels only in the
     #: catalogue (`session/chatUpdated`) and the compact summary.
     chat_changes: dict[str, dict[str, int]] = field(default_factory=dict)
+    #: Terminals a provider opened (`SessionPublisher.open_terminal`), by
+    #: channel URI -> owning chat. Persisted and restored with the session, so
+    #: a tool result's terminal stays subscribable after it exits (1.0.0).
+    terminals: dict[str, str] = field(default_factory=dict)
     #: Opaque provider state a previous run persisted. Round-tripped, never
     #: interpreted: only the provider knows what it means.
     resume_state: Mapping[str, Any] | None = None
@@ -1627,6 +1687,16 @@ class Host:
                 # is actually still running.
                 restored_state.pop("backgroundWork", None)
                 session.chat_uris.add(uri)
+            elif reducer == "terminal":
+                # Whatever was running died with the previous process: a
+                # terminal stored mid-command comes back exited, with the
+                # output it had -- exactly the retained state 1.0.0 asks for.
+                if (restored_state.get("lifecycle") or {}).get("status") != "exited":
+                    restored_state["lifecycle"] = {"status": "exited"}
+                claim = claim_from_wire(restored_state.get("claim"))
+                if not isinstance(claim, TerminalSessionClaim):
+                    continue
+                session.terminals[uri] = claim.chat
             elif uri == stored.uri:
                 await self._refresh_config_schema(stored.provider, restored_state)
             await self.sequencer.register_channel(uri, restored_state, reducer)
@@ -1690,7 +1760,7 @@ class Host:
                 if captured is not None:
                     session.resume_state = dict(captured)
         channels: dict[str, Mapping[str, Any]] = {}
-        for uri in [session.uri, session.annotations_uri, *session.chat_uris]:
+        for uri in [session.uri, session.annotations_uri, *session.chat_uris, *session.terminals]:
             state = self.sequencer.state_of(uri)
             if isinstance(state, Mapping):
                 channels[uri] = dict(state)
@@ -3046,6 +3116,44 @@ class Host:
                 )
         self._trim_terminal(channel)
 
+    async def _open_provider_terminal(
+        self,
+        session: _Session,
+        claim: TerminalSessionClaim,
+        *,
+        title: str,
+        cwd: str | None,
+    ) -> _ProviderTerminal:
+        channel = f"ahp-terminal:/{uuid.uuid4()}"
+        state: dict[str, Any] = {
+            "content": [],
+            "claim": claim.to_wire(),
+            "lifecycle": dict(_TERMINAL_RUNNING),
+            # Plain text: the agent's output, not a pty's.
+            "isPty": False,
+            "title": title or _DEFAULT_TERMINAL_TITLE,
+        }
+        if cwd is not None:
+            state["cwd"] = cwd
+        await self.sequencer.register_channel(channel, state, "terminal")
+        self._channel_created(None, channel, session=session.uri)
+        session.terminals[channel] = claim.chat
+        return _ProviderTerminal(self, session, channel)
+
+    async def _drop_provider_terminals(self, session: _Session, chat: str | None = None) -> None:
+        """Drop the provider terminals of *chat*, or of the whole session.
+
+        "The retained terminal resource follows the lifecycle of its owning
+        chat or session" -- after this a subscribe finds nothing, which is the
+        `NotFound` the spec allows once the owner is gone.
+        """
+        for channel, owner in list(session.terminals.items()):
+            if chat is not None and owner != chat:
+                continue
+            del session.terminals[channel]
+            await self.sequencer.drop_channel(channel)
+            self._channel_dropped(channel)
+
     def _trim_terminal(self, channel: str) -> None:
         """Drop the oldest scrollback, silently.
 
@@ -3562,6 +3670,7 @@ class Host:
         await self._drop_changesets(
             session, [u for u, c in session.changeset_chats.items() if c == chat_uri]
         )
+        await self._drop_provider_terminals(session, chat_uri)
         await self.sequencer.drop_channel(chat_uri)
         self._channel_dropped(chat_uri)
         self._audit("chat.disposed", connection, channel=chat_uri)
@@ -5089,6 +5198,7 @@ class Host:
             await self.sequencer.publish(changeset_uri, {"type": "changeset/cleared"})
             await self.sequencer.drop_channel(changeset_uri)
             self._channel_dropped(changeset_uri)
+        await self._drop_provider_terminals(session)
         for owned_chat in session.chat_uris:
             await self.sequencer.drop_channel(owned_chat)
             self._channel_dropped(owned_chat)

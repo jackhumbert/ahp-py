@@ -49,6 +49,7 @@ __all__ = [
     "ModelInfo",
     "ModelSelection",
     "OpensSessions",
+    "ProviderTerminal",
     "ResumableAgentProvider",
     "SessionDescription",
     "SessionDirectory",
@@ -474,6 +475,31 @@ class SessionPublisher(Protocol):
         """The background work *work_id* finished or is no longer tracked."""
         ...
 
+    async def open_terminal(
+        self,
+        title: str,
+        *,
+        chat: str | None = None,
+        cwd: str | None = None,
+        turn_id: str | None = None,
+        tool_call_id: str | None = None,
+    ) -> ProviderTerminal:
+        """Open a read-only terminal channel for output the agent produces.
+
+        For a command the agent runs: point a tool result's
+        ``{"type": "terminal", "resource": terminal.resource}`` content, or a
+        shell's :class:`BackgroundWork` ``terminal``, at it. The terminal is
+        claimed by the session and *chat* (the default chat unless named), so
+        no client can type into it; *turn_id* and *tool_call_id* narrow the
+        claim to the call using it.
+
+        Retained after :meth:`ProviderTerminal.exited` and across a host
+        restart, as 1.0.0 requires of a terminal a tool result references --
+        until its chat or session is disposed. Not listed in the root terminal
+        catalogue: that is for interactive shells a client re-attaches to.
+        """
+        ...
+
     async def external_turn(self, text: str, run: Callable[[TurnSink], Awaitable[None]]) -> bool:
         """Start a turn on the default chat that no client asked for.
 
@@ -485,6 +511,23 @@ class SessionPublisher(Protocol):
         client's turn does. Returns once the turn has started, not when it
         ends; ``False`` if the chat already has a turn running.
         """
+        ...
+
+
+class ProviderTerminal(Protocol):
+    """The writing end of a terminal from :meth:`SessionPublisher.open_terminal`."""
+
+    @property
+    def resource(self) -> str:
+        """The terminal's channel URI."""
+        ...
+
+    async def write(self, data: str) -> None:
+        """Append output. Plain text; ANSI escapes pass through to clients."""
+        ...
+
+    async def exited(self, exit_code: int | None = None) -> None:
+        """The command ended. Further writes are ignored."""
         ...
 
 

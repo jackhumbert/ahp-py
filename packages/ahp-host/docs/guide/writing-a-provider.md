@@ -231,6 +231,7 @@ no turn is running. Hold it for the life of the session.
 | `activity_changed(activity)` / `title_changed(title)` / `config_changed(values)` | Session metadata that moved on its own. |
 | `changes_published(changeset, changes, chat=)` | Publish or refresh a changeset; a refresh shows as `recomputing`. With `chat`, it belongs to that chat's catalogue and roll-up. |
 | `background_work_set(work, chat=)` / `background_work_removed(id, chat=)` | Work running in the background for a chat. |
+| `open_terminal(title, chat=, cwd=, turn_id=, tool_call_id=)` | A read-only terminal for output the agent produces; returns a handle with `resource`, `write(data)` and `exited(code)`. |
 | `external_turn(text, run)` | A turn that happened somewhere else. |
 | `progress(progress, total=, message=)` | Report against `createSession.progressToken`. |
 
@@ -265,6 +266,15 @@ assert shell.to_wire() == {
 
 A shell needs its `command`, and a subagent needs its own `chat`; `to_wire`
 raises rather than publish an entry every client would reject.
+
+**Terminals for the agent's own output.** `open_terminal` registers a terminal
+channel the session holds, so clients can watch it and none can type into it.
+Point a tool result's `{"type": "terminal", "resource": terminal.resource,
+"title": ...}` content at it, or a background shell's `terminal`. After
+`exited(code)` it stays subscribable with its output, across a host restart
+too, until its chat or session is disposed — 1.0.0 requires that of a terminal
+a tool result references. It is not in the root terminal catalogue, which is
+for interactive shells a client re-attaches to.
 
 ## Truncation, and the one thing you must not fake
 

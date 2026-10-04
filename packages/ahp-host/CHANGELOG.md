@@ -31,6 +31,12 @@ versions each release speaks.
 
 ### Added
 
+- **Provider terminals, retained** (1.0.0): `SessionPublisher.open_terminal`
+  gives a provider a read-only terminal channel, held by the session and a
+  chat, for a tool result or background shell to reference. It stays
+  subscribable after `exited()` and is persisted with the session, so after a
+  restart it comes back exited with its output; it is dropped with its chat or
+  session.
 - **Per-chat changesets** (1.0.0): `publish_changeset(..., chat=)` and
   `SessionPublisher.changes_published(..., chat=)` scope a changeset to one
   chat. It is listed in that chat's `ChatState.changesets` through

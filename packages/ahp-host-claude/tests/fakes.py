@@ -232,6 +232,23 @@ class RecordingSink:
         return self.client_result
 
 
+class FakeTerminal:
+    """A `ProviderTerminal` that records what was written."""
+
+    def __init__(self, resource: str, title: str) -> None:
+        self.resource = resource
+        self.title = title
+        self.output: list[str] = []
+        self.exit_code: int | None = None
+        self.done = False
+
+    async def write(self, data: str) -> None:
+        self.output.append(data)
+
+    async def exited(self, exit_code: int | None = None) -> None:
+        self.done, self.exit_code = True, exit_code
+
+
 class FakePublisher:
     """The host's out-of-turn side: only `external_turn` does anything.
 
@@ -246,6 +263,7 @@ class FakePublisher:
         self.config_changes: list[dict[str, Any]] = []
         #: The chat's background work as the host would hold it, by id.
         self.background: dict[str, dict[str, Any]] = {}
+        self.terminals: list[FakeTerminal] = []
 
     async def external_turn(self, text: str, run: Callable[[Any], Awaitable[None]]) -> bool:
         if any(not task.done() for task in self.tasks):
@@ -290,6 +308,19 @@ class FakePublisher:
 
     async def config_changed(self, values: Mapping[str, Any]) -> None:
         self.config_changes.append(dict(values))
+
+    async def open_terminal(
+        self,
+        title: str,
+        *,
+        chat: str | None = None,
+        cwd: str | None = None,
+        turn_id: str | None = None,
+        tool_call_id: str | None = None,
+    ) -> FakeTerminal:
+        terminal = FakeTerminal(f"ahp-terminal:/{len(self.terminals)}", title)
+        self.terminals.append(terminal)
+        return terminal
 
     async def background_work_set(self, work: BackgroundWork, *, chat: str | None = None) -> None:
         self.background[work.id] = work.to_wire()
