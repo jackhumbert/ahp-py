@@ -491,3 +491,69 @@ class TestTruncation:
             assert _state(host, chat)["turns"], "turns were dropped anyway"
         finally:
             await host.aclose()
+
+
+async def _create_chat(client: FakeClient, session: str, chat: str) -> None:
+    response = await client.request("createChat", {"channel": session, "chat": chat})
+    assert "error" not in response, response
+
+
+def _summary_changes(client: FakeClient, session: str) -> list[dict[str, Any]]:
+    return [
+        n["params"]["changes"]
+        for n in client.notifications
+        if n.get("method") == "root/sessionSummaryChanged" and n["params"]["session"] == session
+    ]
+
+
+class TestCompactCatalogue:
+    """`SessionSummary.chats` / `defaultChat` and per-chat read state (1.0.0)."""
+
+    async def test_list_sessions_carries_the_ordered_compact_catalogue(self, host: Host) -> None:
+        client = await _client(host)
+        default = await _session(host, client, "echo:/compact-1")
+        await _create_chat(client, "echo:/compact-1", "ahp-chat:/compact-1-b")
+        await client.collect(seconds=0.2)
+        listing = (await client.request("listSessions", {"channel": ROOT_URI}))["result"]
+        summary = next(i for i in listing["items"] if i["resource"] == "echo:/compact-1")
+        assert summary["defaultChat"] == default
+        assert [c["resource"] for c in summary["chats"]] == [default, "ahp-chat:/compact-1-b"]
+        for entry in summary["chats"]:
+            assert set(entry) <= {
+                "resource",
+                "title",
+                "origin",
+                "interactivity",
+                "status",
+                "changes",
+            }
+            assert isinstance(entry["title"], str)
+
+    async def test_chat_read_state_reaches_the_catalogue_and_the_root(self, host: Host) -> None:
+        client = await _client(host)
+        session = "echo:/compact-2"
+        await _session(host, client, session)
+        side = "ahp-chat:/compact-2-b"
+        await _create_chat(client, session, side)
+        await client.request("subscribe", {"channel": side})
+        await client.notify(
+            "dispatchAction",
+            {
+                "channel": side,
+                "clientSeq": 7,
+                "action": {"type": "chat/isReadChanged", "isRead": True},
+            },
+        )
+
+        def compact_read() -> bool:
+            for changes in _summary_changes(client, session):
+                for entry in changes.get("chats", []):
+                    if entry["resource"] == side and entry.get("status", 0) & SessionStatus.IS_READ:
+                        return True
+            return False
+
+        await client.collect_until(compact_read, timeout=5.0)
+        assert compact_read(), "root/sessionSummaryChanged never carried the chat's read bit"
+        assert _catalogue(host, session, side)["status"] & SessionStatus.IS_READ
+        # Scoped to the addressed chat: the session's own read state is untouched.
+        assert not _state(host, session)["status"] & SessionStatus.IS_READ

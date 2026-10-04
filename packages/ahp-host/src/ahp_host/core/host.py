@@ -48,6 +48,7 @@ from ahp_host.core.auth import (
     AUTH_REQUIRED_METHOD,
     AuthRequiredReason,
     ProtectedResource,
+    TokenGrant,
     TokenStore,
     auth_required,
     auth_required_params,
@@ -120,6 +121,7 @@ from ahp_host.provider.base import (
     AgentSession,
     AgentSessionContext,
     ArchivesSessions,
+    BackgroundsMcpServers,
     Completes,
     CompletionRequest,
     ConfigRequest,
@@ -209,15 +211,24 @@ _DEFAULT_TERMINAL_TITLE: Final = "Terminal"
 _DEFAULT_CHAT_TITLE: Final = "New Chat"
 
 #: The mutable half of a `ChatSummary`. `resource` is identity and "MUST NOT be
-#: carried in `changes`"; `origin` never changes after creation.
+#: carried in `changes`"; `origin` never changes after creation. `changes` and
+#: `movable` joined in 1.0.0, and both live on `ChatState` too, so the same
+#: projection keeps the catalogue entry in step with the channel.
 _CHAT_SUMMARY_FIELDS: Final = (
     "title",
     "status",
     "activity",
     "modifiedAt",
+    "changes",
+    "movable",
     "interactivity",
     "workingDirectories",
 )
+
+#: `SessionChatSummary` (1.0.0): the compact chat catalogue a session list
+#: renders from `SessionSummary.chats` without subscribing to the session.
+#: Projected from each `ChatSummary`, in catalogue order.
+_COMPACT_CHAT_FIELDS: Final = ("resource", "title", "origin", "interactivity", "status", "changes")
 
 #: How long a title seeded from the first message may be. The session list is a
 #: narrow column; past this it is truncated by the renderer anyway, and a title
@@ -533,6 +544,34 @@ def _child_customization(
 
 #: `CustomizationEnablementKind`. Only `workspace` names a `uri`.
 _ENABLEMENT_KINDS: Final = frozenset({"global", "workspace", "session"})
+
+
+def _mcp_server_entry(state: Any, customization_id: Any) -> Mapping[str, Any] | None:
+    """The `mcpServer` customization with *customization_id*, top level or nested.
+
+    The same search order as the reducer's `updateMcpServerCustomization`: a
+    top-level hit that is not an MCP server ends the search.
+    """
+    if not isinstance(state, Mapping) or not isinstance(customization_id, str):
+        return None
+    customizations = state.get("customizations")
+    if not isinstance(customizations, list):
+        return None
+    for entry in customizations:
+        if isinstance(entry, Mapping) and entry.get("id") == customization_id:
+            return entry if entry.get("type") == "mcpServer" else None
+    for container in customizations:
+        children = container.get("children") if isinstance(container, Mapping) else None
+        for child in children if isinstance(children, list) else ():
+            if isinstance(child, Mapping) and child.get("id") == customization_id:
+                return child if child.get("type") == "mcpServer" else None
+    return None
+
+
+def _mcp_server_state(state: Any, customization_id: Any) -> Mapping[str, Any] | None:
+    entry = _mcp_server_entry(state, customization_id)
+    server = entry.get("state") if entry is not None else None
+    return server if isinstance(server, Mapping) else None
 
 
 def _enablement_rejection(enablement: Any) -> str | None:
@@ -1288,6 +1327,9 @@ class Host:
         #: the spec keys acceptance on having-been-advertised, not on the
         #: challenge still being open.
         self._dynamic_resources: set[str] = set()
+        #: One timer per resource whose token carried `expiresIn` (1.0.0).
+        #: Replaced by the next push, cancelled by a revoke.
+        self._token_expiry: dict[str, asyncio.TimerHandle] = {}
         #: Terminal actions refused from a peer that does not hold the claim.
         #: The default gates what a document names; a multi-trust-domain host
         #: passes `STRICT_CLAIM_GATED_ACTIONS` (see `core/terminals.py`) and
@@ -1492,11 +1534,19 @@ class Host:
         return list(self._sessions)
 
     async def _restore_one(self, stored: StoredSession) -> _Session | None:
-        chat_uri: str | None = None
-        for uri, state in stored.channels.items():
-            reducer = _reducer_for_restored(uri, state, stored.uri)
-            if reducer == "chat" and chat_uri is None:
-                chat_uri = uri
+        chat_uris = [
+            uri
+            for uri, state in stored.channels.items()
+            if _reducer_for_restored(uri, state, stored.uri) == "chat"
+        ]
+        # The session's own `defaultChat` names the default; only a session
+        # stored without one falls back to the first chat. The fallback alone
+        # used to be the rule, and `_persist` writes chats from a set, so a
+        # multi-chat session could come back with a different default chat --
+        # moving every message addressed to "the session" to another tab.
+        session_state = stored.channels.get(stored.uri)
+        named = session_state.get("defaultChat") if isinstance(session_state, Mapping) else None
+        chat_uri = named if named in chat_uris else (chat_uris[0] if chat_uris else None)
         if chat_uri is None:
             _log.warning("stored session %s has no chat channel; skipped", stored.uri)
             return None
@@ -2023,6 +2073,19 @@ class Host:
             borrowed = promoted_from.get("activity")
             if isinstance(borrowed, str):
                 summary["activity"] = borrowed
+
+        # `SessionSummary.chats` and `defaultChat` (1.0.0): the ordered chat
+        # catalogue, compact, so a session list can show every chat -- and
+        # its read, archived and activity bits -- without a subscription.
+        # Projected from `SessionState.chats`, which `_mirror_chats` has just
+        # brought up to date and whose order is the authoritative one.
+        if isinstance(state, Mapping) and isinstance(state.get("chats"), list):
+            summary["chats"] = [
+                {key: entry[key] for key in _COMPACT_CHAT_FIELDS if entry.get(key) is not None}
+                for entry in state["chats"]
+                if isinstance(entry, Mapping) and isinstance(entry.get("resource"), str)
+            ]
+        summary["defaultChat"] = session.chat_uri
 
         # `SessionSummary.annotations` lets badge UI render counts "without
         # subscribing to the channel itself", so it is derived here rather than
@@ -2987,11 +3050,33 @@ class Host:
             self._audit("auth.refused", connection, allowed=False, detail={"resource": resource})
             raise errors.AhpError(-32009, f"Not permitted to authenticate {resource}")
 
+        expires_in = params.get("expiresIn")
+        if expires_in is not None and (
+            isinstance(expires_in, bool) or not isinstance(expires_in, int) or expires_in < 1
+        ):
+            # "When supplied, the value MUST be a positive integer." A zero or
+            # negative lifetime is a token the client already knows is dead.
+            raise errors.invalid_params("expiresIn must be a positive integer")
+
+        self._cancel_token_expiry(resource)
+        if token == "":
+            # "An empty `token` revokes authentication for the resource." Not a
+            # credential, so nothing it could resolve: parked calls stay parked.
+            self.tokens.revoke(resource)
+            self._audit("auth.revoked", connection, detail={"resource": resource})
+            return {}
+
         raw_scopes = params.get("scopes")
         scopes = (
             [s for s in raw_scopes if isinstance(s, str)] if isinstance(raw_scopes, list) else None
         )
-        self.tokens.push(resource, token, scopes=scopes, client_id=connection.client_id)
+        grant = self.tokens.push(
+            resource, token, scopes=scopes, client_id=connection.client_id, expires_in=expires_in
+        )
+        if expires_in is not None:
+            self._token_expiry[resource] = asyncio.get_running_loop().call_later(
+                expires_in, lambda: self._spawn(self._expire_token(resource, grant))
+            )
         await self._resolve_auth_challenges(resource, scopes)
         # The resource, never the token. `AuditEvent` carries identifiers only,
         # and a credential in an audit record is a credential on disk.
@@ -3000,6 +3085,27 @@ class Host:
         # says `{authenticated: boolean}`; the wire handler returns `{}`, and the
         # spec agrees with the wire.
         return {}
+
+    def _cancel_token_expiry(self, resource: str) -> None:
+        timer = self._token_expiry.pop(resource, None)
+        if timer is not None:
+            timer.cancel()
+
+    async def _expire_token(self, resource: str, grant: TokenGrant) -> None:
+        """A pushed token reached its `expiresIn`: drop it and say so.
+
+        Only if the grant is still the one this timer was armed for -- a
+        refresh pushed in the meantime replaced it and cancelled the timer, but
+        a timer that already fired must not revoke the new token.
+        """
+        self._token_expiry.pop(resource, None)
+        if not self.tokens.revoke_grant(grant):
+            return
+        # "When `reason` is `expired`, the client MUST acquire a new credential
+        # or renew the existing credential" -- the reason is what stops a
+        # client blindly replaying the token it just pushed.
+        with contextlib.suppress(Exception):
+            await self.notify_auth_required(resource, reason="expired")
 
     def _advertise_resource(self, resource: str) -> None:
         """Record a protected resource advertised through a live challenge.
@@ -3470,13 +3576,15 @@ class Host:
         previous = session.changesets.get(changeset.uri)
         first = previous is None
         if not first:
-            # Back to `computing` before the list is replaced. Without it the
-            # file list swaps under the user with nothing to say a refresh
-            # happened, and the client's progress bar -- which it renders for
-            # exactly this status -- never appears. Only on a REFRESH: the
-            # first publish already registers the channel in `computing`.
+            # `recomputing` before the list is replaced (1.0.0). Without a
+            # status change the file list swaps under the user with nothing to
+            # say a refresh happened. Not `computing`: that now means "no
+            # completed result yet", and a client renders it as an empty
+            # placeholder -- while here `files` still holds the previous
+            # result, which the spec says stays visible until the replacement
+            # lands. The first publish registers the channel in `computing`.
             await self.sequencer.publish(
-                changeset.uri, {"type": "changeset/statusChanged", "status": "computing"}
+                changeset.uri, {"type": "changeset/statusChanged", "status": "recomputing"}
             )
 
         already = self._reviewed_ids(session, changeset.uri)
@@ -5092,6 +5200,19 @@ class Host:
         if action_type == "session/customizationToggled":
             return _enablement_rejection(action.get("enablement"))
 
+        if action_type == "session/mcpServerBackgroundRequested":
+            # The reducer no-ops unless the server is `starting` with
+            # `blocking: true`; refusing that case here tells the client
+            # rather than leaving it to wonder why nothing happened -- and lets
+            # `_react` assume the request really did clear `blocking`.
+            server = _mcp_server_state(self.sequencer.state_of(channel), action.get("id"))
+            if (
+                server is None
+                or server.get("kind") != "starting"
+                or server.get("blocking") is not True
+            ):
+                return "that MCP server is not blocking message processing"
+
         # Asked of the bound reducer, never of the URI's scheme (invariant 15).
         # Classifying by scheme happens to work for chat URIs this host mints and
         # breaks the moment a client names one, which `createChat` will allow.
@@ -5176,6 +5297,9 @@ class Host:
             return
         if action_type in _MCP_LIFECYCLE_ACTIONS:
             await self._react_to_mcp(channel, action)
+            return
+        if action_type == "session/mcpServerBackgroundRequested":
+            await self._react_to_mcp_background(channel, action)
             return
         if action_type in _ACTIVE_CLIENT_ACTIONS and connection is not None:
             await self._react_to_active_client(connection, channel, action)
@@ -5391,6 +5515,40 @@ class Host:
                 await session.agent_session.start_mcp_server(customization_id)
             else:
                 await session.agent_session.stop_mcp_server(customization_id)
+
+    async def _react_to_mcp_background(self, channel: str, action: Mapping[str, Any]) -> None:
+        """Ask the provider to stop blocking on a starting server (1.0.0).
+
+        The reducer has already set `blocking: false` optimistically. If the
+        provider cannot background the startup -- or has no way to -- the host
+        stays authoritative the way the spec describes: it republishes the
+        `starting` state with `blocking: true`.
+        """
+        session = self._sessions.get(channel)
+        customization_id = action.get("id")
+        if session is None or not isinstance(customization_id, str):
+            return
+        agreed = False
+        if isinstance(session.agent_session, BackgroundsMcpServers):
+            with contextlib.suppress(Exception):
+                agreed = bool(await session.agent_session.background_mcp_server(customization_id))
+        if agreed:
+            return
+        entry = _mcp_server_entry(self.sequencer.state_of(channel), customization_id)
+        if entry is None or (entry.get("state") or {}).get("kind") != "starting":
+            # It finished starting (or stopped) in the meantime; there is no
+            # longer anything to block on, so nothing to reassert.
+            return
+        reassert: dict[str, Any] = {
+            "type": "session/mcpServerStateChanged",
+            "id": customization_id,
+            "state": {**entry["state"], "blocking": True},
+        }
+        # `channel` is written unconditionally by the reducer, so omitting it
+        # would detach the server's MCP channel.
+        if "channel" in entry:
+            reassert["channel"] = entry["channel"]
+        await self.sequencer.publish(channel, reassert)
 
     async def _react_to_toggle(self, channel: str, action: Mapping[str, Any]) -> None:
         """Tell the provider a customization was switched on or off.
@@ -6590,6 +6748,9 @@ class Host:
     # ─── shutdown ────────────────────────────────────────────────────────
 
     async def aclose(self) -> None:
+        for timer in self._token_expiry.values():
+            timer.cancel()
+        self._token_expiry.clear()
         if self._scheduler is not None:
             self._scheduler.cancel()
             with contextlib.suppress(asyncio.CancelledError):

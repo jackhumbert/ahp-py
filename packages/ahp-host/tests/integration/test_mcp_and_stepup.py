@@ -576,3 +576,164 @@ class TestChallengeKeyedResolution:
             assert len(host.pending) == 0
         finally:
             await host.aclose()
+
+
+_RESOURCE_ID = str(_RESOURCE["resource"])
+
+
+class TestTokenExpiry:
+    """`AuthenticateParams.expiresIn` (1.0.0)."""
+
+    async def _push(self, client: FakeClient, **extra: Any) -> dict[str, Any]:
+        response: dict[str, Any] = await client.request(
+            "authenticate",
+            {"channel": ROOT_URI, "resource": _RESOURCE["resource"], "token": "t", **extra},
+        )
+        return response
+
+    @pytest.mark.parametrize("bad", [0, -5, 1.5, True, "60"])
+    async def test_a_non_positive_integer_is_invalid_params(
+        self, wired: tuple[Host, McpProvider], bad: object
+    ) -> None:
+        host, _ = wired
+        client = await _client(host)
+        response = await self._push(client, expiresIn=bad)
+        assert response["error"]["code"] == -32602
+        assert host.tokens.get(_RESOURCE_ID) is None
+
+    async def test_an_expired_token_is_dropped_and_announced(
+        self, wired: tuple[Host, McpProvider]
+    ) -> None:
+        host, _ = wired
+        client = await _client(host)
+        assert (await self._push(client, expiresIn=1))["result"] == {}
+        assert host.tokens.get(_RESOURCE_ID) is not None
+
+        def expired() -> bool:
+            return any(
+                n.get("method") == "auth/required" and n["params"]["reason"] == "expired"
+                for n in client.notifications
+            )
+
+        await client.collect_until(expired, timeout=5.0)
+        assert expired()
+        assert host.tokens.get(_RESOURCE_ID) is None
+
+    async def test_a_refresh_disarms_the_old_timer(self, wired: tuple[Host, McpProvider]) -> None:
+        host, _ = wired
+        client = await _client(host)
+        await self._push(client, expiresIn=1)
+        await self._push(client, token="refreshed")
+        await client.collect(seconds=1.4)
+        grant = host.tokens.get(_RESOURCE_ID)
+        assert grant is not None
+        assert grant.token.reveal() == "refreshed"
+        assert not any(n.get("method") == "auth/required" for n in client.notifications)
+
+    async def test_an_empty_token_revokes(self, wired: tuple[Host, McpProvider]) -> None:
+        host, _ = wired
+        client = await _client(host)
+        await self._push(client)
+        assert (await self._push(client, token=""))["result"] == {}
+        assert host.tokens.get(_RESOURCE_ID) is None
+
+
+class _BackgroundingSession(McpSession):
+    def __init__(self, context: AgentSessionContext, *, agree: bool) -> None:
+        super().__init__(context)
+        self.agree = agree
+        self.backgrounded: list[str] = []
+
+    async def background_mcp_server(self, customization_id: str) -> bool:
+        self.backgrounded.append(customization_id)
+        return self.agree
+
+
+class TestBlockingStartup:
+    """`McpServerStartingState.blocking` and `session/mcpServerBackgroundRequested` (1.0.0)."""
+
+    async def _blocking(self, provider_agrees: bool | None) -> tuple[Host, FakeClient, str, Any]:
+        sessions: list[McpSession] = []
+
+        class Provider(McpProvider):
+            async def create_session(self, context: AgentSessionContext) -> McpSession:
+                session = (
+                    McpSession(context)
+                    if provider_agrees is None
+                    else _BackgroundingSession(context, agree=provider_agrees)
+                )
+                sessions.append(session)
+                return session
+
+        host = Host(Provider(), LoopbackSingleUserPolicy())
+        client = await _client(host)
+        uri = f"echo:/blocking-{provider_agrees}"
+        await _session(host, client, uri)
+        publisher = sessions[0].context.publisher
+        assert publisher is not None
+        await publisher.customizations_changed(
+            [{"type": "mcpServer", "id": "srv", "name": "srv", "state": {"kind": "stopped"}}]
+        )
+        await publisher.mcp_server_changed("srv", {"kind": "starting", "blocking": True})
+        await client.request("subscribe", {"channel": uri})
+        return host, client, uri, sessions[0]
+
+    async def _background(self, client: FakeClient, uri: str) -> None:
+        await client.notify(
+            "dispatchAction",
+            {
+                "channel": uri,
+                "clientSeq": 1,
+                "action": {"type": "session/mcpServerBackgroundRequested", "id": "srv"},
+            },
+        )
+        await client.collect(seconds=0.4)
+
+    def _server(self, host: Host, uri: str) -> dict[str, Any]:
+        state = host.sequencer.state_of(uri) or {}
+        entry = next(c for c in state["customizations"] if c["id"] == "srv")
+        server: dict[str, Any] = entry["state"]
+        return server
+
+    async def test_a_willing_provider_backgrounds_the_startup(self) -> None:
+        host, client, uri, session = await self._blocking(True)
+        try:
+            await self._background(client, uri)
+            assert session.backgrounded == ["srv"]
+            assert self._server(host, uri) == {"kind": "starting", "blocking": False}
+        finally:
+            await host.aclose()
+
+    async def test_a_refusing_provider_reasserts_blocking(self) -> None:
+        host, client, uri, session = await self._blocking(False)
+        try:
+            await self._background(client, uri)
+            assert session.backgrounded == ["srv"]
+            assert self._server(host, uri) == {"kind": "starting", "blocking": True}
+        finally:
+            await host.aclose()
+
+    async def test_a_provider_without_the_protocol_reasserts_blocking(self) -> None:
+        host, client, uri, _ = await self._blocking(None)
+        try:
+            await self._background(client, uri)
+            assert self._server(host, uri) == {"kind": "starting", "blocking": True}
+        finally:
+            await host.aclose()
+
+    async def test_a_server_that_is_not_blocking_is_refused(self) -> None:
+        host, client, uri, session = await self._blocking(True)
+        try:
+            publisher = session.context.publisher
+            await publisher.mcp_server_changed("srv", {"kind": "ready"})
+            await self._background(client, uri)
+            assert session.backgrounded == []
+            echoes = [
+                e
+                for e in client.actions(uri)
+                if e["action"]["type"] == "session/mcpServerBackgroundRequested"
+            ]
+            assert echoes
+            assert echoes[-1].get("rejectionReason")
+        finally:
+            await host.aclose()

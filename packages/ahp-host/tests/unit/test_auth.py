@@ -387,3 +387,41 @@ class TestCrossClientVisibility:
         alice, bob = TokenStore(), TokenStore()
         alice.push(RESOURCE, SECRET, client_id="alice")
         assert bob.get(RESOURCE) is None
+
+
+class TestExpiry:
+    """`AuthenticateParams.expiresIn` (1.0.0), on the store's own clock."""
+
+    def _store(self) -> tuple[TokenStore, list[float]]:
+        now = [100.0]
+        return TokenStore(clock=lambda: now[0]), now
+
+    def test_a_grant_records_its_deadline(self) -> None:
+        store, _ = self._store()
+        grant = store.push(RESOURCE, SECRET, expires_in=60)
+        assert grant.expires_at == 160.0
+
+    def test_no_expires_in_means_no_deadline(self) -> None:
+        store, now = self._store()
+        store.push(RESOURCE, SECRET)
+        now[0] = 1e9
+        assert store.get(RESOURCE) is not None
+
+    def test_an_expired_grant_reads_as_absent_everywhere(self) -> None:
+        store, now = self._store()
+        store.push(RESOURCE, SECRET, expires_in=60)
+        now[0] = 160.0
+        assert store.get(RESOURCE) is None
+        assert not store.satisfies(RESOURCE)
+        assert store.resources() == ()
+        required = ProtectedResource(RESOURCE)
+        assert store.unsatisfied([required]) == [required]
+
+    def test_revoke_grant_spares_a_newer_push(self) -> None:
+        store, _ = self._store()
+        old = store.push(RESOURCE, "old", expires_in=60)
+        store.push(RESOURCE, "new")
+        assert not store.revoke_grant(old)
+        grant = store.get(RESOURCE)
+        assert grant is not None
+        assert grant.token.reveal() == "new"

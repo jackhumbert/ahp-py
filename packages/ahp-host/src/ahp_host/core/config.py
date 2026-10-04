@@ -45,9 +45,11 @@ _TYPES: dict[str, type | tuple[type, ...]] = {
 def type_matches(schema: Any, value: Any) -> bool:
     """Whether *value* is allowed by a `ConfigPropertySchema`.
 
-    Deliberately shallow: `type` and `enum` only. This is an admission check on
-    an untrusted action, not a JSON Schema implementation -- and a partial
-    validator that looks complete is worse than one that says what it does.
+    Deliberately narrow: `type` and `enum`, and for arrays the element schema
+    (`items`) and cardinality (`minItems` / `maxItems`, 1.0.0). This is an
+    admission check on an untrusted action, not a JSON Schema implementation
+    -- and a partial validator that looks complete is worse than one that says
+    what it does. Object `properties` are not descended into.
     """
     if not isinstance(schema, Mapping):
         return False
@@ -65,7 +67,33 @@ def type_matches(schema: Any, value: Any) -> bool:
         return False
 
     allowed = schema.get("enum")
-    return not (isinstance(allowed, list) and value not in allowed)
+    if isinstance(allowed, list) and value not in allowed:
+        return False
+    if isinstance(value, list):
+        return _array_matches(schema, value)
+    return True
+
+
+def _array_matches(schema: Mapping[str, Any], value: list[Any]) -> bool:
+    """`minItems` / `maxItems` and every element against `items`.
+
+    A bound that is not a non-negative integer is ignored rather than
+    enforced: it is the schema's author who got it wrong, not the client, and
+    refusing every value would make the property unsettable.
+    """
+    low, high = _count(schema.get("minItems")), _count(schema.get("maxItems"))
+    if low is not None and len(value) < low:
+        return False
+    if high is not None and len(value) > high:
+        return False
+    items = schema.get("items")
+    return items is None or all(type_matches(items, item) for item in value)
+
+
+def _count(bound: Any) -> int | None:
+    if isinstance(bound, int) and not isinstance(bound, bool) and bound >= 0:
+        return bound
+    return None
 
 
 @dataclass(frozen=True)

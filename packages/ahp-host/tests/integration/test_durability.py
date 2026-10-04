@@ -483,3 +483,53 @@ class TestRestoredConfigSchema:
             assert state["status"] & (1 << 6) == 0, "the reducer did not unarchive it"
         finally:
             await host.aclose()
+
+
+class TestRestoredDefaultChat:
+    async def test_the_default_chat_is_the_one_the_session_names(self, tmp_path: Path) -> None:
+        """Not whichever chat happens to come first in the stored dict."""
+        from ahp_host.core.store import StoredSession
+
+        def chat(uri: str, title: str) -> dict[str, Any]:
+            return {
+                "resource": uri,
+                "title": title,
+                "status": 1,
+                "modifiedAt": "1970-01-01T00:00:00.000Z",
+                "turns": [],
+            }
+
+        store = FileSessionStore(tmp_path / "sessions")
+        await store.save(
+            StoredSession(
+                uri="echo:/two-chats",
+                provider="echo",
+                created_at="1970-01-01T00:00:00.000Z",
+                channels={
+                    "ahp-chat:/side": chat("ahp-chat:/side", "Side"),
+                    "ahp-chat:/main": chat("ahp-chat:/main", "Main"),
+                    "echo:/two-chats": {
+                        "provider": "echo",
+                        "title": "T",
+                        "status": 1,
+                        "lifecycle": "ready",
+                        "activeClients": [],
+                        "chats": [
+                            {"resource": "ahp-chat:/main", "title": "Main"},
+                            {"resource": "ahp-chat:/side", "title": "Side"},
+                        ],
+                        "defaultChat": "ahp-chat:/main",
+                    },
+                },
+            )
+        )
+        host = Host(EchoProvider(), LoopbackSingleUserPolicy(), store=store)
+        try:
+            assert await host.restore() == 1
+            client = await _client(host)
+            listing = (await client.request("listSessions", {"channel": ROOT_URI}))["result"]
+            summary = listing["items"][0]
+            assert summary["defaultChat"] == "ahp-chat:/main"
+            assert [c["resource"] for c in summary["chats"]] == ["ahp-chat:/main", "ahp-chat:/side"]
+        finally:
+            await host.aclose()

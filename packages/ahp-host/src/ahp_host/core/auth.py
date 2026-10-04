@@ -70,6 +70,15 @@ a legacy one; here it does not. And the fallback is a constructor flag
 (`unscoped_satisfies_any=False`) for a host that has decided it *is* the
 enforcement point.
 
+## Expiry (1.0.0)
+
+`AuthenticateParams.expiresIn` is the token's remaining lifetime in seconds,
+relative to the request -- OAuth's `expires_in`, chosen upstream precisely so
+that client and host clocks need not agree. It is turned into a deadline on the
+store's own **monotonic** clock the moment it arrives. An expired grant is
+treated as absent by every read: nothing can hand a dead token to a provider,
+and the host's timer tells clients with `auth/required` reason `expired`.
+
 ## Keyed by resource
 
 The reference keys `(resource, scopes)`, so it accumulates one entry per scope
@@ -82,7 +91,8 @@ implement.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping, Sequence
+import time
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Final, Literal
 
@@ -229,6 +239,9 @@ class TokenGrant:
     #: The `clientId` of the connection that pushed it. Recorded for audit and
     #: never used to partition the store -- see the module docstring.
     client_id: str | None = None
+    #: When the token dies, on the store's monotonic clock; ``None`` when the
+    #: client sent no `expiresIn` (unknown, not "never").
+    expires_at: float | None = None
 
 
 def scopes_satisfied(
@@ -264,10 +277,16 @@ class TokenStore:
     for what that costs a multi-tenant host.
     """
 
-    def __init__(self, *, unscoped_satisfies_any: bool = True) -> None:
+    def __init__(
+        self,
+        *,
+        unscoped_satisfies_any: bool = True,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
         self._grants: dict[str, TokenGrant] = {}
         #: Whether a grant with no declared scopes satisfies a scope request.
         self.unscoped_satisfies_any = unscoped_satisfies_any
+        self._clock = clock
 
     def push(
         self,
@@ -276,24 +295,38 @@ class TokenStore:
         *,
         scopes: Iterable[str] | None = None,
         client_id: str | None = None,
+        expires_in: float | None = None,
     ) -> TokenGrant:
         """Record the token a client pushed for *resource*, replacing any prior one.
 
         Named for what the client is doing -- the spec's own verb -- rather than
         `authenticate`, because nothing is authenticated by storing it.
+        *expires_in* is seconds from now, as `AuthenticateParams.expiresIn`.
         """
         grant = TokenGrant(
             resource=resource,
             token=BearerToken(token),
             scopes=None if scopes is None else tuple(scopes),
             client_id=client_id,
+            expires_at=None if expires_in is None else self._clock() + expires_in,
         )
         self._grants[resource] = grant
         return grant
 
     def get(self, resource: str) -> TokenGrant | None:
-        """The current grant for *resource*, or ``None`` if nobody pushed one."""
-        return self._grants.get(resource)
+        """The live grant for *resource*, or ``None`` if there is none.
+
+        An expired grant is dropped here rather than returned: a caller that
+        forgot to check `expires_at` must not be able to use it.
+        """
+        grant = self._grants.get(resource)
+        if grant is not None and self.is_expired(grant):
+            del self._grants[resource]
+            return None
+        return grant
+
+    def is_expired(self, grant: TokenGrant) -> bool:
+        return grant.expires_at is not None and self._clock() >= grant.expires_at
 
     def revoke(self, resource: str) -> bool:
         """Forget the grant for *resource*. ``True`` if there was one.
@@ -304,16 +337,27 @@ class TokenStore:
         """
         return self._grants.pop(resource, None) is not None
 
+    def revoke_grant(self, grant: TokenGrant) -> bool:
+        """Forget *grant* only if it is still the stored one for its resource.
+
+        For an expiry timer: a refresh that replaced the grant must survive the
+        old grant's timer firing late.
+        """
+        if self._grants.get(grant.resource) is not grant:
+            return False
+        del self._grants[grant.resource]
+        return True
+
     def clear(self) -> None:
         self._grants.clear()
 
     def resources(self) -> tuple[str, ...]:
-        """Every resource currently holding a grant. Never the tokens."""
-        return tuple(self._grants)
+        """Every resource currently holding a live grant. Never the tokens."""
+        return tuple(r for r in list(self._grants) if self.get(r) is not None)
 
     def satisfies(self, resource: str, required_scopes: Iterable[str] = ()) -> bool:
         """Whether a stored grant for *resource* covers *required_scopes*."""
-        grant = self._grants.get(resource)
+        grant = self.get(resource)
         if grant is None:
             return False
         return scopes_satisfied(
@@ -329,7 +373,7 @@ class TokenStore:
         without it, so failing a command over it would be inventing a
         requirement the host itself advertised as optional.
         """
-        return [r for r in resources if r.required and r.resource not in self._grants]
+        return [r for r in resources if r.required and self.get(r.resource) is None]
 
 
 def auth_required(resources: Iterable[ProtectedResource], message: str | None = None) -> AhpError:

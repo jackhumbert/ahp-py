@@ -24,6 +24,7 @@ __all__ = [
     "AgentSessionContext",
     "ArchivesSessions",
     "AuthChallenge",
+    "BackgroundsMcpServers",
     "ClientToolCall",
     "Completes",
     "CompletionItem",
@@ -506,6 +507,28 @@ class ManagesMcpServers(Protocol):
     async def start_mcp_server(self, customization_id: str) -> None: ...
 
     async def stop_mcp_server(self, customization_id: str) -> None: ...
+
+
+@runtime_checkable
+class BackgroundsMcpServers(Protocol):
+    """A provider that can stop holding messages back on a starting MCP server.
+
+    A provider that waits for a server's tools before it processes the next
+    message publishes ``{"kind": "starting", "blocking": True}`` through
+    :meth:`SessionPublisher.mcp_server_changed` (1.0.0). A client may then
+    dispatch `session/mcpServerBackgroundRequested`, and the host calls this.
+
+    Return ``True`` once the startup no longer blocks -- the server keeps
+    starting in the background and later reports `ready` as usual. Return
+    ``False`` to refuse; the host then republishes ``blocking: True``, which is
+    the spec's way for a host to stay authoritative over the optimistic
+    reducer. A provider without this protocol is treated as refusing.
+
+    Separate from :class:`ManagesMcpServers` so a provider written before 1.0.0
+    still satisfies that protocol's runtime check.
+    """
+
+    async def background_mcp_server(self, customization_id: str) -> bool: ...
 
 
 @runtime_checkable

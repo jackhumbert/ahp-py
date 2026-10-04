@@ -12,6 +12,12 @@ versions each release speaks.
 
 ### Changed
 
+- A changeset refresh reports `recomputing`, not `computing` (1.0.0): the
+  previous files stay valid while it runs, and `computing` now means there is
+  no result yet.
+- Restoring a session takes its default chat from `SessionState.defaultChat`.
+  It used to take the first chat in the stored file, whose order is arbitrary,
+  so a multi-chat session could come back with a different default chat.
 - **Speaks AHP 1.0.0** through `ahp-protocol`'s `spec/v1.0.0` pin, and offers
   `1.0.0, 0.9.0, 0.8.0, 0.7.0, 0.6.0`. Negotiation follows the spec's caret
   rule: a client offering `1.4.0` is accepted and told `1.4.0`. A malformed
@@ -25,6 +31,23 @@ versions each release speaks.
 
 ### Added
 
+- **AHP 1.0.0 session catalogue:** every `SessionSummary` (in `listSessions`,
+  `root/sessionAdded` and `root/sessionSummaryChanged`) carries `chats`, the
+  ordered compact chat catalogue with each chat's status bits, and
+  `defaultChat`. A chat's `chat/isReadChanged` / `chat/isArchivedChanged`
+  reaches its `ChatSummary` and that catalogue without touching the session's
+  own read state.
+- **`authenticate` honours `expiresIn`** (1.0.0): the token is dropped when it
+  expires and clients get `auth/required` with reason `expired`. A
+  non-positive or non-integer `expiresIn` is `-32602`, and an empty `token`
+  revokes the grant. `TokenStore.push(expires_in=)`, `TokenGrant.expires_at`
+  and `TokenStore.revoke_grant()`; an expired grant reads as absent.
+- **`BackgroundsMcpServers`**: a provider that publishes an MCP server as
+  `{"kind": "starting", "blocking": True}` can honour a client's
+  `session/mcpServerBackgroundRequested`. A refusal, or a provider without the
+  protocol, gets `blocking: true` reasserted; a request for a server that is
+  not blocking is rejected.
+- **Config arrays are checked** against `items`, `minItems` and `maxItems`.
 - `FollowsActiveClients.active_clients_changed(clients)`: a provider hears the
   session's whole `activeClients` list after `session/activeClientSet`,
   `session/activeClientRemoved`, a client disconnecting, and a restored session

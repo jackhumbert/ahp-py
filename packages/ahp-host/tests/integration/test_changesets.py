@@ -400,6 +400,26 @@ class TestTheCatalogueStaysCurrent:
         # client subscribed the whole time has no other way to learn of it.
         assert self._catalogue(client, uri)[-1][0]["label"] == "After"
 
+    async def test_a_refresh_recomputes_rather_than_computing(self, host: Host) -> None:
+        """1.0.0: `computing` is the first result only; a refresh is
+        `recomputing` and keeps the previous files while it runs."""
+        uri = "echo:/cat-recompute"
+        client = await _session(host, uri)
+        channel = await host.publish_changeset(uri, Changeset(label="c"), [_EDIT])
+        await client.request("subscribe", {"channel": channel})
+        await host.publish_changeset(uri, Changeset(uri=channel, label="c"), [_EDIT])
+
+        def statuses() -> list[str]:
+            return [
+                a["action"]["status"]
+                for a in client.actions(channel)
+                if a["action"]["type"] == "changeset/statusChanged"
+            ]
+
+        await client.collect_until(lambda: statuses()[-2:] == ["recomputing", "ready"])
+        assert statuses()[-2:] == ["recomputing", "ready"]
+        assert "computing" not in statuses()
+
     async def test_an_unchanged_entry_is_not_re_emitted(self, host: Host) -> None:
         """Full-replacement semantics make a redundant catalogue frame a
         re-render of every row in the picker, and a republish happens after

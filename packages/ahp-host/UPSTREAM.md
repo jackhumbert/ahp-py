@@ -57,14 +57,18 @@ client *sends*:
 - `chat/turnResume` (0.9.0) is rejected: the host never marks an error part
   `resumable`, so there is nothing to reopen.
 
-Everything 1.0.0 added is additive. The three newly client-dispatchable
-actions — `chat/isReadChanged`, `chat/isArchivedChanged` and
-`session/mcpServerBackgroundRequested` — are accepted and reduced like any
-other, because dispatchability is read from the generated table. None of the
-1.0.0 *host-side* features (`moveChat`, chat-owned background work, per-chat
-changesets and canvases, `SessionSummary.chats`, automation
-`disableConditions`) is implemented yet: `moveChat` is answered like any other
-unknown method.
+Everything 1.0.0 added is additive. Where each host-side feature stands:
+
+| 1.0.0 feature | Status |
+|---|---|
+| `SessionSummary.chats` / `defaultChat` | Projected from `SessionState.chats`, in catalogue order |
+| `chat/isReadChanged`, `chat/isArchivedChanged` | Accepted; mirrored into `ChatSummary.status` and the compact catalogue |
+| `ChangesetStatus.Recomputing` | A changeset refresh goes `recomputing` → `ready` |
+| `ConfigPropertySchema.minItems` / `maxItems` | Enforced, with `items`, on every config value a client sets |
+| `AuthenticateParams.expiresIn` | The token is dropped at expiry and `auth/required` goes out with reason `expired`; an empty token revokes |
+| `McpServerStartingState.blocking`, `session/mcpServerBackgroundRequested` | Routed to `BackgroundsMcpServers`; a provider that refuses, or lacks it, gets `blocking: true` reasserted |
+| `moveChat`, `ChatState.movable` | Declined with `PermissionDenied`: no chat is movable yet |
+| Chat background work, per-chat `changes` and changesets, canvases, automation `disableConditions` and `customizations`, historical terminal results | Not yet |
 
 What the host *publishes* is 0.9.0-shaped for everyone: errors as response
 parts, terminal `lifecycle`, session claims with `chat`, and a `failed`
