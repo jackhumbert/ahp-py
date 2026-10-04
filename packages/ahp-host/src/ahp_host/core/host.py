@@ -59,12 +59,16 @@ from ahp_host.core.automations import (
     TERMINAL_STATUSES,
     AutomationRecord,
     AutomationStore,
+    after_date,
+    after_runs,
     apply_patch,
     definition_rejection,
+    disable_condition_reached,
     due_occurrences,
     iso,
     next_run_at,
     reset_cursors,
+    run_count_after_update,
 )
 from ahp_host.core.changesets import (
     Changeset,
@@ -821,8 +825,10 @@ class _Publisher:
                 {"type": "session/serverToolsChanged", "tools": list(server_tools)},
             )
 
-    async def changes_published(self, changeset: Any, changes: Sequence[Any]) -> str:
-        return await self._host.publish_changeset(self._session.uri, changeset, changes)
+    async def changes_published(
+        self, changeset: Any, changes: Sequence[Any], *, chat: str | None = None
+    ) -> str:
+        return await self._host.publish_changeset(self._session.uri, changeset, changes, chat=chat)
 
     async def activity_changed(self, activity: str | None) -> None:
         action: dict[str, Any] = {"type": "session/activityChanged"}
@@ -1086,6 +1092,15 @@ class _Session:
     #: undeclared field to every later subscriber while the ones already
     #: subscribed never converged, there being no action that carries it.
     changes: dict[str, int] | None = None
+    #: Changeset URI -> the chat it is scoped to (1.0.0), for the chat-owned
+    #: ones. A changeset absent here is session-level and goes in
+    #: `SessionState.changesets`; one listed here goes in that chat's
+    #: `ChatState.changesets` instead.
+    changeset_chats: dict[str, str] = field(default_factory=dict)
+    #: Chat URI -> `ChatSummary.changes`, held here for the same reason as
+    #: `changes`: no chat action carries it, so it travels only in the
+    #: catalogue (`session/chatUpdated`) and the compact summary.
+    chat_changes: dict[str, dict[str, int]] = field(default_factory=dict)
     #: Opaque provider state a previous run persisted. Round-tripped, never
     #: interpreted: only the provider knows what it means.
     resume_state: Mapping[str, Any] | None = None
@@ -2239,6 +2254,10 @@ class Host:
             current = {
                 key: state[key] for key in _CHAT_SUMMARY_FIELDS if state.get(key) is not None
             }
+            # `ChatSummary.changes` (1.0.0) has no chat action to ride on, so it
+            # is held on the session and enters the catalogue here.
+            if chat_uri in session.chat_changes:
+                current["changes"] = session.chat_changes[chat_uri]
             published = session.published_chats.get(chat_uri, {})
             changes = {k: v for k, v in current.items() if published.get(k) != v}
             retracted = [key for key in published if key not in current]
@@ -3534,7 +3553,15 @@ class Host:
         await self._end_stranded_turn(session, chat_uri)
 
         session.chat_uris.discard(chat_uri)
+        session.published_chats.pop(chat_uri, None)
+        session.chat_changes.pop(chat_uri, None)
         await self.sequencer.publish(session.uri, {"type": "session/chatRemoved", "chat": chat_uri})
+        # "When a chat ends, its chat-scoped changesets implicitly become
+        # un-subscribable" -- said with `changeset/cleared` first, as session
+        # teardown does, so a subscriber sees an end rather than a stall.
+        await self._drop_changesets(
+            session, [u for u, c in session.changeset_chats.items() if c == chat_uri]
+        )
         await self.sequencer.drop_channel(chat_uri)
         self._channel_dropped(chat_uri)
         self._audit("chat.disposed", connection, channel=chat_uri)
@@ -3604,12 +3631,23 @@ class Host:
         session_uri: str,
         changeset: Changeset,
         changes: Sequence[FileChange],
+        *,
+        chat: str | None = None,
     ) -> str:
         """Publish (or refresh) a changeset and its file list.
 
         The channel is registered here, when the host mints the URI, so a
         subscribe is answered by an exact-string lookup and nothing ever parses
         a channel URI (invariant 15).
+
+        *chat* scopes it to one of the session's chats (1.0.0): it is then
+        advertised in that chat's `ChatState.changesets` rather than the
+        session's, and its roll-up is the chat's `ChatSummary.changes`. Scope
+        it to the chat's effective working directories -- its own subset when
+        it has one, else the session's. A refresh keeps the scope the first
+        publish chose, so a caller that only knows the changeset (an operation
+        handler republishing it) cannot move it; naming a different chat is an
+        error.
         """
         session = self._sessions.get(session_uri)
         if session is None:
@@ -3617,6 +3655,11 @@ class Host:
 
         previous = session.changesets.get(changeset.uri)
         first = previous is None
+        scope = session.changeset_chats.get(changeset.uri) if not first else chat
+        if chat is not None and chat != scope:
+            raise ValueError(f"{changeset.uri} is not scoped to {chat}")
+        if scope is not None and scope not in session.chat_uris:
+            raise errors.AhpError(-32008, f"No such chat: {scope}")
         if not first:
             # `recomputing` before the list is replaced (1.0.0). Without a
             # status change the file list swaps under the user with nothing to
@@ -3635,6 +3678,8 @@ class Host:
             for change in changes
         ]
         session.changesets[changeset.uri] = changeset
+        if scope is not None:
+            session.changeset_chats[changeset.uri] = scope
         if first:
             await self.sequencer.register_channel(
                 changeset.uri, {"status": "computing", "files": []}, "changeset"
@@ -3651,13 +3696,7 @@ class Host:
         # and accepted the review anyway. Full-replacement semantics, so the
         # whole catalogue goes out.
         if previous is None or previous.to_catalogue_entry() != changeset.to_catalogue_entry():
-            await self.sequencer.publish(
-                session_uri,
-                {
-                    "type": "session/changesetsChanged",
-                    "changesets": [c.to_catalogue_entry() for c in session.changesets.values()],
-                },
-            )
+            await self._publish_changeset_catalogue(session, scope)
 
         # `contentChanged` replaces the file list wholesale and carries the
         # operations in the same action, so a client never sees a changeset with
@@ -3680,8 +3719,38 @@ class Host:
 
         # The roll-up a session list renders, summed from the per-file diffs the
         # host just computed -- so the list and the changeset cannot disagree.
+        if scope is not None:
+            session.chat_changes[scope] = changes_summary(files)
         await self._set_changes_summary(session, files)
         return changeset.uri
+
+    async def _drop_changesets(self, session: _Session, uris: Sequence[str]) -> None:
+        for changeset_uri in uris:
+            await self.sequencer.publish(changeset_uri, {"type": "changeset/cleared"})
+            await self.sequencer.drop_channel(changeset_uri)
+            self._channel_dropped(changeset_uri)
+            session.changesets.pop(changeset_uri, None)
+            session.changeset_chats.pop(changeset_uri, None)
+            session.reviewed.pop(changeset_uri, None)
+
+    async def _publish_changeset_catalogue(self, session: _Session, chat: str | None) -> None:
+        """Republish one catalogue -- the session's, or *chat*'s -- whole.
+
+        Full-replacement semantics on both actions, so every entry in that
+        scope goes out, and only those: a chat's changesets are not in the
+        session's catalogue, and the other way round.
+        """
+        entries = [
+            c.to_catalogue_entry()
+            for uri, c in session.changesets.items()
+            if session.changeset_chats.get(uri) == chat
+        ]
+        if chat is None:
+            action = {"type": "session/changesetsChanged", "changesets": entries}
+            await self.sequencer.publish(session.uri, action)
+        else:
+            action = {"type": "chat/changesetsChanged", "changesets": entries}
+            await self.sequencer.publish(chat, action)
 
     async def _set_changes_summary(
         self, session: _Session, files: Sequence[Mapping[str, Any]]
@@ -6261,6 +6330,9 @@ class Host:
         upcoming = next_run_at(record)
         if upcoming is not None:
             entry["nextRunAt"] = iso(upcoming)
+        if record.run_count is not None and after_runs(record.definition) is not None:
+            # "Absent when `disableConditions` contains no AfterRunsCondition."
+            entry["runCount"] = record.run_count
         if terminal > shown:
             entry["runsNextCursor"] = str(shown)
         return entry
@@ -6356,6 +6428,7 @@ class Host:
                 definition=copy.deepcopy(dict(definition)),
                 created_at=stamp,
                 modified_at=stamp,
+                run_count=0 if after_runs(definition) is not None else None,
             )
             self._automations[resource] = created
             await store.save(created)
@@ -6375,6 +6448,7 @@ class Host:
             schedule_moved = patched.get("triggers") != record.definition.get("triggers") or (
                 patched.get("enabled") is True and record.definition.get("enabled") is not True
             )
+            record.run_count = run_count_after_update(record, patched)
             record.definition = patched
             record.modified_at = iso(now)
             if schedule_moved:
@@ -6702,6 +6776,12 @@ class Host:
         now = now or datetime.now(UTC)
         started = 0
         for record in list(self._automations.values()):
+            if record.definition.get("enabled") is True and disable_condition_reached(record, now):
+                # Met before anything was due -- an `afterDate` that passed
+                # while the host was down, or an automation re-enabled with
+                # its date already gone.
+                await self._disable_automation(record, now)
+                continue
             occurrences, cursors = due_occurrences(record, now)
             if not cursors:
                 continue
@@ -6718,9 +6798,35 @@ class Host:
                 }
                 if occurrence.catch_up:
                     origin["catchUp"] = True
+                if disable_condition_reached(record, now):
+                    # A catch-up and an on-time run due together can be one
+                    # more than the allowance has left.
+                    await self._disable_automation(record, now)
+                    break
+                if record.run_count is not None:
+                    # Counted at ADMISSION, so a slot is spent "even if that
+                    # run is later cancelled or fails before startup" -- and
+                    # saved with the run `_start_run` records next.
+                    record.run_count += 1
                 await self._start_run(record, origin)
                 started += 1
+            if record.definition.get("enabled") is True and disable_condition_reached(record, now):
+                # The run just admitted used the last of the allowance: stop
+                # now, so `enabled` says so, rather than at the next tick.
+                await self._disable_automation(record, now)
         return started
+
+    async def _disable_automation(self, record: AutomationRecord, now: datetime) -> None:
+        """A disable condition was met: `enabled` goes false; the conditions stay.
+
+        "Meeting any condition sets `enabled` to `false`, while the definition
+        retains its `disableConditions`." Only scheduling stops -- `run` stays
+        in `operations`, since manual runs are never blocked.
+        """
+        record.definition["enabled"] = False
+        record.modified_at = iso(now)
+        await self._save_automation(record)
+        await self._publish_automation(record)
 
     async def _schedule_loop(self) -> None:
         while True:
@@ -6735,6 +6841,11 @@ class Host:
                 upcoming = next_run_at(record)
                 if upcoming is not None:
                     delay = min(delay, max(0.5, (upcoming - now).total_seconds()))
+                deadline = after_date(record.definition)
+                if deadline is not None and record.definition.get("enabled") is True:
+                    # Wake for an `afterDate` too, so `enabled` turns false when
+                    # the date passes rather than up to a tick later.
+                    delay = min(delay, max(0.5, (deadline - now).total_seconds()))
             with contextlib.suppress(TimeoutError):
                 await asyncio.wait_for(self._schedule_changed.wait(), delay)
 

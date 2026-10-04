@@ -14,6 +14,7 @@ from typing import Any
 
 import pytest
 from ahp_protocol.channels import ROOT_URI
+from ahp_protocol.errors import AhpError
 from ahp_protocol.transport import memory_pair
 
 from ahp_host.core import Host, LoopbackSingleUserPolicy
@@ -1365,3 +1366,91 @@ class TestTheDisabledGateIsReEvaluated:
             assert host.sequencer.state_of(channel)["operations"][0]["status"] == "error"
         finally:
             await host.aclose()
+
+
+class TestChatScoped:
+    """`ChatState.changesets`, `chat/changesetsChanged` and `ChatSummary.changes` (1.0.0)."""
+
+    @pytest.fixture
+    async def multichat(self) -> AsyncIterator[Host]:
+        made = Host(EchoProvider(capabilities={"multipleChats": {}}), LoopbackSingleUserPolicy())
+        try:
+            yield made
+        finally:
+            await made.aclose()
+
+    async def _side_chat(self, host: Host, uri: str) -> tuple[FakeClient, str]:
+        client = await _session(host, uri)
+        chat = f"ahp-chat:/{uri.rsplit('/', 1)[-1]}-side"
+        response = await client.request("createChat", {"channel": uri, "chat": chat})
+        assert "error" not in response, response
+        await client.request("subscribe", {"channel": chat})
+        return client, chat
+
+    async def test_the_catalogue_is_the_chats_not_the_sessions(self, multichat: Host) -> None:
+        uri = "echo:/chat-cs-1"
+        _, chat = await self._side_chat(multichat, uri)
+        session_level = await multichat.publish_changeset(uri, Changeset(label="all"), [_EDIT])
+        chat_level = await multichat.publish_changeset(
+            uri, Changeset(label="mine"), [_EDIT], chat=chat
+        )
+        assert [e["uriTemplate"] for e in _catalogue_entries(multichat, uri)] == [session_level]
+        assert [e["uriTemplate"] for e in _catalogue_entries(multichat, chat)] == [chat_level]
+
+    async def test_the_chats_roll_up_reaches_its_catalogue_entry(self, multichat: Host) -> None:
+        uri = "echo:/chat-cs-2"
+        client, chat = await self._side_chat(multichat, uri)
+        await multichat.publish_changeset(uri, Changeset(label="mine"), [_EDIT], chat=chat)
+
+        def entry() -> dict[str, Any]:
+            chats = (multichat.sequencer.state_of(uri) or {}).get("chats") or []
+            found: dict[str, Any] = next((c for c in chats if c["resource"] == chat), {})
+            return found
+
+        await _until(lambda: "changes" in entry())
+        assert entry()["changes"] == {"files": 1, "additions": 1, "deletions": 0}
+        listing = (await client.request("listSessions", {"channel": ROOT_URI}))["result"]
+        summary = next(i for i in listing["items"] if i["resource"] == uri)
+        compact = next(c for c in summary["chats"] if c["resource"] == chat)
+        assert compact["changes"] == entry()["changes"]
+        assert "changes" not in (multichat.sequencer.state_of(chat) or {}), (
+            "no chat action carries it, so it must not be written into ChatState"
+        )
+
+    async def test_a_refresh_keeps_its_chat(self, multichat: Host) -> None:
+        uri = "echo:/chat-cs-3"
+        _, chat = await self._side_chat(multichat, uri)
+        channel = await multichat.publish_changeset(
+            uri, Changeset(label="mine"), [_EDIT], chat=chat
+        )
+        await multichat.publish_changeset(uri, Changeset(uri=channel, label="renamed"), [_EDIT])
+        assert _catalogue_entries(multichat, uri) == []
+        assert [e["label"] for e in _catalogue_entries(multichat, chat)] == ["renamed"]
+        with pytest.raises(ValueError, match="not scoped"):
+            await multichat.publish_changeset(
+                uri, Changeset(uri=channel, label="x"), [_EDIT], chat="ahp-chat:/elsewhere"
+            )
+
+    async def test_an_unknown_chat_is_refused(self, multichat: Host) -> None:
+        uri = "echo:/chat-cs-4"
+        await _session(multichat, uri)
+        with pytest.raises(AhpError):
+            await multichat.publish_changeset(
+                uri, Changeset(label="x"), [_EDIT], chat="ahp-chat:/nope"
+            )
+
+    async def test_disposing_the_chat_clears_and_drops_its_changesets(
+        self, multichat: Host
+    ) -> None:
+        uri = "echo:/chat-cs-5"
+        client, chat = await self._side_chat(multichat, uri)
+        channel = await multichat.publish_changeset(
+            uri, Changeset(label="mine"), [_EDIT], chat=chat
+        )
+        await client.request("subscribe", {"channel": channel})
+        response = await client.request("disposeChat", {"channel": chat})
+        assert "error" not in response, response
+        await client.collect_until(
+            lambda: any(a["action"]["type"] == "changeset/cleared" for a in client.actions(channel))
+        )
+        assert multichat.sequencer.state_of(channel) is None

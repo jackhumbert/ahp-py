@@ -11,6 +11,7 @@ nor leaves a run claiming to be in progress.
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
@@ -489,3 +490,181 @@ class TestRestart:
             assert snapshot["snapshot"]["state"]["resource"] == run
         finally:
             await second.aclose()
+
+
+def _entry(host: Host) -> dict[str, Any]:
+    (entry,) = _entries(host)
+    return entry
+
+
+async def _update(client: FakeClient, host: Host, changes: dict[str, Any], seq: int) -> None:
+    # Every update in these tests changes the definition; `modifiedAt` alone
+    # can repeat when two land in the same millisecond.
+    before = copy.deepcopy(_entry(host)["definition"])
+    await _dispatch(
+        client,
+        AUTOMATIONS_URI,
+        {"type": "automation/updateRequested", "resource": AUTOMATION, "changes": changes},
+        seq=seq,
+    )
+    await _until(lambda: _entry(host)["definition"] != before)
+
+
+class TestDisableConditions:
+    """`AutomationDefinition.disableConditions` and `AutomationEntry.runCount` (1.0.0)."""
+
+    async def test_after_runs_spends_the_allowance_then_disables(self) -> None:
+        host = _host(InMemoryAutomationStore())
+        try:
+            client, _ = await _client(host)
+            conditions = [{"kind": "afterRuns", "max": 2}]
+            await _create(
+                client,
+                host,
+                _definition(triggers=[_schedule("*/5 * * * *")], disableConditions=conditions),
+            )
+            assert _entry(host)["runCount"] == 0
+            start = datetime.now(UTC)
+            assert await host.run_due_automations(start + timedelta(minutes=10)) == 1
+            assert _entry(host)["runCount"] == 1
+            assert _entry(host)["definition"]["enabled"] is True
+            assert await host.run_due_automations(start + timedelta(minutes=20)) == 1
+            entry = _entry(host)
+            assert entry["runCount"] == 2
+            assert entry["definition"]["enabled"] is False, "the last slot disables it"
+            assert entry["definition"]["disableConditions"] == conditions, "conditions stay"
+            assert "nextRunAt" not in entry
+            assert "run" in entry["operations"]
+            assert await host.run_due_automations(start + timedelta(minutes=30)) == 0
+        finally:
+            await host.aclose()
+
+    async def test_a_manual_run_spends_nothing(self) -> None:
+        host = _host(InMemoryAutomationStore())
+        try:
+            client, _ = await _client(host)
+            await _create(
+                client, host, _definition(disableConditions=[{"kind": "afterRuns", "max": 1}])
+            )
+            params = {"channel": AUTOMATIONS_URI, "automation": AUTOMATION, "requestId": "m"}
+            run = (await client.request("runAutomation", params))["result"]["resource"]
+            await _until(lambda: _status(host, run) == "completed")
+            assert _entry(host)["runCount"] == 0
+            assert _entry(host)["definition"]["enabled"] is True
+        finally:
+            await host.aclose()
+
+    async def test_a_passed_date_disables_without_running(self) -> None:
+        host = _host(InMemoryAutomationStore())
+        try:
+            client, _ = await _client(host)
+            deadline = datetime.now(UTC) + timedelta(minutes=7)
+            await _create(
+                client,
+                host,
+                _definition(
+                    triggers=[_schedule("*/5 * * * *")],
+                    disableConditions=[{"kind": "afterDate", "date": iso(deadline)}],
+                ),
+            )
+            assert "runCount" not in _entry(host), "no afterRuns, no count"
+            assert await host.run_due_automations(deadline + timedelta(minutes=10)) == 0
+            assert _entry(host)["definition"]["enabled"] is False
+        finally:
+            await host.aclose()
+
+    @pytest.mark.parametrize(
+        "conditions",
+        [
+            None,
+            [{"kind": "afterRuns", "max": 0}],
+            [{"kind": "afterRuns", "max": True}],
+            [{"kind": "afterDate", "date": "next tuesday"}],
+            [{"kind": "afterRuns", "max": 1}, {"kind": "afterRuns", "max": 1}],
+            [{"kind": "whenever"}],
+        ],
+    )
+    async def test_invalid_conditions_are_rejected(self, conditions: Any) -> None:
+        host = _host(InMemoryAutomationStore())
+        try:
+            client, _ = await _client(host)
+            await client.request("subscribe", {"channel": AUTOMATIONS_URI})
+            await _dispatch(
+                client,
+                AUTOMATIONS_URI,
+                {
+                    "type": "automation/createRequested",
+                    "resource": AUTOMATION,
+                    "definition": _definition(disableConditions=conditions),
+                },
+            )
+            await client.collect_until(
+                lambda: _echo_of(client, "automation/createRequested") is not None
+            )
+            echo = _echo_of(client, "automation/createRequested")
+            assert echo is not None
+            assert echo.get("rejectionReason")
+            assert _entries(host) == []
+        finally:
+            await host.aclose()
+
+    async def test_the_allowance_resets_exactly_when_the_guide_says(self) -> None:
+        host = _host(InMemoryAutomationStore())
+        try:
+            client, _ = await _client(host)
+            runs = {"kind": "afterRuns", "max": 3}
+            date = {"kind": "afterDate", "date": "2999-01-01T00:00:00Z"}
+            await _create(
+                client,
+                host,
+                _definition(triggers=[_schedule("*/5 * * * *")], disableConditions=[runs]),
+            )
+            start = datetime.now(UTC)
+            await host.run_due_automations(start + timedelta(minutes=10))
+            await host.run_due_automations(start + timedelta(minutes=20))
+            assert _entry(host)["runCount"] == 2
+
+            # Raising max while enabled preserves usage.
+            await _update(client, host, {"disableConditions": [{**runs, "max": 5}]}, seq=2)
+            assert _entry(host)["runCount"] == 2
+            # Adding or touching only afterDate preserves it too.
+            await _update(client, host, {"disableConditions": [{**runs, "max": 5}, date]}, seq=3)
+            assert _entry(host)["runCount"] == 2
+            # Clearing removes the count but does not re-enable or disable.
+            await _update(client, host, {"disableConditions": []}, seq=4)
+            assert "runCount" not in _entry(host)
+            assert _entry(host)["definition"]["enabled"] is True
+            # Adding afterRuns where there was none starts a fresh allowance.
+            await _update(client, host, {"disableConditions": [runs]}, seq=5)
+            assert _entry(host)["runCount"] == 0
+            await host.run_due_automations(start + timedelta(minutes=30))
+            assert _entry(host)["runCount"] == 1
+            # A disabled -> enabled transition resets it.
+            await _update(client, host, {"enabled": False}, seq=6)
+            assert _entry(host)["runCount"] == 1
+            await _update(client, host, {"enabled": True}, seq=7)
+            assert _entry(host)["runCount"] == 0
+        finally:
+            await host.aclose()
+
+    async def test_the_count_survives_a_restart(self, tmp_path: Path) -> None:
+        host = _host(FileAutomationStore(tmp_path))
+        try:
+            client, _ = await _client(host)
+            await _create(
+                client,
+                host,
+                _definition(
+                    triggers=[_schedule("*/5 * * * *")],
+                    disableConditions=[{"kind": "afterRuns", "max": 5}],
+                ),
+            )
+            await host.run_due_automations(datetime.now(UTC) + timedelta(minutes=10))
+        finally:
+            await host.aclose()
+        again = _host(FileAutomationStore(tmp_path))
+        try:
+            await _client(again)
+            assert _entry(again)["runCount"] == 1
+        finally:
+            await again.aclose()

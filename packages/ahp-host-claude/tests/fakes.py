@@ -270,7 +270,9 @@ class FakePublisher:
     async def activity_changed(self, activity: str | None) -> None:
         return
 
-    async def changes_published(self, changeset: Any, changes: Sequence[Any]) -> str:
+    async def changes_published(
+        self, changeset: Any, changes: Sequence[Any], *, chat: str | None = None
+    ) -> str:
         return ""
 
     async def mcp_server_changed(

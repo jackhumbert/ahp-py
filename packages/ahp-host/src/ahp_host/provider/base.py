@@ -399,8 +399,15 @@ class SessionPublisher(Protocol):
         """ "Human-readable description of what the session is currently doing."\""""
         ...
 
-    async def changes_published(self, changeset: Any, changes: Sequence[Any]) -> str:
+    async def changes_published(
+        self, changeset: Any, changes: Sequence[Any], *, chat: str | None = None
+    ) -> str:
         """Publish (or refresh) a changeset. Returns its channel URI.
+
+        With *chat*, the changeset belongs to that chat (1.0.0): it is listed
+        in `ChatState.changesets` and rolls up into the chat's
+        `ChatSummary.changes`. Scope its contents to the chat's effective
+        working directories. A refresh keeps the original scope.
 
         The provider is the only thing that knows what the agent changed, and
         until this existed it had no way to say so: `Host.publish_changeset`

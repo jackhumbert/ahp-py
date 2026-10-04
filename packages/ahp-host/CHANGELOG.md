@@ -31,6 +31,19 @@ versions each release speaks.
 
 ### Added
 
+- **Per-chat changesets** (1.0.0): `publish_changeset(..., chat=)` and
+  `SessionPublisher.changes_published(..., chat=)` scope a changeset to one
+  chat. It is listed in that chat's `ChatState.changesets` through
+  `chat/changesetsChanged` and not in the session's; its roll-up becomes the
+  chat's `ChatSummary.changes` and compact `SessionSummary.chats[].changes`.
+  A refresh keeps the original scope, and disposing the chat clears and drops
+  its changesets.
+- **Automation disable conditions** (1.0.0): `afterRuns` and `afterDate` are
+  validated (positive integer, ISO 8601 date, at most one of each kind),
+  patched with full-array replacement, and enforced by the scheduler.
+  `AutomationEntry.runCount` is counted at admission, persisted, and reset
+  exactly on a disabled→enabled transition or when `afterRuns` is added.
+  Meeting a condition sets `enabled` to false; manual runs never count.
 - **Chat background work** (1.0.0): `SessionPublisher.background_work_set` /
   `background_work_removed` and the `BackgroundWork` value publish
   `chat/backgroundWorkSet` / `chat/backgroundWorkRemoved` on a chat the session

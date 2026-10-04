@@ -229,7 +229,7 @@ no turn is running. Hold it for the life of the session.
 | `customizations_changed(customizations, server_tools=)` | Republish the session's customization tree. |
 | `mcp_server_changed(id, state, channel=)` | An MCP server's lifecycle. Publish `{"kind": "starting", "blocking": True}` if its startup holds back the next message, and implement `BackgroundsMcpServers` to let a client stop waiting. |
 | `activity_changed(activity)` / `title_changed(title)` / `config_changed(values)` | Session metadata that moved on its own. |
-| `changes_published(changeset, changes)` | Publish or refresh a changeset; a refresh shows as `recomputing`. |
+| `changes_published(changeset, changes, chat=)` | Publish or refresh a changeset; a refresh shows as `recomputing`. With `chat`, it belongs to that chat's catalogue and roll-up. |
 | `background_work_set(work, chat=)` / `background_work_removed(id, chat=)` | Work running in the background for a chat. |
 | `external_turn(text, run)` | A turn that happened somewhere else. |
 | `progress(progress, total=, message=)` | Report against `createSession.progressToken`. |

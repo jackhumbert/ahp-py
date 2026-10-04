@@ -250,11 +250,18 @@ are validated before they are saved, with the refusal echoed as
 trigger id, a message whose origin is not `automation`, an unknown provider.
 **Event triggers are refused** — their types are host-defined, and this host
 defines none, so `listAutomationTriggerDefinitions` answers an empty list.
+**Disable conditions** (`afterRuns`, `afterDate`) stop scheduling on their own:
+`AutomationEntry.runCount` counts each scheduled run when it is admitted, a met
+condition sets `enabled` to false and leaves the conditions in place, and
+manual runs neither spend the allowance nor are blocked by it.
 
 **Changesets** are driven from a real git working tree: two changesets
 (`uncommitted` and `session`), per-file review flags, and operations wired to
-`git add`, `git commit` and a scoped revert. Four rules the schema states and
-a host is on the hook for:
+`git add`, `git commit` and a scoped revert. A changeset can also belong to one
+chat (`publish_changeset(..., chat=)`): it is then listed in that chat's
+`ChatState.changesets`, and its roll-up is the chat's `ChatSummary.changes`.
+A refresh reports `recomputing`. Four rules the schema states and a host is on
+the hook for:
 
 - **An operation is invocable only while the changeset declares it.** A
   registered handler is not an invitation — the demo drops Commit from the list

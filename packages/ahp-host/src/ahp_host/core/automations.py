@@ -51,10 +51,14 @@ __all__ = [
     "FileAutomationStore",
     "InMemoryAutomationStore",
     "Occurrence",
+    "after_date",
+    "after_runs",
     "apply_patch",
     "definition_rejection",
+    "disable_condition_reached",
     "due_occurrences",
     "next_run_at",
+    "run_count_after_update",
 ]
 
 _log = logging.getLogger(__name__)
@@ -336,10 +340,100 @@ def definition_rejection(definition: Any, providers: Collection[str]) -> str | N
         seen.add(trigger["id"])
     if "_meta" in definition and not isinstance(definition.get("_meta"), Mapping):
         return "definition._meta must be an object"
+    if "disableConditions" in definition:
+        return _disable_conditions_rejection(definition["disableConditions"])
     return None
 
 
-_PATCHABLE: Final = ("title", "message", "session", "enabled", "triggers", "_meta")
+def _disable_conditions_rejection(conditions: Any) -> str | None:
+    """`AutomationDefinition.disableConditions` (1.0.0).
+
+    The union is `@exhaustive`, so an unknown kind is refused rather than
+    stored and ignored -- a condition the host cannot evaluate would never
+    stop anything. And "hosts MUST reject create or update requests containing
+    duplicate kinds", even with identical values.
+    """
+    if not isinstance(conditions, list):
+        # "`null` is not a clear value": `[]` is.
+        return "definition.disableConditions must be a list"
+    kinds: set[str] = set()
+    for condition in conditions:
+        if not isinstance(condition, Mapping):
+            return "each disable condition must be an object"
+        kind = condition.get("kind")
+        if kind == "afterRuns":
+            limit = condition.get("max")
+            if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
+                return "afterRuns.max must be a positive integer"
+        elif kind == "afterDate":
+            date = condition.get("date")
+            if not isinstance(date, str) or parse_iso(date) is None:
+                return "afterDate.date must be an ISO 8601 timestamp"
+        else:
+            return f"unknown disable condition kind {kind!r}"
+        if kind in kinds:
+            return f"two disable conditions share the kind {kind!r}"
+        kinds.add(kind)
+    return None
+
+
+def _condition(definition: Mapping[str, Any], kind: str) -> Mapping[str, Any] | None:
+    conditions = definition.get("disableConditions")
+    for condition in conditions if isinstance(conditions, list) else ():
+        if isinstance(condition, Mapping) and condition.get("kind") == kind:
+            return condition
+    return None
+
+
+def after_runs(definition: Mapping[str, Any]) -> int | None:
+    """The `afterRuns` allowance, if the definition has one."""
+    condition = _condition(definition, "afterRuns")
+    limit = condition.get("max") if condition is not None else None
+    return limit if isinstance(limit, int) and not isinstance(limit, bool) else None
+
+
+def after_date(definition: Mapping[str, Any]) -> datetime | None:
+    """The `afterDate` deadline, if the definition has one."""
+    condition = _condition(definition, "afterDate")
+    date = condition.get("date") if condition is not None else None
+    return parse_iso(date) if isinstance(date, str) else None
+
+
+def disable_condition_reached(record: AutomationRecord, now: datetime) -> bool:
+    """Whether any disable condition is met -- "logical OR"."""
+    deadline = after_date(record.definition)
+    if deadline is not None and now >= deadline:
+        return True
+    limit = after_runs(record.definition)
+    return limit is not None and (record.run_count or 0) >= limit
+
+
+def run_count_after_update(record: AutomationRecord, patched: Mapping[str, Any]) -> int | None:
+    """`AutomationEntry.runCount` once *patched* replaces the definition.
+
+    The allowance resets to 0 "in exactly two cases": a disabled→enabled
+    transition, and adding an `afterRuns` condition where there was none.
+    Removing `afterRuns` makes the count absent; every other edit -- raising
+    `max`, touching only `afterDate`, reordering -- preserves it.
+    """
+    if after_runs(patched) is None:
+        return None
+    had_limit = after_runs(record.definition) is not None
+    enabled_now = patched.get("enabled") is True and record.definition.get("enabled") is not True
+    if not had_limit or enabled_now:
+        return 0
+    return record.run_count or 0
+
+
+_PATCHABLE: Final = (
+    "title",
+    "message",
+    "session",
+    "enabled",
+    "triggers",
+    "disableConditions",
+    "_meta",
+)
 
 
 def apply_patch(definition: Mapping[str, Any], changes: Mapping[str, Any]) -> dict[str, Any]:
@@ -375,6 +469,10 @@ class AutomationRecord:
     #: `runAutomation.requestId` -> the run it created. "Retrying with the same
     #: key and automation MUST return the original run URI."
     requests: dict[str, str] = field(default_factory=dict)
+    #: `AutomationEntry.runCount` (1.0.0): scheduled runs admitted against the
+    #: current `afterRuns` allowance. ``None`` when there is no such condition.
+    #: Its own field, never derived from `runs`, which is pruned.
+    run_count: int | None = None
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -386,6 +484,7 @@ class AutomationRecord:
             "cursors": self.cursors,
             "runs": self.runs,
             "requests": self.requests,
+            **({} if self.run_count is None else {"runCount": self.run_count}),
         }
 
     @classmethod
@@ -399,6 +498,7 @@ class AutomationRecord:
         cursors = payload.get("cursors")
         runs = payload.get("runs")
         requests = payload.get("requests")
+        run_count = payload.get("runCount")
         return cls(
             resource=resource,
             definition=definition,
@@ -411,6 +511,9 @@ class AutomationRecord:
             requests={k: v for k, v in requests.items() if isinstance(v, str)}
             if isinstance(requests, dict)
             else {},
+            run_count=run_count
+            if isinstance(run_count, int) and not isinstance(run_count, bool)
+            else None,
         )
 
     def run(self, uri: str) -> dict[str, Any] | None:
@@ -571,6 +674,9 @@ def next_run_at(record: AutomationRecord) -> datetime | None:
     evaluation ... It may be in the past while catch-up is pending."""
     if record.definition.get("enabled") is not True:
         return None
+    limit = after_runs(record.definition)
+    if limit is not None and (record.run_count or 0) >= limit:
+        return None
     earliest: datetime | None = None
     triggers = record.definition.get("triggers")
     for trigger in triggers if isinstance(triggers, list) else ():
@@ -583,6 +689,10 @@ def next_run_at(record: AutomationRecord) -> datetime | None:
         upcoming = cron.next_after(_cursor(record, str(trigger.get("id"))), zone)
         if upcoming is not None and (earliest is None or upcoming < earliest):
             earliest = upcoming
+    deadline = after_date(record.definition)
+    if earliest is not None and deadline is not None and earliest >= deadline:
+        # Scheduling stops at the deadline, so nothing at or after it is next.
+        return None
     return earliest
 
 
