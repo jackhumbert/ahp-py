@@ -73,7 +73,7 @@ Everything 1.0.0 added is additive. Where each host-side feature stands:
 | Automation `disableConditions`, `runCount` | Validated, persisted and enforced by the scheduler |
 | Historical terminal results | `SessionPublisher.open_terminal`: retained after exit and persisted with the session. A client's own `createTerminal` shells are kept in memory, not on disk |
 | Canvases | `SessionPublisher.canvas_set` / `canvas_removed`; runtime-only, and the source `url` is redacted from wire logs |
-| Automation `customizations` | Not yet |
+| Automation `customizations` | Captured from the dispatching client at save time (`core/plugin_copies.py`), served as `ahp-plugin-copy:`, given to every run session |
 
 What the host *publishes* is 0.9.0-shaped for everyone: errors as response
 parts, terminal `lifecycle`, session claims with `chat`, and a `failed`

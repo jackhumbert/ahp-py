@@ -32,6 +32,13 @@ versions each release speaks.
 
 ### Added
 
+- **Automation customizations** (1.0.0): `AutomationSessionTemplate.customizations`
+  is captured when a definition is saved -- each new or changed plugin is
+  copied from the dispatching client with `resourceList` / `resourceRead`,
+  bounded to 500 files and 8 MiB, and persisted with the record. A failed
+  capture rejects the action. `AutomationEntry.customizations` reports the
+  copies (served under `ahp-plugin-copy:`), every run session gets them with
+  the template's enablement, and `automations.customizations` is advertised.
 - **`moveChat`** (1.0.0). `ChatState.movable` (and `ChatSummary.movable`) is
   derived and kept current: every chat but the default and the side or tool
   chats under another chat. A same-session move reorders the catalogue

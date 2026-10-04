@@ -41,6 +41,7 @@ from pathlib import Path
 from typing import Any, Final, Protocol
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from ahp_host.core.plugin_copies import PluginCopy
 from ahp_host.core.store import _write_atomically
 
 __all__ = [
@@ -59,6 +60,7 @@ __all__ = [
     "due_occurrences",
     "next_run_at",
     "run_count_after_update",
+    "template_customizations",
 ]
 
 _log = logging.getLogger(__name__)
@@ -324,6 +326,10 @@ def definition_rejection(definition: Any, providers: Collection[str]) -> str | N
         return "definition.session.workingDirectories must be a list of URIs"
     if "config" in session and not isinstance(session.get("config"), Mapping):
         return "definition.session.config must be an object"
+    if "customizations" in session:
+        rejection = _customizations_rejection(session["customizations"])
+        if rejection is not None:
+            return rejection
     if not isinstance(definition.get("enabled"), bool):
         return "definition.enabled must be a boolean"
     triggers = definition.get("triggers")
@@ -343,6 +349,38 @@ def definition_rejection(definition: Any, providers: Collection[str]) -> str | N
     if "disableConditions" in definition:
         return _disable_conditions_rejection(definition["disableConditions"])
     return None
+
+
+def _customizations_rejection(customizations: Any) -> str | None:
+    """`AutomationSessionTemplate.customizations` (1.0.0): client plugins.
+
+    Keyed by `id`, so two entries with one id would leave the host unable to
+    say which copy a run gets.
+    """
+    if not isinstance(customizations, list):
+        return "definition.session.customizations must be a list"
+    ids: set[str] = set()
+    for entry in customizations:
+        if not isinstance(entry, Mapping):
+            return "each customization must be an object"
+        if entry.get("type") != "plugin":
+            return "an automation can carry only plugin customizations"
+        for key in ("id", "uri", "name"):
+            if not isinstance(entry.get(key), str):
+                return f"a customization needs a string {key}"
+        if "nonce" in entry and not isinstance(entry.get("nonce"), str):
+            return "a customization's nonce must be a string"
+        if entry["id"] in ids:
+            return f"two customizations share the id {entry['id']!r}"
+        ids.add(entry["id"])
+    return None
+
+
+def template_customizations(definition: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+    """The plugins a definition's session template names, in order."""
+    session = definition.get("session")
+    entries = session.get("customizations") if isinstance(session, Mapping) else None
+    return [e for e in entries if isinstance(e, Mapping)] if isinstance(entries, list) else []
 
 
 def _disable_conditions_rejection(conditions: Any) -> str | None:
@@ -473,6 +511,10 @@ class AutomationRecord:
     #: current `afterRuns` allowance. ``None`` when there is no such condition.
     #: Its own field, never derived from `runs`, which is pruned.
     run_count: int | None = None
+    #: Host-owned copies of the template's plugins, by template entry id
+    #: (`plugin_copies.py`). Persisted with the record: a run uses exactly what
+    #: was captured when the definition was saved.
+    captures: dict[str, PluginCopy] = field(default_factory=dict)
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -485,6 +527,11 @@ class AutomationRecord:
             "runs": self.runs,
             "requests": self.requests,
             **({} if self.run_count is None else {"runCount": self.run_count}),
+            **(
+                {"captures": {k: v.to_json() for k, v in self.captures.items()}}
+                if self.captures
+                else {}
+            ),
         }
 
     @classmethod
@@ -499,6 +546,12 @@ class AutomationRecord:
         runs = payload.get("runs")
         requests = payload.get("requests")
         run_count = payload.get("runCount")
+        stored = payload.get("captures")
+        captures: dict[str, PluginCopy] = {}
+        for key, value in stored.items() if isinstance(stored, Mapping) else ():
+            copy_ = PluginCopy.from_json(value)
+            if copy_ is not None:
+                captures[str(key)] = copy_
         return cls(
             resource=resource,
             definition=definition,
@@ -514,6 +567,7 @@ class AutomationRecord:
             run_count=run_count
             if isinstance(run_count, int) and not isinstance(run_count, bool)
             else None,
+            captures=captures,
         )
 
     def run(self, uri: str) -> dict[str, Any] | None:

@@ -250,6 +250,13 @@ are validated before they are saved, with the refusal echoed as
 trigger id, a message whose origin is not `automation`, an unknown provider.
 **Event triggers are refused** — their types are host-defined, and this host
 defines none, so `listAutomationTriggerDefinitions` answers an empty list.
+**Client plugins travel with the automation** (`session.customizations`,
+advertised as `automations.customizations`): when a definition is saved the
+host copies each new or changed plugin from the client that saved it, serves
+the copy under its own `ahp-plugin-copy:` URI, and gives it to every run
+session — so a run at 3 a.m. has the skills and prompts the user saved,
+with no client connected. The copy is bounded (500 files, 8 MiB); a capture
+that fails rejects the whole action.
 **Disable conditions** (`afterRuns`, `afterDate`) stop scheduling on their own:
 `AutomationEntry.runCount` counts each scheduled run when it is admitted, a met
 condition sets `enabled` to false and leaves the conditions in place, and

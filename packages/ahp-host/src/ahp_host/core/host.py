@@ -69,6 +69,7 @@ from ahp_host.core.automations import (
     next_run_at,
     reset_cursors,
     run_count_after_update,
+    template_customizations,
 )
 from ahp_host.core.changesets import (
     CONTENT_SCHEME,
@@ -83,9 +84,18 @@ from ahp_host.core.config import RootConfig, type_matches
 from ahp_host.core.connection import DEFAULT_OUTBOX_LIMIT, Connection
 from ahp_host.core.outbound import OutboundRequests
 from ahp_host.core.pending import PendingRequests, RequestOutcome
+from ahp_host.core.plugin_copies import (
+    COPY_SCHEME,
+    CaptureError,
+    PluginCopy,
+    capture_plugin,
+    copy_root,
+    split_copy_uri,
+)
 from ahp_host.core.policy import Policy, TracksChannels
 from ahp_host.core.resources import (
     NullResourceProvider,
+    ResourceContent,
     ResourceInfo,
     ResourceProvider,
     WritableResourceProvider,
@@ -1486,6 +1496,10 @@ class Host:
         #: One timer per resource whose token carried `expiresIn` (1.0.0).
         #: Replaced by the next push, cancelled by a revoke.
         self._token_expiry: dict[str, asyncio.TimerHandle] = {}
+        #: Automation plugin captures (1.0.0) run one at a time, and hand their
+        #: copies to `_react_to_automation` through `_pending_copies`.
+        self._capture_lock = asyncio.Lock()
+        self._pending_copies: dict[str, dict[str, PluginCopy]] = {}
         #: Terminal actions refused from a peer that does not hold the claim.
         #: The default gates what a document names; a multi-trust-domain host
         #: passes `STRICT_CLAIM_GATED_ACTIONS` (see `core/terminals.py`) and
@@ -2150,6 +2164,9 @@ class Host:
                 "schedules": {},
                 "runCancellation": {},
                 "runHistoryLimit": self.automation_history,
+                # 1.0.0: the host captures the template's client plugins when
+                # a definition is saved (`plugin_copies.py`).
+                "customizations": {},
             }
         return result
 
@@ -2552,6 +2569,9 @@ class Host:
 
         if method == "resourceRequest":
             return self._resource_request(connection, params, uri)
+
+        if uri.startswith(COPY_SCHEME):
+            return self._serve_plugin_copy(connection, method, uri, params)
 
         # Host-owned content is answered BEFORE the provider is consulted, so a
         # changeset renders on a host that exposes no filesystem at all. VS
@@ -4124,6 +4144,33 @@ class Host:
         if isinstance(self.policy, TracksChannels):
             return self.policy.session_metadata(session)
         return None
+
+    def _serve_plugin_copy(
+        self, connection: Connection, method: str, uri: str, params: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        """`resource*` on a captured automation plugin: "clients can browse
+        [it] with `resourceRead`". Visible to whoever can see the catalogue."""
+        if not self.policy.may_see_channel(connection.info, AUTOMATIONS_URI):
+            raise errors.AhpError(-32009, f"Not permitted to read {uri}")
+        found = self._plugin_copy_at(uri)
+        if found is None:
+            raise errors.AhpError(-32008, f"No such content: {uri}")
+        copy_, path = found
+        data = copy_.files.get(path)
+        if data is not None:
+            if method == "resourceList":
+                raise errors.invalid_params(f"{uri} is not a directory")
+            if method == "resourceResolve":
+                return ResourceInfo(uri=uri, type="file", size=len(data)).to_wire()
+            return _read_result(ResourceContent(data=data), params.get("encoding"))
+        listed = copy_.entries(path)
+        if listed is None:
+            raise errors.AhpError(-32008, f"No such content: {uri}")
+        if method == "resourceList":
+            return {"entries": listed}
+        if method == "resourceResolve":
+            return ResourceInfo(uri=uri, type="directory").to_wire()
+        raise errors.invalid_params(f"{uri} is a directory")
 
     def _content_owner(self, uri: str) -> _Session | None:
         """The session whose store holds `uri`, if any."""
@@ -5749,11 +5796,74 @@ class Host:
                 },
             )
 
+        needed = self._captures_needed(channel, action)
+        if needed:
+            # Capturing asks THIS client for the plugin over `resource*`, and
+            # its answers arrive through the read loop this handler is running
+            # in -- awaiting them here would deadlock it. So the action waits
+            # on its own task, and is published (or rejected) from there.
+            self._spawn(self._capture_then_apply(connection, channel, action, origin, needed))
+            return
+
         await self.sequencer.publish(channel, action, origin=origin)
         await self._react(channel, action, connection)
         session = self._session_for(channel)
         if session is not None:
             await self._mirror_summary(session)
+
+    def _captures_needed(self, channel: str, action: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+        """The template plugins an automation action names that have no copy yet.
+
+        "Entries whose `id`, `uri`, and `nonce` are unchanged keep their
+        existing copy, so any client can re-submit a template it received
+        without being able to serve the plugin itself."
+        """
+        if channel != AUTOMATIONS_URI:
+            return []
+        action_type = action.get("type")
+        if action_type == "automation/createRequested":
+            definition = action.get("definition")
+            return template_customizations(definition) if isinstance(definition, Mapping) else []
+        if action_type != "automation/updateRequested":
+            return []
+        changes = action.get("changes")
+        if not isinstance(changes, Mapping) or "session" not in changes:
+            return []
+        record = self._automations.get(str(action.get("resource")))
+        existing = record.captures if record is not None else {}
+        return [
+            entry
+            for entry in template_customizations({"session": changes["session"]})
+            if not (entry.get("id") in existing and existing[str(entry["id"])].matches(entry))
+        ]
+
+    async def _capture_then_apply(
+        self,
+        connection: Connection,
+        channel: str,
+        action: Mapping[str, Any],
+        origin: Mapping[str, Any],
+        needed: Sequence[Mapping[str, Any]],
+    ) -> None:
+        """Capture every plugin *needed*, then apply the action -- or reject it whole."""
+        copies: dict[str, PluginCopy] = {}
+        async with self._capture_lock:
+            try:
+                for entry in needed:
+                    copy_ = await capture_plugin(
+                        entry,
+                        lambda uri: self.list_client_resource(connection, uri),
+                        lambda uri: self.read_client_resource(connection, uri),
+                    )
+                    copies[copy_.plugin_id] = copy_
+            except CaptureError as exc:
+                await self.sequencer.publish(
+                    channel, action, origin=origin, rejection_reason=f"capture failed: {exc}"
+                )
+                return
+            self._pending_copies[str(action.get("resource"))] = copies
+            await self.sequencer.publish(channel, action, origin=origin)
+            await self._react(channel, action, connection)
 
     def _validate_client_action(
         self, connection: Connection, channel: str, action: Mapping[str, Any]
@@ -6845,6 +6955,17 @@ class Host:
         upcoming = next_run_at(record)
         if upcoming is not None:
             entry["nextRunAt"] = iso(upcoming)
+        copies = [
+            c
+            for c in (
+                self._copy_customization(record, e)
+                for e in template_customizations(record.definition)
+            )
+            if c is not None
+        ]
+        if copies:
+            # "Absent when the template has no customizations."
+            entry["customizations"] = copies
         if record.run_count is not None and after_runs(record.definition) is not None:
             # "Absent when `disableConditions` contains no AfterRunsCondition."
             entry["runCount"] = record.run_count
@@ -6945,6 +7066,7 @@ class Host:
                 modified_at=stamp,
                 run_count=0 if after_runs(definition) is not None else None,
             )
+            self._take_copies(created, created.definition)
             self._automations[resource] = created
             await store.save(created)
             await self._publish_automation(created)
@@ -6964,6 +7086,7 @@ class Host:
                 patched.get("enabled") is True and record.definition.get("enabled") is not True
             )
             record.run_count = run_count_after_update(record, patched)
+            self._take_copies(record, patched)
             record.definition = patched
             record.modified_at = iso(now)
             if schedule_moved:
@@ -6985,6 +7108,78 @@ class Host:
                     if uri not in self._run_tasks:
                         await self.sequencer.drop_channel(uri)
         self._schedule_changed.set()
+
+    def _take_copies(self, record: AutomationRecord, definition: Mapping[str, Any]) -> None:
+        """Set the record's copies to exactly the plugins *definition* names.
+
+        A fresh capture wins; an unchanged entry keeps its copy; a plugin the
+        template no longer names is dropped with its copy.
+        """
+        fresh = self._pending_copies.pop(record.resource, {})
+        kept: dict[str, PluginCopy] = {}
+        for entry in template_customizations(definition):
+            plugin_id = str(entry.get("id"))
+            if plugin_id in fresh:
+                kept[plugin_id] = fresh[plugin_id]
+            elif plugin_id in record.captures and record.captures[plugin_id].matches(entry):
+                kept[plugin_id] = record.captures[plugin_id]
+        record.captures = kept
+
+    def _copy_customization(
+        self, record: AutomationRecord, entry: Mapping[str, Any]
+    ) -> dict[str, Any] | None:
+        """The `PluginCustomization` for one captured template entry.
+
+        Served under the host's own URI, with `children` worked out the way a
+        live client's plugin's are -- and no `clientId`, "because the copy no
+        longer depends on a client".
+        """
+        copy_ = record.captures.get(str(entry.get("id")))
+        if copy_ is None:
+            return None
+        root = copy_root(record.resource, copy_.plugin_id)
+        owner = {"id": copy_.plugin_id, "name": copy_.name}
+        children: list[Any] = []
+        if copy_.single_file:
+            ((filename, _),) = copy_.files.items()
+            children = self._single_file_children(owner, f"{root}/{filename}")
+        for path, data in sorted(copy_.files.items()) if not copy_.single_file else ():
+            # Every captured file, not only the top level a live expansion
+            # walks: the copy is already in hand, so the Open Plugins layout
+            # (`skills/<name>/SKILL.md`, `agents/<file>.md`) costs nothing to
+            # see. Classified the same way, by suffix then parent directory.
+            name = path.rsplit("/", 1)[-1]
+            child = _child_customization(owner, f"{root}/{path}", name, data)
+            if child is None:
+                continue
+            # Ids by PATH: two skills are both `SKILL.md`.
+            child["id"] = f"{copy_.plugin_id}/{path}"
+            untitled = not _title_of(data.decode(errors="replace"))
+            if name.lower() == "skill.md" and "/" in path and untitled:
+                # No front-matter name: the directory names the skill.
+                child["name"] = path.rsplit("/", 2)[-2]
+            children.append(child)
+        customization: dict[str, Any] = {
+            "type": "plugin",
+            "id": copy_.plugin_id,
+            "uri": root,
+            "name": copy_.name,
+            "children": children,
+            "load": {"kind": "loaded"},
+        }
+        return customization
+
+    def _plugin_copy_at(self, uri: str) -> tuple[PluginCopy, str] | None:
+        """The captured plugin, and the path in it, that a copy URI names."""
+        parts = split_copy_uri(uri)
+        if parts is None:
+            return None
+        owner, plugin_id, path = parts
+        for record in self._automations.values():
+            copy_ = record.captures.get(plugin_id)
+            if copy_ is not None and copy_root(record.resource, plugin_id).split("/")[1] == owner:
+                return copy_, path
+        return None
 
     def _automation_named(self, params: Mapping[str, Any]) -> AutomationRecord:
         self._require_automations()
@@ -7195,6 +7390,20 @@ class Host:
             if run_uri in self._cancelled_runs:
                 await self._finish_run(record, run_uri, "cancelled")
                 return
+            # "Every run session receives these plugins in
+            # `SessionState.customizations`, with the enablement from the
+            # matching template entry" -- before the turn, so the agent has
+            # them from its first message.
+            for entry in template_customizations(definition):
+                customization = self._copy_customization(record, entry)
+                if customization is None:
+                    continue
+                if isinstance(entry.get("enablement"), list):
+                    customization["enablement"] = copy.deepcopy(entry["enablement"])
+                await self.sequencer.publish(
+                    session_uri,
+                    {"type": "session/customizationUpdated", "customization": customization},
+                )
             created = self.sequencer.state_of(run_uri)
             previous = created.get("lifecycle") if isinstance(created, Mapping) else None
             await self._run_changed(
