@@ -8,11 +8,12 @@ every task is *background* work, and not every one can be shown:
   or a command moved to the background mid-run. It becomes a ``shell`` entry.
   Its command line comes from the `Bash` call that started it; the task itself
   only carries the call's description.
-* Subagents (`local_agent`, `remote_agent`, `in_process_teammate`) would be
-  ``subagent`` entries, but that kind requires the subagent's own chat and this
-  adapter does not give subagents chats -- their tool calls are shown inline
-  in the parent turn. Publishing one without a chat would be a schema
-  violation every client receives, so they are not published.
+* A subagent (`local_agent`, `remote_agent`, `in_process_teammate`) running in
+  the background gets a worker chat of its own (`open_tool_chat`): its
+  messages -- which arrive after the turn that started it has ended -- are
+  streamed there, and it becomes a ``subagent`` entry pointing at that chat.
+  A subagent in the foreground is unchanged: its tool calls show inline in the
+  parent turn, which is still running.
 * Anything else (`local_workflow`, `monitor_mcp`, `dream`, ...) is left alone.
 
 A task ends on a terminal status from **either** `task_notification` or
@@ -25,17 +26,30 @@ not it was published.
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, Final
 
-from ahp_host.provider.base import BackgroundWork
+from ahp_host.provider.base import BackgroundWork, ProviderChat, TurnSink
 
-__all__ = ["SHELL_TASK", "TERMINAL_STATUSES", "Task", "backgrounded", "now_iso", "work_for"]
+__all__ = [
+    "SHELL_TASK",
+    "SUBAGENT_TASKS",
+    "TERMINAL_STATUSES",
+    "Subagent",
+    "Task",
+    "backgrounded",
+    "now_iso",
+    "work_for",
+]
 
 #: The task type of a shell running in the background.
 SHELL_TASK: Final = "local_bash"
+
+#: The task types of a subagent.
+SUBAGENT_TASKS: Final = frozenset({"local_agent", "remote_agent", "in_process_teammate"})
 
 #: `claude_agent_sdk.TERMINAL_TASK_STATUSES` -- both vocabularies, since
 #: `task_notification` says `stopped` where `task_updated` says `killed`.
@@ -59,6 +73,8 @@ class Task:
     #: task only by being backgrounded.
     backgrounded: bool | None = None
     published: bool = False
+    #: A subagent's type, as Claude Code names it (`Explore`, ...).
+    agent_type: str | None = None
 
     @property
     def work_id(self) -> str:
@@ -76,8 +92,43 @@ def backgrounded(data: Mapping[str, Any]) -> bool | None:
     return flag if isinstance(flag, bool) else None
 
 
-def work_for(task: Task) -> BackgroundWork | None:
-    """The background work entry for *task*, or ``None`` if it gets none."""
+@dataclass
+class Subagent:
+    """A background subagent's worker chat, and what streams into it."""
+
+    task: Task
+    chat: ProviderChat
+    #: The worker turn's sink, once the host has started it.
+    sink: TurnSink | None = None
+    #: Messages that arrived before the sink did, in order.
+    pending: list[Any] = field(default_factory=list)
+    #: Set when the task ends; the worker turn ends with it.
+    done: asyncio.Event = field(default_factory=asyncio.Event)
+    announced: set[str] = field(default_factory=set)
+    inputs: dict[str, tuple[str, dict[str, Any]]] = field(default_factory=dict)
+    streamed: set[str] = field(default_factory=set)
+    current_message: str | None = None
+
+
+def work_for(task: Task, chat: str | None = None) -> BackgroundWork | None:
+    """The background work entry for *task*, or ``None`` if it gets none.
+
+    A subagent's entry needs *chat*, its worker chat.
+    """
+    if task.task_type in SUBAGENT_TASKS:
+        if chat is None or not task.backgrounded:
+            return None
+        meta: dict[str, Any] = {"taskId": task.task_id}
+        if task.agent_type is not None:
+            meta["agentType"] = task.agent_type
+        return BackgroundWork(
+            id=task.work_id,
+            kind="subagent",
+            label=task.description or task.agent_type or "Subagent",
+            started_at=task.started_at,
+            chat=chat,
+            meta=meta,
+        )
     if task.task_type != SHELL_TASK or task.backgrounded is False:
         return None
     label = task.description or task.command or "Background shell"

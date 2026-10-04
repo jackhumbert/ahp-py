@@ -50,6 +50,10 @@ Status: pre-alpha.
   listed on the chat (AHP 1.0.0 background work) with its command line until it
   finishes or is stopped, so a client can show what is still going after the
   turn has ended.
+- **Background subagents** get a read-only worker chat of their own, where
+  their messages and tool calls stream after the turn that started them has
+  ended. They are listed as background work pointing at that chat, and the
+  spawning call's result links to it.
 - **Steering**: a message sent while Claude is working joins the turn at
   its next tool call (Claude Code's own "next" queue slot) instead of waiting
   for it to finish; queued messages still run afterwards.

@@ -455,6 +455,10 @@ class ClaudeSession:
         #: the ones shown as chat background work and the ones that may yet
         #: be (`background.py`).
         self._tasks: dict[str, background.Task] = {}
+        #: Background subagents with a worker chat, by the `tool_use_id` of the
+        #: call that started them -- the `parent_tool_use_id` their messages
+        #: carry.
+        self._subagents: dict[str, background.Subagent] = {}
 
     @property
     def _sink(self) -> TurnSink | None:
@@ -1179,6 +1183,9 @@ class ClaudeSession:
                 tool_use_id=tool_use_id if isinstance(tool_use_id, str) else None,
                 command=self._command_of(tool_use_id),
                 backgrounded=background.backgrounded(data),
+                agent_type=data.get("subagent_type")
+                if isinstance(data.get("subagent_type"), str)
+                else None,
             )
             self._tasks[task_id] = started
             await self._show_task(started)
@@ -1199,6 +1206,9 @@ class ClaudeSession:
         if status in background.TERMINAL_STATUSES:
             del self._tasks[task_id]
             await self._hide_task(task)
+            subagent = self._subagents.pop(task.tool_use_id or "", None)
+            if subagent is not None:
+                subagent.done.set()
 
     def _command_of(self, tool_use_id: object) -> str | None:
         """The command line of the `Bash` call *tool_use_id*, if this session saw it."""
@@ -1209,7 +1219,10 @@ class ClaudeSession:
         return command if isinstance(command, str) else None
 
     async def _show_task(self, task: background.Task) -> None:
-        work = background.work_for(task)
+        if task.task_type in background.SUBAGENT_TASKS and task.backgrounded:
+            await self._open_subagent(task)
+        subagent = self._subagents.get(task.tool_use_id or "")
+        work = background.work_for(task, subagent.chat.resource if subagent else None)
         if work is None:
             await self._hide_task(task)
             return
@@ -1238,12 +1251,125 @@ class ClaudeSession:
         tasks, self._tasks = list(self._tasks.values()), {}
         for task in tasks:
             await self._hide_task(task)
+        subagents, self._subagents = list(self._subagents.values()), {}
+        for subagent in subagents:
+            subagent.done.set()
+
+    async def _open_subagent(self, task: background.Task) -> None:
+        """Give a background subagent its own worker chat, and a turn on it."""
+        publisher = self.context.publisher
+        call_id = task.tool_use_id
+        if publisher is None or call_id is None or call_id in self._subagents:
+            return
+        try:
+            chat = await publisher.open_tool_chat(
+                task.description or task.agent_type or "Subagent", tool_call_id=call_id
+            )
+        except Exception:
+            log.exception("opening a subagent's chat failed")
+            return
+        subagent = background.Subagent(task=task, chat=chat)
+        self._subagents[call_id] = subagent
+        _, tool_input = self._inputs.get(call_id, ("", {}))
+        prompt = tool_input.get("prompt")
+
+        async def run(sink: TurnSink) -> None:
+            subagent.sink = sink
+            pending, subagent.pending = subagent.pending, []
+            for item in pending:
+                await self._route_to_subagent(subagent, item)
+            try:
+                await subagent.done.wait()
+            except asyncio.CancelledError:
+                # A client stopped the worker chat: stop that task, and only
+                # it -- the host does not interrupt the whole session for this.
+                stop = getattr(self._client, "stop_task", None)
+                if stop is not None:
+                    with contextlib.suppress(Exception):
+                        await stop(task.task_id)
+                raise
+
+        text = prompt if isinstance(prompt, str) and prompt else task.description
+        if not await chat.run_turn(text, run):
+            self._subagents.pop(call_id, None)
+
+    async def _to_subagent(self, item: Any) -> bool:
+        """Divert a message from a background subagent to its worker chat."""
+        parent = getattr(item, "parent_tool_use_id", None)
+        subagent = self._subagents.get(parent) if isinstance(parent, str) else None
+        if subagent is None or not isinstance(
+            item, StreamEvent | AssistantMessage | SdkUserMessage
+        ):
+            return False
+        if subagent.sink is None:
+            subagent.pending.append(item)
+        else:
+            await self._route_to_subagent(subagent, item)
+        return True
+
+    async def _route_to_subagent(self, subagent: background.Subagent, item: Any) -> None:
+        """The parent-turn handlers' work, against the worker chat's own sink."""
+        sink = subagent.sink
+        if sink is None:
+            return
+        try:
+            if isinstance(item, StreamEvent):
+                event = item.event
+                if event.get("type") == "message_start":
+                    message_id = event.get("message", {}).get("id")
+                    subagent.current_message = message_id if isinstance(message_id, str) else None
+                elif event.get("type") == "content_block_delta":
+                    delta = event.get("delta", {})
+                    text = delta.get("text") or delta.get("thinking")
+                    if text and subagent.current_message is not None:
+                        subagent.streamed.add(subagent.current_message)
+                    if delta.get("type") == "text_delta" and text:
+                        await sink.text_delta(text)
+                    elif delta.get("type") == "thinking_delta" and text:
+                        await sink.reasoning_delta(text)
+            elif isinstance(item, AssistantMessage):
+                streamed = item.message_id is not None and item.message_id in subagent.streamed
+                for block in item.content:
+                    if isinstance(block, ToolUseBlock) and block.id not in subagent.announced:
+                        subagent.announced.add(block.id)
+                        subagent.inputs[block.id] = (block.name, dict(block.input))
+                        display, _ = describe(block.name, block.input)
+                        await sink.tool_call_started(
+                            block.id, block.name, dict(block.input), display_name=display
+                        )
+                        await sink.tool_call_delta(
+                            block.id, invocation_message=progress_line(block.name, block.input)
+                        )
+                    elif not streamed and isinstance(block, TextBlock) and block.text:
+                        await sink.text_delta(block.text)
+                    elif not streamed and isinstance(block, ThinkingBlock) and block.thinking:
+                        await sink.reasoning_delta(block.thinking)
+            elif isinstance(item, SdkUserMessage) and not isinstance(item.content, str):
+                for block in item.content:
+                    if not isinstance(block, ToolResultBlock):
+                        continue
+                    if block.tool_use_id not in subagent.announced:
+                        continue
+                    failed = bool(block.is_error)
+                    name, tool_input = subagent.inputs.get(block.tool_use_id, ("", {}))
+                    await sink.tool_call_completed(
+                        block.tool_use_id,
+                        {"content": [{"type": "text", "text": _text_of(block.content)}]},
+                        success=not failed,
+                        past_tense_message=past_tense(name, tool_input, failed=failed),
+                    )
+        except Exception:
+            # The worker turn may have been stopped under us; the parent and
+            # the rest of the stream carry on regardless.
+            log.debug("a subagent message could not be shown", exc_info=True)
 
     def _is_elsewhere(self, item: SdkUserMessage) -> bool:
         """A replayed message we did not send: typed on claude.ai, or injected."""
         return item.origin is not None and item.uuid is not None and item.uuid not in self._sent
 
     async def _on_message(self, item: Any) -> None:
+        if await self._to_subagent(item):
+            return
         if isinstance(item, SdkUserMessage):
             if self._is_elsewhere(item):
                 await self._on_message_from_elsewhere(item)
@@ -1361,9 +1487,20 @@ class ClaudeSession:
             text = _text_of(block.content)
             await self._report_answer_from_result(sink, block.tool_use_id, failed, text)
             name, tool_input = self._inputs.get(block.tool_use_id, ("", {}))
+            content: list[dict[str, Any]] = [{"type": "text", "text": text}]
+            subagent = self._subagents.get(block.tool_use_id)
+            if subagent is not None:
+                # The forward edge of the worker chat's `tool` origin.
+                content.append(
+                    {
+                        "type": "subagent",
+                        "resource": subagent.chat.resource,
+                        "title": subagent.task.description or "Subagent",
+                    }
+                )
             await sink.tool_call_completed(
                 block.tool_use_id,
-                {"content": [{"type": "text", "text": text}]},
+                {"content": content},
                 success=not failed,
                 past_tense_message=past_tense(name, tool_input, failed=failed),
             )

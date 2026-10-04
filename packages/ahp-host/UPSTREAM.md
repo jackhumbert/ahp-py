@@ -68,7 +68,7 @@ Everything 1.0.0 added is additive. Where each host-side feature stands:
 | `AuthenticateParams.expiresIn` | The token is dropped at expiry and `auth/required` goes out with reason `expired`; an empty token revokes |
 | `McpServerStartingState.blocking`, `session/mcpServerBackgroundRequested` | Routed to `BackgroundsMcpServers`; a provider that refuses, or lacks it, gets `blocking: true` reasserted |
 | `moveChat`, `ChatState.movable` | Reorder within a session; cross-session and `newSession` moves need `TransfersChats` from the provider |
-| Chat background work | `SessionPublisher.background_work_set` / `background_work_removed`; dropped on restore |
+| Chat background work | `SessionPublisher.background_work_set` / `background_work_removed`; dropped on restore. A subagent entry's chat comes from `open_tool_chat` |
 | Per-chat `changes` and changesets | `publish_changeset(..., chat=)`; `ChatSummary.changes` travels in the catalogue, since no chat action carries `ChatState.changes` |
 | Automation `disableConditions`, `runCount` | Validated, persisted and enforced by the scheduler |
 | Historical terminal results | `SessionPublisher.open_terminal`: retained after exit and persisted with the session. A client's own `createTerminal` shells are kept in memory, not on disk |

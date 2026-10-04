@@ -232,6 +232,7 @@ no turn is running. Hold it for the life of the session.
 | `changes_published(changeset, changes, chat=)` | Publish or refresh a changeset; a refresh shows as `recomputing`. With `chat`, it belongs to that chat's catalogue and roll-up. |
 | `background_work_set(work, chat=)` / `background_work_removed(id, chat=)` | Work running in the background for a chat. |
 | `canvas_set(canvas, chat=)` / `canvas_removed(instance_id, chat=)` | A live canvas on a chat (experimental): an `ahp-canvas:` channel the chat references. Its `url` is never persisted and is redacted from wire logs. |
+| `open_tool_chat(title, tool_call_id=, chat=, interactivity=)` | A worker chat for a tool call — a subagent's own conversation. Returns a handle whose `run_turn(prompt, run)` runs a turn on it. |
 | `open_terminal(title, chat=, cwd=, turn_id=, tool_call_id=)` | A read-only terminal for output the agent produces; returns a handle with `resource`, `write(data)` and `exited(code)`. |
 | `external_turn(text, run)` | A turn that happened somewhere else. |
 | `progress(progress, total=, message=)` | Report against `createSession.progressToken`. |
@@ -267,6 +268,15 @@ assert shell.to_wire() == {
 
 A shell needs its `command`, and a subagent needs its own `chat`; `to_wire`
 raises rather than publish an entry every client would reject.
+
+**Worker chats.** `open_tool_chat` opens a chat whose origin is
+`{kind: "tool", chat, toolCallId}` — the reverse of a
+`{"type": "subagent", "resource": ..., "title": ...}` content on the spawning
+call's result — read-only by default, and moved with its parent by `moveChat`.
+`run_turn(prompt, run)` starts a turn on it the way `external_turn` does on the
+default chat. A client stopping that turn cancels only your `run`: the
+session's agent is not interrupted, so stop the worker yourself on
+`CancelledError`.
 
 **Terminals for the agent's own output.** `open_terminal` registers a terminal
 channel the session holds, so clients can watch it and none can type into it.

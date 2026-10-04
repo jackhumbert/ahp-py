@@ -151,6 +151,7 @@ from ahp_host.provider.base import (
     HandlesCustomizations,
     ManagesMcpServers,
     OpensSessions,
+    ProviderChat,
     ProviderTerminal,
     ReconfiguresSessions,
     ResumableAgentProvider,
@@ -997,26 +998,45 @@ class _Publisher:
             cwd=cwd,
         )
 
+    async def open_tool_chat(
+        self,
+        title: str,
+        *,
+        tool_call_id: str,
+        chat: str | None = None,
+        interactivity: str = "read-only",
+    ) -> ProviderChat:
+        parent = self._chat_of(chat)
+        if parent is None:
+            raise errors.AhpError(-32008, f"No such chat: {chat}")
+        return await self._host._open_tool_chat(
+            self._session, parent, title, tool_call_id, interactivity
+        )
+
     async def external_turn(self, text: str, run: Callable[[TurnSink], Awaitable[None]]) -> bool:
-        host, session = self._host, self._session
-        channel = session.chat_uri
-        state = host.sequencer.state_of(channel)
-        if not isinstance(state, Mapping) or state.get("activeTurn") is not None:
+        return await self._host._run_external_turn(
+            self._session, self._session.chat_uri, text, run, "user"
+        )
+
+
+class _ProviderChat:
+    """`ProviderChat`: a worker chat a provider opened, and turns run on it."""
+
+    def __init__(self, host: Host, session: _Session, resource: str) -> None:
+        self._host = host
+        self._session = session
+        self._resource = resource
+
+    @property
+    def resource(self) -> str:
+        return self._resource
+
+    async def run_turn(self, text: str, run: Callable[[TurnSink], Awaitable[None]]) -> bool:
+        if self._resource not in self._session.chat_uris:
             return False
-        started = {
-            "type": "chat/turnStarted",
-            "turnId": f"external-{uuid.uuid4()}",
-            "startedAt": now_iso(),
-            # `Message.origin` is required (`state.schema.json` Message). Left
-            # out, the turn broke every client that decodes chat state strictly:
-            # the iOS client could not open the chat at all.
-            "message": {"text": text, "origin": {"kind": "user"}},
-        }
-        # Published, then run -- the same order as a queued message, for the
-        # same reason: there is no client dispatch to have published it.
-        await host.sequencer.publish(channel, started)
-        await host._start_turn(session, channel, started, _ExternalTurn(run))
-        return True
+        return await self._host._run_external_turn(
+            self._session, self._resource, text, run, "agent"
+        )
 
 
 @dataclass
@@ -1029,6 +1049,7 @@ class _HandedOver:
     reviewed: dict[str, set[str]] = field(default_factory=dict)
     terminals: dict[str, str] = field(default_factory=dict)
     canvases: dict[tuple[str, str], str] = field(default_factory=dict)
+    provider_chats: set[str] = field(default_factory=set)
     content: ContentStore | None = None
 
 
@@ -1211,6 +1232,10 @@ class _Session:
     #: channel URI -> owning chat. Persisted and restored with the session, so
     #: a tool result's terminal stays subscribable after it exits (1.0.0).
     terminals: dict[str, str] = field(default_factory=dict)
+    #: Chats a provider opened for its own workers (`open_tool_chat`). Their
+    #: turns are the provider's callbacks, so cancelling one cancels only that
+    #: callback -- never the session's agent, which is busy with other things.
+    provider_chats: set[str] = field(default_factory=set)
     #: Live canvases (1.0.0): (chat, provider's instance id) -> `ahp-canvas:`
     #: channel, in the order they were added. Runtime only -- a canvas's
     #: source URL "MUST NOT be reused from persisted state after a provider
@@ -3272,6 +3297,76 @@ class Host:
             action["canvases"] = references
         await self.sequencer.publish(chat, action)
 
+    async def _run_external_turn(
+        self,
+        session: _Session,
+        channel: str,
+        text: str,
+        run: Callable[[TurnSink], Awaitable[None]],
+        kind: str,
+    ) -> bool:
+        """Start a turn no client asked for, on *channel*, run by *run*.
+
+        `kind` is the turn message's `MessageOrigin.kind`: ``user`` for a
+        message typed elsewhere, ``agent`` for the prompt a parent agent gave
+        a worker chat.
+        """
+        state = self.sequencer.state_of(channel)
+        if not isinstance(state, Mapping) or state.get("activeTurn") is not None:
+            return False
+        started = {
+            "type": "chat/turnStarted",
+            "turnId": f"external-{uuid.uuid4()}",
+            "startedAt": now_iso(),
+            # `Message.origin` is required (`state.schema.json` Message). Left
+            # out, the turn broke every client that decodes chat state strictly:
+            # the iOS client could not open the chat at all.
+            "message": {"text": text, "origin": {"kind": kind}},
+        }
+        # Published, then run -- the same order as a queued message, for the
+        # same reason: there is no client dispatch to have published it.
+        await self.sequencer.publish(channel, started)
+        await self._start_turn(session, channel, started, _ExternalTurn(run))
+        return True
+
+    async def _open_tool_chat(
+        self,
+        session: _Session,
+        parent: str,
+        title: str,
+        tool_call_id: str,
+        interactivity: str,
+    ) -> _ProviderChat:
+        """A worker chat spawned by a tool call -- a subagent's own conversation.
+
+        Its `ChatOrigin` is `{kind: "tool", chat, toolCallId}`, the reverse of
+        the `ToolResultSubagentContent` the spawning call can carry, and it
+        sits under its parent in the host's hierarchy: not movable on its own,
+        moved with the parent. Read-only by default ("agent team workers").
+        """
+        chat = f"ahp-chat:/{uuid.uuid4()}"
+        await self.sequencer.register_channel(
+            chat,
+            {
+                "resource": chat,
+                "title": title or _DEFAULT_CHAT_TITLE,
+                "status": _STATUS_IDLE,
+                "modifiedAt": now_iso(),
+                "turns": [],
+                "origin": {"kind": "tool", "chat": parent, "toolCallId": tool_call_id},
+                "interactivity": interactivity,
+            },
+            "chat",
+        )
+        self._channel_created(None, chat, session=session.uri)
+        session.chat_uris.add(chat)
+        session.provider_chats.add(chat)
+        entry, projected = self._chat_entry(session, chat)
+        session.published_chats[chat] = projected
+        await self.sequencer.publish(session.uri, {"type": "session/chatAdded", "summary": entry})
+        await self._mirror_summary(session)
+        return _ProviderChat(self, session, chat)
+
     async def _drop_provider_terminals(self, session: _Session, chat: str | None = None) -> None:
         """Drop the provider terminals of *chat*, or of the whole session.
 
@@ -4069,6 +4164,9 @@ class Host:
             source.chat_uris.discard(chat)
             source.published_chats.pop(chat, None)
             handed.chats.append(chat)
+            if chat in source.provider_chats:
+                source.provider_chats.discard(chat)
+                handed.provider_chats.add(chat)
             if chat in source.chat_changes:
                 handed.chat_changes[chat] = source.chat_changes.pop(chat)
             for uri, owner in list(source.changeset_chats.items()):
@@ -4099,6 +4197,7 @@ class Host:
         target.reviewed.update(handed.reviewed)
         target.terminals.update(handed.terminals)
         target.canvases.update(handed.canvases)
+        target.provider_chats.update(handed.provider_chats)
         if handed.content is not None and handed.changesets:
             # A moved changeset's diffs are bytes in the source's store.
             target.content.absorb(handed.content)
@@ -6530,6 +6629,10 @@ class Host:
         for task in session.running(chat):
             task.cancel()
         session.turns.pop(chat, None)
+        if chat in session.provider_chats:
+            # The provider's worker turn: its callback has the CancelledError,
+            # and the agent session is not this chat's to interrupt.
+            return
         if session.agent_session is not None and not session.running():
             with contextlib.suppress(Exception):
                 await session.agent_session.cancel(reason)

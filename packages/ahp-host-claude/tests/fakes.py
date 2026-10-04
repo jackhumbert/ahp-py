@@ -233,6 +233,31 @@ class RecordingSink:
         return self.client_result
 
 
+class FakeChat:
+    """A `ProviderChat`: each worker turn runs on its own task, into a fresh sink."""
+
+    def __init__(self, resource: str, title: str, tool_call_id: str) -> None:
+        self.resource = resource
+        self.title = title
+        self.tool_call_id = tool_call_id
+        self.prompts: list[str] = []
+        self.sinks: list[RecordingSink] = []
+        self.tasks: list[asyncio.Task[None]] = []
+
+    async def run_turn(self, text: str, run: Callable[[Any], Awaitable[None]]) -> bool:
+        if any(not task.done() for task in self.tasks):
+            return False
+        sink = RecordingSink()
+        self.prompts.append(text)
+        self.sinks.append(sink)
+
+        async def turn() -> None:
+            await run(sink)
+
+        self.tasks.append(asyncio.create_task(turn()))
+        return True
+
+
 class FakeTerminal:
     """A `ProviderTerminal` that records what was written."""
 
@@ -265,6 +290,7 @@ class FakePublisher:
         #: The chat's background work as the host would hold it, by id.
         self.background: dict[str, dict[str, Any]] = {}
         self.terminals: list[FakeTerminal] = []
+        self.chats: list[FakeChat] = []
 
     async def external_turn(self, text: str, run: Callable[[Any], Awaitable[None]]) -> bool:
         if any(not task.done() for task in self.tasks):
@@ -309,6 +335,18 @@ class FakePublisher:
 
     async def config_changed(self, values: Mapping[str, Any]) -> None:
         self.config_changes.append(dict(values))
+
+    async def open_tool_chat(
+        self,
+        title: str,
+        *,
+        tool_call_id: str,
+        chat: str | None = None,
+        interactivity: str = "read-only",
+    ) -> FakeChat:
+        opened = FakeChat(f"ahp-chat:/worker-{len(self.chats)}", title, tool_call_id)
+        self.chats.append(opened)
+        return opened
 
     async def canvas_set(self, canvas: Canvas, *, chat: str | None = None) -> str:
         return f"ahp-canvas:/{canvas.instance_id}"

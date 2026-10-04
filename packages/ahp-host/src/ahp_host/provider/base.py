@@ -515,6 +515,26 @@ class SessionPublisher(Protocol):
         """
         ...
 
+    async def open_tool_chat(
+        self,
+        title: str,
+        *,
+        tool_call_id: str,
+        chat: str | None = None,
+        interactivity: str = "read-only",
+    ) -> ProviderChat:
+        """Open a worker chat for a tool call -- a subagent's own conversation.
+
+        The chat's origin is `{kind: "tool", chat, toolCallId}` (the default
+        chat unless *chat* names another), it is read-only unless
+        *interactivity* says otherwise, and it moves with its parent. Run the
+        worker's turns on it with :meth:`ProviderChat.run_turn`, and reference
+        it from the spawning call's result with
+        ``{"type": "subagent", "resource": chat.resource, "title": ...}`` or
+        from a subagent's :class:`BackgroundWork`.
+        """
+        ...
+
     async def external_turn(self, text: str, run: Callable[[TurnSink], Awaitable[None]]) -> bool:
         """Start a turn on the default chat that no client asked for.
 
@@ -564,6 +584,26 @@ class Canvas:
             if value is not None:
                 wire[key] = value
         return wire
+
+
+class ProviderChat(Protocol):
+    """A worker chat from :meth:`SessionPublisher.open_tool_chat`."""
+
+    @property
+    def resource(self) -> str:
+        """The chat's channel URI."""
+        ...
+
+    async def run_turn(self, text: str, run: Callable[[TurnSink], Awaitable[None]]) -> bool:
+        """Start a turn on the chat, as `external_turn` does on the default chat.
+
+        *text* is the worker's prompt, published with origin `agent`; *run*
+        gets the turn's sink, and the turn ends when it returns. ``False`` if a
+        turn is already running there or the chat is gone. Cancelling it -- a
+        client stopping the worker -- cancels only *run*: the session's agent
+        is not interrupted, so stop the worker yourself on `CancelledError`.
+        """
+        ...
 
 
 class ProviderTerminal(Protocol):

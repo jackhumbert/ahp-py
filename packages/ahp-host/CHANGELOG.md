@@ -32,6 +32,12 @@ versions each release speaks.
 
 ### Added
 
+- **Worker chats for tool calls**: `SessionPublisher.open_tool_chat` opens a
+  chat with a `tool` origin, read-only by default, and its `run_turn` runs a
+  turn on it. Stopping a worker's turn cancels only that turn -- the
+  session's agent is not interrupted, as it was for any provider-run turn
+  when nothing else was running. What lets a background subagent be listed as
+  chat background work, which needs a chat of its own.
 - **Automation customizations** (1.0.0): `AutomationSessionTemplate.customizations`
   is captured when a definition is saved -- each new or changed plugin is
   copied from the dispatching client with `resourceList` / `resourceRead`,

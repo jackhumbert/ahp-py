@@ -10,7 +10,13 @@ from pathlib import Path
 from typing import Any
 
 from ahp_host.provider.base import AgentSessionContext, UserMessage
-from claude_agent_sdk import AssistantMessage, ClaudeAgentOptions, ResultMessage, ToolUseBlock
+from claude_agent_sdk import (
+    AssistantMessage,
+    ClaudeAgentOptions,
+    ResultMessage,
+    TextBlock,
+    ToolUseBlock,
+)
 from claude_agent_sdk import UserMessage as SdkUserMessage
 from claude_agent_sdk._internal.message_parser import parse_message
 from claude_agent_sdk.types import ToolResultBlock
@@ -137,17 +143,107 @@ async def test_a_task_moved_to_the_background_later_is_published_then(tmp_path: 
     assert harness.publisher.background["local_bash:b2"]["command"] == "make"
 
 
-async def test_a_subagent_is_not_published_without_a_chat(tmp_path: Path) -> None:
+def _background_task(task_id: str = "a1", call: str = "t1") -> list[Step]:
+    return [
+        AssistantMessage(
+            content=[
+                ToolUseBlock(
+                    call,
+                    "Task",
+                    {"prompt": "map the repo", "description": "Explore", "run_in_background": True},
+                )
+            ],
+            model="m",
+        ),
+        _started(
+            task_id,
+            "local_agent",
+            tool_use_id=call,
+            is_backgrounded=True,
+            description="Explore",
+            subagent_type="Explore",
+        ),
+        SdkUserMessage(content=[ToolResultBlock(call, "Async agent launched", False)]),
+        _result(),
+    ]
+
+
+async def test_a_background_subagent_gets_a_worker_chat_and_an_entry(tmp_path: Path) -> None:
+    harness = Harness(tmp_path, _background_task())
+    session = await harness.provider.create_session(harness.context())
+    parent = RecordingSink(approve=True)
+    await session.send_user_message(UserMessage(text="explore"), parent)
+
+    (chat,) = harness.publisher.chats
+    assert chat.tool_call_id == "t1"
+    assert chat.title == "Explore"
+    assert chat.prompts == ["map the repo"]
+    work = harness.publisher.background["local_agent:a1"]
+    assert work["kind"] == "subagent"
+    assert work["chat"] == chat.resource
+    assert work["_meta"] == {"taskId": "a1", "agentType": "Explore"}
+    # The spawning call's result points at the worker chat.
+    (completed,) = [e for e in parent.events if e[0] == "completed"]
+    assert {"type": "subagent", "resource": chat.resource, "title": "Explore"} in completed[3][
+        "content"
+    ]
+
+
+async def test_the_subagents_messages_stream_into_its_chat_after_the_turn(
+    tmp_path: Path,
+) -> None:
+    harness = Harness(tmp_path, _background_task())
+    session = await harness.provider.create_session(harness.context())
+    parent = RecordingSink(approve=True)
+    await session.send_user_message(UserMessage(text="explore"), parent)
+    (chat,) = harness.publisher.chats
+
+    client = harness.clients[0]
+    client.push(
+        AssistantMessage(
+            content=[
+                TextBlock("Looking around."),
+                ToolUseBlock("s1", "Read", {"file_path": "/x/a.py"}),
+            ],
+            model="m",
+            parent_tool_use_id="t1",
+        ),
+        SdkUserMessage(content=[ToolResultBlock("s1", "print(1)", False)], parent_tool_use_id="t1"),
+    )
+    await eventually(
+        lambda: bool(chat.sinks) and any(e[0] == "completed" for e in chat.sinks[0].events)
+    )
+    worker = chat.sinks[0]
+    assert ("text", "Looking around.") in worker.events
+    assert ("started", "s1", "Read", "Read file") in worker.events
+    # None of it leaked into the parent turn.
+    assert not any(e[0] == "started" and e[1] == "s1" for e in parent.events)
+
+    client.push(
+        _system(
+            "task_notification",
+            task_id="a1",
+            status="completed",
+            output_file="/tmp/a1",
+            summary="done",
+        )
+    )
+    await eventually(lambda: chat.tasks[0].done())
+    assert "local_agent:a1" not in harness.publisher.background
+
+
+async def test_a_foreground_subagent_is_unchanged(tmp_path: Path) -> None:
     harness = Harness(
         tmp_path,
         [
             AssistantMessage(content=[ToolUseBlock("t1", "Task", {"prompt": "x"})], model="m"),
-            _started("a1", "local_agent", tool_use_id="t1", is_backgrounded=True),
-            SdkUserMessage(content=[ToolResultBlock("t1", "launched", False)]),
+            _started("a2", "local_agent", tool_use_id="t1", is_backgrounded=False),
+            SdkUserMessage(content=[ToolResultBlock("t1", "done", False)]),
             _result(),
         ],
     )
     await _run_turn(harness)
+    assert harness.publisher.chats == []
     assert harness.publisher.background == {}
 
 
