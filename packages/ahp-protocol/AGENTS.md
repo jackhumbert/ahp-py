@@ -38,7 +38,7 @@ it.
 ```
 
 It is **not** a host and **not** a client. It holds only the parts that must be
-byte-identical on both ends: wire values, the nine reducers, version
+byte-identical on both ends: wire values, the ten reducers, version
 negotiation, the error taxonomy, the transport abstraction, and the vendored
 conformance corpora.
 
@@ -52,8 +52,8 @@ stopped being a job anyone has;
 [`docs/decisions/0002-extraction.md`](docs/decisions/0002-extraction.md)
 records the extraction and carries a dated postscript on the migration.
 
-Current state: **all 272 upstream reducer fixtures, all 44 round-trip fixtures
-and the 81-case JS-semantics oracle pass.** `mypy --strict`, `ruff`,
+Current state: **all 308 upstream reducer fixtures, all 67 round-trip fixtures, all 22 version-negotiation cases
+and the 102-case JS-semantics oracle pass.** `mypy --strict`, `ruff`,
 `ruff format` and `lint-imports` are all green and all four are gates.
 
 ## Commands
@@ -79,7 +79,7 @@ scripts/regenerate_js_semantics.sh      # needs Node + a checkout of upstream
 | Path | Contents | May import |
 |---|---|---|
 | `src/ahp_protocol/types/` | wire values, `TypedDict` views, `TypeSpec`, generated tables | stdlib only, **not** `json`/`os`/`pathlib`/`asyncio` |
-| `src/ahp_protocol/reducers/` | the nine reducers, injectable clock, `js.py` | `types` |
+| `src/ahp_protocol/reducers/` | the ten reducers, injectable clock, `js.py` | `types` |
 | `src/ahp_protocol/channels.py` | `ROOT_URI`, `classify`, `reducer_for_state` | stdlib |
 | `src/ahp_protocol/versions.py` | `parse_version`, `is_compatible`, `negotiate` | stdlib |
 | `src/ahp_protocol/errors.py` | `AhpError`, `to_json`/`from_json`, spec codes | `types` |

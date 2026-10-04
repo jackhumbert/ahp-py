@@ -25,16 +25,16 @@ ROOT = Path(__file__).resolve().parents[2]
 
 def test_action_tables_cover_every_action() -> None:
     """A missing entry would silently make an action non-dispatchable or unversioned."""
-    assert len(ACTION_TYPES) == 96
+    assert len(ACTION_TYPES) == 106
     assert set(IS_CLIENT_DISPATCHABLE) == set(ACTION_TYPES)
     assert set(ACTION_INTRODUCED_IN) == set(ACTION_TYPES)
 
 
 def test_client_dispatchable_count() -> None:
-    """44 of 96. Upstream has 46 `@clientDispatchable` JSDoc annotations, but its
+    """47 of 106. Upstream has 49 `@clientDispatchable` JSDoc annotations, but its
     own generator only counts declarations carrying `type: ActionType.X`, so the
     generated map -- which `isClientDispatchable` reads -- is authoritative."""
-    assert sum(IS_CLIENT_DISPATCHABLE.values()) == 44
+    assert sum(IS_CLIENT_DISPATCHABLE.values()) == 47
 
 
 def test_unknown_actions_are_not_client_dispatchable() -> None:
@@ -82,16 +82,11 @@ def test_error_codes_match_the_spec() -> None:
 
 
 def test_upstream_version_constants() -> None:
-    assert UPSTREAM_PROTOCOL_VERSION == "0.9.0"
-    assert UPSTREAM_SUPPORTED_PROTOCOL_VERSIONS[0] == UPSTREAM_PROTOCOL_VERSION
-    assert UPSTREAM_SUPPORTED_PROTOCOL_VERSIONS == (
-        "0.9.0",
-        "0.8.0",
-        "0.7.0",
-        "0.6.0",
-        "0.5.2",
-        "0.5.1",
-    )
+    assert UPSTREAM_PROTOCOL_VERSION == "1.0.0"
+    # Since 1.0.0 these are "released compatibility baselines, independent of
+    # the current development PROTOCOL_VERSION" (registry.ts) -- they happen to
+    # lead with it today, but nothing upstream promises that any more.
+    assert UPSTREAM_SUPPORTED_PROTOCOL_VERSIONS == ("1.0.0", "0.9.0")
 
 
 def test_vendored_pin_matches_upstream_md() -> None:
@@ -138,9 +133,9 @@ def test_root_session_chat_action_counts() -> None:
     for action in ACTION_TYPES:
         counts[action.split("/")[0]] = counts.get(action.split("/")[0], 0) + 1
     assert counts["root"] == 4
-    assert counts["session"] == 28
-    assert counts["chat"] == 30
-    assert counts["root"] + counts["session"] + counts["chat"] == 62
+    assert counts["session"] == 30
+    assert counts["chat"] == 37
+    assert counts["root"] + counts["session"] + counts["chat"] == 71
 
 
 def test_schemas_are_vendored_but_not_trusted() -> None:

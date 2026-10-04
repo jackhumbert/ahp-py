@@ -10,6 +10,8 @@ Under construction. `docs/plan.md` is the design and its §7 is the build order.
 
 ### Changed
 
+- **Speaks AHP 1.0.0** through `ahp-protocol`'s `spec/v1.0.0` pin. A malformed
+  entry in `protocolVersions` is refused `-32602` instead of being skipped.
 - **Renamed from `agent-host-broker` to `ahp-gateway`** (import `agent_host_broker` → `ahp_gateway`), and moved into the `ahp-py` monorepo as `packages/ahp-gateway`. "Broker" is "gateway" throughout, including the root-state `_meta` key: `agent-host-broker/nodes` → `ahp-gateway/nodes`. Tags are now per package: `ahp-gateway/v<version>`.
 - **File URIs reach the surfaces as `ahp-file`, not `file`.** `ahp-file:///<node>/<rel>`
   is a path under the node's root (its `defaultDirectory`), and

@@ -134,7 +134,7 @@ def assert_valid_action(action: Any) -> None:
 def assert_valid_state(channel_kind: str, state: Any) -> None:
     """Fail unless a channel's published state matches its declared shape.
 
-    The keys are the nine ``REDUCERS`` names -- all nine,
+    The keys are the ten ``REDUCERS`` names -- all ten,
     because a gate that ``KeyError``s on ``resourceWatch`` (which the schema
     does define, as ``ResourceWatchState``) crashes the caller instead of
     reporting shape problems.
@@ -149,6 +149,7 @@ def assert_valid_state(channel_kind: str, state: Any) -> None:
         "resourceWatch": "ResourceWatchState",
         "automation": "AutomationState",
         "automationRun": "AutomationRunState",
+        "canvas": "CanvasState",
     }[channel_kind]
     problems = validate_against("state", definition, state)
     assert not problems, f"{channel_kind} state does not match {definition}:\n  " + "\n  ".join(

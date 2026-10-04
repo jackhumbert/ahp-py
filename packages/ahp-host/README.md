@@ -146,18 +146,19 @@ with no adapter installed.
 
 ### Implemented
 
-Protocol **0.9.0, 0.8.0, 0.7.0 and 0.6.0** on the wire · **all seven channels** — root,
+Protocol **1.0.0, 0.9.0, 0.8.0, 0.7.0 and 0.6.0** on the wire · **all seven channels** — root,
 session, chat, annotations, terminal, changeset and resource-watch, each
-detailed below · **all nine reducers**, gated on upstream's whole 272-fixture corpus
+detailed below · **all ten reducers**, gated on upstream's whole 308-fixture corpus
 · host-global sequencing with per-channel replay budgets · a pluggable agent
 provider with an offline echo implementation · WebSocket transport behind a
 transport abstraction.
 
-All 32 commands, and none of them a stub:
+All 33 commands, and none of them a stub:
 
 `initialize` · `ping` · `subscribe` · `unsubscribe` · `reconnect` ·
 `listSessions` (paginated) · `createSession` (with `fork`) · `disposeSession` ·
 `dispatchAction` · `fetchTurns` · `createChat` · `disposeChat` ·
+`moveChat` (declined: no chat advertises `movable` yet) ·
 `resolveSessionConfig` · `sessionConfigCompletions` · `completions` ·
 `authenticate` · `createTerminal` · `disposeTerminal` · `createResourceWatch` ·
 `invokeChangesetOperation` · `resourceResolve` · `resourceRead` ·

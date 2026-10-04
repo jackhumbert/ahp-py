@@ -52,6 +52,8 @@ _OTLP_PREFIX: Final = "ahp-otlp:"
 #: The automation catalogue is a singleton, like root (0.9.0).
 AUTOMATIONS_URI: Final = "ahp-automations://"
 _AUTOMATION_RUN_PREFIX: Final = "ahp-automation-run:"
+#: One live canvas a chat advertises in `ChatState.canvases` (1.0.0, experimental).
+_CANVAS_PREFIX: Final = "ahp-canvas:"
 
 
 class ChannelKind(Enum):
@@ -65,6 +67,7 @@ class ChannelKind(Enum):
     OTLP = "otlp"
     AUTOMATION = "automation"
     AUTOMATION_RUN = "automationRun"
+    CANVAS = "canvas"
     #: A scheme we do not know. Clients MUST NOT subscribe to one, but a peer
     #: must still answer rather than crash.
     UNKNOWN = "unknown"
@@ -95,6 +98,8 @@ def classify(uri: str) -> ChannelKind:
         return ChannelKind.AUTOMATION
     if uri.startswith(_AUTOMATION_RUN_PREFIX):
         return ChannelKind.AUTOMATION_RUN
+    if uri.startswith(_CANVAS_PREFIX):
+        return ChannelKind.CANVAS
     return ChannelKind.UNKNOWN
 
 
@@ -109,13 +114,15 @@ def classify(uri: str) -> ChannelKind:
 #: are checked before it. ``agents`` comes first because ``RootState`` is the
 #: only state carrying it, and ``root`` -- the watched directory of a
 #: ``ResourceWatchState`` -- is checked after it so the two cannot collide.
+#: ``canvasId`` is the one key every ``CanvasState`` (1.0.0) must carry and no
+#: other state has; a chat holds only ``canvases`` references.
 #:
-#: Verified against all 272 upstream reducer fixtures by
+#: Verified against all 308 upstream reducer fixtures by
 #: ``tests/conformance/test_state_shapes.py``: every one of them classifies to
 #: the reducer the fixture itself declares, with no unclassifiable case --
-#: root 7, session 79, chat 132, terminal 19, changeset 16, resourceWatch 2,
-#: annotations 10, automation 5, automationRun 2. That is 272 correctness cases
-#: from data neither peer wrote.
+#: root 7, session 92, chat 149, terminal 19, changeset 17, resourceWatch 2,
+#: annotations 10, automation 7, automationRun 2, canvas 3. That is 308
+#: correctness cases from data neither peer wrote.
 _SHAPE_ORDER: Final[tuple[tuple[str, str], ...]] = (
     ("agents", "root"),
     ("claim", "terminal"),
@@ -125,6 +132,7 @@ _SHAPE_ORDER: Final[tuple[tuple[str, str], ...]] = (
     ("files", "changeset"),
     ("root", "resourceWatch"),
     ("entries", "automation"),
+    ("canvasId", "canvas"),
     ("annotations", "annotations"),
 )
 

@@ -178,6 +178,15 @@ class TestHandshake:
         # assertion pinned the wrong one for as long as it existed.
         assert "0.7.0" in response["error"]["data"]["supportedVersions"]
 
+    async def test_a_malformed_offer_is_invalid_params_even_beside_a_good_one(
+        self, connected: tuple[Host, FakeClient]
+    ) -> None:
+        """Spec 1.0.0: malformed versions are reported, not skipped."""
+        _, client = connected
+        response = await _initialize(client, protocolVersions=["1.0", "1.0.0"])
+        assert response["error"]["code"] == -32602
+        assert "'1.0'" in response["error"]["message"]
+
     async def test_commands_before_initialize_are_refused(
         self, connected: tuple[Host, FakeClient]
     ) -> None:
@@ -215,6 +224,27 @@ class TestUnimplemented:
                 # to CREATE one fail again cleaning it up.
                 continue
             assert response["error"]["code"] != -32601, method
+
+    async def test_move_chat_is_declined_with_a_reason(
+        self, connected: tuple[Host, FakeClient]
+    ) -> None:
+        """1.0.0's `moveChat` requires `movable: true`, which no chat here has."""
+        _, client = connected
+        await _initialize(client)
+        destination = {"kind": "newSession"}
+        missing = await client.request(
+            "moveChat", {"channel": "ahp-chat:/nope", "destination": destination}
+        )
+        assert missing["error"]["code"] == -32008
+        bad = await client.request("moveChat", {"channel": "ahp-chat:/nope"})
+        assert bad["error"]["code"] == -32602
+        await client.request("createSession", {"channel": "echo:/m"})
+        await client.collect(seconds=0.3)
+        state = (await client.request("subscribe", {"channel": "echo:/m"}))["result"]
+        chat = state["snapshot"]["state"]["chats"][0]["resource"]
+        refused = await client.request("moveChat", {"channel": chat, "destination": destination})
+        assert refused["error"]["code"] == -32009
+        assert "not movable" in refused["error"]["message"]
 
     async def test_an_unknown_method_still_is_method_not_found(
         self, connected: tuple[Host, FakeClient]

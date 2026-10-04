@@ -19,11 +19,12 @@ from ahp_client.client.client import ClientConfig
 
 def test_the_pin_is_the_spec_revision_this_client_was_written_against() -> None:
     """Every wire shape here was read out of `spec/v0.7.0` (plan §2.3) and
-    re-checked against `spec/v0.8.0` and `spec/v0.9.0`; the 0.9.0 ones it
-    reads (turn errors, terminal lifecycle, session claims) accept both. A
-    dependency that vendors a different tag invalidates that evidence, and the
-    place it must fail is a test rather than a field report."""
-    assert UPSTREAM_PROTOCOL_VERSION == "0.9.0"
+    re-checked against `spec/v0.8.0`, `spec/v0.9.0` and `spec/v1.0.0`; the
+    0.9.0 ones it reads (turn errors, terminal lifecycle, session claims)
+    accept both, and 1.0.0 only added. A dependency that vendors a different
+    tag invalidates that evidence, and the place it must fail is a test rather
+    than a field report."""
+    assert UPSTREAM_PROTOCOL_VERSION == "1.0.0"
 
 
 def test_the_default_offer_is_the_pins_list_not_upstreams() -> None:
@@ -39,6 +40,11 @@ def test_every_offered_version_is_covered_by_the_pin() -> None:
     """The subset test invariant 12 says to ship: whatever the default offer
     becomes, each entry must be one the pin's vendored tables cover — and the
     pin's own list must stay within what upstream declares, so a widened
-    `DEFAULT_SUPPORTED_VERSIONS` is a vendoring decision, not a typo."""
+    `DEFAULT_SUPPORTED_VERSIONS` is a vendoring decision, not a typo.
+
+    One named exception: upstream 1.0.0 dropped 0.8.0, 0.7.0 and 0.6.0, and
+    the protocol package keeps them for one release (its `UPSTREAM.md`, step
+    8). Listed exactly, so the next pin bump has to decide again."""
     assert set(ClientConfig().protocol_versions) <= set(DEFAULT_SUPPORTED_VERSIONS)
-    assert set(DEFAULT_SUPPORTED_VERSIONS) <= set(UPSTREAM_SUPPORTED_PROTOCOL_VERSIONS)
+    grace = {"0.8.0", "0.7.0", "0.6.0"}
+    assert set(DEFAULT_SUPPORTED_VERSIONS) - set(UPSTREAM_SUPPORTED_PROTOCOL_VERSIONS) == grace

@@ -130,16 +130,17 @@ async def test_version_verification_can_be_switched_off_for_a_loose_host() -> No
 
 
 async def test_offered_versions_default_to_what_the_pin_covers() -> None:
-    """Not upstream's constant, which advertises versions we have no tables for."""
-    from ahp_protocol.types import UPSTREAM_SUPPORTED_PROTOCOL_VERSIONS
+    """The pin's list, not upstream's constant: the two differ in both
+    directions over time, and only the first is a claim about our tables."""
+    from ahp_protocol import DEFAULT_SUPPORTED_VERSIONS
 
     client, host = await _connected()
     await client.initialize(client_id="c1")
     offered = next(m for m in host.received if m.get("method") == "initialize")["params"][
         "protocolVersions"
     ]
-    assert offered == ["0.9.0", "0.8.0", "0.7.0", "0.6.0"]
-    assert set(offered) < set(UPSTREAM_SUPPORTED_PROTOCOL_VERSIONS)
+    assert offered == ["1.0.0", "0.9.0", "0.8.0", "0.7.0", "0.6.0"]
+    assert offered == list(DEFAULT_SUPPORTED_VERSIONS)
     await client.shutdown()
     await host.stop()
 

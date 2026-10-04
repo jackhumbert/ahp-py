@@ -73,6 +73,7 @@ CALLER_SCOPED: Final[frozenset[str]] = frozenset(
         "createSession",
         "disposeSession",
         "createChat",
+        "moveChat",
         "disposeChat",
         "createTerminal",
         "disposeTerminal",
@@ -82,7 +83,7 @@ CALLER_SCOPED: Final[frozenset[str]] = frozenset(
     }
 )
 
-#: Every client→server request. 30 of them; `unsubscribe` and `dispatchAction`
+#: Every client→server request. 31 of them; `unsubscribe` and `dispatchAction`
 #: are notifications and live on the client itself.
 COMMANDS: Final[frozenset[str]] = ROOT_SCOPED | AUTOMATIONS_SCOPED | CALLER_SCOPED
 
@@ -98,9 +99,9 @@ def _omit_none(params: Mapping[str, Any]) -> JsonObject:
 
 
 class CommandsMixin:
-    """26 wrappers, mixed into :class:`~ahp_client.client.AhpClient`.
+    """27 wrappers, mixed into :class:`~ahp_client.client.AhpClient`.
 
-    The other four of the 30 commands -- `initialize`, `ping`, `reconnect`,
+    The other four of the 31 commands -- `initialize`, `ping`, `reconnect`,
     `subscribe` -- are connection machinery and live on `AhpClient` itself.
     Kept in its own module so the command surface can be read, counted and
     tested without wading through that machinery.
@@ -214,6 +215,20 @@ class CommandsMixin:
         implements it. The types win.
         """
         return await self._scoped("disposeChat", chat, {})
+
+    async def move_chat(self, chat: str, destination: Mapping[str, Any]) -> JsonObject:
+        """Atomically move a chat within or between sessions (1.0.0).
+
+        *destination* is a ``ChatMoveDestination``: ``{"kind": "session",
+        "session": uri, "after": uri?}`` or ``{"kind": "newSession"}``. The
+        result's ``session`` is the authoritative owner afterwards.
+
+        Not gated locally on ``movable``: the spec says clients MUST only ask
+        when the chat advertises ``movable: true``, but the host MUST validate
+        it anyway, and a stale mirror would refuse a move the host now allows
+        (ADR 0008). Checking ``movable`` before calling is the caller's job.
+        """
+        return await self._scoped("moveChat", chat, {"destination": dict(destination)})
 
     async def fetch_turns(
         self, chat: str, *, cursor: str | None = None, **extra: Any

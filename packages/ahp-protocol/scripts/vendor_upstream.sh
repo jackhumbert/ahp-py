@@ -7,8 +7,8 @@
 set -euo pipefail
 
 UPSTREAM_REPO="https://github.com/microsoft/agent-host-protocol.git"
-SPEC_TAG="spec/v0.9.0"
-SPEC_COMMIT="60706330f2f351b09f150d9a9c3c0eaedfc8e8b9"
+SPEC_TAG="spec/v1.0.0"
+SPEC_COMMIT="5f16d81bb7045b66d7bc768d244feab75002d943"
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CHECKOUT="$ROOT/.research/agent-host-protocol"

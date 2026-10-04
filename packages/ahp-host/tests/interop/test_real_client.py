@@ -2,7 +2,7 @@
 
 Skipped unless Node and the published client are available:
 
-    npm i --no-save @microsoft/agent-host-protocol@0.9.0 ws
+    npm i --no-save @microsoft/agent-host-protocol@1.0.0 ws
 
 This is the only test in the suite that needs anything outside Python. It is
 worth the cost: the reference client validates almost nothing, so nothing else
@@ -31,7 +31,7 @@ ROOT = Path(__file__).resolve().parents[2]
 DRIVER = Path(__file__).parent / "driver.mjs"
 
 
-SETUP = "needs node + `npm i --no-save @microsoft/agent-host-protocol@0.9.0 ws`"
+SETUP = "needs node + `npm i --no-save @microsoft/agent-host-protocol@1.0.0 ws`"
 
 
 def _client_available() -> bool:
@@ -76,8 +76,9 @@ async def test_real_client_drives_a_turn_end_to_end() -> None:
     assert report["ok"], f"driver failed: {report['errors']}\nstderr:\n{stderr.decode()}"
 
     # The handshake.
-    # The 0.9.0 client offers 0.9.0 first, and this host now covers it.
-    assert report["negotiatedVersion"] == "0.9.0"
+    # The 1.0.0 client offers its two baselines, 1.0.0 and 0.9.0, and the
+    # caret rule picks the highest.
+    assert report["negotiatedVersion"] == "1.0.0"
     assert report["snapshotsIsArray"] is True
     assert report["rootSnapshotResource"] == "ahp-root://"
     assert report["agents"] == ["echo"]

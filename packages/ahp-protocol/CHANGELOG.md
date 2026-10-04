@@ -8,6 +8,36 @@ the spec revision it targets.
 
 ## [Unreleased]
 
+### Changed — the spec pin moves to `spec/v1.0.0`
+
+- **The pinned upstream revision is `spec/v1.0.0` (`5f16d81b`), up from
+  `spec/v0.9.0`.** Re-vendored and regenerated: `UPSTREAM_PROTOCOL_VERSION` is
+  `1.0.0` and upstream's own supported list is just `1.0.0, 0.9.0`; 106 actions
+  (47 client-dispatchable), 308 reducer fixtures and 67 round-trips — all pass.
+  Every reducer change in 1.0.0 is additive.
+- **`DEFAULT_SUPPORTED_VERSIONS` is `("1.0.0", "0.9.0", "0.8.0", "0.7.0",
+  "0.6.0")`.** The three MINORs upstream dropped stay for one release, per
+  `UPSTREAM.md` step 8.
+- **A tenth reducer, `canvas`** (experimental): `canvas/stateChanged` replaces
+  the whole state. `classify()` knows `ahp-canvas:` and the shape classifier
+  keys on `canvasId`.
+- **Chat:** `chat/backgroundWorkSet` / `chat/backgroundWorkRemoved`,
+  `chat/movableChanged`, `chat/changesetsChanged`, `chat/canvasesChanged`,
+  `chat/isReadChanged` and `chat/isArchivedChanged`. **Session:**
+  `session/chatsReordered` (an exact permutation or a no-op) and
+  `session/mcpServerBackgroundRequested`.
+- **Breaking: negotiation follows the spec's caret rule.** `negotiate()` picks
+  the highest offered version inside `^baseline` for any supported baseline and
+  returns it verbatim, so an offer *above* a baseline (`1.10.0` against
+  `1.0.0`) is now accepted, where it used to be refused. A malformed entry now
+  raises the new `InvalidProtocolVersionError` (a `ValueError`) instead of
+  being skipped. `parse_version()` rejects leading zeros and a trailing newline,
+  which the old `re.match`-with-`$` pattern let through. Gated on upstream's new
+  22-case `version-negotiation.json`, vendored and loadable through
+  `conformance.version_negotiation_cases()`.
+- The JS-semantics oracle grows from 81 to **102** cases, covering every new
+  branch; the 81 existing cases reproduce unchanged against the 1.0.0 reducers.
+
 ### Changed — the spec pin moves to `spec/v0.9.0`
 
 - **The pinned upstream revision is `spec/v0.9.0` (`60706330`).** Re-vendored

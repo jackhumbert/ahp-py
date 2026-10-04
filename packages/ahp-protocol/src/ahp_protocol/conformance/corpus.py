@@ -64,6 +64,7 @@ _REDUCER_NAMES = frozenset(
         "resourceWatch",
         "automation",
         "automationRun",
+        "canvas",
     }
 )
 
@@ -126,7 +127,7 @@ def _require(raw: dict[str, Any], path: Path, *keys: str) -> None:
 
 
 def reducer_fixtures() -> Iterator[ReducerFixture]:
-    """The 272-fixture reducer corpus, validated structurally as it loads.
+    """The 308-fixture reducer corpus, validated structurally as it loads.
 
     A malformed upstream fixture must fail loudly rather than be silently
     skipped -- a skipped fixture looks identical to a passing one in a summary.
@@ -150,7 +151,7 @@ def reducer_fixtures() -> Iterator[ReducerFixture]:
 
 
 def round_trip_fixtures() -> Iterator[RoundTripFixture]:
-    """The 44-fixture wire round-trip corpus."""
+    """The 67-fixture wire round-trip corpus."""
     directory = CORPUS_ROOT / "test-cases" / "round-trips"
     for path in sorted(directory.glob("*.json")):
         raw = json.loads(path.read_text(encoding="utf-8"))
@@ -169,4 +170,31 @@ def round_trip_fixtures() -> Iterator[RoundTripFixture]:
             input=raw["input"],
             acceptable_outputs=outputs,
             preserved_output=raw.get("preservedOutput"),
+        )
+
+
+@dataclass(frozen=True)
+class NegotiationCase:
+    """One row of ``version-negotiation.json`` (1.0.0).
+
+    ``expected`` is the version a host built on upstream's two baselines must
+    select, or ``None`` to refuse; ``invalid`` means the offer must be rejected
+    as malformed rather than negotiated at all.
+    """
+
+    offered: list[str]
+    expected: str | None
+    invalid: bool
+
+
+def version_negotiation_cases() -> Iterator[NegotiationCase]:
+    """Upstream's host-side negotiation corpus, against its own baselines."""
+    path = CORPUS_ROOT / "test-cases" / "version-negotiation.json"
+    for raw in json.loads(path.read_text(encoding="utf-8")):
+        if "offered" not in raw or ("expected" not in raw and not raw.get("invalid")):
+            raise ValueError(f"{path.name}: malformed case {raw!r}")
+        yield NegotiationCase(
+            offered=raw["offered"],
+            expected=raw.get("expected"),
+            invalid=bool(raw.get("invalid")),
         )

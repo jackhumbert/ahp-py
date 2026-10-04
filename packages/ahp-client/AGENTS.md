@@ -63,7 +63,7 @@ scopes and M9 has not reached.
 
 ## Depend on the shared layer; do not fork it
 
-`ahp-protocol` holds the wire types, all seven reducers, version
+`ahp-protocol` holds the wire types, all ten reducers, version
 negotiation, the error taxonomy, the transport ABC and the conformance corpora.
 **Do not copy any of it into this repository**, and do not re-port a reducer.
 The reducers are ~2,500 lines of hand-ported JavaScript semantics with a
@@ -103,12 +103,12 @@ code they justify.
 
 ## Verified surface (count from the code, never from prose)
 
-- **30** client→server requests, **2** client notifications. The sibling host
-  implements 29 of the 32: it does not host automations, so it declines
-  `listAutomationTriggerDefinitions`, `runAutomation` and `fetchAutomationRuns`
+- **31** client→server requests, **2** client notifications. The sibling host
+  dispatches all 33, and declines `moveChat` (1.0.0) with `PermissionDenied`
+  because no chat it hosts advertises `movable`
 - **10** server→client requests, **9** server→client notifications
-- **96** action types, **44** client-dispatchable
-- **272** reducer fixtures, **44** round-trips
+- **106** action types, **47** client-dispatchable
+- **308** reducer fixtures, **67** round-trips
 
 Every design proposal that fed this plan wrote 28 or ~30 commands. Only a
 *generated* parity matrix catches that, which is why `docs/parity.md` is

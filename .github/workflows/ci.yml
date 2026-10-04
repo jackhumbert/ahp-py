@@ -99,7 +99,7 @@ jobs:
         with:
           node-version: "20"
       - run: uv sync --locked --all-packages --all-extras --all-groups
-      - run: npm i --no-save @microsoft/agent-host-protocol@0.9.0 ws
+      - run: npm i --no-save @microsoft/agent-host-protocol@1.0.0 ws
         working-directory: packages/ahp-host
       - name: Host against both clients
         env:

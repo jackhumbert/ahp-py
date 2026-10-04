@@ -21,22 +21,28 @@ be able to arrive as a patch upgrade.
 | Field | Value |
 |---|---|
 | Upstream | [`microsoft/agent-host-protocol`](https://github.com/microsoft/agent-host-protocol) (MIT) |
-| Spec tag | `spec/v0.9.0` |
-| Spec commit | `60706330f2f351b09f150d9a9c3c0eaedfc8e8b9` |
+| Spec tag | `spec/v1.0.0` |
+| Spec commit | `5f16d81bb7045b66d7bc768d244feab75002d943` |
 | Working revision read during research | `bd27d354b39c1b2090fbcc6db392d406b743280c` (2026-07-31) |
-| **Protocol version negotiated on the wire** | **`0.9.0`** (we offer `0.9.0, 0.8.0, 0.7.0, 0.6.0`) |
-| Conformance corpus | with the dependency, vendored there from `spec/v0.9.0` → `types/test-cases/` |
-| Reference client for interop tests | `@microsoft/agent-host-protocol@0.9.0` (npm, published 2026-08-28) |
+| **Protocol version negotiated on the wire** | **`1.0.0`** (we offer `1.0.0, 0.9.0, 0.8.0, 0.7.0, 0.6.0`) |
+| Conformance corpus | with the dependency, vendored there from `spec/v1.0.0` → `types/test-cases/` |
+| Reference client for interop tests | `@microsoft/agent-host-protocol@1.0.0` (npm, published 2026-10-02) |
 
 ### The interop client matches the wire version
 
 Earlier revisions of this section recorded the interop client trailing the
 preferred wire version by a MINOR, until npm caught up with `spec/v0.7.0`.
-Since then they have moved together: this host prefers **`0.9.0`**, npm
-published `@microsoft/agent-host-protocol@0.9.0` from that same tag on
-2026-08-28, and `tests/interop/` drives it and negotiates `0.9.0`. `0.8.0`,
-`0.7.0` and `0.6.0` stay in the offered list — upstream still declares all
-three supported — and the negotiation tests still cover the downgrade path.
+Since then they have moved together: this host prefers **`1.0.0`**, npm
+published `@microsoft/agent-host-protocol@1.0.0` from that same tag on
+2026-10-02, and `tests/interop/` drives it and negotiates `1.0.0`. Upstream
+1.0.0 advertises only `1.0.0` and `0.9.0`; `0.8.0`, `0.7.0` and `0.6.0` stay in
+the offered list for one more release and the negotiation tests still cover the
+downgrade path.
+
+Negotiation follows the spec's caret rule since 1.0.0: the highest offered
+version inside `^1.0.0` or `^0.9.0` (or one of the older baselines) wins and
+is returned verbatim, so a `1.4.0` client is accepted and told `1.4.0`. A
+malformed entry anywhere in `protocolVersions` is answered `-32602`.
 
 A peer that negotiates an older version still gets the pinned reducers, and
 some shape changes are breaking on the wire. This host deals with the ones a
@@ -50,6 +56,15 @@ client *sends*:
   it, for the 0.7.0 and 0.8.0 peers — VS Code's `/fork` among them.
 - `chat/turnResume` (0.9.0) is rejected: the host never marks an error part
   `resumable`, so there is nothing to reopen.
+
+Everything 1.0.0 added is additive. The three newly client-dispatchable
+actions — `chat/isReadChanged`, `chat/isArchivedChanged` and
+`session/mcpServerBackgroundRequested` — are accepted and reduced like any
+other, because dispatchability is read from the generated table. None of the
+1.0.0 *host-side* features (`moveChat`, chat-owned background work, per-chat
+changesets and canvases, `SessionSummary.chats`, automation
+`disableConditions`) is implemented yet: `moveChat` is answered like any other
+unknown method.
 
 What the host *publishes* is 0.9.0-shaped for everyone: errors as response
 parts, terminal `lifecycle`, session claims with `chat`, and a `failed`

@@ -1,6 +1,6 @@
 """The Agent Host Protocol, as a Python library.
 
-Wire types, the nine pure state reducers, protocol-version negotiation, the
+Wire types, the ten pure state reducers, protocol-version negotiation, the
 error taxonomy, the transport abstraction, and the vendored upstream
 conformance corpora. No I/O beyond reading its own fixture files, no agent, no
 host, no client -- those are the two peers that depend on this.
@@ -48,6 +48,7 @@ from ahp_protocol.types import (
 )
 from ahp_protocol.versions import (
     DEFAULT_SUPPORTED_VERSIONS,
+    InvalidProtocolVersionError,
     is_compatible,
     negotiate,
     parse_version,
@@ -72,6 +73,7 @@ __all__ = [
     "UPSTREAM_SUPPORTED_PROTOCOL_VERSIONS",
     "AhpError",
     "ChannelKind",
+    "InvalidProtocolVersionError",
     "JsonObject",
     "JsonValue",
     "Reducer",

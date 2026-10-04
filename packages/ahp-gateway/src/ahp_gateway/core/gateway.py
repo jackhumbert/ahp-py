@@ -50,6 +50,7 @@ from ahp_protocol import (
     REDUCERS,
     ROOT_URI,
     AhpError,
+    InvalidProtocolVersionError,
     Transport,
     TransportClosed,
     negotiate,
@@ -465,7 +466,11 @@ class _SurfaceConnection:
             or not all(isinstance(version, str) for version in offered)
         ):
             raise invalid_params("protocolVersions must be a non-empty array of strings")
-        chosen = negotiate(offered, self.gateway.supported_versions)
+        try:
+            chosen = negotiate(offered, self.gateway.supported_versions)
+        except InvalidProtocolVersionError as error:
+            # Spec 1.0.0 reports a malformed offer instead of skipping it.
+            raise invalid_params(str(error)) from None
         if chosen is None:
             raise unsupported_protocol_version(self.gateway.supported_versions)
 

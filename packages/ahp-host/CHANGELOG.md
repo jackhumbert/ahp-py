@@ -12,6 +12,15 @@ versions each release speaks.
 
 ### Changed
 
+- **Speaks AHP 1.0.0** through `ahp-protocol`'s `spec/v1.0.0` pin, and offers
+  `1.0.0, 0.9.0, 0.8.0, 0.7.0, 0.6.0`. Negotiation follows the spec's caret
+  rule: a client offering `1.4.0` is accepted and told `1.4.0`. A malformed
+  entry anywhere in `protocolVersions` is now refused `-32602` instead of being
+  skipped. The interop suite drives `@microsoft/agent-host-protocol@1.0.0`.
+- **`moveChat` (new in 1.0.0) is answered `PermissionDenied`** after validating
+  the chat exists: the spec requires `movable: true`, which no chat here
+  advertises. `chat/isReadChanged`, `chat/isArchivedChanged` and
+  `session/mcpServerBackgroundRequested` are accepted from clients.
 - **Renamed from `agent-host-server` to `ahp-host`** (import `agent_host_server` → `ahp_host`), and moved into the `ahp-py` monorepo as `packages/ahp-host`. Commands: `agent-host-server` → `ahp-host`, `agent-host-node` → `ahp-node`; the node's launchd label is `io.ahp.node`, and example configs live under `~/.config/ahp/`. Tags are now per package: `ahp-host/v<version>`.
 
 ### Added

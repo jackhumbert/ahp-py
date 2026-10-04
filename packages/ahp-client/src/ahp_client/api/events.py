@@ -596,6 +596,17 @@ _NOT_MODELLED: frozenset[str] = frozenset(
         # accepts, the turn is simply active again; a new `chat/turnComplete` or
         # `chat/error` settles it, and those are what an observer reads.
         "chat/turnResume",
+        # 1.0.0: chat-level catalogues and flags, deliberately independent of
+        # turn lifetime -- background shells and subagents outlive the turn
+        # that started them. The mirror holds them; a turn observer has nothing
+        # to settle on any of them.
+        "chat/backgroundWorkSet",
+        "chat/backgroundWorkRemoved",
+        "chat/movableChanged",
+        "chat/changesetsChanged",
+        "chat/canvasesChanged",
+        "chat/isReadChanged",
+        "chat/isArchivedChanged",
     }
 )
 

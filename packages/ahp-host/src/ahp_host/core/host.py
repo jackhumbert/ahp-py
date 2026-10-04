@@ -36,7 +36,11 @@ from ahp_protocol.types import (
     JSON_RPC_ERROR_CODES,
 )
 from ahp_protocol.types.protocol import SessionStatus, session_status_flags
-from ahp_protocol.versions import DEFAULT_SUPPORTED_VERSIONS, negotiate
+from ahp_protocol.versions import (
+    DEFAULT_SUPPORTED_VERSIONS,
+    InvalidProtocolVersionError,
+    negotiate,
+)
 
 from ahp_host.core import policy as policy_mod
 from ahp_host.core.audit import AuditEvent, AuditSink, emit
@@ -1790,6 +1794,8 @@ class Host:
             return await self._create_chat(connection, params)
         if method == "disposeChat":
             return await self._dispose_chat(connection, params)
+        if method == "moveChat":
+            return await self._move_chat(connection, params)
         if method == "invokeChangesetOperation":
             return await self._invoke_changeset_operation(connection, params)
         if method == "createResourceWatch":
@@ -1845,7 +1851,13 @@ class Host:
         ):
             raise errors.invalid_params("protocolVersions must be a non-empty array of strings")
 
-        chosen = negotiate(offered, self.supported_versions)
+        try:
+            chosen = negotiate(offered, self.supported_versions)
+        except InvalidProtocolVersionError as error:
+            # Spec 1.0.0: a malformed offer is reported explicitly, not
+            # skipped -- `["1.0", "1.0.0"]` is refused even though one entry
+            # would do. The client's request is at fault, so -32602.
+            raise errors.invalid_params(str(error)) from None
         if chosen is None:
             # MUST refuse rather than proceed. No client verifies this for us.
             # The shared emitter writes the schema's `supportedVersions`; the
@@ -3380,6 +3392,28 @@ class Host:
         self._audit("chat.disposed", connection, channel=chat_uri)
         await self._mirror_summary(session)
         return
+
+    async def _move_chat(self, connection: Connection, params: Mapping[str, Any]) -> Any:
+        """`moveChat` (1.0.0): declined, with the reason the spec itself gives.
+
+        "Clients MUST only request a move when the source chat advertises
+        `movable: true`", and the host MUST validate that before committing.
+        This host never advertises `movable`, so every request fails that check
+        -- but the method is defined, so it is answered with a specific refusal
+        rather than `MethodNotFound` (invariant 14). Validation runs in the
+        spec's order so a client learns the first thing it got wrong.
+        """
+        chat_uri = params.get("channel")
+        if not isinstance(chat_uri, str):
+            raise errors.invalid_params("channel is required")
+        destination = params.get("destination")
+        if not isinstance(destination, Mapping) or not isinstance(destination.get("kind"), str):
+            raise errors.invalid_params("destination with a kind is required")
+        if not any(chat_uri in s.chat_uris for s in self._sessions.values()):
+            raise errors.AhpError(-32008, f"No such chat: {chat_uri}")
+        if not self.policy.may_see_channel(connection.info, chat_uri):
+            raise errors.AhpError(-32009, f"Not permitted to move {chat_uri}")
+        raise errors.AhpError(-32009, f"{chat_uri} is not movable")
 
     # ─── changesets ──────────────────────────────────────────────────────
 

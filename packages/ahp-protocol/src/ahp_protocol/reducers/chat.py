@@ -91,6 +91,7 @@ _STATUS_ERROR = SessionStatus.ERROR
 _STATUS_IN_PROGRESS = SessionStatus.IN_PROGRESS
 _STATUS_INPUT_NEEDED = SessionStatus.INPUT_NEEDED
 _STATUS_IS_READ = SessionStatus.IS_READ
+_STATUS_IS_ARCHIVED = SessionStatus.IS_ARCHIVED
 
 #: Bitmask covering the mutually-exclusive activity bits (0-4).
 _STATUS_ACTIVITY_MASK = SessionStatus.ACTIVITY_MASK
@@ -725,6 +726,46 @@ def chat_reducer(state: Any, action: Mapping[str, Any]) -> Any:
     if action_type == "chat/activityChanged":
         return {**state, "activity": action.get("activity")}
 
+    # ── Chat-owned catalogues (1.0.0) ────────────────────────────────────────
+
+    if action_type == "chat/backgroundWorkSet":
+        # Upsert by id, independent of turn lifetime. A missing `work` throws
+        # upstream (`action.work.id`); we decline instead (invariant 3).
+        work = get(action, "work")
+        if not isinstance(work, Mapping):
+            return state
+        work_list = list(_seq(coalesce(state.get("backgroundWork"), [])))
+        index = index_of(work_list, "id", get(work, "id"))
+        if index < 0:
+            work_list.append(work)
+        else:
+            work_list[index] = work
+        return {**state, "backgroundWork": work_list}
+
+    if action_type == "chat/backgroundWorkRemoved":
+        work_list = _seq(coalesce(state.get("backgroundWork"), []))
+        index = index_of(work_list, "id", get(action, "id"))
+        if index < 0:
+            return state
+        remaining = list(work_list)
+        del remaining[index]
+        return {**state, "backgroundWork": remaining}
+
+    if action_type == "chat/movableChanged":
+        return assign({**state}, "movable", get(action, "movable"))
+
+    if action_type in ("chat/changesetsChanged", "chat/canvasesChanged"):
+        # Both destructure the key out and re-add it only when the action's
+        # value is truthy -- JS truthiness, so `[]` sets an empty catalogue and
+        # an explicit null clears it, the same shape as
+        # `session/changesetsChanged`.
+        key = "changesets" if action_type == "chat/changesetsChanged" else "canvases"
+        value = get(action, key)
+        next_state = {k: v for k, v in state.items() if k != key}
+        if truthy(value):
+            next_state[key] = value
+        return next_state
+
     if action_type == "chat/usage":
         active = state.get("activeTurn")
         if active is None or not strict_equal(get(active, "id"), get(action, "turnId")):
@@ -1327,6 +1368,24 @@ def chat_reducer(state: Any, action: Mapping[str, Any]) -> Any:
 
     if action_type == "chat/draftChanged":
         return {**state, "draft": action.get("draft")}
+
+    # ── Read / archived status (1.0.0) ───────────────────────────────────────
+
+    if action_type == "chat/isReadChanged":
+        return {
+            **state,
+            "status": _with_status_flag(
+                _status_bits(state), _STATUS_IS_READ, truthy(get(action, "isRead"))
+            ),
+        }
+
+    if action_type == "chat/isArchivedChanged":
+        return {
+            **state,
+            "status": _with_status_flag(
+                _status_bits(state), _STATUS_IS_ARCHIVED, truthy(get(action, "isArchived"))
+            ),
+        }
 
     # Unknown action: return the state unchanged. Never raise -- upstream's
     # `softAssertNever` logs and degrades so a peer speaking a newer version of

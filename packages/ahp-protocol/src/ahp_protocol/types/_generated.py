@@ -2,7 +2,7 @@
 
 Regenerate with `python scripts/generate_tables.py`.
 
-Source: spec/v0.9.0 (60706330f2f351b09f150d9a9c3c0eaedfc8e8b9)
+Source: spec/v1.0.0 (5f16d81bb7045b66d7bc768d244feab75002d943)
 """
 
 from __future__ import annotations
@@ -11,10 +11,10 @@ from typing import Final
 
 #: The protocol version upstream's own source tree declares at the pinned tag.
 #: This is NOT what we speak -- see ahp_protocol.types.versions.
-UPSTREAM_PROTOCOL_VERSION: Final = '0.9.0'
+UPSTREAM_PROTOCOL_VERSION: Final = '1.0.0'
 
 #: Every version the upstream client at the pinned tag will negotiate.
-UPSTREAM_SUPPORTED_PROTOCOL_VERSIONS: Final[tuple[str, ...]] = ('0.9.0', '0.8.0', '0.7.0', '0.6.0', '0.5.2', '0.5.1')
+UPSTREAM_SUPPORTED_PROTOCOL_VERSIONS: Final[tuple[str, ...]] = ('1.0.0', '0.9.0')
 
 #: Every action's wire string, from `export const enum ActionType`.
 ACTION_TYPES: Final[frozenset[str]] = frozenset([
@@ -32,6 +32,7 @@ ACTION_TYPES: Final[frozenset[str]] = frozenset([
     'automationRun/primarySessionChanged',
     'automationRun/sessionRemoved',
     'automationRun/sessionSet',
+    'canvas/stateChanged',
     'changeset/cleared',
     'changeset/contentChanged',
     'changeset/fileRemoved',
@@ -41,12 +42,19 @@ ACTION_TYPES: Final[frozenset[str]] = frozenset([
     'changeset/operationsChanged',
     'changeset/statusChanged',
     'chat/activityChanged',
+    'chat/backgroundWorkRemoved',
+    'chat/backgroundWorkSet',
+    'chat/canvasesChanged',
+    'chat/changesetsChanged',
     'chat/delta',
     'chat/draftChanged',
     'chat/error',
     'chat/inputAnswerChanged',
     'chat/inputCompleted',
     'chat/inputRequested',
+    'chat/isArchivedChanged',
+    'chat/isReadChanged',
+    'chat/movableChanged',
     'chat/pendingMessageRemoved',
     'chat/pendingMessageSet',
     'chat/queuedMessagesReordered',
@@ -82,6 +90,7 @@ ACTION_TYPES: Final[frozenset[str]] = frozenset([
     'session/chatAdded',
     'session/chatRemoved',
     'session/chatUpdated',
+    'session/chatsReordered',
     'session/configChanged',
     'session/creationFailed',
     'session/customizationRemoved',
@@ -93,6 +102,7 @@ ACTION_TYPES: Final[frozenset[str]] = frozenset([
     'session/inputNeededSet',
     'session/isArchivedChanged',
     'session/isReadChanged',
+    'session/mcpServerBackgroundRequested',
     'session/mcpServerStartRequested',
     'session/mcpServerStateChanged',
     'session/mcpServerStopRequested',
@@ -129,6 +139,7 @@ IS_CLIENT_DISPATCHABLE: Final[dict[str, bool]] = {
     'session/chatAdded': False,
     'session/chatRemoved': False,
     'session/chatUpdated': False,
+    'session/chatsReordered': False,
     'session/defaultChatChanged': False,
     'session/titleChanged': True,
     'session/serverToolsChanged': False,
@@ -146,6 +157,7 @@ IS_CLIENT_DISPATCHABLE: Final[dict[str, bool]] = {
     'session/mcpServerStateChanged': False,
     'session/mcpServerStartRequested': True,
     'session/mcpServerStopRequested': True,
+    'session/mcpServerBackgroundRequested': True,
     'session/isReadChanged': True,
     'session/isArchivedChanged': True,
     'session/activityChanged': False,
@@ -169,6 +181,12 @@ IS_CLIENT_DISPATCHABLE: Final[dict[str, bool]] = {
     'chat/error': False,
     'chat/turnResume': True,
     'chat/activityChanged': False,
+    'chat/backgroundWorkSet': False,
+    'chat/backgroundWorkRemoved': False,
+    'chat/movableChanged': False,
+    'chat/changesetsChanged': False,
+    'chat/canvasesChanged': False,
+    'canvas/stateChanged': False,
     'chat/workingDirectorySet': True,
     'chat/workingDirectoryRemoved': True,
     'chat/usage': False,
@@ -177,6 +195,8 @@ IS_CLIENT_DISPATCHABLE: Final[dict[str, bool]] = {
     'chat/pendingMessageRemoved': True,
     'chat/queuedMessagesReordered': True,
     'chat/draftChanged': True,
+    'chat/isReadChanged': True,
+    'chat/isArchivedChanged': True,
     'chat/inputRequested': False,
     'chat/inputAnswerChanged': True,
     'chat/inputCompleted': True,
@@ -229,6 +249,7 @@ ACTION_INTRODUCED_IN: Final[dict[str, str]] = {
     'session/chatAdded': '0.4.0',
     'session/chatRemoved': '0.4.0',
     'session/chatUpdated': '0.4.0',
+    'session/chatsReordered': '0.9.0',
     'session/defaultChatChanged': '0.4.0',
     'session/titleChanged': '0.1.0',
     'session/serverToolsChanged': '0.1.0',
@@ -246,6 +267,7 @@ ACTION_INTRODUCED_IN: Final[dict[str, str]] = {
     'session/mcpServerStateChanged': '0.3.0',
     'session/mcpServerStartRequested': '0.5.2',
     'session/mcpServerStopRequested': '0.5.2',
+    'session/mcpServerBackgroundRequested': '0.9.0',
     'session/isReadChanged': '0.1.0',
     'session/isArchivedChanged': '0.1.0',
     'session/activityChanged': '0.1.0',
@@ -269,6 +291,12 @@ ACTION_INTRODUCED_IN: Final[dict[str, str]] = {
     'chat/error': '0.4.0',
     'chat/turnResume': '0.9.0',
     'chat/activityChanged': '0.5.0',
+    'chat/backgroundWorkSet': '0.9.0',
+    'chat/backgroundWorkRemoved': '0.9.0',
+    'chat/movableChanged': '0.9.0',
+    'chat/changesetsChanged': '0.9.0',
+    'chat/canvasesChanged': '0.10.0',
+    'canvas/stateChanged': '0.10.0',
     'chat/workingDirectorySet': '0.7.0',
     'chat/workingDirectoryRemoved': '0.7.0',
     'chat/usage': '0.4.0',
@@ -277,6 +305,8 @@ ACTION_INTRODUCED_IN: Final[dict[str, str]] = {
     'chat/pendingMessageRemoved': '0.4.0',
     'chat/queuedMessagesReordered': '0.4.0',
     'chat/draftChanged': '0.5.0',
+    'chat/isReadChanged': '0.9.0',
+    'chat/isArchivedChanged': '0.9.0',
     'chat/inputRequested': '0.4.0',
     'chat/inputAnswerChanged': '0.4.0',
     'chat/inputCompleted': '0.4.0',

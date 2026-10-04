@@ -1,6 +1,6 @@
 # ahp-protocol
 
-The [Agent Host Protocol][ahp] (AHP) as a Python library: wire types, the nine
+The [Agent Host Protocol][ahp] (AHP) as a Python library: wire types, the ten
 pure state reducers, version negotiation, the error taxonomy, the transport
 abstraction, and **upstream's own conformance corpora, shipped inside the
 wheel**.
@@ -13,9 +13,10 @@ wheel**.
 > ### ⚠️ Status: pre-alpha.
 >
 > Extracted from [`ahp-host`][server], whose reducers this is. All
-> **272** upstream reducer fixtures, all **44** round-trip fixtures and the
-> 81-case JS-semantics oracle pass. Distributed from this repository —
-> deliberately not on PyPI — and the API is not stable.
+> **308** upstream reducer fixtures, all **67** round-trip fixtures, all
+> **22** version-negotiation cases and the 102-case JS-semantics oracle pass.
+> Distributed from this repository — deliberately not on PyPI — and the API is
+> not stable.
 
 ## What this is for
 
@@ -39,7 +40,7 @@ and a host library in no language at all.
 JavaScript semantics with a documented history of six defects that only an
 adversarial oracle could find. A fork with a drift-detecting CI job makes
 divergence *detectable*; it does not make it impossible, and the failure mode is
-silent — the 272-fixture comparator normalises `null` away on both sides, so a
+silent — the 308-fixture comparator normalises `null` away on both sides, so a
 null-passthrough fix landing on one side leaves both suites green while the two
 implementations disagree about what a peer just sent.
 
@@ -65,9 +66,9 @@ peers would inherit.
 | Module | Contents |
 |---|---|
 | `types/` | wire values, `TypedDict` views, `TypeSpec` validation, the generated upstream data tables |
-| `reducers/` | all nine reducers, the injectable clock, and `js.py` |
+| `reducers/` | all ten reducers, the injectable clock, and `js.py` |
 | `channels.py` | `ROOT_URI`, `classify()`, and `reducer_for_state()` |
-| `versions.py` | `parse_version`, `is_compatible`, `negotiate` |
+| `versions.py` | `parse_version`, `is_compatible`, `negotiate`, `InvalidProtocolVersionError` |
 | `errors.py` | `AhpError`, `to_json`/`from_json`, the spec's codes |
 | `transport/` | the `Transport` protocol and an in-process pair |
 | `conformance/` | fixture loaders over the vendored corpora |
@@ -120,7 +121,7 @@ of them `ahp-terminal:`. Routing on a scheme therefore applies *no* reducer,
 which freezes state silently while actions keep arriving.
 
 Bind the reducer when you register the channel. Where you cannot,
-`reducer_for_state()` reads the shape instead, and is verified against all 272
+`reducer_for_state()` reads the shape instead, and is verified against all 308
 fixtures: every one classifies to the reducer it declares, with no
 unclassifiable case.
 
@@ -129,9 +130,10 @@ unclassifiable case.
 "Conformant" without a conformance test is a lie, and this package's entire
 value is that other implementations can trust it.
 
-- **All 272 upstream reducer fixtures**, consumed unmodified — the same artifact
-  the Rust, Go, Kotlin and Swift clients are gated on. All 272, not a subset.
-- **All 44 round-trip fixtures**, plus `encode(decode(x)) == x` over the whole
+- **All 308 upstream reducer fixtures**, consumed unmodified — the same artifact
+  the Rust, Go, Kotlin and Swift clients are gated on. All 308, not a subset.
+- **All 22 version-negotiation cases**, against upstream's own baselines.
+- **All 67 round-trip fixtures**, plus `encode(decode(x)) == x` over the whole
   reducer corpus.
 - **The corpus's own blind spot, covered separately.** Its comparator drops
   `null`-valued keys on both sides, so it cannot express the difference between
@@ -140,7 +142,7 @@ value is that other implementations can trust it.
   by running adversarial cases through the **real pinned TypeScript reducers**
   under Node and freezing the output verbatim, nulls and all. Comparison is
   byte-for-byte, offline.
-- **The shape classifier** is asserted against all 272 fixtures' declared
+- **The shape classifier** is asserted against all 308 fixtures' declared
   reducers.
 
 The corpora ship **inside the wheel**, so a downstream implementation can run
@@ -160,9 +162,27 @@ Two constants, and they are not the same number:
 
 - `UPSTREAM_SUPPORTED_PROTOCOL_VERSIONS` — what upstream declares.
 - `DEFAULT_SUPPORTED_VERSIONS` — what a peer built on this pin can honestly
-  speak (`0.9.0`, `0.8.0`, `0.7.0`, `0.6.0`).
+  speak (`1.0.0`, `0.9.0`, `0.8.0`, `0.7.0`, `0.6.0`).
 
-Offer the second. Offering a version whose action and state tables are not
+Offer the second.
+
+`negotiate()` follows the spec's caret rule (1.0.0): it picks the **highest**
+offered version inside the caret range of any supported baseline — `^1.0.0`
+accepts `1.10.0`, `^0.9.0` accepts `0.9.3` but not `0.10.0` — and returns that
+exact string. A malformed offer raises `InvalidProtocolVersionError` instead of
+being skipped:
+
+```python
+from ahp_protocol import InvalidProtocolVersionError, negotiate
+
+assert negotiate(["0.9.0", "1.2.0"]) == "1.2.0"
+assert negotiate(["2.0.0"]) is None  # refuse: UnsupportedProtocolVersion
+
+try:
+    negotiate(["1.0"])
+except InvalidProtocolVersionError as error:
+    assert error.version == "1.0"
+``` Offering a version whose action and state tables are not
 vendored here means negotiating a protocol you cannot reduce: you pass your own
 compatibility check and then apply the wrong reducer branches.
 

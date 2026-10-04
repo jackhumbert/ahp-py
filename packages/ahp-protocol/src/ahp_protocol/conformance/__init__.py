@@ -10,18 +10,22 @@ from __future__ import annotations
 
 from ahp_protocol.conformance.corpus import (
     CORPUS_ROOT,
+    NegotiationCase,
     ReducerFixture,
     RoundTripFixture,
     pin,
     reducer_fixtures,
     round_trip_fixtures,
+    version_negotiation_cases,
 )
 
 __all__ = [
     "CORPUS_ROOT",
+    "NegotiationCase",
     "ReducerFixture",
     "RoundTripFixture",
     "pin",
     "reducer_fixtures",
     "round_trip_fixtures",
+    "version_negotiation_cases",
 ]

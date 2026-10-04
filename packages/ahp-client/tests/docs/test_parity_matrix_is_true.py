@@ -51,9 +51,9 @@ def test_every_upstream_command_has_a_wrapper() -> None:
     )
 
 
-def test_there_are_thirty_of_them() -> None:
+def test_there_are_thirty_one_of_them() -> None:
     """Pinned because every prose description of this protocol gets it wrong."""
-    assert len(COMMANDS) == 30
+    assert len(COMMANDS) == 31
     assert len(_map_entries("ClientNotificationMap")) == 2
     assert len(_map_entries("ServerCommandMap")) == 10
     assert len(_map_entries("ServerNotificationMap")) == 9
@@ -139,13 +139,13 @@ def test_all_nine_server_notifications_are_surfaced() -> None:
     assert len(NOTIFICATION_METHODS) == 9
 
 
-def test_all_nine_reducers_are_available() -> None:
-    assert len(REDUCERS) == 9
+def test_all_ten_reducers_are_available() -> None:
+    assert len(REDUCERS) == 10
 
 
 def test_the_mirror_can_bind_every_reducer() -> None:
     """The matrix's "Mirrored here" column derives from `REDUCER_NAMES`, the set
-    `StateMirror.bind` accepts. It must be all nine: the TS mirror wires four,
+    `StateMirror.bind` accepts. It must be all ten: the TS mirror wires four,
     and matching that would inherit its `ahp-chat:`-snapshots-ignored gap."""
     assert frozenset(REDUCERS) == REDUCER_NAMES
 
@@ -181,8 +181,8 @@ def test_the_reverse_here_column_matches_the_servers_dispatch_tables() -> None:
 
 def test_dispatchable_action_count_is_pinned() -> None:
     dispatchable = [a for a in ACTION_TYPES if IS_CLIENT_DISPATCHABLE.get(a)]
-    assert len(ACTION_TYPES) == 96
-    assert len(dispatchable) == 44
+    assert len(ACTION_TYPES) == 106
+    assert len(dispatchable) == 47
 
 
 def test_the_generated_matrix_is_not_stale() -> None:

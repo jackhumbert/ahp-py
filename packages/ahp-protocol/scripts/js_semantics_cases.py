@@ -717,6 +717,117 @@ case(
     [{"type": "terminal/exited", "exitCode": 0}],
 )
 
+# ── 1.0.0: chat-owned catalogues and status ─────────────────────────────────
+
+case("chat/movable=null", "chat", _CHAT, [{"type": "chat/movableChanged", "movable": None}])
+case("chat/movable-absent", "chat", {**_CHAT, "movable": True}, [{"type": "chat/movableChanged"}])
+# Destructure-and-re-add on truthiness: `[]` keeps an empty catalogue, null clears.
+_WITH_CATALOGUES = {**_CHAT, "changesets": [{"resource": "c"}], "canvases": [{"resource": "v"}]}
+case(
+    "chat/changesets=null",
+    "chat",
+    _WITH_CATALOGUES,
+    [{"type": "chat/changesetsChanged", "changesets": None}],
+)
+case(
+    "chat/changesets=[]",
+    "chat",
+    _WITH_CATALOGUES,
+    [{"type": "chat/changesetsChanged", "changesets": []}],
+)
+case("chat/canvases-absent", "chat", _WITH_CATALOGUES, [{"type": "chat/canvasesChanged"}])
+case(
+    "chat/canvases=[]",
+    "chat",
+    _WITH_CATALOGUES,
+    [{"type": "chat/canvasesChanged", "canvases": []}],
+)
+# `set ? status | flag : status & ~flag` -- JS truthiness, and an absent status.
+case("chat/isRead=[]", "chat", _CHAT, [{"type": "chat/isReadChanged", "isRead": []}])
+case(
+    "chat/isRead=0", "chat", {**_CHAT, "status": 33}, [{"type": "chat/isReadChanged", "isRead": 0}]
+)
+case(
+    "chat/isArchived-no-status",
+    "chat",
+    {"turns": []},
+    [{"type": "chat/isArchivedChanged", "isArchived": True}],
+)
+# Background work is keyed with `===`: `true` is not `1`, absent matches absent.
+_WORK = {**_CHAT, "backgroundWork": [{"id": 1, "kind": "shell"}, {"kind": "subagent"}]}
+case(
+    "chat/backgroundWorkSet-true-vs-1",
+    "chat",
+    _WORK,
+    [{"type": "chat/backgroundWorkSet", "work": {"id": True, "kind": "shell"}}],
+)
+case(
+    "chat/backgroundWorkSet-replaces-1",
+    "chat",
+    _WORK,
+    [{"type": "chat/backgroundWorkSet", "work": {"id": 1, "kind": "subagent"}}],
+)
+case(
+    "chat/backgroundWorkRemoved-null-vs-absent",
+    "chat",
+    _WORK,
+    [{"type": "chat/backgroundWorkRemoved", "id": None}],
+)
+case(
+    "chat/backgroundWorkRemoved-absent-matches-absent",
+    "chat",
+    _WORK,
+    [{"type": "chat/backgroundWorkRemoved"}],
+)
+
+# ── 1.0.0: session chat order and MCP backgrounding ──────────────────────────
+
+# A Map keyed by resource is SameValueZero: `1` and `"1"` are different chats.
+_ORDERED = {**_SESSION, "chats": [{"resource": 1, "title": "n"}, {"resource": "1", "title": "s"}]}
+case(
+    "sess/chatsReordered-1-vs-'1'",
+    "session",
+    _ORDERED,
+    [{"type": "session/chatsReordered", "chats": ["1", 1]}],
+)
+case(
+    "sess/chatsReordered-true-is-unknown",
+    "session",
+    _ORDERED,
+    [{"type": "session/chatsReordered", "chats": ["1", True]}],
+)
+case(
+    "sess/chatsReordered-duplicate",
+    "session",
+    _ORDERED,
+    [{"type": "session/chatsReordered", "chats": [1, 1]}],
+)
+_STARTING = {
+    **_SESSION,
+    "customizations": [
+        {"type": "mcpServer", "id": "a", "state": {"kind": "starting", "blocking": 1}},
+        {"type": "mcpServer", "id": "b", "state": {"kind": "starting", "blocking": []}},
+        {"type": "mcpServer", "id": "c", "state": {"kind": "starting", "blocking": 0}},
+        {"type": "mcpServer", "id": "d", "state": {"kind": "running", "blocking": True}},
+    ],
+}
+for _id in "abcd":
+    case(
+        f"sess/mcpServerBackgroundRequested-{_id}",
+        "session",
+        _STARTING,
+        [{"type": "session/mcpServerBackgroundRequested", "id": _id}],
+    )
+
+# ── 1.0.0: canvas ────────────────────────────────────────────────────────────
+
+case(
+    "canvas/stateChanged=null",
+    "canvas",
+    {"instanceId": "i", "extensionId": "e", "canvasId": "c", "url": "https://example.com"},
+    [{"type": "canvas/stateChanged", "canvas": None}],
+)
+
 if __name__ == "__main__":
     for entry in CASES:
         sys.stdout.write(json.dumps(entry) + "\n")

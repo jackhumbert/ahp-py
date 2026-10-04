@@ -157,6 +157,16 @@
           "$ref": "#/$defs/ConfigPropertySchema",
           "description": "JSON Schema: schema for array items (used when `type` is `'array'`)"
         },
+        "minItems": {
+          "type": "integer",
+          "description": "JSON Schema: minimum number of array items (used when `type` is `'array'`)",
+          "minimum": 0
+        },
+        "maxItems": {
+          "type": "integer",
+          "description": "JSON Schema: maximum number of array items (used when `type` is `'array'`)",
+          "minimum": 0
+        },
         "properties": {
           "type": "object",
           "additionalProperties": {
@@ -286,55 +296,67 @@
         "uri"
       ]
     },
+    "FileEditSide": {
+      "type": "object",
+      "properties": {
+        "uri": {
+          "$ref": "#/$defs/URI",
+          "description": "URI of the file on this side of the edit"
+        },
+        "content": {
+          "$ref": "#/$defs/ContentRef",
+          "description": "Reference to the file content on this side of the edit"
+        }
+      },
+      "required": [
+        "uri",
+        "content"
+      ]
+    },
+    "FileEditDiffStats": {
+      "type": "object",
+      "properties": {
+        "added": {
+          "type": "number",
+          "description": "Number of items added (e.g., lines for text files, cells for notebooks)"
+        },
+        "removed": {
+          "type": "number",
+          "description": "Number of items removed (e.g., lines for text files, cells for notebooks)"
+        }
+      }
+    },
     "FileEdit": {
       "type": "object",
       "description": "Describes a file modification with before/after state and diff metadata.\n\nSupports creates (only `after`), deletes (only `before`), renames/moves\n(different `uri` in `before` and `after`), and edits (same `uri`, different content).",
       "properties": {
         "before": {
-          "type": "object",
-          "properties": {
-            "uri": {
-              "$ref": "#/$defs/URI"
-            },
-            "content": {
-              "$ref": "#/$defs/ContentRef"
-            }
-          },
-          "required": [
-            "uri",
-            "content"
-          ],
+          "$ref": "#/$defs/FileEditSide",
           "description": "The file state before the edit. Absent for file creations or for in-place file edits."
         },
         "after": {
-          "type": "object",
-          "properties": {
-            "uri": {
-              "$ref": "#/$defs/URI"
-            },
-            "content": {
-              "$ref": "#/$defs/ContentRef"
-            }
-          },
-          "required": [
-            "uri",
-            "content"
-          ],
+          "$ref": "#/$defs/FileEditSide",
           "description": "The file state after the edit. Absent for file deletions."
         },
         "diff": {
-          "type": "object",
-          "properties": {
-            "added": {
-              "type": "number"
-            },
-            "removed": {
-              "type": "number"
-            }
-          },
+          "$ref": "#/$defs/FileEditDiffStats",
           "description": "Optional diff display metadata"
         }
       }
+    },
+    "FileEditCollection": {
+      "type": "object",
+      "properties": {
+        "items": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/FileEdit"
+          }
+        }
+      },
+      "required": [
+        "items"
+      ]
     },
     "UsageInfo": {
       "type": "object",
@@ -394,7 +416,7 @@
       "properties": {
         "resource": {
           "$ref": "#/$defs/URI",
-          "description": "The subscribed channel URI (e.g. `ahp-root://`, `ahp-session:/<uuid>`, or `ahp-chat:/<uuid>`)"
+          "description": "The subscribed channel URI (e.g. `ahp-root://`, `ahp-session:/<uuid>`, `ahp-chat:/<uuid>`, or `ahp-canvas:/<uuid>`)"
         },
         "state": {
           "oneOf": [
@@ -418,6 +440,9 @@
             },
             {
               "$ref": "#/$defs/ChatState"
+            },
+            {
+              "$ref": "#/$defs/CanvasState"
             },
             {
               "$ref": "#/$defs/AutomationState"
@@ -529,7 +554,7 @@
       "properties": {
         "multipleChats": {
           "$ref": "#/$defs/MultipleChatsCapability",
-          "description": "The agent can host more than one concurrent chat per session. When absent,\nclients MUST NOT call `createChat` to open chats beyond the default one the\nsession starts with. An empty object `{}` advertises multi-chat without\nsource-based creation; set {@link MultipleChatsCapability.fork} or\n{@link MultipleChatsCapability.sideChat} to allow the corresponding mode."
+          "description": "The agent can host more than one concurrent chat per session. When absent,\nclients MUST NOT call `createChat` to open chats beyond the default one the\nsession starts with. An empty object `{}` advertises multi-chat without\nsource-based creation; set {@link MultipleChatsCapability.fork} or\n{@link MultipleChatsCapability.sideChat} to allow the corresponding\ncreation mode."
         },
         "multipleWorkingDirectories": {
           "$ref": "#/$defs/MultipleWorkingDirectoriesCapability",
@@ -789,11 +814,11 @@
           "items": {
             "$ref": "#/$defs/ChatSummary"
           },
-          "description": "Catalog of chats in this session."
+          "description": "Catalog of chats in this session.\n\nOrder is host-authoritative and durable. Catalog order is independent of\n`defaultChat`."
         },
         "defaultChat": {
           "$ref": "#/$defs/URI",
-          "description": "The chat that receives input when the user addresses the session without\nselecting a specific chat. This is a UI routing hint, not a hierarchy\nmarker — chats remain equal peers at the protocol level. Hosts MAY change\nthis over the session's lifetime."
+          "description": "The chat that receives input when the user addresses the session without\nselecting a specific chat. This routing designation does not determine the\nchat's catalog position. Hosts MAY change it over the session's lifetime."
         },
         "config": {
           "$ref": "#/$defs/SessionConfigState",
@@ -1033,7 +1058,7 @@
     },
     "SessionSummary": {
       "type": "object",
-      "description": "Lightweight catalog entry summarizing one session. Surfaced via\n{@link RootChannelCommands.listSessions | `root/listSessions`} and\n`root/sessionAdded`/`root/sessionSummaryChanged` notifications.\n\n**Aggregation across chats.** Once a session contains more than one chat,\nseveral `SessionSummary` fields are derived from the underlying\n{@link SessionState.chats | chat catalog}. Producers SHOULD follow these\nrules so clients that only consume the session summary (e.g. a session\nlist) still see meaningful state:\n\n- `status`: take the activity bits (`Idle` / `InProgress` / `InputNeeded` /\n  `Error` — bits 0–4) from the\n  {@link SessionState.defaultChat | default chat} when present, else from\n  the most recently modified chat. **Promote** `InputNeeded` whenever any\n  chat in the session needs input, and **promote** `Error` whenever any\n  chat is in an error state — both override the default-chat bits. The\n  orthogonal flag bits (`IsRead`, `IsArchived`) remain session-scoped.\n- `activity`: mirror the activity string of the default chat, or of the\n  chat currently driving the promoted status bits when a non-default chat\n  wins (e.g. the chat that raised `InputNeeded`).\n- `modifiedAt`: the max of all chats' `modifiedAt`.\n- `workingDirectories`: the session-level set. Individual chats MAY restrict\n  to a subset via {@link ChatSummary.workingDirectories}; aggregating these\n  up is meaningless and SHOULD NOT be attempted.\n- `changes`: optional roll-up across all chats. Producers MAY sum the\n  per-chat changeset stats or report the most expensive chat's stats —\n  whichever is cheaper for the host to compute.\n\nSessions with a single chat trivially satisfy all of the above (the chat's\nvalues pass through unchanged). The rules only matter once a session\ncarries multiple chats.",
+      "description": "Lightweight catalog entry summarizing one session. Surfaced via\n{@link RootChannelCommands.listSessions | `root/listSessions`} and\n`root/sessionAdded`/`root/sessionSummaryChanged` notifications.\n\n**Aggregation across chats.** Once a session contains more than one chat,\nseveral `SessionSummary` fields are derived from the underlying\n{@link SessionState.chats | chat catalog}. Producers SHOULD follow these\nrules so clients that only consume the session summary (e.g. a session\nlist) still see meaningful state:\n\n- `status`: take the activity bits (`Idle` / `InProgress` / `InputNeeded` /\n  `Error` — bits 0–4) from the\n  {@link SessionState.defaultChat | default chat} when present, else from\n  the most recently modified chat. **Promote** `InputNeeded` whenever any\n  chat in the session needs input, and **promote** `Error` whenever any\n  chat is in an error state — both override the default-chat bits. The\n  orthogonal flag bits (`IsRead`, `IsArchived`) remain session-scoped.\n- `activity`: mirror the activity string of the default chat, or of the\n  chat currently driving the promoted status bits when a non-default chat\n  wins (e.g. the chat that raised `InputNeeded`).\n- `modifiedAt`: the max of all chats' `modifiedAt`.\n- `workingDirectories`: the session-level set. Individual chats MAY restrict\n  to a subset via {@link ChatSummary.workingDirectories}; aggregating these\n  up is meaningless and SHOULD NOT be attempted.\n- `changes`: optional roll-up across all chats. Producers MAY sum the\n  per-chat {@link ChatSummary.changes | changes summaries} or report the\n  most expensive chat's stats —\n  whichever is cheaper for the host to compute.\n\nSessions with a single chat trivially satisfy all of the above (the chat's\nvalues pass through unchanged). The rules only matter once a session\ncarries multiple chats.",
       "properties": {
         "provider": {
           "type": "string",
@@ -1090,6 +1115,17 @@
           "type": "object",
           "additionalProperties": {},
           "description": "Lightweight server-defined metadata clients may use for the session\npresentation. The protocol does not interpret these values; producers\nSHOULD keep the payload small because summaries appear in session lists\nand session notifications."
+        },
+        "chats": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SessionChatSummary"
+          },
+          "description": "Lightweight host-authoritative ordered chat catalog."
+        },
+        "defaultChat": {
+          "$ref": "#/$defs/URI",
+          "description": "Chat that receives input when none is selected, independent of catalog position."
         }
       },
       "required": [
@@ -1101,9 +1137,43 @@
         "modifiedAt"
       ]
     },
+    "SessionChatSummary": {
+      "type": "object",
+      "description": "Lightweight chat information in a session catalog.",
+      "properties": {
+        "resource": {
+          "$ref": "#/$defs/URI",
+          "description": "Canonical chat URI"
+        },
+        "title": {
+          "type": "string",
+          "description": "Human-readable chat title"
+        },
+        "origin": {
+          "$ref": "#/$defs/ChatOrigin",
+          "description": "How this chat was created, when known"
+        },
+        "interactivity": {
+          "$ref": "#/$defs/ChatInteractivity",
+          "description": "How the user can interact with this chat.\n\nGeneric clients use this to omit hidden chats and disable input for\nread-only chats. Absence defaults to {@link ChatInteractivity.Full} for\nbackward compatibility."
+        },
+        "status": {
+          "$ref": "#/$defs/SessionStatus",
+          "description": "Current chat status, matching {@link ChatSummary.status}.\n\nIncludes the activity bits and the orthogonal {@link SessionStatus.IsRead}\nand {@link SessionStatus.IsArchived} flags. Generic clients use these bits\nto present read, unread, or archived chats in session lists without\nsubscribing to the session or chat channel. Absence means the host did\nnot provide the status; clients MUST treat it as unknown, not as unread\nor unarchived."
+        },
+        "changes": {
+          "$ref": "#/$defs/ChangesSummary",
+          "description": "Aggregate summary of file changes associated with this chat.\n\nServers may populate this so session lists can show per-chat change\ncounts without subscribing to the session or chat channel. Updates travel\nwith the rest of the catalog in `root/sessionSummaryChanged`."
+        }
+      },
+      "required": [
+        "resource",
+        "title"
+      ]
+    },
     "ChangesSummary": {
       "type": "object",
-      "description": "Aggregate counts describing the file changes associated with a session.\n\nAll fields are optional so servers can populate only the metrics they\ncheaply have available.",
+      "description": "Aggregate counts describing the file changes associated with a session or\nchat.\n\nAll fields are optional so servers can populate only the metrics they\ncheaply have available.",
       "properties": {
         "additions": {
           "type": "number",
@@ -1186,6 +1256,16 @@
         "items": {
           "$ref": "#/$defs/ConfigPropertySchema",
           "description": "JSON Schema: schema for array items (used when `type` is `'array'`)"
+        },
+        "minItems": {
+          "type": "integer",
+          "description": "JSON Schema: minimum number of array items (used when `type` is `'array'`)",
+          "minimum": 0
+        },
+        "maxItems": {
+          "type": "integer",
+          "description": "JSON Schema: maximum number of array items (used when `type` is `'array'`)",
+          "minimum": 0
         },
         "properties": {
           "type": "object",
@@ -2208,6 +2288,10 @@
       "properties": {
         "kind": {
           "const": "starting"
+        },
+        "blocking": {
+          "type": "boolean",
+          "description": "Hosts SHOULD set this to `true` when this server's startup will hold back\nthe processing of new messages (for example, the next turn) while the\nserver's contributions — such as its tools — are discovered.\n\nClients MAY dispatch\n{@link SessionMcpServerBackgroundRequestedAction | `session/mcpServerBackgroundRequested`}\nthrough an appropriate affordance to ask the host to background the\nstartup."
         }
       },
       "required": [
@@ -2366,9 +2450,17 @@
           "type": "string",
           "description": "Last modification timestamp (ISO 8601, e.g. `\"2025-03-10T18:42:03.123Z\"`)"
         },
+        "changes": {
+          "$ref": "#/$defs/ChangesSummary",
+          "description": "Aggregate summary of file changes associated with this chat. Servers may\npopulate this to give clients a quick at-a-glance view of the chat's\nfootprint without requiring the client to subscribe to a changeset."
+        },
         "origin": {
           "$ref": "#/$defs/ChatOrigin",
           "description": "How this chat came into existence"
+        },
+        "movable": {
+          "type": "boolean",
+          "description": "Whether this chat is eligible to be the source of `moveChat`, including\nsame-session ordering.\n\nThe host is authoritative. Absence means `false`. A `true` value does not\nguarantee that a particular request will succeed. A chat referenced by its\nowning session's `defaultChat` MUST NOT be movable."
         },
         "interactivity": {
           "$ref": "#/$defs/ChatInteractivity",
@@ -2380,6 +2472,27 @@
             "$ref": "#/$defs/URI"
           },
           "description": "The subset of the session's\n{@link SessionState.workingDirectories | `workingDirectories`} that this\nchat's agent has tool access to. Every entry MUST be present in the owning\nsession's `workingDirectories`; servers MUST reject a\n`chat/workingDirectorySet` action that violates this constraint.\n\nWhen absent, the chat inherits the full session set. When present but empty\n(not recommended), the chat has no working-directory tool access at all.\n\nDispatch `chat/workingDirectorySet` / `chat/workingDirectoryRemoved` to\nupdate the subset on a running chat."
+        },
+        "changesets": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Changeset"
+          },
+          "description": "Catalogue of changesets the server can produce for this chat. Each entry\nadvertises a subscribable view of file changes scoped to the chat's\neffective working directories and the URI template the client expands\nbefore subscribing. See {@link Changeset} for the full shape and\n{@link /guide/changesets | Changesets} for an overview of the model.\n\nThis catalogue is intentionally absent from {@link ChatSummary}; clients\nobtain it by subscribing to the chat channel."
+        },
+        "backgroundWork": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/BackgroundWork"
+          },
+          "description": "Work running in the background for this chat, such as shells and\nsubagents. Only active work is listed: hosts remove an entry once the work\nends. An entry may have been started by an earlier turn rather than the\n{@link ChatState.activeTurn | activeTurn}.\n\nLike {@link ChatState.changesets | changesets}, this is intentionally\nabsent from {@link ChatSummary}; clients obtain it by subscribing to the\nchat channel."
+        },
+        "canvases": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/CanvasReference"
+          },
+          "description": "Live canvases currently exposed by this chat.\n\nEntries intentionally contain only subscribable channel references.\nClients subscribe to each resource for the experimental presentation\nstate, including its current live source URL."
         },
         "turns": {
           "type": "array",
@@ -2449,9 +2562,17 @@
           "type": "string",
           "description": "Last modification timestamp (ISO 8601, e.g. `\"2025-03-10T18:42:03.123Z\"`)"
         },
+        "changes": {
+          "$ref": "#/$defs/ChangesSummary",
+          "description": "Aggregate summary of file changes associated with this chat. Servers may\npopulate this to give clients a quick at-a-glance view of the chat's\nfootprint without requiring the client to subscribe to a changeset."
+        },
         "origin": {
           "$ref": "#/$defs/ChatOrigin",
           "description": "How this chat came into existence"
+        },
+        "movable": {
+          "type": "boolean",
+          "description": "Whether this chat is structurally eligible to be the source of\n`moveChat`. Absence means `false`.\n\nSee {@link ChatState.movable} for the full semantics."
         },
         "interactivity": {
           "$ref": "#/$defs/ChatInteractivity",
@@ -2470,6 +2591,112 @@
         "title",
         "status",
         "modifiedAt"
+      ]
+    },
+    "BackgroundWorkBase": {
+      "type": "object",
+      "description": "Fields common to every {@link BackgroundWork} variant.",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Identifier of this entry, unique within the owning chat across all kinds.\nThe host derives it however it likes (for example from the kind plus the\nagent's own task id); consumers MUST treat it as opaque. It is the key for\nthe `chat/backgroundWorkSet` / `chat/backgroundWorkRemoved` upsert\nconvention."
+        },
+        "label": {
+          "type": "string",
+          "description": "Human-readable label, such as the command's purpose or the subagent's name."
+        },
+        "startedAt": {
+          "type": "string",
+          "description": "ISO 8601 timestamp when the work started."
+        },
+        "_meta": {
+          "type": "object",
+          "additionalProperties": {},
+          "description": "Provider-specific metadata."
+        }
+      },
+      "required": [
+        "id",
+        "label",
+        "startedAt"
+      ]
+    },
+    "BackgroundShellWork": {
+      "type": "object",
+      "description": "A shell command continuing outside its initiating tool call. Covers shells\ntied to the agent's lifetime (attached) and shells that outlive it\n(detached). Whether a shell is attached is provider-specific and goes in its\n`_meta`.",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Identifier of this entry, unique within the owning chat across all kinds.\nThe host derives it however it likes (for example from the kind plus the\nagent's own task id); consumers MUST treat it as opaque. It is the key for\nthe `chat/backgroundWorkSet` / `chat/backgroundWorkRemoved` upsert\nconvention."
+        },
+        "label": {
+          "type": "string",
+          "description": "Human-readable label, such as the command's purpose or the subagent's name."
+        },
+        "startedAt": {
+          "type": "string",
+          "description": "ISO 8601 timestamp when the work started."
+        },
+        "_meta": {
+          "type": "object",
+          "additionalProperties": {},
+          "description": "Provider-specific metadata."
+        },
+        "kind": {
+          "const": "shell"
+        },
+        "command": {
+          "type": "string",
+          "description": "Command line, displayed as plain text."
+        },
+        "terminal": {
+          "$ref": "#/$defs/URI",
+          "description": "Terminal carrying this shell's output. Hosts SHOULD set this whenever they\ncan show that output. Clients open it like\n{@link ToolResultTerminalContent.resource}; `isPty` on its\n{@link TerminalState} says whether the output is plain text."
+        }
+      },
+      "required": [
+        "id",
+        "label",
+        "startedAt",
+        "kind",
+        "command"
+      ]
+    },
+    "BackgroundSubagentWork": {
+      "type": "object",
+      "description": "A subagent running in the background. Its own state lives in its chat.",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Identifier of this entry, unique within the owning chat across all kinds.\nThe host derives it however it likes (for example from the kind plus the\nagent's own task id); consumers MUST treat it as opaque. It is the key for\nthe `chat/backgroundWorkSet` / `chat/backgroundWorkRemoved` upsert\nconvention."
+        },
+        "label": {
+          "type": "string",
+          "description": "Human-readable label, such as the command's purpose or the subagent's name."
+        },
+        "startedAt": {
+          "type": "string",
+          "description": "ISO 8601 timestamp when the work started."
+        },
+        "_meta": {
+          "type": "object",
+          "additionalProperties": {},
+          "description": "Provider-specific metadata."
+        },
+        "kind": {
+          "const": "subagent"
+        },
+        "chat": {
+          "$ref": "#/$defs/URI",
+          "description": "The subagent's chat: the same chat the spawning tool call's\n{@link ToolResultSubagentContent.resource} points to."
+        }
+      },
+      "required": [
+        "id",
+        "label",
+        "startedAt",
+        "kind",
+        "chat"
       ]
     },
     "SideChatSelection": {
@@ -3786,18 +4013,7 @@
           "description": "Risk assessment that informed the confirmation requirement."
         },
         "edits": {
-          "type": "object",
-          "properties": {
-            "items": {
-              "type": "array",
-              "items": {
-                "$ref": "#/$defs/FileEdit"
-              }
-            }
-          },
-          "required": [
-            "items"
-          ],
+          "$ref": "#/$defs/FileEditCollection",
           "description": "File edits that this tool call will perform, for preview before confirmation"
         },
         "editable": {
@@ -4302,47 +4518,15 @@
       "description": "Describes a file modification performed by a tool.",
       "properties": {
         "before": {
-          "type": "object",
-          "properties": {
-            "uri": {
-              "$ref": "#/$defs/URI"
-            },
-            "content": {
-              "$ref": "#/$defs/ContentRef"
-            }
-          },
-          "required": [
-            "uri",
-            "content"
-          ],
+          "$ref": "#/$defs/FileEditSide",
           "description": "The file state before the edit. Absent for file creations or for in-place file edits."
         },
         "after": {
-          "type": "object",
-          "properties": {
-            "uri": {
-              "$ref": "#/$defs/URI"
-            },
-            "content": {
-              "$ref": "#/$defs/ContentRef"
-            }
-          },
-          "required": [
-            "uri",
-            "content"
-          ],
+          "$ref": "#/$defs/FileEditSide",
           "description": "The file state after the edit. Absent for file deletions."
         },
         "diff": {
-          "type": "object",
-          "properties": {
-            "added": {
-              "type": "number"
-            },
-            "removed": {
-              "type": "number"
-            }
-          },
+          "$ref": "#/$defs/FileEditDiffStats",
           "description": "Optional diff display metadata"
         },
         "type": {
@@ -4355,14 +4539,14 @@
     },
     "ToolResultTerminalContent": {
       "type": "object",
-      "description": "A reference to a terminal whose output is relevant to this tool result.\n\nClients can subscribe to the terminal's URI to stream its output in real\ntime, providing live feedback while a tool is executing.\n\nWhen the command exits, {@link result} is filled in on the completed\nresult, retaining the outcome for clients that did not subscribe. This\nrecords the command's exit, not the terminal's — the terminal may keep\nrunning afterwards.",
+      "description": "A reference to a terminal whose output is relevant to this tool result.\n\nClients can subscribe to the terminal's URI to stream its output in real\ntime, providing live feedback while a tool is executing. The same URI\nremains subscribable for historical results: when the referenced resource's\nlifecycle is `exited`, subscribing returns an exited {@link TerminalState}\ncontaining the retained terminal content. Servers may reconstruct that state\nlazily and do not need to retain a live terminal process.\n\nWhen the command exits, {@link result} is filled in on the completed\nresult, retaining the outcome for clients that did not subscribe. This\nrecords the command's exit, not the terminal's — the terminal may keep\nrunning afterwards.",
       "properties": {
         "type": {
           "const": "terminal"
         },
         "resource": {
           "$ref": "#/$defs/URI",
-          "description": "Terminal URI (subscribable for full terminal state)"
+          "description": "Terminal URI (subscribable for live or retained terminal state)"
         },
         "title": {
           "type": "string",
@@ -4429,6 +4613,58 @@
         "type",
         "resource",
         "title"
+      ]
+    },
+    "CanvasReference": {
+      "type": "object",
+      "description": "Stable reference to a subscribable canvas channel.\n\nChat state intentionally carries only this reference so the experimental\ncanvas presentation model can evolve without changing the stable chat\nchannel shape.",
+      "properties": {
+        "resource": {
+          "$ref": "#/$defs/URI",
+          "description": "Canvas channel URI. Subscribe to this resource for the full state."
+        }
+      },
+      "required": [
+        "resource"
+      ]
+    },
+    "CanvasState": {
+      "type": "object",
+      "description": "Full state for one live canvas, returned when a client subscribes to its\n`ahp-canvas:` URI.\n\nThe client already knows the subscribed resource, so the state does not\nredundantly carry its channel URI.",
+      "properties": {
+        "instanceId": {
+          "type": "string",
+          "description": "Stable caller-supplied instance identifier."
+        },
+        "extensionId": {
+          "type": "string",
+          "description": "Owning extension/provider identifier."
+        },
+        "extensionName": {
+          "type": "string",
+          "description": "Owning extension display name, when available."
+        },
+        "canvasId": {
+          "type": "string",
+          "description": "Provider-local canvas type identifier."
+        },
+        "title": {
+          "type": "string",
+          "description": "Provider-supplied title, when available."
+        },
+        "status": {
+          "type": "string",
+          "description": "Provider-supplied status text, when available."
+        },
+        "url": {
+          "$ref": "#/$defs/URI",
+          "description": "Current absolute HTTP(S) source URL; absent when the live source is unavailable.\nHosts MUST clear this field when the provider becomes unavailable.\n\nSource URLs MUST be redacted from diagnostic logs and MUST NOT be reused\nfrom persisted state after a provider or host restart."
+        }
+      },
+      "required": [
+        "instanceId",
+        "extensionId",
+        "canvasId"
       ]
     },
     "TerminalInfo": {
@@ -4657,7 +4893,7 @@
     },
     "Changeset": {
       "type": "object",
-      "description": "Catalogue entry describing one changeset the server can produce for a\nsession.\n\nCatalogue entries are intentionally lightweight — just enough to render a\nchip or list row without subscribing. Full per-changeset detail\n({@link ChangesetState}) lives on the subscribable URI obtained by\nexpanding {@link uriTemplate}.",
+      "description": "Catalogue entry describing one changeset the server can produce for a\nsession or chat.\n\nCatalogue entries are intentionally lightweight — just enough to render a\nchip or list row without subscribing. Full per-changeset detail\n({@link ChangesetState}) lives on the subscribable URI obtained by\nexpanding {@link uriTemplate}.",
       "properties": {
         "label": {
           "type": "string",
@@ -4665,7 +4901,7 @@
         },
         "uriTemplate": {
           "type": "string",
-          "description": "RFC 6570 URI template. Clients parse the variables directly out of the\ntemplate using the standard `{name}` syntax — they are not redeclared\nhere.\n\nOnly the following template shapes are defined by this protocol; any\nother variable name MUST be ignored by clients (there is no\nprotocol-defined way to obtain values for unknown variables):\n\n| Variables in template                       | Meaning                                                                              |\n| ------------------------------------------- | ------------------------------------------------------------------------------------ |\n| _(none)_                                    | A static, session-wide changeset. The template is itself a subscribable URI.         |\n| `{turnId}`                                  | Per-turn slice. Expand with a `Turn.id` from the session.                            |\n| `{originalTurnId}` and `{modifiedTurnId}`   | Diff between two turns. Both variables MUST be present.                              |\n\nFuture protocol versions MAY add new well-known variables."
+          "description": "RFC 6570 URI template. Clients parse the variables directly out of the\ntemplate using the standard `{name}` syntax — they are not redeclared\nhere.\n\nOnly the following template shapes are defined by this protocol; any\nother variable name MUST be ignored by clients (there is no\nprotocol-defined way to obtain values for unknown variables):\n\n| Variables in template                       | Meaning                                                                              |\n| ------------------------------------------- | ------------------------------------------------------------------------------------ |\n| _(none)_                                    | A static changeset scoped to the advertising session or chat. The template is itself a subscribable URI. |\n| `{turnId}`                                  | Per-turn slice. Expand with a `Turn.id` from the advertising chat or session.        |\n| `{originalTurnId}` and `{modifiedTurnId}`   | Diff between two turns. Both variables MUST be present.                              |\n\nFuture protocol versions MAY add new well-known variables."
         },
         "description": {
           "type": "string",
@@ -4677,7 +4913,7 @@
         },
         "capabilities": {
           "$ref": "#/$defs/ChangesetCapabilities",
-          "description": "Optional capability declarations for this changeset. Absent (or an empty\nobject) means the changeset advertises no optional capabilities.\n\nBecause the catalogue entry is delivered up-front on\n{@link ChangesetState | the session's changeset list}, clients can decide\nwhether to surface capability-gated UI (such as review checkboxes) without\nfirst subscribing to the changeset URI. Mirrors the presence-flag\nconvention of `ClientCapabilities`."
+          "description": "Optional capability declarations for this changeset. Absent (or an empty\nobject) means the changeset advertises no optional capabilities.\n\nBecause the catalogue entry is delivered up-front on the advertising\nsession or chat's changeset list, clients can decide whether to surface\ncapability-gated UI (such as review checkboxes) without first subscribing\nto the changeset URI. Mirrors the presence-flag convention of\n`ClientCapabilities`."
         }
       },
       "required": [
@@ -5107,6 +5343,41 @@
         "events"
       ]
     },
+    "AutomationAfterRunsCondition": {
+      "type": "object",
+      "description": "Stops scheduling after a fixed number of scheduled runs.",
+      "properties": {
+        "kind": {
+          "const": "afterRuns"
+        },
+        "max": {
+          "type": "integer",
+          "description": "Positive-integer cap on scheduled runs.",
+          "minimum": 1
+        }
+      },
+      "required": [
+        "kind",
+        "max"
+      ]
+    },
+    "AutomationAfterDateCondition": {
+      "type": "object",
+      "description": "Stops scheduling once a wall-clock date passes.",
+      "properties": {
+        "kind": {
+          "const": "afterDate"
+        },
+        "date": {
+          "type": "string",
+          "description": "ISO 8601 timestamp after which scheduling stops."
+        }
+      },
+      "required": [
+        "kind",
+        "date"
+      ]
+    },
     "AutomationTriggerEventDefinition": {
       "type": "object",
       "description": "Describes one host-defined trigger event.",
@@ -5190,6 +5461,13 @@
           "type": "object",
           "additionalProperties": {},
           "description": "Session configuration values equivalent to\n{@link CreateSessionParams.config}, normally obtained from\n{@link ResolveSessionConfigResult.values}."
+        },
+        "customizations": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ClientPluginCustomization"
+          },
+          "description": "Client plugins to make available in every run session, in the same\npublished shape as\n{@link SessionActiveClient.customizations | `activeClients[].customizations`}.\nEntries are keyed by `id`.\n\nRuns usually start when no client is connected, so the host does not\nresolve these URIs at run time. Instead, when it accepts a\n{@link AutomationCreateRequestedAction | `automation/createRequested`} or\n{@link AutomationUpdateRequestedAction | `automation/updateRequested`}\nthat adds an entry or changes an entry's `uri` or `nonce`, the host\ncaptures a host-owned copy of the plugin. For client-served URIs such as\n`virtual://…`, it reads the contents from the dispatching client with\nserver→client `resource*` requests. If a capture fails, the host rejects\nthe whole action. Entries whose `id`, `uri`, and `nonce` are unchanged keep\ntheir existing copy, so any client can re-submit a template it received\nwithout being able to serve the plugin itself. The resulting copies are\nreported in {@link AutomationEntry.customizations}.\n\nThe host MAY share one stored copy between entries with equal `uri` and\n`nonce`, including across automations; this is not observable to clients.\n\nClients MUST NOT set this field unless the host advertises\n{@link AutomationCapabilities.customizations}."
         }
       }
     },
@@ -5219,6 +5497,45 @@
             "$ref": "#/$defs/AutomationTrigger"
           },
           "description": "Automatic triggers. An empty list means manual-only."
+        },
+        "disableConditions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/AutomationDisableCondition"
+          },
+          "description": "Self-disable rules combined with logical OR: the host sets\n{@link AutomationDefinition.enabled} to `false` when any condition is met.\nAbsent or empty means no automatic disable conditions. Each\n{@link AutomationDisableConditionKind} may appear at most once; hosts MUST\nreject create or update requests containing duplicate kinds.\n\nOnly automatic (scheduled) runs are governed; manual runs via\n{@link RunAutomationParams | runAutomation} are never blocked. For a\n{@link AutomationAfterRunsCondition}, usage is tracked by the host-owned\n{@link AutomationEntry.runCount}. Adding that kind when absent or\na disabled→enabled transition starts a fresh allowance. Clearing the\nconditions does not re-enable a disabled automation. See the\n{@link /guide/automations | Automations Guide}.",
+          "allOf": [
+            {
+              "contains": {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "const": "afterRuns"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              "minContains": 0,
+              "maxContains": 1
+            },
+            {
+              "contains": {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "const": "afterDate"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              "minContains": 0,
+              "maxContains": 1
+            }
+          ]
         },
         "_meta": {
           "type": "object",
@@ -5250,6 +5567,10 @@
           "type": "string",
           "description": "Earliest schedule occurrence awaiting evaluation, as an ISO 8601 timestamp. It may be in the past while catch-up is pending."
         },
+        "runCount": {
+          "type": "number",
+          "description": "Host-owned count of scheduled runs consumed against the current\n{@link AutomationAfterRunsCondition} allowance. Authoritative usage for the\n**current** allowance, not a lifetime total: the host resets it to `0` when\na disabled→enabled transition starts a fresh allowance or a\n{@link AutomationAfterRunsCondition} is added when none was present. It is NOT\nreconstructed from {@link runs} (a bounded, prunable window). The host\nincrements it atomically when it admits a scheduled run, including runs\nlater cancelled or failed.\n\nAbsent when {@link AutomationDefinition.disableConditions} contains no\n{@link AutomationAfterRunsCondition}."
+        },
         "runs": {
           "type": "array",
           "items": {
@@ -5267,6 +5588,13 @@
             "$ref": "#/$defs/AutomationOperation"
           },
           "description": "Operations currently permitted for this automation."
+        },
+        "customizations": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PluginCustomization"
+          },
+          "description": "Host-owned copies of the plugins in\n{@link AutomationSessionTemplate.customizations}, one per template entry\nwith the same `id`. Absent when the template has no customizations.\n\nEach copy's `uri` identifies the captured contents, which clients can\nbrowse with `resourceRead`. `children` and `load` report what the host\nfound in that copy, independent of whether the originating client is\nconnected. `clientId` is absent because the copy no longer depends on a\nclient.\n\nEvery run session receives these plugins in\n{@link SessionState.customizations}, with the enablement from the\nmatching template entry."
         },
         "createdAt": {
           "type": "string",
@@ -5776,6 +6104,17 @@
       ],
       "description": "Discriminated union of all MCP server lifecycle states.\nDiscriminated by `kind` (a {@link McpServerStatus} value)."
     },
+    "BackgroundWork": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/BackgroundShellWork"
+        },
+        {
+          "$ref": "#/$defs/BackgroundSubagentWork"
+        }
+      ],
+      "description": "Work running in the background for a chat, such as a shell or a subagent.\nClients that don't recognize a `kind` should keep the entry and may render it\nfrom the common fields."
+    },
     "ChatOrigin": {
       "oneOf": [
         {
@@ -5850,7 +6189,7 @@
           ]
         }
       ],
-      "description": "How a chat came into existence. Clients MAY use it to render\ncontextual UI (parent indicators, fork markers, \"spawned by tool\" badges).\n\nFork and side-chat origins both carry a stable top-level `turnId` alongside\ntheir discriminated `kind` value instead of snapshotting whether that turn\nwas active or historical at creation time. Consumers resolve the identifier\nagainst the\nsource chat's current `activeTurn` or retained `turns` as needed.\n\nWhen a host accepts side-chat creation from the source chat's current active\nturn, it snapshots the retained history plus that turn's current user\nmessage and any partial assistant response already available. Later\nsource-turn deltas do not retroactively change the created side chat's\nstarting context, and once the source turn completes it is still referenced\nby the same `turnId`. Side-chat origins MAY also retain an immutable\n{@link SideChatSelection | selected-text snapshot} captured at acceptance\ntime; any `responsePartId` there is provenance only, not a range.\n\nThe `tool` variant records a tool-spawned worker from the worker's side: its\n`chat`/`toolCallId` identify the spawning tool call in the parent chat. This\nis the canonical record of the spawn relationship. The same edge is surfaced\nfrom the parent's side by {@link ToolResultSubagentContent}, whose `resource`\nis this chat's URI; hosts MUST keep the two consistent."
+      "description": "How a chat came into existence. Clients MAY use it to render creation\nprovenance (fork markers and \"spawned by tool\" badges). Any host-internal\nhierarchy used to move a complete chat subtree is not exposed by AHP.\n\nFork and side-chat origins both carry a stable top-level `turnId` alongside\ntheir discriminated `kind` value instead of snapshotting whether that turn\nwas active or historical at creation time. Consumers resolve the identifier\nagainst the\nsource chat's current `activeTurn` or retained `turns` as needed.\n\nWhen a host accepts side-chat creation from the source chat's current active\nturn, it snapshots the retained history plus that turn's current user\nmessage and any partial assistant response already available. Later\nsource-turn deltas do not retroactively change the created side chat's\nstarting context, and once the source turn completes it is still referenced\nby the same `turnId`. Side-chat origins MAY also retain an immutable\n{@link SideChatSelection | selected-text snapshot} captured at acceptance\ntime; any `responsePartId` there is provenance only, not a range.\n\nThe `tool` variant records a tool-spawned worker from the worker's side: its\n`chat`/`toolCallId` identify the spawning tool call in the parent chat. This\nis the canonical record of the spawn relationship. The same edge is surfaced\nfrom the parent's side by {@link ToolResultSubagentContent}, whose `resource`\nis this chat's URI; hosts MUST keep the two consistent."
     },
     "ChatInputQuestion": {
       "oneOf": [
@@ -6082,6 +6421,17 @@
       ],
       "description": "An automatic trigger that can create runs for an enabled automation.\n\nManual execution is not represented as a trigger. An empty trigger list\ntherefore means the automation is manual-only."
     },
+    "AutomationDisableCondition": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/AutomationAfterRunsCondition"
+        },
+        {
+          "$ref": "#/$defs/AutomationAfterDateCondition"
+        }
+      ],
+      "description": "One self-disable rule in {@link AutomationDefinition.disableConditions}.\nThe host disables scheduling once any rule is met (logical OR)."
+    },
     "AutomationRunOrigin": {
       "oneOf": [
         {
@@ -6147,15 +6497,6 @@
       "type": "string",
       "description": "Session initialization state."
     },
-    "McpAuthRequiredReason": {
-      "enum": [
-        "required",
-        "expired",
-        "insufficientScope"
-      ],
-      "type": "string",
-      "description": "Why an MCP server is currently in the {@link McpServerStatus.AuthRequired}\nstate. Mirrors the three failure modes defined by the\n[MCP authorization spec](https://modelcontextprotocol.io/specification/2025-11-25/basic/authorization.md)."
-    },
     "ChatInteractivity": {
       "enum": [
         "full",
@@ -6164,6 +6505,15 @@
       ],
       "type": "string",
       "description": "How a user can interact with a chat.\n\n- `Full` — user can send messages and watch (default when absent)\n- `ReadOnly` — user can watch but not send messages (e.g. agent team workers)\n- `Hidden` — internal worker not shown in UI at all\n\nSupports the agent-team pattern where a lead chat is fully interactive and\nworker chats are read-only (visible for observability) or hidden (internal\nimplementation detail). The harness sets this based on the chat's role;\nthe UI uses it to show appropriate controls."
+    },
+    "McpAuthRequiredReason": {
+      "enum": [
+        "required",
+        "expired",
+        "insufficientScope"
+      ],
+      "type": "string",
+      "description": "Why an MCP server is currently in the {@link McpServerStatus.AuthRequired}\nstate. Mirrors the three failure modes defined by the\n[MCP authorization spec](https://modelcontextprotocol.io/specification/2025-11-25/basic/authorization.md)."
     },
     "TurnState": {
       "enum": [
@@ -6230,6 +6580,7 @@
     "ChangesetStatus": {
       "enum": [
         "computing",
+        "recomputing",
         "ready",
         "error"
       ],

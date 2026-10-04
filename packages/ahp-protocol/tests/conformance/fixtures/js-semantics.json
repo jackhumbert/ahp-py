@@ -3238,6 +3238,937 @@
     },
     "exitCode": 3
    }
+  },
+  {
+   "name": "chat/movable=null",
+   "reducer": "chat",
+   "initial": {
+    "turns": [],
+    "status": 1,
+    "modifiedAt": "1970-01-01T00:00:00.000Z"
+   },
+   "actions": [
+    {
+     "type": "chat/movableChanged",
+     "movable": null
+    }
+   ],
+   "expected": {
+    "turns": [],
+    "status": 1,
+    "modifiedAt": "1970-01-01T00:00:00.000Z",
+    "movable": null
+   }
+  },
+  {
+   "name": "chat/movable-absent",
+   "reducer": "chat",
+   "initial": {
+    "turns": [],
+    "status": 1,
+    "modifiedAt": "1970-01-01T00:00:00.000Z",
+    "movable": true
+   },
+   "actions": [
+    {
+     "type": "chat/movableChanged"
+    }
+   ],
+   "expected": {
+    "turns": [],
+    "status": 1,
+    "modifiedAt": "1970-01-01T00:00:00.000Z"
+   }
+  },
+  {
+   "name": "chat/changesets=null",
+   "reducer": "chat",
+   "initial": {
+    "turns": [],
+    "status": 1,
+    "modifiedAt": "1970-01-01T00:00:00.000Z",
+    "changesets": [
+     {
+      "resource": "c"
+     }
+    ],
+    "canvases": [
+     {
+      "resource": "v"
+     }
+    ]
+   },
+   "actions": [
+    {
+     "type": "chat/changesetsChanged",
+     "changesets": null
+    }
+   ],
+   "expected": {
+    "turns": [],
+    "status": 1,
+    "modifiedAt": "1970-01-01T00:00:00.000Z",
+    "canvases": [
+     {
+      "resource": "v"
+     }
+    ]
+   }
+  },
+  {
+   "name": "chat/changesets=[]",
+   "reducer": "chat",
+   "initial": {
+    "turns": [],
+    "status": 1,
+    "modifiedAt": "1970-01-01T00:00:00.000Z",
+    "changesets": [
+     {
+      "resource": "c"
+     }
+    ],
+    "canvases": [
+     {
+      "resource": "v"
+     }
+    ]
+   },
+   "actions": [
+    {
+     "type": "chat/changesetsChanged",
+     "changesets": []
+    }
+   ],
+   "expected": {
+    "turns": [],
+    "status": 1,
+    "modifiedAt": "1970-01-01T00:00:00.000Z",
+    "canvases": [
+     {
+      "resource": "v"
+     }
+    ],
+    "changesets": []
+   }
+  },
+  {
+   "name": "chat/canvases-absent",
+   "reducer": "chat",
+   "initial": {
+    "turns": [],
+    "status": 1,
+    "modifiedAt": "1970-01-01T00:00:00.000Z",
+    "changesets": [
+     {
+      "resource": "c"
+     }
+    ],
+    "canvases": [
+     {
+      "resource": "v"
+     }
+    ]
+   },
+   "actions": [
+    {
+     "type": "chat/canvasesChanged"
+    }
+   ],
+   "expected": {
+    "turns": [],
+    "status": 1,
+    "modifiedAt": "1970-01-01T00:00:00.000Z",
+    "changesets": [
+     {
+      "resource": "c"
+     }
+    ]
+   }
+  },
+  {
+   "name": "chat/canvases=[]",
+   "reducer": "chat",
+   "initial": {
+    "turns": [],
+    "status": 1,
+    "modifiedAt": "1970-01-01T00:00:00.000Z",
+    "changesets": [
+     {
+      "resource": "c"
+     }
+    ],
+    "canvases": [
+     {
+      "resource": "v"
+     }
+    ]
+   },
+   "actions": [
+    {
+     "type": "chat/canvasesChanged",
+     "canvases": []
+    }
+   ],
+   "expected": {
+    "turns": [],
+    "status": 1,
+    "modifiedAt": "1970-01-01T00:00:00.000Z",
+    "changesets": [
+     {
+      "resource": "c"
+     }
+    ],
+    "canvases": []
+   }
+  },
+  {
+   "name": "chat/isRead=[]",
+   "reducer": "chat",
+   "initial": {
+    "turns": [],
+    "status": 1,
+    "modifiedAt": "1970-01-01T00:00:00.000Z"
+   },
+   "actions": [
+    {
+     "type": "chat/isReadChanged",
+     "isRead": []
+    }
+   ],
+   "expected": {
+    "turns": [],
+    "status": 33,
+    "modifiedAt": "1970-01-01T00:00:00.000Z"
+   }
+  },
+  {
+   "name": "chat/isRead=0",
+   "reducer": "chat",
+   "initial": {
+    "turns": [],
+    "status": 33,
+    "modifiedAt": "1970-01-01T00:00:00.000Z"
+   },
+   "actions": [
+    {
+     "type": "chat/isReadChanged",
+     "isRead": 0
+    }
+   ],
+   "expected": {
+    "turns": [],
+    "status": 1,
+    "modifiedAt": "1970-01-01T00:00:00.000Z"
+   }
+  },
+  {
+   "name": "chat/isArchived-no-status",
+   "reducer": "chat",
+   "initial": {
+    "turns": []
+   },
+   "actions": [
+    {
+     "type": "chat/isArchivedChanged",
+     "isArchived": true
+    }
+   ],
+   "expected": {
+    "turns": [],
+    "status": 64
+   }
+  },
+  {
+   "name": "chat/backgroundWorkSet-true-vs-1",
+   "reducer": "chat",
+   "initial": {
+    "turns": [],
+    "status": 1,
+    "modifiedAt": "1970-01-01T00:00:00.000Z",
+    "backgroundWork": [
+     {
+      "id": 1,
+      "kind": "shell"
+     },
+     {
+      "kind": "subagent"
+     }
+    ]
+   },
+   "actions": [
+    {
+     "type": "chat/backgroundWorkSet",
+     "work": {
+      "id": true,
+      "kind": "shell"
+     }
+    }
+   ],
+   "expected": {
+    "turns": [],
+    "status": 1,
+    "modifiedAt": "1970-01-01T00:00:00.000Z",
+    "backgroundWork": [
+     {
+      "id": 1,
+      "kind": "shell"
+     },
+     {
+      "kind": "subagent"
+     },
+     {
+      "id": true,
+      "kind": "shell"
+     }
+    ]
+   }
+  },
+  {
+   "name": "chat/backgroundWorkSet-replaces-1",
+   "reducer": "chat",
+   "initial": {
+    "turns": [],
+    "status": 1,
+    "modifiedAt": "1970-01-01T00:00:00.000Z",
+    "backgroundWork": [
+     {
+      "id": 1,
+      "kind": "shell"
+     },
+     {
+      "kind": "subagent"
+     }
+    ]
+   },
+   "actions": [
+    {
+     "type": "chat/backgroundWorkSet",
+     "work": {
+      "id": 1,
+      "kind": "subagent"
+     }
+    }
+   ],
+   "expected": {
+    "turns": [],
+    "status": 1,
+    "modifiedAt": "1970-01-01T00:00:00.000Z",
+    "backgroundWork": [
+     {
+      "id": 1,
+      "kind": "subagent"
+     },
+     {
+      "kind": "subagent"
+     }
+    ]
+   }
+  },
+  {
+   "name": "chat/backgroundWorkRemoved-null-vs-absent",
+   "reducer": "chat",
+   "initial": {
+    "turns": [],
+    "status": 1,
+    "modifiedAt": "1970-01-01T00:00:00.000Z",
+    "backgroundWork": [
+     {
+      "id": 1,
+      "kind": "shell"
+     },
+     {
+      "kind": "subagent"
+     }
+    ]
+   },
+   "actions": [
+    {
+     "type": "chat/backgroundWorkRemoved",
+     "id": null
+    }
+   ],
+   "expected": {
+    "turns": [],
+    "status": 1,
+    "modifiedAt": "1970-01-01T00:00:00.000Z",
+    "backgroundWork": [
+     {
+      "id": 1,
+      "kind": "shell"
+     },
+     {
+      "kind": "subagent"
+     }
+    ]
+   }
+  },
+  {
+   "name": "chat/backgroundWorkRemoved-absent-matches-absent",
+   "reducer": "chat",
+   "initial": {
+    "turns": [],
+    "status": 1,
+    "modifiedAt": "1970-01-01T00:00:00.000Z",
+    "backgroundWork": [
+     {
+      "id": 1,
+      "kind": "shell"
+     },
+     {
+      "kind": "subagent"
+     }
+    ]
+   },
+   "actions": [
+    {
+     "type": "chat/backgroundWorkRemoved"
+    }
+   ],
+   "expected": {
+    "turns": [],
+    "status": 1,
+    "modifiedAt": "1970-01-01T00:00:00.000Z",
+    "backgroundWork": [
+     {
+      "id": 1,
+      "kind": "shell"
+     }
+    ]
+   }
+  },
+  {
+   "name": "sess/chatsReordered-1-vs-'1'",
+   "reducer": "session",
+   "initial": {
+    "provider": "p",
+    "title": "T",
+    "status": 1,
+    "lifecycle": "ready",
+    "activeClients": [],
+    "chats": [
+     {
+      "resource": 1,
+      "title": "n"
+     },
+     {
+      "resource": "1",
+      "title": "s"
+     }
+    ]
+   },
+   "actions": [
+    {
+     "type": "session/chatsReordered",
+     "chats": [
+      "1",
+      1
+     ]
+    }
+   ],
+   "expected": {
+    "provider": "p",
+    "title": "T",
+    "status": 1,
+    "lifecycle": "ready",
+    "activeClients": [],
+    "chats": [
+     {
+      "resource": "1",
+      "title": "s"
+     },
+     {
+      "resource": 1,
+      "title": "n"
+     }
+    ]
+   }
+  },
+  {
+   "name": "sess/chatsReordered-true-is-unknown",
+   "reducer": "session",
+   "initial": {
+    "provider": "p",
+    "title": "T",
+    "status": 1,
+    "lifecycle": "ready",
+    "activeClients": [],
+    "chats": [
+     {
+      "resource": 1,
+      "title": "n"
+     },
+     {
+      "resource": "1",
+      "title": "s"
+     }
+    ]
+   },
+   "actions": [
+    {
+     "type": "session/chatsReordered",
+     "chats": [
+      "1",
+      true
+     ]
+    }
+   ],
+   "expected": {
+    "provider": "p",
+    "title": "T",
+    "status": 1,
+    "lifecycle": "ready",
+    "activeClients": [],
+    "chats": [
+     {
+      "resource": 1,
+      "title": "n"
+     },
+     {
+      "resource": "1",
+      "title": "s"
+     }
+    ]
+   }
+  },
+  {
+   "name": "sess/chatsReordered-duplicate",
+   "reducer": "session",
+   "initial": {
+    "provider": "p",
+    "title": "T",
+    "status": 1,
+    "lifecycle": "ready",
+    "activeClients": [],
+    "chats": [
+     {
+      "resource": 1,
+      "title": "n"
+     },
+     {
+      "resource": "1",
+      "title": "s"
+     }
+    ]
+   },
+   "actions": [
+    {
+     "type": "session/chatsReordered",
+     "chats": [
+      1,
+      1
+     ]
+    }
+   ],
+   "expected": {
+    "provider": "p",
+    "title": "T",
+    "status": 1,
+    "lifecycle": "ready",
+    "activeClients": [],
+    "chats": [
+     {
+      "resource": 1,
+      "title": "n"
+     },
+     {
+      "resource": "1",
+      "title": "s"
+     }
+    ]
+   }
+  },
+  {
+   "name": "sess/mcpServerBackgroundRequested-a",
+   "reducer": "session",
+   "initial": {
+    "provider": "p",
+    "title": "T",
+    "status": 1,
+    "lifecycle": "ready",
+    "activeClients": [],
+    "chats": [],
+    "customizations": [
+     {
+      "type": "mcpServer",
+      "id": "a",
+      "state": {
+       "kind": "starting",
+       "blocking": 1
+      }
+     },
+     {
+      "type": "mcpServer",
+      "id": "b",
+      "state": {
+       "kind": "starting",
+       "blocking": []
+      }
+     },
+     {
+      "type": "mcpServer",
+      "id": "c",
+      "state": {
+       "kind": "starting",
+       "blocking": 0
+      }
+     },
+     {
+      "type": "mcpServer",
+      "id": "d",
+      "state": {
+       "kind": "running",
+       "blocking": true
+      }
+     }
+    ]
+   },
+   "actions": [
+    {
+     "type": "session/mcpServerBackgroundRequested",
+     "id": "a"
+    }
+   ],
+   "expected": {
+    "provider": "p",
+    "title": "T",
+    "status": 1,
+    "lifecycle": "ready",
+    "activeClients": [],
+    "chats": [],
+    "customizations": [
+     {
+      "type": "mcpServer",
+      "id": "a",
+      "state": {
+       "kind": "starting",
+       "blocking": false
+      }
+     },
+     {
+      "type": "mcpServer",
+      "id": "b",
+      "state": {
+       "kind": "starting",
+       "blocking": []
+      }
+     },
+     {
+      "type": "mcpServer",
+      "id": "c",
+      "state": {
+       "kind": "starting",
+       "blocking": 0
+      }
+     },
+     {
+      "type": "mcpServer",
+      "id": "d",
+      "state": {
+       "kind": "running",
+       "blocking": true
+      }
+     }
+    ]
+   }
+  },
+  {
+   "name": "sess/mcpServerBackgroundRequested-b",
+   "reducer": "session",
+   "initial": {
+    "provider": "p",
+    "title": "T",
+    "status": 1,
+    "lifecycle": "ready",
+    "activeClients": [],
+    "chats": [],
+    "customizations": [
+     {
+      "type": "mcpServer",
+      "id": "a",
+      "state": {
+       "kind": "starting",
+       "blocking": 1
+      }
+     },
+     {
+      "type": "mcpServer",
+      "id": "b",
+      "state": {
+       "kind": "starting",
+       "blocking": []
+      }
+     },
+     {
+      "type": "mcpServer",
+      "id": "c",
+      "state": {
+       "kind": "starting",
+       "blocking": 0
+      }
+     },
+     {
+      "type": "mcpServer",
+      "id": "d",
+      "state": {
+       "kind": "running",
+       "blocking": true
+      }
+     }
+    ]
+   },
+   "actions": [
+    {
+     "type": "session/mcpServerBackgroundRequested",
+     "id": "b"
+    }
+   ],
+   "expected": {
+    "provider": "p",
+    "title": "T",
+    "status": 1,
+    "lifecycle": "ready",
+    "activeClients": [],
+    "chats": [],
+    "customizations": [
+     {
+      "type": "mcpServer",
+      "id": "a",
+      "state": {
+       "kind": "starting",
+       "blocking": 1
+      }
+     },
+     {
+      "type": "mcpServer",
+      "id": "b",
+      "state": {
+       "kind": "starting",
+       "blocking": false
+      }
+     },
+     {
+      "type": "mcpServer",
+      "id": "c",
+      "state": {
+       "kind": "starting",
+       "blocking": 0
+      }
+     },
+     {
+      "type": "mcpServer",
+      "id": "d",
+      "state": {
+       "kind": "running",
+       "blocking": true
+      }
+     }
+    ]
+   }
+  },
+  {
+   "name": "sess/mcpServerBackgroundRequested-c",
+   "reducer": "session",
+   "initial": {
+    "provider": "p",
+    "title": "T",
+    "status": 1,
+    "lifecycle": "ready",
+    "activeClients": [],
+    "chats": [],
+    "customizations": [
+     {
+      "type": "mcpServer",
+      "id": "a",
+      "state": {
+       "kind": "starting",
+       "blocking": 1
+      }
+     },
+     {
+      "type": "mcpServer",
+      "id": "b",
+      "state": {
+       "kind": "starting",
+       "blocking": []
+      }
+     },
+     {
+      "type": "mcpServer",
+      "id": "c",
+      "state": {
+       "kind": "starting",
+       "blocking": 0
+      }
+     },
+     {
+      "type": "mcpServer",
+      "id": "d",
+      "state": {
+       "kind": "running",
+       "blocking": true
+      }
+     }
+    ]
+   },
+   "actions": [
+    {
+     "type": "session/mcpServerBackgroundRequested",
+     "id": "c"
+    }
+   ],
+   "expected": {
+    "provider": "p",
+    "title": "T",
+    "status": 1,
+    "lifecycle": "ready",
+    "activeClients": [],
+    "chats": [],
+    "customizations": [
+     {
+      "type": "mcpServer",
+      "id": "a",
+      "state": {
+       "kind": "starting",
+       "blocking": 1
+      }
+     },
+     {
+      "type": "mcpServer",
+      "id": "b",
+      "state": {
+       "kind": "starting",
+       "blocking": []
+      }
+     },
+     {
+      "type": "mcpServer",
+      "id": "c",
+      "state": {
+       "kind": "starting",
+       "blocking": 0
+      }
+     },
+     {
+      "type": "mcpServer",
+      "id": "d",
+      "state": {
+       "kind": "running",
+       "blocking": true
+      }
+     }
+    ]
+   }
+  },
+  {
+   "name": "sess/mcpServerBackgroundRequested-d",
+   "reducer": "session",
+   "initial": {
+    "provider": "p",
+    "title": "T",
+    "status": 1,
+    "lifecycle": "ready",
+    "activeClients": [],
+    "chats": [],
+    "customizations": [
+     {
+      "type": "mcpServer",
+      "id": "a",
+      "state": {
+       "kind": "starting",
+       "blocking": 1
+      }
+     },
+     {
+      "type": "mcpServer",
+      "id": "b",
+      "state": {
+       "kind": "starting",
+       "blocking": []
+      }
+     },
+     {
+      "type": "mcpServer",
+      "id": "c",
+      "state": {
+       "kind": "starting",
+       "blocking": 0
+      }
+     },
+     {
+      "type": "mcpServer",
+      "id": "d",
+      "state": {
+       "kind": "running",
+       "blocking": true
+      }
+     }
+    ]
+   },
+   "actions": [
+    {
+     "type": "session/mcpServerBackgroundRequested",
+     "id": "d"
+    }
+   ],
+   "expected": {
+    "provider": "p",
+    "title": "T",
+    "status": 1,
+    "lifecycle": "ready",
+    "activeClients": [],
+    "chats": [],
+    "customizations": [
+     {
+      "type": "mcpServer",
+      "id": "a",
+      "state": {
+       "kind": "starting",
+       "blocking": 1
+      }
+     },
+     {
+      "type": "mcpServer",
+      "id": "b",
+      "state": {
+       "kind": "starting",
+       "blocking": []
+      }
+     },
+     {
+      "type": "mcpServer",
+      "id": "c",
+      "state": {
+       "kind": "starting",
+       "blocking": 0
+      }
+     },
+     {
+      "type": "mcpServer",
+      "id": "d",
+      "state": {
+       "kind": "running",
+       "blocking": true
+      }
+     }
+    ]
+   }
+  },
+  {
+   "name": "canvas/stateChanged=null",
+   "reducer": "canvas",
+   "initial": {
+    "instanceId": "i",
+    "extensionId": "e",
+    "canvasId": "c",
+    "url": "https://example.com"
+   },
+   "actions": [
+    {
+     "type": "canvas/stateChanged",
+     "canvas": null
+    }
+   ],
+   "expected": null
   }
  ]
 }

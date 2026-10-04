@@ -21,6 +21,7 @@ const { chatReducer } = await import(`${T}/channels-chat/reducer.ts`);
 const { rootReducer } = await import(`${T}/channels-root/reducer.ts`);
 const { automationReducer } = await import(`${T}/channels-automation/reducer.ts`);
 const { automationRunReducer } = await import(`${T}/channels-automation-run/reducer.ts`);
+const { canvasReducer } = await import(`${T}/channels-canvas/reducer.ts`);
 
 const REDUCERS = {
   terminal: terminalReducer,
@@ -31,6 +32,7 @@ const REDUCERS = {
   root: rootReducer,
   automation: automationReducer,
   automationRun: automationRunReducer,
+  canvas: canvasReducer,
 };
 
 // Since 0.9.0 no reducer reads the clock; it stays pinned so an older pin's

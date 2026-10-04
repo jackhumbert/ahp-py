@@ -34,6 +34,7 @@ from ahp_protocol.reducers.js import (
     get,
     index_of,
     index_of_value,
+    key_of,
     strict_equal,
     truthy,
 )
@@ -304,6 +305,32 @@ def session_reducer(state: Any, action: Mapping[str, Any]) -> Any:
         updated = list(chats)
         updated[index] = {**chats[index], **changes}
         return {**state, "chats": updated}
+
+    if action_type == "session/chatsReordered":
+        # Authoritative full order (1.0.0). Anything but an exact permutation of
+        # the current catalogue -- wrong length, a duplicate, an unknown
+        # resource -- is a no-op, so a client with a stale view converges on the
+        # next snapshot instead of losing a chat. Map/Set keys are SameValueZero.
+        chats = coalesce(state.get("chats"), [])
+        order = get(action, "chats")
+        if not isinstance(order, list) or not isinstance(chats, list):
+            return state
+        if len(order) != len(chats) or len({key_of(r) for r in order}) != len(chats):
+            return state
+        by_resource: dict[Any, Any] = {}
+        for summary in chats:
+            by_resource[key_of(get(summary, "resource"))] = summary
+        reordered: list[Any] = []
+        for resource in order:
+            summary = by_resource.get(key_of(resource))
+            if not truthy(summary):
+                return state
+            reordered.append(summary)
+        # `summary === list[index]` -- reference identity: an unchanged order
+        # returns the very same state object.
+        if all(summary is chats[index] for index, summary in enumerate(reordered)):
+            return state
+        return {**state, "chats": reordered}
 
     if action_type == "session/defaultChatChanged":
         return assign({**state}, "defaultChat", get(action, "defaultChat"))
@@ -589,6 +616,22 @@ def session_reducer(state: Any, action: Mapping[str, Any]) -> Any:
             get(action, "id"),
             lambda entry: assign({**entry, "state": {"kind": "starting"}}, "channel", UNDEFINED),
         )
+
+    if action_type == "session/mcpServerBackgroundRequested":
+        # Client-dispatchable (1.0.0): stop holding message processing on a
+        # blocking startup. Only a `starting` entry with truthy `blocking`
+        # changes; everything else is left as it was.
+        def _background(entry: Mapping[str, Any]) -> dict[str, Any]:
+            server_state = entry.get("state")
+            if (
+                isinstance(server_state, Mapping)
+                and server_state.get("kind") == "starting"
+                and truthy(get(server_state, "blocking"))
+            ):
+                return {**entry, "state": {**server_state, "blocking": False}}
+            return dict(entry)
+
+        return _update_mcp_server(state, get(action, "id"), _background)
 
     if action_type == "session/mcpServerStopRequested":
         return _update_mcp_server(

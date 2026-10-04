@@ -11,7 +11,7 @@ matrix is self-updating and also self-congratulatory — a wrapper that exists b
 has never been exercised shows green. Treat the ticks as *implemented*, and the
 interop suite as the evidence.
 
-## Client → server requests (30)
+## Client → server requests (31)
 
 | Method | TS client wrapper | Here | Channel |
 |---|---|---|---|
@@ -22,6 +22,7 @@ interop suite as the evidence.
 | `createSession` | — | ✅ | caller |
 | `disposeSession` | — | ✅ | caller |
 | `createChat` | — | ✅ | caller |
+| `moveChat` | — | ✅ | caller |
 | `disposeChat` | — | ✅ | caller |
 | `createTerminal` | — | ✅ | caller |
 | `disposeTerminal` | — | ✅ | caller |
@@ -94,7 +95,7 @@ server stays absent.
 | `resourceRequest` | — | ✅ |
 | `createResourceWatch` | — | — |
 
-## Channels (9)
+## Channels (10)
 
 Reducers come from `ahp-protocol`, so all nine are available to the
 mirror, which binds any of them by name at registration. The TypeScript
@@ -105,6 +106,7 @@ mirror, which binds any of them by name at registration. The TypeScript
 | `annotations` | ✅ | ✅ |
 | `automation` | ✅ | ✅ |
 | `automationRun` | ✅ | ✅ |
+| `canvas` | ✅ | ✅ |
 | `changeset` | ✅ | ✅ |
 | `chat` | ✅ | ✅ |
 | `resourceWatch` | ✅ | ✅ |
@@ -112,7 +114,7 @@ mirror, which binds any of them by name at registration. The TypeScript
 | `session` | ✅ | ✅ |
 | `terminal` | ✅ | ✅ |
 
-## Client-dispatchable actions (44 of 96)
+## Client-dispatchable actions (47 of 106)
 
 Enumerated from the generated `IS_CLIENT_DISPATCHABLE` table.
 
@@ -129,6 +131,8 @@ Enumerated from the generated `IS_CLIENT_DISPATCHABLE` table.
 - `chat/draftChanged`
 - `chat/inputAnswerChanged`
 - `chat/inputCompleted`
+- `chat/isArchivedChanged`
+- `chat/isReadChanged`
 - `chat/pendingMessageRemoved`
 - `chat/pendingMessageSet`
 - `chat/queuedMessagesReordered`
@@ -149,6 +153,7 @@ Enumerated from the generated `IS_CLIENT_DISPATCHABLE` table.
 - `session/customizationToggled`
 - `session/isArchivedChanged`
 - `session/isReadChanged`
+- `session/mcpServerBackgroundRequested`
 - `session/mcpServerStartRequested`
 - `session/mcpServerStopRequested`
 - `session/titleChanged`

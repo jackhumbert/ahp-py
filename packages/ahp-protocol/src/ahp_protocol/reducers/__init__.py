@@ -24,6 +24,7 @@ from typing import Any, Final
 from ahp_protocol.reducers.annotations import annotations_reducer
 from ahp_protocol.reducers.automation import automation_reducer
 from ahp_protocol.reducers.automation_run import automation_run_reducer
+from ahp_protocol.reducers.canvas import canvas_reducer
 from ahp_protocol.reducers.changeset import changeset_reducer
 from ahp_protocol.reducers.chat import chat_reducer
 from ahp_protocol.reducers.resource_watch import resource_watch_reducer
@@ -37,6 +38,7 @@ __all__ = [
     "annotations_reducer",
     "automation_reducer",
     "automation_run_reducer",
+    "canvas_reducer",
     "changeset_reducer",
     "chat_reducer",
     "resource_watch_reducer",
@@ -48,7 +50,7 @@ __all__ = [
 Reducer = Callable[[Any, Mapping[str, Any]], Any]
 
 #: Keyed by the fixture corpus's `reducer` field so the harness can dispatch.
-#: All nine, so the whole 272-fixture corpus runs -- ADR 0004 makes the port
+#: All ten, so the whole 308-fixture corpus runs -- ADR 0004 makes the port
 #: all-or-nothing per channel, and registering a channel whose reducer does not
 #: exist would leave its client-dispatchable actions unreduced.
 REDUCERS: Final[dict[str, Reducer]] = {
@@ -61,4 +63,5 @@ REDUCERS: Final[dict[str, Reducer]] = {
     "resourceWatch": resource_watch_reducer,
     "automation": automation_reducer,
     "automationRun": automation_run_reducer,
+    "canvas": canvas_reducer,
 }
