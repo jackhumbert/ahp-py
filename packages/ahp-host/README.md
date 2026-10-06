@@ -183,6 +183,34 @@ python -m ahp_host --elicit
 input; `--client-tools` delegates the work to a tool the client owns;
 `--configurable` publishes a session config schema.
 
+A confirmation can offer **richer choices** (`ConfirmationOption`) and a **diff
+preview** of the edits it will make, and its answer reaches the provider
+whole — the option picked, and for a denial the user's reason and suggestion.
+A tool result can **be a diff** (`TurnSink.file_edit`, `fileEdit` content); a
+turn can carry a **system notification**; and a failed turn can be **resumed**
+(`chat/turnResume`) by an agent that is `ResumesTurns`, accepted only when the
+spec's preconditions hold.
+
+**One agent session serves every chat**, so every message names its chat
+(`UserMessage.chat_uri`), and an agent that keeps a conversation per chat can
+follow them: `HostsChats` hears each chat open (a refusal fails `createChat`
+with nothing created) and close, replayed after a restart; `CancelsChats` stops
+one chat's turn without the others; `FollowsChatWorkingDirectories` tracks a
+chat's folder subset, which the host keeps inside the session's set — a
+`chat/workingDirectorySet` naming a folder the session lacks is rejected, as
+1.0.0 requires. A **chat attachment** (`MessageChatAttachment`) has its
+`endTurn` pinned when the message is accepted, is refused when it names an
+unknown chat or turn, and reaches the provider resolved
+(`UserMessage.attached_chats`).
+
+**The agent can change after start-up**: an `UpdatesAgentInfo` provider that
+finds its models late republishes them (`root/agentsChanged`, only when the
+list differs; `Host.refresh_agents()` for an embedder), `AgentInfo.customizations`
+is published, and a `Completes` provider declares its own completion trigger
+characters (`DeclaresCompletionTriggers`) — used when the embedder passes none,
+which is how `ahp-node` reaches its agents' completions. All of it is in
+[the provider guide](https://github.com/jackhumbert/ahp-py/blob/main/packages/ahp-host/docs/guide/writing-a-provider.md).
+
 **Params are validated where the schema is specific, and the refusal is the
 schema's code.** A `protocolVersions` array with a non-string entry, a
 `listSessions` `limit` that is a JSON boolean or a string, a chat `source` with
@@ -291,6 +319,12 @@ the hook for:
 
 `SessionSummary.changes` rides on `root/sessionSummaryChanged`. It is not
 written into `SessionState`, which declares no such key.
+
+Changeset diffs, confirmation edit previews and `fileEdit` results share one
+content store per session, served by `resourceRead` under that session's
+visibility. It is a bounded cache — `Host(max_content_bytes=...)`, 128 MiB by
+default, least recently used out first — and it does not survive a restart, so
+an old diff may no longer open.
 
 **The `resource*` family** is implemented, and exposes nothing by default. A
 host does not acquire a filesystem by being upgraded: install

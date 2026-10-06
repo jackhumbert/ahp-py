@@ -32,7 +32,7 @@ from __future__ import annotations
 
 import difflib
 import hashlib
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from typing import Any
 
 from ahp_protocol import errors
@@ -56,7 +56,9 @@ __all__ = [
     "FileChange",
     "OperationHandler",
     "changeset_content_uri",
+    "content_uris",
     "diff_counts",
+    "file_edit",
 ]
 
 #: Content refs the host serves itself. A private scheme, intercepted before
@@ -67,6 +69,14 @@ CONTENT_SCHEME = "ahp-changeset-content:"
 #: Bytes above which content is offered by reference only. A `ContentRef`
 #: already IS a reference, so this only bounds what the store holds in memory.
 DEFAULT_MAX_BLOB = 4 * 1024 * 1024
+
+#: What one session's store may hold in all. Changesets re-put their files on
+#: every refresh, but `TurnSink.file_edit` and confirmation previews add new
+#: content on every tool call for the life of the session -- unbounded, a long
+#: session editing a large file kept every version of it in memory. Past the
+#: budget the least recently used content goes; a ref to it then reads as
+#: `NotFound`, which is what a diff cache honestly has to say.
+DEFAULT_MAX_STORE_BYTES = 128 * 1024 * 1024
 
 
 def changeset_content_uri(blob_id: str) -> str:
@@ -80,14 +90,29 @@ class ContentStore:
     grow the store and two files with identical content cost one copy. The
     store is per-session and dies with it: this is a diff cache, not a
     filesystem, and nothing should come to depend on it outliving the session.
+
+    Bounded twice: each blob by *max_blob* (truncated), and the whole store by
+    *max_bytes*, least recently used out first -- a `put` or a `get` counts as
+    a use, so content a client is reading, or a changeset keeps republishing,
+    stays. ``max_bytes=None`` removes the overall bound.
     """
 
-    def __init__(self, *, max_blob: int = DEFAULT_MAX_BLOB) -> None:
+    def __init__(
+        self, *, max_blob: int = DEFAULT_MAX_BLOB, max_bytes: int | None = DEFAULT_MAX_STORE_BYTES
+    ) -> None:
+        #: Insertion order is recency order: a use moves the blob to the end.
         self._blobs: dict[str, bytes] = {}
         self._max_blob = max_blob
+        self._max_bytes = max_bytes
+        self._bytes = 0
 
     def __len__(self) -> int:
         return len(self._blobs)
+
+    @property
+    def size(self) -> int:
+        """Bytes currently held."""
+        return self._bytes
 
     def put(self, data: bytes, *, content_type: str | None = None) -> dict[str, Any]:
         """Store bytes and return the `ContentRef` that names them."""
@@ -96,17 +121,41 @@ class ContentStore:
             # beats one showing an error where a diff should be.
             data = data[: self._max_blob]
         blob_id = hashlib.sha256(data).hexdigest()[:32]
-        self._blobs[blob_id] = data
+        self._store(blob_id, data)
         ref: dict[str, Any] = {"uri": changeset_content_uri(blob_id), "sizeHint": len(data)}
         if content_type is not None:
             ref["contentType"] = content_type
         return ref
 
+    def _store(self, blob_id: str, data: bytes) -> None:
+        previous = self._blobs.pop(blob_id, None)
+        if previous is not None:
+            self._bytes -= len(previous)
+        self._blobs[blob_id] = data
+        self._bytes += len(data)
+        self._evict(keep=blob_id)
+
+    def _evict(self, *, keep: str | None = None) -> None:
+        """Drop the least recently used blobs until the store fits its budget.
+
+        Never the one just stored: a ref the caller is about to publish must
+        resolve at least once, even if it alone is over budget.
+        """
+        if self._max_bytes is None:
+            return
+        while self._bytes > self._max_bytes and len(self._blobs) > 1:
+            oldest = next(iter(self._blobs))
+            if oldest == keep:
+                break
+            self._bytes -= len(self._blobs.pop(oldest))
+
     def get(self, uri: str) -> ResourceContent:
         blob_id = uri.removeprefix(f"{CONTENT_SCHEME}/")
-        data = self._blobs.get(blob_id)
+        data = self._blobs.pop(blob_id, None)
         if data is None:
             raise errors.AhpError(-32008, f"No such content: {uri}")
+        # Re-inserted at the end: being read is being used.
+        self._blobs[blob_id] = data
         return ResourceContent(data=data)
 
     def owns(self, uri: str) -> bool:
@@ -120,13 +169,33 @@ class ContentStore:
             uri.startswith(CONTENT_SCHEME) and uri.removeprefix(f"{CONTENT_SCHEME}/") in self._blobs
         )
 
-    def absorb(self, other: ContentStore) -> None:
-        """Take every blob *other* holds -- for a chat moving between sessions.
+    def absorb(self, other: ContentStore, uris: Collection[str] | None = None) -> None:
+        """Take blobs *other* holds -- for a chat moving between sessions.
 
         Copied rather than moved: the source session may still reference the
         same bytes from its own changesets, since identical content is shared.
+        With *uris*, only those: the moving chat's own content, not everything
+        the session it leaves ever stored.
         """
-        self._blobs.update(other._blobs)
+        for blob_id, data in list(other._blobs.items()):
+            if uris is None or changeset_content_uri(blob_id) in uris:
+                self._store(blob_id, data)
+
+
+def content_uris(value: Any) -> set[str]:
+    """Every host content URI referenced anywhere inside *value* (a state tree)."""
+    found: set[str] = set()
+    stack = [value]
+    while stack:
+        item = stack.pop()
+        if isinstance(item, str):
+            if item.startswith(CONTENT_SCHEME):
+                found.add(item)
+        elif isinstance(item, Mapping):
+            stack.extend(item.values())
+        elif isinstance(item, list | tuple):
+            stack.extend(item)
+    return found
 
 
 def diff_counts(before: bytes | None, after: bytes | None) -> dict[str, int]:
@@ -156,15 +225,12 @@ def diff_counts(before: bytes | None, after: bytes | None) -> dict[str, int]:
     return {"added": additions, "removed": deletions}
 
 
-def file_entry(
-    change: FileChange, store: ContentStore, *, reviewed: bool = False
-) -> dict[str, Any]:
-    """One `ChangesetFile`, with its content parked in the store.
+def file_edit(change: FileChange, store: ContentStore) -> dict[str, Any]:
+    """One `FileEdit`, its before/after content parked in *store*.
 
-    The id is the *destination* URI, or the source for a deletion -- which is
-    upstream's "typically `after.uri` (or `before.uri` for deletions)". A rename
-    therefore changes the id, and the caller is responsible for removing the old
-    entry; that is upstream's model, not a choice made here.
+    The one shape behind three wire surfaces: a changeset's files, a tool
+    confirmation's `edits` preview, and a tool result's `fileEdit` content --
+    so a diff renders the same wherever it is shown.
     """
     edit: dict[str, Any] = {}
     if change.before is not None:
@@ -178,6 +244,20 @@ def file_entry(
             "content": store.put(change.after, content_type=change.content_type),
         }
     edit["diff"] = diff_counts(change.before, change.after)
+    return edit
+
+
+def file_entry(
+    change: FileChange, store: ContentStore, *, reviewed: bool = False
+) -> dict[str, Any]:
+    """One `ChangesetFile`, with its content parked in the store.
+
+    The id is the *destination* URI, or the source for a deletion -- which is
+    upstream's "typically `after.uri` (or `before.uri` for deletions)". A rename
+    therefore changes the id, and the caller is responsible for removing the old
+    entry; that is upstream's model, not a choice made here.
+    """
+    edit = file_edit(change, store)
 
     identity = change.renamed_to or change.uri if change.after is not None else change.uri
     entry: dict[str, Any] = {"id": identity, "edit": edit}

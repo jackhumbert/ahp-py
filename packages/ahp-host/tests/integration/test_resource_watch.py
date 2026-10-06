@@ -89,7 +89,11 @@ class TestResourceWatch:
         first = await _watch(client, root)
         second = await _watch(client, root)
         assert first != second
-        assert root.name not in first
+        # The watched PATH must not be in it. (This used to test the two-letter
+        # directory name, which a random token contains now and then -- a
+        # flake, not a leak.)
+        assert root.as_uri() not in first
+        assert str(root) not in first
         assert first.startswith("ahp-resource-watch:/")
 
     async def test_the_state_describes_the_watch(

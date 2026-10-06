@@ -180,6 +180,10 @@ async def run(settings: NodeSettings, info: HostInfo | None = None) -> None:
         # A node is always on and single-user, which is what a schedule needs:
         # `restore()` below starts the scheduler before anyone connects.
         automations=FileAutomationStore(state / "automations"),
+        # No `completion_trigger_characters`, deliberately: a node fronts
+        # whatever agents its config names, and only they know what opens
+        # their pickers (`/` for slash commands, ...). Left unset, the host
+        # advertises each `Completes` agent's own `DeclaresCompletionTriggers`.
     )
     restored = await host.restore()
     _log.info("restored %d session(s)", restored)

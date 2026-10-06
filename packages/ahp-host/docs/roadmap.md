@@ -518,27 +518,34 @@ is exactly the failure mode that keeps the port open.
 
 ## 5. Other unowned surface
 
-Each of these is small, real, and belonged to no area:
+Each of these was small, real, and belonged to no area when this list was
+written. Most have since been built; what is left open is marked so.
 
-- **`root/sessionSummaryChanged` is never emitted.** `grep` finds only
-  `root/sessionAdded` at `core/host.py:371`. Every mutation of a summary field —
-  title, status, `changes`, annotation counts, `isRead`, activity — must be
-  mirrored to root. In the Agents app this is the home screen (§0).
+- **`root/sessionSummaryChanged`** — done. `Host._mirror_summary` projects the
+  summary out of the session channel's state and emits only the fields that
+  changed — title, status, `changes`, `activity`, the compact `chats`
+  catalogue — at both ends of every turn and after every client action. The
+  one thing it cannot do is *retract* a field; see the README's "genuinely
+  absent" list.
 - **`SubscribeParams.delivery` / `SubscriptionDeliveryOptions.maxLatencyMs`**
-  (`types/common/commands.ts:376,410-416`). The protocol's own coalescing
-  contract. Two areas hand-rolled coalescing while this went unclaimed.
-- **`listSessions` `limit`/`cursor`/`nextCursor`** — discarded at
-  `core/host.py:270`.
-- **`InitializeResult.defaultDirectory`** (`types/common/commands.ts:239`) — one
-  line, named nowhere.
-- **Session lifecycle**: `session/isReadChanged` (in the live capture),
-  `session/isArchivedChanged`, `session/activityChanged`, `chat/activityChanged`,
-  `session/metaChanged`, `chat/usage`, `chat/draftChanged`. And `chat/truncated`,
-  which is client-dispatchable and **destructive** — a peer can delete turns,
-  with no identity check and no owner.
-- **`AgentInfo.models`** — the model picker data. Related: `RootState.agents` is
-  plural and `Host` holds a single `self.provider`; multi-agent on one host is
-  unclaimed.
+  (`types/common/commands.ts`) — **still open, deliberately.** The protocol's
+  own coalescing contract, but no in-tree client sends it and honouring it
+  means buffering on the path that carries the ordering guarantee
+  (`core/sequencer.py` says so in its module docstring).
+- **`listSessions` `limit`/`cursor`/`nextCursor`** — done: opaque cursors,
+  most-recently-modified first, a server-side page cap of 200.
+- **`InitializeResult.defaultDirectory`** — done: `Host(default_directory=...)`,
+  and `--serve-directory` / `ahp-node` set it to the served root.
+- **Session lifecycle** — done except one: `session/isReadChanged` (the host
+  owns the "unread again" half), `session/isArchivedChanged` (`ArchivesSessions`),
+  `session/activityChanged` (from tool calls and `SessionPublisher.activity_changed`),
+  `chat/usage` (`TurnSink.usage`) and `chat/draftChanged` (client-dispatched,
+  reduced, persisted) all work. `chat/truncated` is refused unless the agent can
+  forget (`TruncatesHistory`). **Open:** `session/metaChanged` has no producer.
+- **`AgentInfo.models`** — done: `ModelInfo`, published on the root channel, and
+  republished with `root/agentsChanged` when an `UpdatesAgentInfo` provider's
+  list changes. `Host` takes a list of providers; §4 records why each still
+  owns its sessions outright.
 
 ---
 

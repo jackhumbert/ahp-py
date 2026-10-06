@@ -141,10 +141,11 @@ class TestAFailedTurnCarriesAnErrorType:
 
 class TestResumeIsRefused:
     async def test_a_turn_resume_is_rejected_so_the_client_reverts(self) -> None:
-        """0.9.0's `chat/turnResume` is client-dispatchable. This host never
-        marks an error `resumable`, so nothing can reopen -- and a resume that
-        was silently accepted would leave the client's optimistic reopening in
-        place with no turn behind it."""
+        """0.9.0's `chat/turnResume` is client-dispatchable. An agent that is
+        not `ResumesTurns` never gets a `resumable` error, so nothing can
+        reopen -- and a resume that was silently accepted would leave the
+        client's optimistic reopening in place with no turn behind it. The
+        accepted path is `tests/unit/test_resumable_turns.py`."""
         envelopes = await _run_turn(
             Host(Exploding(), LoopbackSingleUserPolicy()),
             "echo:/e4",
@@ -152,7 +153,7 @@ class TestResumeIsRefused:
         )
         resumes = [e for e in envelopes if e["action"]["type"] == "chat/turnResume"]
         assert resumes
-        assert resumes[-1]["rejectionReason"] == "this host does not resume failed turns"
+        assert resumes[-1]["rejectionReason"] == "this agent cannot resume a failed turn"
 
 
 class TestDurationIsMeasured:

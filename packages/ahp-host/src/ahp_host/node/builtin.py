@@ -14,4 +14,7 @@ def echo(options: Mapping[str, Any], node: NodeContext) -> EchoProvider:
     return EchoProvider(
         provider_id=str(options.get("provider_id", "echo")),
         display_name=str(options.get("agent_name", "Echo")),
+        # What echo's `complete()` answers to; the node passes no triggers of
+        # its own, so each agent's declaration is what clients are told.
+        completion_trigger_characters=("#",),
     )

@@ -73,11 +73,13 @@ from ahp_host.core.automations import (
 )
 from ahp_host.core.changesets import (
     CONTENT_SCHEME,
+    DEFAULT_MAX_STORE_BYTES,
     Changeset,
     ContentStore,
     FileChange,
     OperationHandler,
     changes_summary,
+    content_uris,
     file_entry,
 )
 from ahp_host.core.config import RootConfig, type_matches
@@ -122,7 +124,13 @@ from ahp_host.core.terminals import (
     terminal_dispatch_rejection,
     trim_scrollback,
 )
-from ahp_host.core.turn import ActionTurnSink, TurnRunner, tool_call_dispatch_rejection
+from ahp_host.core.turn import (
+    ActionTurnSink,
+    TurnRunner,
+    attached_chats,
+    tool_call_dispatch_rejection,
+    user_message,
+)
 from ahp_host.core.watches import (
     DEFAULT_COALESCE_SECONDS,
     ResourceChange,
@@ -138,28 +146,35 @@ from ahp_host.provider.base import (
     ArchivesSessions,
     BackgroundsMcpServers,
     BackgroundWork,
+    CancelsChats,
     Canvas,
+    ChatContext,
     Completes,
     CompletionRequest,
     ConfigRequest,
     ConfiguresSessions,
+    DeclaresCompletionTriggers,
     DescribesSession,
     DisposesSessions,
     FollowsActiveClients,
+    FollowsChatWorkingDirectories,
     FollowsWorkingDirectories,
     ForkedFrom,
     HandlesCustomizations,
+    HostsChats,
     ManagesMcpServers,
     OpensSessions,
     ProviderChat,
     ProviderTerminal,
     ReconfiguresSessions,
     ResumableAgentProvider,
+    ResumesTurns,
     SessionPublisher,
     SteersTurns,
     TransfersChats,
     TruncatesHistory,
     TurnSink,
+    UpdatesAgentInfo,
     UserMessage,
 )
 
@@ -267,6 +282,21 @@ _WORKING_DIRECTORY_ACTIONS: Final = frozenset(
         "session/workingDirectoryReplaced",
     }
 )
+
+#: The chat-level pair (1.0.0): a chat's subset of the session's folders. Kept
+#: apart from the session actions because they validate against a different
+#: set -- "`directory` MUST be one of the owning session's
+#: `SessionState.workingDirectories`; a host MUST reject a directory that is
+#: not" -- and because nothing routed them at all: the reducer applied any
+#: directory a client named, so a chat could claim a folder the session was
+#: never granted.
+_CHAT_WORKING_DIRECTORY_ACTIONS: Final = frozenset(
+    {"chat/workingDirectorySet", "chat/workingDirectoryRemoved"}
+)
+
+#: Client actions that carry a `Message` the host accepts, and so the chat
+#: attachments in it the host must resolve and pin.
+_MESSAGE_ACTIONS: Final = frozenset({"chat/turnStarted", "chat/pendingMessageSet"})
 
 #: Client-dispatchable, and both name a request the host is suspended on.
 #: Upstream states their rejection rules in prose ("servers SHOULD reject...")
@@ -742,6 +772,52 @@ def _answers_of(state: Any, request_id: str) -> Mapping[str, Any]:
         answers = request.get("answers")
         return answers if isinstance(answers, Mapping) else {}
     return {}
+
+
+def _pending_tool_call(state: Any, turn_id: Any, tool_call_id: Any) -> Mapping[str, Any] | None:
+    """The tool call *tool_call_id* in the chat's active turn *turn_id*, or None."""
+    active = state.get("activeTurn") if isinstance(state, Mapping) else None
+    if not isinstance(active, Mapping) or not js.strict_equal(active.get("id"), turn_id):
+        return None
+    parts = active.get("responseParts")
+    for part in parts if isinstance(parts, list) else []:
+        call = part.get("toolCall") if isinstance(part, Mapping) else None
+        if isinstance(call, Mapping) and js.strict_equal(call.get("toolCallId"), tool_call_id):
+            return call
+    return None
+
+
+def _selected_option_rejection(state: Any, action: Mapping[str, Any]) -> str | None:
+    """Refuse a `selectedOptionId` the confirmation never offered.
+
+    The reducer resolves the id against the call's `options` and silently
+    drops one that matches nothing, so the transcript would record no choice
+    while the provider -- told the id -- acted on one. And an option's `kind`
+    is "whether this option represents an approval or denial": an approval
+    that selects a deny option (or the reverse) is a contradiction the
+    provider cannot act on, so it is refused rather than guessed at. An
+    unrecognised kind passes (the enum is non-exhaustive).
+    """
+    selected = action.get("selectedOptionId")
+    if not isinstance(selected, str):
+        return "selectedOptionId must be a string"
+    call = _pending_tool_call(state, action.get("turnId"), action.get("toolCallId"))
+    options = call.get("options") if call is not None else None
+    option = next(
+        (
+            o
+            for o in (options if isinstance(options, list) else [])
+            if isinstance(o, Mapping) and js.strict_equal(o.get("id"), selected)
+        ),
+        None,
+    )
+    if option is None:
+        return "selectedOptionId does not name an option this confirmation offered"
+    approved = js.truthy(action.get("approved"))
+    kind = option.get("kind")
+    if (kind == "approve" and not approved) or (kind == "deny" and approved):
+        return f"option {selected!r} has kind {kind!r}, which contradicts approved"
+    return None
 
 
 def _side_chat_selection(selection: Any) -> dict[str, Any]:
@@ -1247,6 +1323,10 @@ class _Session:
     #: `(plugin id, nonce)` pairs already expanded, so a republication with an
     #: unchanged nonce does not cost a round trip per child file.
     expanded_plugins: set[tuple[Any, Any]] = field(default_factory=set)
+    #: Chats the CURRENT agent session has been told about through
+    #: `HostsChats.chat_opened`. Per agent session, so one that comes up late
+    #: (bring-up, a lazy resume) is told about exactly the chats it missed.
+    opened_chats: set[str] = field(default_factory=set)
 
     def running(self, chat: str | None = None) -> list[asyncio.Task[None]]:
         """Live turn tasks -- for one chat, or for the whole session.
@@ -1373,6 +1453,23 @@ def _title_from(text: str) -> str | None:
     return f"{spaced if len(spaced) >= _TITLE_LIMIT // 2 else collapsed[:body]}…"
 
 
+def _fork_turn_id(params: Mapping[str, Any]) -> str | None:
+    """`createSession.fork.turnId`, or ``None`` for "the whole chat"."""
+    fork = params.get("fork")
+    turn_id = fork.get("turnId") if isinstance(fork, Mapping) else None
+    return turn_id if isinstance(turn_id, str) else None
+
+
+def _turns_through(turns: Any, turn_id: str) -> list[Mapping[str, Any]]:
+    """*turns* from the first through *turn_id* inclusive, deep-copied; ``[]`` if absent."""
+    if not isinstance(turns, list):
+        return []
+    for index, turn in enumerate(turns):
+        if isinstance(turn, Mapping) and js.strict_equal(turn.get("id"), turn_id):
+            return copy.deepcopy([t for t in turns[: index + 1] if isinstance(t, Mapping)])
+    return []
+
+
 def _with_origin(summary: dict[str, Any], origin: Mapping[str, Any] | None) -> dict[str, Any]:
     """`ChatSummary.origin` -- where a forked or side chat came from.
 
@@ -1418,6 +1515,7 @@ class Host:
         claim_gated_actions: Collection[str] = CLAIM_GATED_ACTIONS,
         automations: AutomationStore | None = None,
         automation_history: int = DEFAULT_AUTOMATION_HISTORY,
+        max_content_bytes: int | None = DEFAULT_MAX_STORE_BYTES,
     ) -> None:
         if policy is None:  # pragma: no cover - defensive; typing already forbids it
             raise ValueError("a Policy is required; there is no default")
@@ -1502,7 +1600,16 @@ class Host:
         # one a provider ignores gives the user an empty picker on every
         # keystroke, which reads as a broken host rather than as an empty
         # result. Gated again at emit time on `Completes`.
-        self.completion_trigger_characters = tuple(completion_trigger_characters or ())
+        #
+        # `None` -- the embedder said nothing -- defers to the providers'
+        # own declarations (`DeclaresCompletionTriggers`); anything else,
+        # `()` included, is the embedder's final word. See
+        # `completion_triggers`.
+        self.completion_trigger_characters: tuple[str, ...] | None = (
+            tuple(completion_trigger_characters)
+            if completion_trigger_characters is not None
+            else None
+        )
         # Tokens the agent needs for services IT talks to. Host-global, matching
         # the reference implementation -- `authenticate` carries no client
         # identity, so a per-connection store is not observable by a conformant
@@ -1584,6 +1691,10 @@ class Host:
         self._automations_ready = False
         self._scheduler: asyncio.Task[None] | None = None
         self._schedule_changed = asyncio.Event()
+        #: What each session's content store -- changeset diffs, tool-call
+        #: edit previews, `fileEdit` results -- may hold before the least
+        #: recently used content is evicted. `None` removes the bound.
+        self.max_content_bytes = max_content_bytes
         self.sequencer.observer = self
         self._root_ready = False
         self.wire_log = WireLog(wire_log) if wire_log is not None else None
@@ -1676,6 +1787,7 @@ class Host:
             title=title,
             created_at=created_at,
             resume_state=dict(resume_state),
+            content=self._content_store(),
         )
         session.chat_uris.add(chat_uri)
         session.publisher = _Publisher(self, session, None)
@@ -1753,6 +1865,7 @@ class Host:
             title=stored.title or "Restored Session",
             created_at=stored.created_at,
             resume_state=stored.resume_state,
+            content=self._content_store(),
         )
         for uri, state in stored.channels.items():
             reducer = _reducer_for_restored(uri, state, stored.uri)
@@ -1868,6 +1981,10 @@ class Host:
                 )
             )
 
+    def _content_store(self) -> ContentStore:
+        """A session's content store, bounded as the embedder asked."""
+        return ContentStore(max_bytes=self.max_content_bytes)
+
     def _provider_named(self, provider_id: Any) -> AgentProvider:
         """The provider a request names, or the default when it names none.
 
@@ -1902,7 +2019,82 @@ class Host:
                 root_state["config"] = self.root_config.to_wire()
             await self.sequencer.register_channel(ROOT_URI, root_state, "root")
             self._root_ready = True
+            # After the channel exists, so a provider that already knows better
+            # can say so straight away and be published.
+            for provider_id, each in self.providers.items():
+                if isinstance(each, UpdatesAgentInfo):
+                    try:
+                        await each.attach_agent_updates(self.refresh_agents)
+                    except Exception:
+                        _log.exception("attach_agent_updates failed for %s", provider_id)
         await self._ensure_automations()
+
+    def completion_triggers(self) -> tuple[str, ...]:
+        """The `completionTriggerCharacters` this host advertises.
+
+        Nothing unless some provider is `Completes`. Then the embedder's
+        `completion_trigger_characters` when it gave one -- it wins outright,
+        an empty one included -- else every `Completes` provider's
+        `DeclaresCompletionTriggers` declaration, in provider order, each
+        character once. Without the provider half, a host built with no
+        argument -- `ahp-node` among them -- advertised none, and no
+        provider's completions were ever requested.
+        """
+        completing = [each for each in self.providers.values() if isinstance(each, Completes)]
+        if not completing:
+            return ()
+        if self.completion_trigger_characters is not None:
+            return self.completion_trigger_characters
+        merged: dict[str, None] = {}
+        for each in completing:
+            if not isinstance(each, DeclaresCompletionTriggers):
+                continue
+            try:
+                declared = each.completion_trigger_characters
+            except Exception:
+                _log.exception("completion_trigger_characters failed")
+                continue
+            for character in declared if isinstance(declared, Sequence) else ():
+                if isinstance(character, str) and character:
+                    merged.setdefault(character, None)
+        return tuple(merged)
+
+    async def refresh_agents(self) -> bool:
+        """Re-read every provider's `AgentInfo`; publish `root/agentsChanged` if it moved.
+
+        `RootState.agents` was computed once, when the root channel was built,
+        so an agent that discovered its models late -- start-up discovery that
+        failed, models reported per session -- left the picker empty for the
+        life of the host. A provider that is `UpdatesAgentInfo` is handed this
+        method; an embedder may call it directly too.
+
+        Emitted only when the wire value differs, compared as canonical JSON
+        rather than with `==` (which would equate `True` and `1`), so a
+        provider can call it as often as it likes. Returns whether it emitted.
+        Refuses -- publishing nothing -- if a provider's id changed: the id
+        keys every session the agent serves, and `createSession.provider` is
+        checked against the ids the host started with.
+        """
+        if not self._root_ready:
+            # The root channel reads `agent` when it is built, so nothing is lost.
+            return False
+        agents: list[dict[str, Any]] = []
+        for provider_id, each in self.providers.items():
+            info = each.agent
+            if info.provider != provider_id:
+                _log.error(
+                    "provider %r now reports the id %r; an agent's id cannot change",
+                    provider_id,
+                    info.provider,
+                )
+                return False
+            agents.append(info.to_wire())
+        state = self.sequencer.state_of(ROOT_URI)
+        published = state.get("agents") if isinstance(state, Mapping) else None
+        if json.dumps(published, sort_keys=True) == json.dumps(agents, sort_keys=True):
+            return False
+        await self.sequencer.publish(ROOT_URI, {"type": "root/agentsChanged", "agents": agents})
+        return True
 
     async def serve(
         self,
@@ -2163,16 +2355,15 @@ class Host:
             result["telemetry"] = dict(self.telemetry)
         if self.default_directory is not None:
             result["defaultDirectory"] = self.default_directory
-        if self.completion_trigger_characters and any(
-            isinstance(each, Completes) for each in self.providers.values()
-        ):
+        triggers = self.completion_triggers()
+        if triggers:
             # Without this the `completions` command is fully implemented and
             # never called: the client only issues it for a character the host
             # named, so an unadvertised trigger means the picker never opens.
             # Note the client caches these at content-provider registration and
             # does NOT re-read them on reconnect -- changing them needs a
             # window reload, not just a host restart.
-            result["completionTriggerCharacters"] = list(self.completion_trigger_characters)
+            result["completionTriggerCharacters"] = list(triggers)
         if self._advertised_prefix():
             # "Absence means the host does not support command prefixes."
             # Advertised only behind a real backend: with the refusing default,
@@ -3361,6 +3552,9 @@ class Host:
         self._channel_created(None, chat, session=session.uri)
         session.chat_uris.add(chat)
         session.provider_chats.add(chat)
+        # Not announced -- the provider asked for it and holds the handle --
+        # but known to the agent, so a client disposing it is `chat_closed`.
+        session.opened_chats.add(chat)
         entry, projected = self._chat_entry(session, chat)
         session.published_chats[chat] = projected
         await self.sequencer.publish(session.uri, {"type": "session/chatAdded", "summary": entry})
@@ -3659,6 +3853,136 @@ class Host:
         capability = provider.agent.capabilities.get("multipleChats")
         return capability if isinstance(capability, Mapping) else None
 
+    # ─── telling the agent which chats exist (`HostsChats`) ──────────────
+
+    def _chat_context(
+        self,
+        session: _Session,
+        chat: str,
+        state: Mapping[str, Any],
+        *,
+        restored: bool = False,
+        moved_from: str | None = None,
+    ) -> ChatContext:
+        """What `HostsChats.chat_opened` is told about *chat*, from its state.
+
+        From STATE rather than from the `createChat` params, so a chat being
+        created and one replayed after a restart are described the same way.
+        A fork's turns are its own copied prefix (through the origin turn); a
+        side chat's are its source's, which it does not hold -- best effort
+        either way: a prefix truncated away, or a source since disposed,
+        resolves to none.
+        """
+        raw = state.get("origin")
+        origin = dict(raw) if isinstance(raw, Mapping) else None
+        fork = side = None
+        source = origin.get("chat") if origin is not None else None
+        turn_id = origin.get("turnId") if origin is not None else None
+        if origin is not None and isinstance(source, str) and isinstance(turn_id, str):
+            if origin.get("kind") == "fork":
+                fork = ForkedFrom(
+                    session_uri=session.uri,
+                    turns=tuple(_turns_through(state.get("turns"), turn_id)),
+                    chat_uri=source,
+                    turn_id=turn_id,
+                )
+            elif origin.get("kind") == "sideChat":
+                owner = self._session_for(source)
+                source_state = self.sequencer.state_of(source)
+                source_turns = (
+                    source_state.get("turns") if isinstance(source_state, Mapping) else None
+                )
+                side = ForkedFrom(
+                    session_uri=owner.uri if owner is not None else session.uri,
+                    turns=tuple(_turns_through(source_turns, turn_id)),
+                    chat_uri=source,
+                    turn_id=turn_id,
+                )
+        directories = state.get("workingDirectories")
+        return ChatContext(
+            session_uri=session.uri,
+            chat_uri=chat,
+            origin=origin,
+            fork=fork,
+            side_chat=side,
+            # `None` and `[]` mean different things -- inherit the session's
+            # set, versus no folder access at all -- so absence is kept.
+            working_directories=(
+                tuple(d for d in directories if isinstance(d, str))
+                if isinstance(directories, list)
+                else None
+            ),
+            restored=restored,
+            moved_from=moved_from,
+        )
+
+    async def _open_chat(
+        self, session: _Session, context: ChatContext, *, refusable: bool = False
+    ) -> None:
+        """Tell the session's agent a chat exists, if it hosts chats.
+
+        *refusable* is `createChat`: the provider may refuse the chat, and its
+        exception becomes the command's error -- an `AhpError` as raised, so
+        a provider can say `PermissionDenied`, anything else `InternalError`.
+        Everywhere else the chat already exists, so a raise is only logged.
+        """
+        agent = session.agent_session
+        if not isinstance(agent, HostsChats):
+            return
+        try:
+            await agent.chat_opened(context)
+        except errors.AhpError:
+            if refusable:
+                raise
+            _log.exception("chat_opened failed for %s", context.chat_uri)
+            return
+        except Exception as exc:
+            if refusable:
+                raise errors.internal_error(
+                    f"the agent could not open the chat: {type(exc).__name__}: {exc}"
+                ) from exc
+            _log.exception("chat_opened failed for %s", context.chat_uri)
+            return
+        session.opened_chats.add(context.chat_uri)
+
+    async def _close_chat(self, session: _Session, chat: str) -> None:
+        """Tell the session's agent a chat it was told about is gone from it."""
+        agent = session.agent_session
+        if chat not in session.opened_chats:
+            return
+        session.opened_chats.discard(chat)
+        if not isinstance(agent, HostsChats):
+            return
+        try:
+            await agent.chat_closed(chat)
+        except Exception:
+            _log.exception("chat_closed failed for %s", chat)
+
+    async def _attach_agent(self, session: _Session, agent: AgentSession) -> None:
+        """Make *agent* the session's agent, and tell it which chats exist.
+
+        Every chat but the default one, in catalogue order, with
+        ``restored=True``: they existed before this agent session did -- a
+        restored session after a host restart, or a chat a client created
+        while bring-up was still running. Worker chats are included; the
+        agent that opened them is gone.
+        """
+        session.opened_chats.clear()
+        session.agent_session = agent
+        if not isinstance(agent, HostsChats):
+            return
+        order = self._catalogue_order(session)
+        chats = [c for c in order if c in session.chat_uris] + sorted(
+            session.chat_uris - set(order)
+        )
+        for chat in chats:
+            if chat == session.chat_uri or chat in session.opened_chats:
+                continue
+            state = self.sequencer.state_of(chat)
+            if not isinstance(state, Mapping):
+                continue
+            await self._open_chat(session, self._chat_context(session, chat, state, restored=True))
+
     async def _create_chat(self, connection: Connection, params: Mapping[str, Any]) -> None:
         """Open a second chat in a session.
 
@@ -3718,6 +4042,37 @@ class Host:
             state["origin"] = origin
         if directories is not None:
             state["workingDirectories"] = list(directories)
+
+        initial = params.get("initialMessage")
+        if isinstance(initial, Mapping):
+            # The same acceptance rules as a dispatched message: an unknown
+            # chat or `endTurn` refused, an absent one pinned.
+            refused = self._chat_attachment_rejection(connection, initial)
+            if refused is not None:
+                raise errors.invalid_params(refused)
+            initial = self._pin_chat_attachments(initial)
+
+        # The provider hears about the chat BEFORE it exists, so it can refuse
+        # it with nothing created -- no channel, no catalogue entry, no turn.
+        # A restored session's agent is resumed for this: it is the one that
+        # will run the chat's turns, and it is the only one that can say no.
+        # Only once the session is `ready`: during bring-up the agent is still
+        # being CREATED, and resuming one beside it would start two. A chat
+        # created then is announced when bring-up attaches the agent.
+        lifecycle = self.sequencer.state_of(session.uri)
+        if isinstance(lifecycle, Mapping) and lifecycle.get("lifecycle") == "ready":
+            await self._resume_if_restored(session)
+        await self._open_chat(session, self._chat_context(session, chat_uri, state), refusable=True)
+        if self._sessions.get(session_uri) is not session:
+            # Disposed while the provider was being asked.
+            raise errors.session_not_found(session_uri)
+        if self.sequencer.has_channel(chat_uri):
+            # A concurrent `createChat` took the URI meanwhile. Nothing was
+            # created by this one. Not `chat_closed`: the URI now names the
+            # chat the other call created, which the agent must keep.
+            raise errors.AhpError(
+                AHP_ERROR_CODES["AlreadyExists"], f"Channel already exists: {chat_uri}"
+            )
         await self.sequencer.register_channel(chat_uri, state, "chat")
         self._channel_created(connection, chat_uri, session=session_uri)
         session.chat_uris.add(chat_uri)
@@ -3744,7 +4099,6 @@ class Host:
         )
         self._audit("chat.created", connection, channel=chat_uri)
 
-        initial = params.get("initialMessage")
         if isinstance(initial, Mapping):
             # Delivered as an ordinary turn, so the whole turn machinery --
             # sequencing, the suspending primitive, cancellation -- applies to a
@@ -3886,6 +4240,10 @@ class Host:
         # from a channel that simply stops, and waits for a terminal action
         # that is never coming.
         await self._end_stranded_turn(session, chat_uri)
+        # Told once its turn is down and while the channel still exists, so a
+        # provider tearing down the chat's conversation is not racing a turn
+        # still publishing into it.
+        await self._close_chat(session, chat_uri)
 
         session.chat_uris.discard(chat_uri)
         session.published_chats.pop(chat_uri, None)
@@ -4095,10 +4453,30 @@ class Host:
             )
         await self._publish_order(target, _placed(self._catalogue_order(target), moving, after))
         await self._reclaim_terminals(target, list(handed.terminals))
+        await self._rehost_chats(source, target, moving)
         await self._mirror_summary(source)
         await self._mirror_summary(target)
         await self._persist(source)
         await self._persist(target)
+
+    async def _rehost_chats(self, source: _Session, target: _Session, chats: Sequence[str]) -> None:
+        """Tell both agents about chats a committed move took between them.
+
+        After the commit, so these cannot refuse it -- `TransfersChats` was
+        the provider's chance, before anything changed. The source's agent
+        stops hosting them; the target's starts. A target whose agent is not
+        running yet hears about them when it comes up, like any other chat.
+        """
+        for chat in chats:
+            await self._close_chat(source, chat)
+        if target.agent_session is None:
+            return
+        for chat in chats:
+            state = self.sequencer.state_of(chat)
+            if isinstance(state, Mapping) and chat != target.chat_uri:
+                await self._open_chat(
+                    target, self._chat_context(target, chat, state, moved_from=source.uri)
+                )
 
     async def _move_to_new_session(
         self, connection: Connection, source: _Session, chat: str
@@ -4145,6 +4523,10 @@ class Host:
                 )
             await self._reclaim_terminals(created, list(under.terminals))
         await self._reclaim_terminals(created, list(handed.terminals))
+        # The moved chat is the new session's DEFAULT, which its agent already
+        # knows as `AgentSessionContext.chat_uri`; its descendants are
+        # announced as arriving.
+        await self._rehost_chats(source, created, moving)
         await self._mirror_summary(source)
         await self._mirror_summary(created)
         await self._persist(source)
@@ -4198,9 +4580,16 @@ class Host:
         target.terminals.update(handed.terminals)
         target.canvases.update(handed.canvases)
         target.provider_chats.update(handed.provider_chats)
-        if handed.content is not None and handed.changesets:
-            # A moved changeset's diffs are bytes in the source's store.
-            target.content.absorb(handed.content)
+        if handed.content is not None:
+            # A moved changeset's diffs, and the edit previews and `fileEdit`
+            # results in a moved chat's transcript, are bytes in the SOURCE's
+            # store; left there they would stop resolving the moment the chat
+            # arrived. Only what the moving channels reference is copied, not
+            # everything the source session ever stored.
+            referenced: set[str] = set()
+            for channel in [*handed.chats, *handed.changesets]:
+                referenced |= content_uris(self.sequencer.state_of(channel))
+            target.content.absorb(handed.content, referenced)
 
     async def _reclaim_terminals(self, target: _Session, terminals: Sequence[str]) -> None:
         """A moved chat's terminals now belong to its new session; say so."""
@@ -5306,6 +5695,166 @@ class Host:
             return "the primary working directory is immutable"
         return None
 
+    def _validate_chat_working_directory_action(
+        self, channel: str, action: Mapping[str, Any]
+    ) -> str | None:
+        """`chat/workingDirectorySet` / `...Removed`: a chat's folder subset.
+
+        "`directory` MUST be one of the owning session's
+        `SessionState.workingDirectories`; a host MUST reject a directory that
+        is not. Only valid when the agent advertises
+        `AgentCapabilities.multipleWorkingDirectories`." The capability gates
+        removal too: without it "clients MUST NOT mutate a session's or chat's
+        working-directory set". A removal is otherwise always accepted -- it
+        is idempotent, "a no-op when it is not present", and it only narrows.
+
+        No policy question: the session's set has already been through
+        `may_grant_working_directory`, and a subset grants nothing new.
+        """
+        session = next((s for s in self._sessions.values() if channel in s.chat_uris), None)
+        if session is None:
+            return "no such chat"
+        if self._multiroot(self._provider_of(session)) is None:
+            return "this agent does not advertise multipleWorkingDirectories"
+        directory = action.get("directory")
+        if not isinstance(directory, str):
+            return "directory must be a string"
+        if action.get("type") == "chat/workingDirectorySet":
+            state = self.sequencer.state_of(session.uri)
+            owned = state.get("workingDirectories") if isinstance(state, Mapping) else None
+            if not isinstance(owned, list) or not any(
+                js.strict_equal(entry, directory) for entry in owned
+            ):
+                return "that directory is not one of the session's working directories"
+        return None
+
+    def _resume_rejection(
+        self, channel: str, state: Mapping[str, Any], action: Mapping[str, Any]
+    ) -> str | None:
+        """Accept `chat/turnResume` only where it can do what it says.
+
+        The spec's preconditions, checked as the reducer checks them: "The
+        turn MUST be the latest turn, its state MUST be `error`, and its final
+        response part MUST be a resumable error" (`ChatTurnResumeAction`), and
+        no turn may be active. The reducer would silently no-op otherwise;
+        rejecting is what lets the client revert its optimistic reopening.
+
+        And the host's own: the session's agent must be able to resume
+        (`ResumesTurns`). A restored session whose agent has not come back
+        yet is given the benefit of the doubt when its provider can resume
+        sessions -- the error part was marked resumable by an agent that
+        could -- and if the agent returns without the ability, the reopened
+        turn is failed again, not left hanging.
+        """
+        session = next((s for s in self._sessions.values() if channel in s.chat_uris), None)
+        if session is None:
+            return "no such chat"
+        if channel in session.provider_chats:
+            # A worker chat's turns are the provider's callbacks; there is no
+            # agent conversation behind them to resume.
+            return "a worker chat's turns cannot be resumed"
+        agent = session.agent_session
+        if agent is not None and not isinstance(agent, ResumesTurns):
+            return "this agent cannot resume a failed turn"
+        if agent is None and not isinstance(self._provider_of(session), ResumableAgentProvider):
+            return "this agent cannot resume a failed turn"
+        if state.get("activeTurn") is not None:
+            return "a turn is already active"
+        turns = state.get("turns")
+        latest = turns[-1] if isinstance(turns, list) and turns else None
+        if not isinstance(latest, Mapping) or not js.strict_equal(
+            latest.get("id"), action.get("turnId")
+        ):
+            return "turnId does not name the chat's latest turn"
+        if latest.get("state") != "error":
+            return "the latest turn did not fail"
+        parts = latest.get("responseParts")
+        final = parts[-1] if isinstance(parts, list) and parts else None
+        if (
+            not isinstance(final, Mapping)
+            or final.get("kind") != "error"
+            or final.get("resumable") is not True
+        ):
+            return "the latest turn's error is not resumable"
+        return None
+
+    def _chat_attachment_rejection(self, connection: Connection, message: Any) -> str | None:
+        """Refuse a message whose `MessageChatAttachment` cannot be resolved.
+
+        "The host MUST reject an attachment that references an unknown chat,
+        specifies an unknown, active, or non-retained `endTurn`"
+        (`chat-channel.md`, Pulling a chat into another chat). A chat the
+        connection may not see is answered as unknown: the attachment would
+        otherwise feed another user's transcript to this user's agent, and a
+        different refusal would confirm that the chat exists.
+
+        "When the referenced chat has no completed retained turns ... the host
+        MUST NOT reject the attachment on that basis" -- so an attachment with
+        no `endTurn` is always accepted here, and pinned afterwards.
+        """
+        attachments = message.get("attachments") if isinstance(message, Mapping) else None
+        for attachment in attachments if isinstance(attachments, list) else []:
+            if not isinstance(attachment, Mapping) or attachment.get("type") != "chat":
+                continue
+            resource = attachment.get("resource")
+            if (
+                not isinstance(resource, str)
+                or self.sequencer.reducer_of(resource) != "chat"
+                or not self.policy.may_see_channel(connection.info, resource)
+            ):
+                return "a chat attachment names an unknown chat"
+            if "endTurn" not in attachment:
+                continue
+            end_turn = attachment["endTurn"]
+            state = self.sequencer.state_of(resource)
+            turns = state.get("turns") if isinstance(state, Mapping) else None
+            # The retained `turns` hold exactly the completed ones: an active
+            # turn lives in `activeTurn`, a pruned one is gone -- so one
+            # membership test covers "unknown, active, or non-retained".
+            retained = turns if isinstance(turns, list) else []
+            if not isinstance(end_turn, str) or not any(
+                isinstance(turn, Mapping) and js.strict_equal(turn.get("id"), end_turn)
+                for turn in retained
+            ):
+                return "a chat attachment's endTurn is not a completed turn of that chat"
+        return None
+
+    def _pin_chat_attachments(self, message: Mapping[str, Any]) -> Mapping[str, Any]:
+        """*message* with every chat attachment's `endTurn` pinned.
+
+        "When `endTurn` is omitted, the host MUST resolve and pin the
+        referenced chat's latest completed turn when accepting the message
+        ... Later turns do not change the context represented by an
+        already-sent attachment." Pinned INTO the accepted message, so the
+        bound is in the transcript every client sees and in the state a
+        restart restores -- not in host memory. The latest completed turn is
+        the last retained one; with none, the attachment stays unpinned and
+        resolves to an empty transcript.
+
+        Returns *message* itself when there is nothing to pin.
+        """
+        attachments = message.get("attachments")
+        if not isinstance(attachments, list):
+            return message
+        pinned: list[Any] = []
+        changed = False
+        for attachment in attachments:
+            if (
+                isinstance(attachment, Mapping)
+                and attachment.get("type") == "chat"
+                and "endTurn" not in attachment
+                and isinstance(attachment.get("resource"), str)
+            ):
+                state = self.sequencer.state_of(attachment["resource"])
+                turns = state.get("turns") if isinstance(state, Mapping) else None
+                latest = turns[-1] if isinstance(turns, list) and turns else None
+                if isinstance(latest, Mapping) and isinstance(latest.get("id"), str):
+                    pinned.append({**attachment, "endTurn": latest["id"]})
+                    changed = True
+                    continue
+            pinned.append(attachment)
+        return {**message, "attachments": pinned} if changed else message
+
     def _copy_turns(self, chat_uri: str, turn_id: Any) -> list[Any]:
         """The source chat's turns up to and INCLUDING *turn_id*, deep-copied.
 
@@ -5508,6 +6057,7 @@ class Host:
             if forked is not None
             else title or _DEFAULT_SESSION_TITLE,
             created_at=created_at,
+            content=self._content_store(),
         )
         session.chat_uris.add(chat_uri)
         token = params.get("progressToken")
@@ -5623,7 +6173,12 @@ class Host:
                 # the first reply after a fork answers with no context -- the
                 # published state and the agent silently disagree.
                 fork=(
-                    ForkedFrom(session_uri=forked[0].uri, turns=tuple(forked[1]))
+                    ForkedFrom(
+                        session_uri=forked[0].uri,
+                        turns=tuple(forked[1]),
+                        chat_uri=forked[0].chat_uri,
+                        turn_id=_fork_turn_id(params),
+                    )
                     if forked is not None
                     else None
                 ),
@@ -5631,7 +6186,7 @@ class Host:
                 active_client_id=active_client[0]["clientId"] if active_client else None,
                 client_tools=tuple(active_client[0]["tools"]) if active_client else (),
             )
-            session.agent_session = await self._provider_of(session).create_session(context)
+            agent = await self._provider_of(session).create_session(context)
         except Exception as exc:
             await self.sequencer.publish(
                 session.uri,
@@ -5641,6 +6196,7 @@ class Host:
                 },
             )
             return
+        await self._attach_agent(session, agent)
         await self._announce(session)
 
     async def _announce(self, session: _Session) -> None:
@@ -5880,6 +6436,14 @@ class Host:
             )
             await self.sequencer.publish(channel, action, origin=origin, rejection_reason=rejection)
             return
+        message = action.get("message")
+        if action.get("type") in _MESSAGE_ACTIONS and isinstance(message, Mapping):
+            # Pinned in the ACCEPTED action: the echo every client reconciles
+            # its optimistic copy against carries the bound, so the transcript
+            # records which turns the attachment stood for.
+            pinned = self._pin_chat_attachments(message)
+            if pinned is not message:
+                action = {**action, "message": pinned}
         if action.get("type") in _TOOL_RESOLVING_ACTIONS:
             # Who approved a tool call is the single event an operator is most
             # likely to be asked about, and the protocol's own validation table
@@ -6032,6 +6596,9 @@ class Host:
         if action_type in _WORKING_DIRECTORY_ACTIONS:
             return self._validate_working_directory_action(connection, channel, action)
 
+        if action_type in _CHAT_WORKING_DIRECTORY_ACTIONS:
+            return self._validate_chat_working_directory_action(channel, action)
+
         if action_type == "session/customizationToggled":
             return _enablement_rejection(action.get("enablement"))
 
@@ -6071,11 +6638,12 @@ class Host:
                     return "turnId does not name the active turn"
             if action_type == "chat/turnStarted" and state.get("activeTurn") is not None:
                 return "a turn is already active"
+            if action_type in _MESSAGE_ACTIONS:
+                refused = self._chat_attachment_rejection(connection, action.get("message"))
+                if refused is not None:
+                    return refused
             if action_type == "chat/turnResume":
-                # This host never publishes a `resumable` error part, so there
-                # is no turn a resume could reopen -- the reducer would no-op.
-                # Rejected so the client drops its optimistic reopening.
-                return "this host does not resume failed turns"
+                return self._resume_rejection(channel, state, action)
             if (
                 action_type in _TOOL_RESOLVING_ACTIONS
                 and self.pending.id_for_key(action.get("toolCallId"), channel=channel) is None
@@ -6088,6 +6656,10 @@ class Host:
                 mismatch = self._tool_park_rejection(connection, channel, action)
                 if mismatch is not None:
                     return mismatch
+            if action_type == "chat/toolCallConfirmed" and "selectedOptionId" in action:
+                refused = _selected_option_rejection(state, action)
+                if refused is not None:
+                    return refused
             if action_type in _INPUT_ACTIONS and not self.pending.is_open(
                 action.get("requestId"), channel=channel
             ):
@@ -6128,7 +6700,10 @@ class Host:
             await self._react_to_archive(channel, action)
             return
         if action_type in _WORKING_DIRECTORY_ACTIONS:
-            await self._react_to_working_directories(channel)
+            await self._react_to_working_directories(channel, action)
+            return
+        if action_type in _CHAT_WORKING_DIRECTORY_ACTIONS:
+            await self._react_to_chat_working_directories(channel)
             return
         if action_type in _MCP_LIFECYCLE_ACTIONS:
             await self._react_to_mcp(channel, action)
@@ -6163,6 +6738,10 @@ class Host:
             return
         if action_type == "chat/turnStarted":
             await self._start_turn(session, channel, action)
+        elif action_type == "chat/turnResume":
+            # Validation established the preconditions and the reducer has
+            # reopened the turn; the agent picks it up under the same id.
+            await self._start_turn(session, channel, action, resume=True)
         elif action_type == "chat/pendingMessageSet":
             await self._drain_queue(session, channel)
         elif action_type == "chat/truncated":
@@ -6200,14 +6779,28 @@ class Host:
             if request_id is not None:
                 if action_type == "chat/toolCallConfirmed":
                     approved = action.get("approved")
+                    # `editedToolInput` is the client's rewrite of the
+                    # parameters, carried so the provider runs what was
+                    # approved rather than what it proposed. The rest is why:
+                    # the option picked, and for a denial its reason, the
+                    # user's explanation and what they suggested instead --
+                    # all dropped here once, so an agent told "no, edit the
+                    # other file" only ever heard "no".
+                    payload = {
+                        key: action[key]
+                        for key in (
+                            "selectedOptionId",
+                            "reason",
+                            "reasonMessage",
+                            "userSuggestion",
+                        )
+                        if key in action
+                    }
+                    if "editedToolInput" in action:
+                        payload["toolInput"] = action["editedToolInput"]
                     outcome = RequestOutcome(
                         response="accept" if approved is not False else "decline",
-                        # `editedToolInput` is the client's rewrite of the
-                        # parameters. Carried through so the provider runs what
-                        # was approved rather than what it proposed.
-                        payload={"toolInput": action["editedToolInput"]}
-                        if "editedToolInput" in action
-                        else {},
+                        payload=payload,
                     )
                 else:
                     # A client-run tool reports success on the RESULT, and
@@ -6564,10 +7157,17 @@ class Host:
         channel: str,
         action: Mapping[str, Any],
         agent: AgentSession | None = None,
+        *,
+        resume: bool = False,
     ) -> None:
         """Run *action* as a turn on *channel*, by *agent* if given (an external
-        turn) or else the session's own agent."""
-        command = self._terminal_command(action)
+        turn) or else the session's own agent.
+
+        With *resume*, *action* is an accepted `chat/turnResume`: the reducer
+        has reopened the failed turn, and the agent continues it
+        (`ResumesTurns.resume_turn`) rather than being sent a message.
+        """
+        command = None if resume else self._terminal_command(action)
         if command is not None:
             # Never reaches the provider. The user asked the HOST to run a
             # command; handing it to an agent as a message beginning with `!`
@@ -6576,7 +7176,8 @@ class Host:
                 self._run_terminal_command(session, channel, action, command)
             )
         else:
-            await self._seed_title(session, channel, action)
+            if not resume:
+                await self._seed_title(session, channel, action)
             runner = TurnRunner(
                 self.sequencer,
                 channel,
@@ -6584,9 +7185,12 @@ class Host:
                 session.uri,
                 lambda: self._mirror_summary(session),
                 self._advertise_resource,
+                content=session.content,
             )
             session.runners[channel] = runner
-            task = asyncio.create_task(self._run_turn(session, runner, action, agent))
+            task = asyncio.create_task(
+                self._run_turn(session, runner, action, agent, resume=resume)
+            )
         session.turns[channel] = task
         session.turn_started[channel] = time.monotonic()
         # Both ends of the turn, from ONE place each. A changeset operation is
@@ -6625,17 +7229,30 @@ class Host:
         truncate an innocent chat's answer because a different chat was
         cancelled -- which is precisely the class of bug this method exists to
         close, one layer down.
+
+        An agent session that is `CancelsChats` is told exactly which chat
+        instead -- every time that chat had a turn to cancel, whatever else is
+        running -- and never gets the session-wide `cancel`.
         """
-        for task in session.running(chat):
+        running = session.running(chat)
+        for task in running:
             task.cancel()
         session.turns.pop(chat, None)
         if chat in session.provider_chats:
             # The provider's worker turn: its callback has the CancelledError,
             # and the agent session is not this chat's to interrupt.
             return
-        if session.agent_session is not None and not session.running():
+        agent = session.agent_session
+        if isinstance(agent, CancelsChats):
+            if running:
+                try:
+                    await agent.cancel_chat(chat, reason)
+                except Exception:
+                    _log.exception("cancel_chat failed for %s", chat)
+            return
+        if agent is not None and not session.running():
             with contextlib.suppress(Exception):
-                await session.agent_session.cancel(reason)
+                await agent.cancel(reason)
 
     async def _end_stranded_turn(self, session: _Session, chat: str) -> None:
         """Publish a terminal action for a turn nothing else will ever end.
@@ -6779,10 +7396,12 @@ class Host:
             or runner.sink is None
         ):
             return
-        text = message.get("text")
-        text = text if isinstance(text, str) else ""
+        steering = user_message(
+            message, chat_uri=channel, attached=attached_chats(self.sequencer, message)
+        )
+        text = steering.text
         try:
-            taken = await session.agent_session.steer(channel, UserMessage(text=text, raw=message))
+            taken = await session.agent_session.steer(channel, steering)
         except Exception:
             _log.exception("steering %s failed", channel)
             return
@@ -6877,10 +7496,19 @@ class Host:
             resume_state=session.resume_state,
         )
         try:
-            session.agent_session = await provider.resume_session(context)
+            agent = await provider.resume_session(context)
         except Exception:
             _log.exception("could not resume %s", session.uri)
             return
+        if session.agent_session is not None:
+            # Two first turns raced to resume the same session (two chats at
+            # once): the other one won. Keep its agent; this one is surplus.
+            with contextlib.suppress(Exception):
+                await agent.aclose()
+            return
+        # Its chats first: the agent must know a chat exists before anything
+        # -- the turn that triggered this resume, or a client -- reaches it.
+        await self._attach_agent(session, agent)
         # The context names no clients (they are not the creator), but some may
         # have joined while the session waited for its agent.
         await self._tell_active_clients(session)
@@ -6916,7 +7544,9 @@ class Host:
                 _log.exception("archived_changed failed for %s", channel)
         await self._persist(session)
 
-    async def _react_to_working_directories(self, channel: str) -> None:
+    async def _react_to_working_directories(
+        self, channel: str, action: Mapping[str, Any] | None = None
+    ) -> None:
         """Tell the agent the session's folders changed, then save it.
 
         The whole set, read back from state, rather than the one action: the
@@ -6924,20 +7554,82 @@ class Host:
         agent re-deriving it would be a second reducer that could disagree.
         A restored session with no agent yet gets nothing to call: resuming
         reads its folders from state (`_resume_if_restored`).
+
+        Then the chats: a chat's subset "MUST be present in the owning
+        session's `workingDirectories`", so a folder the session just lost
+        leaves every subset that named it, and a REPLACED folder is replaced
+        in them too -- a chat narrowed to the old checkout follows it to the
+        new one rather than silently losing all access.
         """
         session = self._sessions.get(channel)
         if session is None:
             return
+        state = self.sequencer.state_of(channel)
+        directories = state.get("workingDirectories") if isinstance(state, Mapping) else None
+        current = [d for d in directories or () if isinstance(d, str)]
         if isinstance(session.agent_session, FollowsWorkingDirectories):
-            state = self.sequencer.state_of(channel)
-            directories = state.get("workingDirectories") if isinstance(state, Mapping) else None
             try:
-                await session.agent_session.working_directories_changed(
-                    [d for d in directories or () if isinstance(d, str)]
-                )
+                await session.agent_session.working_directories_changed(current)
             except Exception:
                 _log.exception("working_directories_changed failed for %s", channel)
+        replaced = (
+            (action.get("directory"), action.get("replacement"))
+            if action is not None and action.get("type") == "session/workingDirectoryReplaced"
+            else None
+        )
+        for chat in sorted(session.chat_uris):
+            await self._prune_chat_directories(session, chat, current, replaced)
         await self._persist(session)
+
+    async def _prune_chat_directories(
+        self,
+        session: _Session,
+        chat: str,
+        session_directories: Sequence[str],
+        replaced: tuple[Any, Any] | None,
+    ) -> None:
+        """Keep one chat's subset inside the session's set, after it changed."""
+        state = self.sequencer.state_of(chat)
+        subset = state.get("workingDirectories") if isinstance(state, Mapping) else None
+        if not isinstance(subset, list):
+            # No subset: the chat follows the session's set, already told.
+            return
+        stale = [d for d in subset if d not in session_directories]
+        if not stale:
+            return
+        for directory in stale:
+            await self.sequencer.publish(
+                chat, {"type": "chat/workingDirectoryRemoved", "directory": directory}
+            )
+        if replaced is not None:
+            old, new = replaced
+            if old in stale and isinstance(new, str) and new in session_directories:
+                await self.sequencer.publish(
+                    chat, {"type": "chat/workingDirectorySet", "directory": new}
+                )
+        await self._tell_chat_directories(session, chat)
+
+    async def _react_to_chat_working_directories(self, channel: str) -> None:
+        """Tell the agent one chat's folder subset changed, then save it."""
+        session = next((s for s in self._sessions.values() if channel in s.chat_uris), None)
+        if session is None:
+            return
+        await self._tell_chat_directories(session, channel)
+        await self._persist(session)
+
+    async def _tell_chat_directories(self, session: _Session, chat: str) -> None:
+        """`FollowsChatWorkingDirectories`, with the subset as the reducer left it."""
+        agent = session.agent_session
+        if not isinstance(agent, FollowsChatWorkingDirectories):
+            return
+        state = self.sequencer.state_of(chat)
+        subset = state.get("workingDirectories") if isinstance(state, Mapping) else None
+        try:
+            await agent.chat_working_directories_changed(
+                chat, [d for d in subset or () if isinstance(d, str)]
+            )
+        except Exception:
+            _log.exception("chat_working_directories_changed failed for %s", chat)
 
     async def _run_turn(
         self,
@@ -6945,6 +7637,8 @@ class Host:
         runner: TurnRunner,
         action: Mapping[str, Any],
         agent: AgentSession | None = None,
+        *,
+        resume: bool = False,
     ) -> None:
         """Run one turn, then bring the root catalogue back in step.
 
@@ -6956,7 +7650,11 @@ class Host:
         """
         try:
             await self._resume_if_restored(session)
-            await runner.run(agent or session.agent_session, action)
+            turn_id = action.get("turnId")
+            if resume and isinstance(turn_id, str):
+                await runner.resume(agent or session.agent_session, turn_id)
+            else:
+                await runner.run(agent or session.agent_session, action)
         finally:
             # Retracted in a DETACHED task on purpose. This one is frequently
             # the task being cancelled, and a cancelled task cannot be relied on

@@ -410,8 +410,13 @@ class EchoProvider:
         configurable: bool = False,
         workspace: DemoWorkspace | None = None,
         capabilities: Mapping[str, Any] | None = None,
+        completion_trigger_characters: Sequence[str] = (),
     ) -> None:
         self._configurable = configurable
+        #: `DeclaresCompletionTriggers`. Empty by default, so a host that
+        #: names none advertises none -- the demo passes ``("#",)``, which is
+        #: what `complete` answers to.
+        self.completion_trigger_characters = tuple(completion_trigger_characters)
         #: Every `moveChat` transfer this provider agreed to, for tests.
         self.transfers: list[tuple[tuple[str, ...], str, str]] = []
         self._delay = delay

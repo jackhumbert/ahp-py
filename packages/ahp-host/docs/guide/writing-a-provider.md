@@ -134,8 +134,10 @@ So a host that wants to be usable must:
 | `tool_call_started(id, name, input, *, display_name=, intention=, meta=)` | Announce a call. `display_name` is what the user reads. |
 | `tool_call_delta(id, content=, *, invocation_message=)` | Stream the parameters, or move the progress line under the tool's name. Call it at any point in the call's life; the host picks the action that state accepts. |
 | `tool_call_output(id, content, *, meta=)` | What a still-running call has produced. **Replaces**, so pass everything so far. Moves the call to `running` if it is not there yet. |
-| `tool_call_completed(id, result, *, success=, past_tense_message=)` | Finish it. Both keyword fields are **required by the protocol**. |
-| `turn_failed(message, error_type=, duration_ms=)` | End in error. `error_type` is required — omitting it renders `Error: (undefined) …`. |
+| `tool_call_completed(id, result, *, success=, past_tense_message=)` | Finish it. Both keyword fields are **required by the protocol**. `result` is a `ToolCallResult` mapping or just its content list. |
+| `file_edit(change)` | A `fileEdit` content item for a `FileChange`, its bytes in the session's content store. Put it in a result's content and the client renders a diff. |
+| `system_notification(text, *, markdown=, meta=)` | A note from the harness in the transcript: "conversation compacted", "sent from another device". |
+| `turn_failed(message, error_type=, duration_ms=, *, resumable=)` | End in error. `error_type` is required — omitting it renders `Error: (undefined) …`. `resumable=True` offers `chat/turnResume`; see [Resuming a failed turn](#resuming-a-failed-turn). |
 | `usage(*, input_tokens=, output_tokens=, cache_read_tokens=, model=)` | Report the turn's tokens. No usage, no context gauge — the client renders nothing rather than a zero. |
 | `request_input(request)` | **Suspends.** Ask a human and wait. |
 | `confirm_tool_call(confirmation)` | **Suspends.** Ask before running a tool. |
@@ -161,6 +163,51 @@ A failed call returns a `ToolResult` that is not `accepted`. That covers a
 client that refused, one that left, and a tool that ran and reported
 `success: false`. Its `reason` carries the result's own text, so the agent can
 say what went wrong.
+
+### Confirmations: choices, a preview, and why the user said no
+
+A `ToolConfirmation` can offer more than approve/deny, and show what the tool
+will change before anyone decides. The outcome carries everything the user
+said, so give a denial's reason to the model — otherwise it tries the same
+thing again.
+
+```python
+from ahp_host.provider.base import ConfirmationOption, ToolConfirmation, ToolConfirmationOutcome
+from ahp_host.provider.changes import FileChange
+
+ask = ToolConfirmation(
+    call_id="call-7",
+    name="write_file",
+    invocation_message="Write notes.md",
+    options=(
+        ConfirmationOption(id="once", label="Allow once", kind="approve", group=1),
+        ConfirmationOption(id="session", label="Allow for this session", kind="approve", group=1),
+        ConfirmationOption(id="no", label="Deny", kind="deny", group=2),
+    ),
+    # Published as `edits`: a diff a client can open before approving.
+    edits=(FileChange(uri="file:///work/notes.md", before=b"old\n", after=b"new\n"),),
+)
+assert ask.options[0].to_wire() == {
+    "id": "once",
+    "label": "Allow once",
+    "kind": "approve",
+    "group": 1,
+}
+
+# What `confirm_tool_call(ask)` returns when the user denied it with a reason:
+outcome = ToolConfirmationOutcome(
+    approved=False, reason="denied", reason_message="edit README.md instead"
+)
+assert outcome.selected_option is None and outcome.user_suggestion is None
+```
+
+`selected_option` is the `ConfirmationOption` the user picked (the host refuses
+an id you did not offer, and an approval that picks a `deny` option);
+`user_suggestion` is a `UserMessage` with what they suggested doing instead.
+The preview's bytes live in the session's content store, served by
+`resourceRead` to whoever may see the session — like a changeset's. That store
+is a bounded cache (`Host(max_content_bytes=...)`, 128 MiB per session by
+default, least recently used out first), and it does not survive a restart.
 
 Parts are segmented for you: switching between text, reasoning and tool calls
 starts a new response part, so prose written *after* a tool call renders below
@@ -296,7 +343,171 @@ session's agent, so the host asks first: implement `TransfersChats` on your
 provider, and `chats_transferred(chats, source_session, destination_session)`
 is called with every chat that moves, its side chats included, before
 anything changes. Return `False` and the move is refused. Without the protocol
-your chats can still be reordered, but not moved out.
+your chats can still be reordered, but not moved out. Once a move has
+committed, a `HostsChats` session hears about it on both sides (below).
+
+## One agent session, many chats
+
+A session has **one** agent session, and every chat's turns reach it through
+`send_user_message`. `UserMessage.chat_uri` says which chat a message is for —
+the default chat is `AgentSessionContext.chat_uri`, any other came from
+`createChat` — so an agent that keeps one conversation per chat can route on
+it. Steering (`SteersTurns.steer`) and truncation
+(`TruncatesHistory.history_truncated`) already name the chat.
+
+To keep a conversation per chat you also need to know when chats come and go,
+how to stop just one, and which folders each may touch. Three optional
+protocols, all feature-detected:
+
+| Protocol | Called |
+|---|---|
+| `HostsChats.chat_opened(context)` | During `createChat`, **before anything is created** — raise and the command fails (an `AhpError` keeps its code) with no channel and no catalogue entry. When your agent session comes up (a restored session's `resume_session`, or bring-up finishing after a chat was created), once per chat it missed, with `restored=True`. On the destination after a cross-session `moveChat`, with `moved_from`. Never for the default chat. |
+| `HostsChats.chat_closed(chat_uri)` | After `disposeChat` has cancelled the chat's turn, while its channel still exists; and on the source after a cross-session `moveChat`. Not at session disposal — `disposed`/`aclose` end every chat at once. |
+| `CancelsChats.cancel_chat(chat_uri, reason)` | Instead of `cancel`, whenever a chat had a turn to cancel (a client stopping it, `chat/truncated`, `disposeChat`). `cancel` is session-wide, so without this the host withholds it while another chat is still running. |
+| `FollowsChatWorkingDirectories.chat_working_directories_changed(chat_uri, directories)` | After `chat/workingDirectorySet` / `...Removed`, with the chat's subset as it now stands — and when the session losing (or replacing) a folder prunes a subset. |
+
+```python
+from ahp_host.provider.base import (
+    CancelsChats,
+    ChatContext,
+    FollowsChatWorkingDirectories,
+    HostsChats,
+)
+
+
+class PerChatSession(ShoutSession):
+    """`ShoutSession` from above, keeping a transcript per chat."""
+
+    def __init__(self, context: AgentSessionContext) -> None:
+        super().__init__(context)
+        self.chats: dict[str, list[str]] = {context.chat_uri: []}
+
+    async def send_user_message(self, message: UserMessage, sink: TurnSink) -> None:
+        history = self.chats.setdefault(message.chat_uri or self.context.chat_uri, [])
+        history.append(message.text)
+        await sink.text_delta(f"{len(history)} message(s) in this chat")
+
+    async def chat_opened(self, context: ChatContext) -> None:
+        # A fork's copied turns are ALREADY this chat's visible history; a
+        # side chat's are context only. Either way, seed the agent with them.
+        seed = context.fork or context.side_chat
+        self.chats[context.chat_uri] = [] if seed is None else [str(t["id"]) for t in seed.turns]
+
+    async def chat_closed(self, chat_uri: str) -> None:
+        self.chats.pop(chat_uri, None)
+
+    async def cancel_chat(self, chat_uri: str, reason: str | None = None) -> None:
+        """Stop THIS chat's turn; every other chat keeps going."""
+
+    async def chat_working_directories_changed(self, chat_uri: str, directories) -> None:
+        """Narrow what this chat's tools may touch."""
+
+
+session = PerChatSession.__new__(PerChatSession)
+assert isinstance(session, HostsChats) and isinstance(session, CancelsChats)
+assert isinstance(session, FollowsChatWorkingDirectories)
+```
+
+`ChatContext.working_directories` is `None` when the chat follows the
+session's whole set and a sequence (possibly empty: no folder access at all)
+when it has its own subset — test with `is None`. The host has already refused
+a chat directory the session does not have, as the spec requires.
+
+**After a restart** the provider learns which chats exist from the replayed
+`chat_opened(restored=True)` calls, made right after `resume_session` and
+before the first turn reaches it. Keep each chat's runtime handle (a session
+id, say) in what `resume_state_of` returns, keyed by chat URI, and pick it back
+up there.
+
+**Chat attachments.** A message can attach another chat's transcript
+(`MessageChatAttachment`). The host pins its `endTurn` when the client left it
+out, refuses one naming an unknown chat or turn, and hands you the transcript
+as `UserMessage.attached_chats` — each an `AttachedChat` with `resource`,
+`end_turn`, `label` and the `turns` through `end_turn`. Attachments inside
+those turns stay references.
+
+## Resuming a failed turn
+
+A turn that failed on something transient — a rate limit, a dropped
+connection — can be picked up where it stopped instead of retried as a new
+message. Implement `ResumesTurns` and fail with `resumable=True`; a client may
+then send `chat/turnResume`, and the host calls `resume_turn` with the same
+turn id and a fresh sink. What you add lands after the error part, and the
+turn ends as any turn does: return to complete it, raise or `turn_failed` to
+fail it again.
+
+```python
+from ahp_host.provider.base import ResumesTurns
+
+
+class RetryingSession(ShoutSession):
+    async def send_user_message(self, message: UserMessage, sink: TurnSink) -> None:
+        await sink.text_delta("Halfway there")
+        await sink.turn_failed("rate limited", "agent.rateLimit", resumable=True)
+
+    async def resume_turn(self, chat_uri: str, turn_id: str, sink: TurnSink) -> None:
+        await sink.text_delta(" — and the rest.")
+
+
+assert isinstance(RetryingSession.__new__(RetryingSession), ResumesTurns)
+```
+
+The host accepts the resume only when the spec says a turn can reopen — it is
+the chat's latest turn, its state is `error`, its last part a resumable
+error — and rejects it, with a reason, otherwise. Without `ResumesTurns`,
+`resumable=True` is dropped (and logged), so no client is offered a resume
+nothing would answer.
+
+## What the root channel says about your agent
+
+`AgentInfo` is read when the host builds the root channel. Three things to know:
+
+- **`AgentInfo.customizations`** advertises what the agent itself brings —
+  plugins it bundles, directories it watches, MCP servers — as plain wire
+  dicts. Getting them into each *session* is still yours
+  (`DescribesSession`, `customizations_changed`).
+- **Models that arrive late.** Implement `UpdatesAgentInfo`: the host calls
+  `attach_agent_updates(changed)` once, when the root channel is built. Change
+  what `agent` returns, then `await changed()`; the host publishes
+  `root/agentsChanged` if the list differs, and returns whether it did. The
+  provider id must not change. An embedder can do the same with
+  `await host.refresh_agents()`.
+- **Completion triggers.** A `Completes` provider names the characters that
+  open its picker with a `completion_trigger_characters` attribute
+  (`DeclaresCompletionTriggers`); without one, no client ever calls
+  `complete`. The embedder's `Host(completion_trigger_characters=...)` wins
+  when given — `()` included, meaning none — and otherwise the host advertises
+  every completing provider's declaration, in order, each character once.
+  `ahp-node` passes none, so its agents' own declarations are what clients see.
+
+```python
+from ahp_host.provider.base import AgentInfoChanged, DeclaresCompletionTriggers, UpdatesAgentInfo
+
+
+class LateModelsProvider(ShoutProvider):
+    completion_trigger_characters = ("/",)
+
+    def __init__(self) -> None:
+        self.models: tuple[ModelInfo, ...] = ()
+        self.changed: AgentInfoChanged | None = None
+
+    @property
+    def agent(self) -> AgentInfo:
+        return AgentInfo(
+            provider="shout", display_name="Shouty", description="", models=self.models
+        )
+
+    async def attach_agent_updates(self, changed: AgentInfoChanged) -> None:
+        self.changed = changed  # keep it; call it once discovery finishes
+
+    async def complete(self, request):
+        return ()
+
+
+late = LateModelsProvider()
+assert isinstance(late, UpdatesAgentInfo) and isinstance(late, DeclaresCompletionTriggers)
+assert Host(late, LoopbackSingleUserPolicy()).completion_triggers() == ("/",)
+```
 
 ## Truncation, and the one thing you must not fake
 
@@ -332,7 +543,8 @@ merely underserving them.
 
 If there is a turn running when truncation arrives, the host cancels it — "if
 there is an active turn it is silently dropped and the chat status returns to
-`idle`" — so your `cancel` is called as usual.
+`idle`" — so your `cancel` is called as usual (`cancel_chat`, if you are
+`CancelsChats`).
 
 ## What the host does not do for you
 

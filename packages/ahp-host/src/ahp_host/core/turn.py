@@ -13,7 +13,9 @@ to know that; here it is impossible to get wrong.
 
 from __future__ import annotations
 
+import copy
 import json
+import logging
 import time
 import uuid
 from collections.abc import Awaitable, Callable, Mapping, Sequence
@@ -22,22 +24,36 @@ from typing import Any, Final
 
 from ahp_protocol.types import IS_CLIENT_DISPATCHABLE
 
+from ahp_host.core.changesets import ContentStore, file_edit
 from ahp_host.core.pending import PendingRequest, PendingRequests, RequestOutcome
 from ahp_host.core.sequencer import Sequencer
 from ahp_host.provider.base import (
     AgentSession,
+    AttachedChat,
     AuthChallenge,
     ClientToolCall,
     InputOutcome,
     InputRequest,
     ModelSelection,
+    ResumesTurns,
     ToolConfirmation,
     ToolConfirmationOutcome,
     ToolResult,
     UserMessage,
 )
+from ahp_host.provider.changes import FileChange
 
-__all__ = ["ActionTurnSink", "TurnRunner", "tool_call_dispatch_rejection", "turn_scope"]
+__all__ = [
+    "ActionTurnSink",
+    "TurnRunner",
+    "attached_chats",
+    "markdown_text",
+    "tool_call_dispatch_rejection",
+    "turn_scope",
+    "user_message",
+]
+
+_log = logging.getLogger(__name__)
 
 #: Called after the sink changes something the *session summary* projects, so
 #: the host can re-mirror it. A turn's ordinary output is deliberately not
@@ -162,11 +178,23 @@ class ActionTurnSink:
         session_uri: str | None = None,
         session_changed: SessionChanged | None = None,
         advertise_resource: Callable[[str], None] | None = None,
+        *,
+        content: ContentStore | None = None,
+        resumable: bool = False,
     ) -> None:
         self._sequencer = sequencer
         self._channel = channel
         self._turn_id = turn_id
         self._pending = pending if pending is not None else PendingRequests()
+        #: Where `file_edit` and confirmation previews park their bytes: the
+        #: session's store, so `resourceRead` serves them under the session's
+        #: visibility. A bare sink gets a private one, which nothing serves --
+        #: fine for a test, and the refs are still well-formed.
+        self._content = content if content is not None else ContentStore()
+        #: Whether the agent running this turn can answer `chat/turnResume`
+        #: (`ResumesTurns`). Without it a `resumable` error part would offer
+        #: users a button that does nothing, so `turn_failed` drops the flag.
+        self._resumable = resumable
         #: Where `session/inputNeeded` entries are mirrored. Optional so a bare
         #: sink stays constructible in a test without a session around it.
         self._session_uri = session_uri
@@ -193,22 +221,45 @@ class ActionTurnSink:
         whatever the agent says next starts below it rather than continuing a
         part above.
         """
+        await self.system_notification(text, meta={"steering": True})
+
+    async def system_notification(
+        self, text: str, *, markdown: bool = False, meta: Mapping[str, Any] | None = None
+    ) -> None:
+        """Publish a `SystemNotificationResponsePart` into the running turn.
+
+        Exactly the declared shape -- `kind`, `content`, optional `_meta` --
+        and no `id`: the part has none (`channels-chat/state.ts`
+        SystemNotificationResponsePart), and nothing targets it afterwards,
+        unlike a markdown or reasoning part that deltas append to. The steering
+        note used to carry an invented one.
+        """
+        part: dict[str, Any] = {
+            "kind": "systemNotification",
+            # `StringOrMarkdown`: "A plain `string` is rendered as-is (no
+            # Markdown processing)", `{markdown}` is rendered as Markdown.
+            "content": {"markdown": text} if markdown else text,
+        }
+        if meta is not None:
+            part["_meta"] = dict(meta)
         await self._sequencer.publish(
             self._channel,
-            {
-                "type": "chat/responsePart",
-                "turnId": self._turn_id,
-                "part": {
-                    "kind": "systemNotification",
-                    "id": str(uuid.uuid4()),
-                    "content": text,
-                    "_meta": {"steering": True},
-                },
-            },
+            {"type": "chat/responsePart", "turnId": self._turn_id, "part": part},
         )
         self._segment = None
         self._markdown_part_id = None
         self._reasoning_part_id = None
+
+    async def file_edit(self, change: FileChange) -> dict[str, Any]:
+        """`ToolResultFileEditContent` for *change*, its bytes in the session store.
+
+        The content refs are what make it a diff rather than a label: the
+        client fetches each side with `resourceRead`, which the host answers
+        from this store under the owning session's visibility -- the same path
+        a changeset's files take. Publishes nothing; the provider places the
+        returned item in a result's `content`.
+        """
+        return {"type": "fileEdit", **file_edit(change, self._content)}
 
     def _open_segment(self, kind: str) -> None:
         """Start a new response part when the kind of output changes.
@@ -569,7 +620,12 @@ class ActionTurnSink:
         await self.set_activity(None)
 
     async def turn_failed(
-        self, message: str, error_type: str = "agent.turn", duration_ms: int = 0
+        self,
+        message: str,
+        error_type: str = "agent.turn",
+        duration_ms: int = 0,
+        *,
+        resumable: bool = False,
     ) -> None:
         """End the turn in error.
 
@@ -591,19 +647,31 @@ class ActionTurnSink:
         routing a user's stop through `chat/error` would paint it red.
 
         Since 0.9.0 the error is an `ErrorResponsePart` the reducer appends to
-        the ended turn, so it stays in the transcript. It is never marked
-        `resumable`: this host cannot pick a failed turn back up, and a
-        resumable part would invite a `chat/turnResume` nothing would answer.
+        the ended turn, so it stays in the transcript. It is marked
+        `resumable` only when the provider asked AND the agent running the
+        turn is `ResumesTurns`: "Only `true` enables resume", and a resumable
+        part from an agent that cannot resume would invite a `chat/turnResume`
+        nothing would answer. The host rejects such a resume anyway; not
+        offering it is the honest half.
         """
+        part: dict[str, Any] = {
+            "kind": "error",
+            "error": {"errorType": error_type, "message": message},
+        }
+        if resumable:
+            if self._resumable:
+                part["resumable"] = True
+            else:
+                _log.warning(
+                    "turn_failed(resumable=True) from an agent session that is not "
+                    "ResumesTurns; publishing the error as not resumable"
+                )
         await self._sequencer.publish(
             self._channel,
             {
                 "type": "chat/error",
                 "turnId": self._turn_id,
-                "part": {
-                    "kind": "error",
-                    "error": {"errorType": error_type, "message": message},
-                },
+                "part": part,
                 "duration": duration_ms,
             },
         )
@@ -687,30 +755,44 @@ class ActionTurnSink:
             action["confirmationTitle"] = call.confirmation_title
         if call.editable:
             action["editable"] = True
+        # Both are declared on `ChatToolCallReadyAction` and carried into
+        # `ToolCallPendingConfirmationState` by the reducer (`options`,
+        # `edits`), so a client can offer "Approve in this Session" and show
+        # the diff before the user decides. Omitted when empty: an empty
+        # `options` list would tell a client to render no choices at all.
+        options = [option.to_wire() for option in call.options]
+        if options:
+            action["options"] = options
+        if call.edits:
+            action["edits"] = {"items": [file_edit(edit, self._content) for edit in call.edits]}
         await self._sequencer.publish(self._channel, action)
 
+        pending_call: dict[str, Any] = {
+            "toolCallId": call.call_id,
+            "toolName": call.name,
+            "displayName": call.display_name or call.name,
+            # REQUIRED by ToolCallPendingConfirmationState, and omitted
+            # -- so the whole `session/inputNeeded` entry failed its
+            # own declared shape. The session-level mirror is what a
+            # client renders when the approval is surfaced OUTSIDE the
+            # chat, so a malformed one loses the approval entirely.
+            "invocationMessage": call.invocation_message,
+            # KEBAB-case. The enum is `pending-confirmation`, and we
+            # sent `pendingConfirmation` -- every other discriminant
+            # nearby is camelCase, which is exactly why this was not
+            # noticed. Same for `auth-required`.
+            "status": "pending-confirmation",
+        }
+        # The mirror is a whole `ToolCallPendingConfirmationState`, so the
+        # fields that decide the answer travel with it: a client answering from
+        # the session list, without the chat, otherwise approves blind -- no
+        # input, no diff, and only approve/deny where the agent offered more.
+        for key in ("toolInput", "confirmationTitle", "editable", "options", "edits"):
+            if key in action:
+                pending_call[key] = action[key]
         await self._mirror_input_needed(
             parked.id,
-            {
-                "kind": "toolConfirmation",
-                "turnId": self._turn_id,
-                "toolCall": {
-                    "toolCallId": call.call_id,
-                    "toolName": call.name,
-                    "displayName": call.display_name or call.name,
-                    # REQUIRED by ToolCallPendingConfirmationState, and omitted
-                    # -- so the whole `session/inputNeeded` entry failed its
-                    # own declared shape. The session-level mirror is what a
-                    # client renders when the approval is surfaced OUTSIDE the
-                    # chat, so a malformed one loses the approval entirely.
-                    "invocationMessage": call.invocation_message,
-                    # KEBAB-case. The enum is `pending-confirmation`, and we
-                    # sent `pendingConfirmation` -- every other discriminant
-                    # nearby is camelCase, which is exactly why this was not
-                    # noticed. Same for `auth-required`.
-                    "status": "pending-confirmation",
-                },
-            },
+            {"kind": "toolConfirmation", "turnId": self._turn_id, "toolCall": pending_call},
         )
 
         outcome = await parked.future
@@ -722,7 +804,24 @@ class ActionTurnSink:
         # returns is a JSON string, not the object an adapter expects -- the
         # encoding is a wire concern and must not leak into the provider API.
         edited = _decoded_tool_input(payload.get("toolInput", call.tool_input))
-        return ToolConfirmationOutcome(approved=outcome.response == "accept", tool_input=edited)
+        approved = outcome.response == "accept"
+        # Validation has already refused an id this call did not offer, so the
+        # lookup only fails for a confirmation resolved some other way.
+        selected_id = payload.get("selectedOptionId")
+        selected = next((o for o in call.options if o.id == selected_id), None)
+        reason = payload.get("reason")
+        suggestion = payload.get("userSuggestion")
+        return ToolConfirmationOutcome(
+            approved=approved,
+            tool_input=edited,
+            selected_option=selected,
+            reason=reason if isinstance(reason, str) and not approved else None,
+            # What the user said about the denial -- the field that was dropped
+            # on the floor here, so an agent told "no, use the other file" only
+            # ever heard "no" and tried the same thing again.
+            reason_message=markdown_text(payload.get("reasonMessage")),
+            user_suggestion=user_message(suggestion) if isinstance(suggestion, Mapping) else None,
+        )
 
     async def tool_call_confirmed(
         self, call_id: str, *, approved: bool, reason_message: str | None = None
@@ -1011,6 +1110,85 @@ def _agent_uri(value: Any) -> str | None:
     return None
 
 
+def markdown_text(value: Any) -> str | None:
+    """A `StringOrMarkdown` as text: the string, or the `{markdown}` source."""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, Mapping) and isinstance(value.get("markdown"), str):
+        return str(value["markdown"])
+    return None
+
+
+def user_message(
+    message: Mapping[str, Any],
+    *,
+    chat_uri: str | None = None,
+    attached: Sequence[AttachedChat] = (),
+) -> UserMessage:
+    """A wire `Message` in provider terms.
+
+    The model and agent selections are lifted out of `raw` and named. The
+    client sends both on every turn; leaving them buried meant no adapter
+    could find them without knowing the wire format.
+    """
+    text = message.get("text")
+    return UserMessage(
+        text=text if isinstance(text, str) else "",
+        raw=message,
+        model=ModelSelection.from_wire(message.get("model")),
+        agent_uri=_agent_uri(message.get("agent")),
+        chat_uri=chat_uri,
+        attached_chats=tuple(attached),
+    )
+
+
+def attached_chats(sequencer: Sequencer, message: Any) -> tuple[AttachedChat, ...]:
+    """Resolve a message's `MessageChatAttachment`s against the chats' state.
+
+    "When accepting the message, the host MUST resolve the referenced chat's
+    retained transcript from its first turn through the supplied `endTurn`
+    ... and supply it as model context." Validation has already refused an
+    unknown chat or `endTurn` and pinned an absent one, so this only reads;
+    a chat pruned since then resolves to whatever it still retains.
+
+    Deep-copied: the provider gets an independent transcript, and an edit to
+    the source chat must not reach back into a message already sent.
+    """
+    attachments = message.get("attachments") if isinstance(message, Mapping) else None
+    resolved: list[AttachedChat] = []
+    for attachment in attachments if isinstance(attachments, list) else []:
+        if not isinstance(attachment, Mapping) or attachment.get("type") != "chat":
+            continue
+        resource = attachment.get("resource")
+        if not isinstance(resource, str):
+            continue
+        end = attachment.get("endTurn")
+        end_turn = end if isinstance(end, str) else None
+        label = attachment.get("label")
+        state = sequencer.state_of(resource)
+        turns = state.get("turns") if isinstance(state, Mapping) else None
+        transcript: list[Mapping[str, Any]] = []
+        if end_turn is not None and isinstance(turns, list):
+            for turn in turns:
+                if isinstance(turn, Mapping):
+                    transcript.append(copy.deepcopy(dict(turn)))
+                    if turn.get("id") == end_turn:
+                        break
+            else:
+                # `endTurn` is gone (truncated away since it was pinned):
+                # nothing can stand in for it, so nothing is supplied.
+                transcript = []
+        resolved.append(
+            AttachedChat(
+                resource=resource,
+                end_turn=end_turn,
+                label=label if isinstance(label, str) else None,
+                turns=tuple(transcript),
+            )
+        )
+    return tuple(resolved)
+
+
 def _result_text(result: Mapping[str, Any]) -> str | None:
     """The readable part of a `ToolCallResult`: its text content, else `error`."""
     content = result.get("content")
@@ -1063,7 +1241,14 @@ def _decoded_tool_input(value: Any) -> Any:
 
 
 def _tool_result(result: Any, success: bool, past_tense_message: str | None) -> dict[str, Any]:
-    """A `ToolCallResult` with the two fields the protocol makes mandatory."""
+    """A `ToolCallResult` with the two fields the protocol makes mandatory.
+
+    A bare content list is the result's `content`: the natural thing to pass
+    once `file_edit` hands back content items, and it used to become `{}` --
+    the edit silently dropped from a call that reported success.
+    """
+    if isinstance(result, Sequence) and not isinstance(result, str | bytes):
+        result = {"content": [dict(item) for item in result if isinstance(item, Mapping)]}
     wire: dict[str, Any] = dict(result) if isinstance(result, Mapping) else {}
     wire.setdefault("success", success)
     wire.setdefault(
@@ -1084,6 +1269,8 @@ class TurnRunner:
         session_uri: str | None = None,
         session_changed: SessionChanged | None = None,
         advertise_resource: Callable[[str], None] | None = None,
+        *,
+        content: ContentStore | None = None,
     ) -> None:
         self._sequencer = sequencer
         self._channel = channel
@@ -1091,6 +1278,7 @@ class TurnRunner:
         self._session_uri = session_uri
         self._session_changed = session_changed
         self._advertise_resource = advertise_resource
+        self._content = content
         #: The chat this turn ran on. The caller drains that chat's queue when
         #: the turn ends, and it should not have to remember which one.
         self.channel = channel
@@ -1103,10 +1291,7 @@ class TurnRunner:
         #: clears its activity, for the same reason it retracts the requests.
         self.sink: ActionTurnSink | None = None
 
-    async def run(self, agent_session: AgentSession | None, started: Mapping[str, Any]) -> None:
-        turn_id = started.get("turnId")
-        if not isinstance(turn_id, str):
-            return
+    def _sink(self, agent_session: AgentSession | None, turn_id: str) -> ActionTurnSink:
         sink = ActionTurnSink(
             self._sequencer,
             self._channel,
@@ -1115,35 +1300,76 @@ class TurnRunner:
             self._session_uri,
             self._session_changed,
             self._advertise_resource,
+            content=self._content,
+            # Decided by the agent that RUNS the turn, not the session's: an
+            # external or worker turn's agent is the provider's callback, which
+            # has nothing to resume with.
+            resumable=isinstance(agent_session, ResumesTurns),
         )
         # However the turn ends -- return, raise or cancellation -- the session
         # must not be left advertising a tool that is no longer running. A
         # cancelled turn is exactly the case that would strand it.
         self.sink = sink
+        return sink
 
-        started_at = time.monotonic()
-
+    async def run(self, agent_session: AgentSession | None, started: Mapping[str, Any]) -> None:
+        turn_id = started.get("turnId")
+        if not isinstance(turn_id, str):
+            return
+        sink = self._sink(agent_session, turn_id)
         if agent_session is None:
             # Distinct from a provider crash, and named the way the reference
             # host names it: the session could not be resumed.
             await sink.turn_failed("no agent session", "provider.resumeSession")
             return
 
-        message = started.get("message") or {}
-        text = message.get("text") if isinstance(message, Mapping) else None
-        try:
-            await agent_session.send_user_message(
-                UserMessage(
-                    text=text if isinstance(text, str) else "",
-                    raw=message,
-                    # Lifted out of `raw` and named. The client sends both on
-                    # every turn; leaving them buried meant no adapter could
-                    # find them without knowing the wire format.
-                    model=ModelSelection.from_wire(message.get("model")),
-                    agent_uri=_agent_uri(message.get("agent")),
+        raw = started.get("message")
+        message: Mapping[str, Any] = raw if isinstance(raw, Mapping) else {}
+        await self._drive(
+            turn_id,
+            sink,
+            lambda: agent_session.send_user_message(
+                user_message(
+                    message,
+                    # Which chat. One agent session serves every chat of the
+                    # session, and nothing told it which one a message was for.
+                    chat_uri=self._channel,
+                    attached=attached_chats(self._sequencer, message),
                 ),
                 sink,
+            ),
+        )
+
+    async def resume(self, agent_session: AgentSession | None, turn_id: str) -> None:
+        """Continue a failed turn the reducer has just reopened (`chat/turnResume`).
+
+        Same turn id, a fresh sink, and the same endings as :meth:`run`: what
+        the provider adds lands after the error part, and the turn completes,
+        fails or is cancelled like any other. `duration` measures this
+        resumption -- the host's own work on it -- not the time the turn sat
+        failed in between.
+        """
+        sink = self._sink(agent_session, turn_id)
+        if not isinstance(agent_session, ResumesTurns):
+            # Accepted only because the session's agent was not running yet
+            # and might have resumed; it came back without the ability. The
+            # reopened turn still has to end, and a resumable error here would
+            # only invite the same dead end again.
+            await sink.turn_failed(
+                "this agent cannot resume a failed turn", "provider.resumeTurn", resumable=False
             )
+            return
+        await self._drive(
+            turn_id, sink, lambda: agent_session.resume_turn(self._channel, turn_id, sink)
+        )
+
+    async def _drive(
+        self, turn_id: str, sink: ActionTurnSink, call: Callable[[], Awaitable[None]]
+    ) -> None:
+        """Run the agent's half of a turn, then end it the one way it should end."""
+        started_at = time.monotonic()
+        try:
+            await call()
         except Exception as exc:
             if self._is_active(turn_id):
                 await sink.turn_failed(

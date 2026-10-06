@@ -19,16 +19,22 @@ from typing import Any, Protocol, runtime_checkable
 
 from ahp_protocol.reducers.clock import now_iso
 
+from ahp_host.provider.changes import FileChange
+
 __all__ = [
     "AgentInfo",
+    "AgentInfoChanged",
     "AgentProvider",
     "AgentSession",
     "AgentSessionContext",
     "ArchivesSessions",
+    "AttachedChat",
     "AuthChallenge",
     "BackgroundWork",
     "BackgroundsMcpServers",
+    "CancelsChats",
     "Canvas",
+    "ChatContext",
     "ClientToolCall",
     "Completes",
     "CompletionItem",
@@ -37,12 +43,16 @@ __all__ = [
     "ConfigResolution",
     "ConfigValue",
     "ConfiguresSessions",
+    "ConfirmationOption",
+    "DeclaresCompletionTriggers",
     "DescribesSession",
     "DisposesSessions",
     "FollowsActiveClients",
+    "FollowsChatWorkingDirectories",
     "FollowsWorkingDirectories",
     "ForkedFrom",
     "HandlesCustomizations",
+    "HostsChats",
     "InputOutcome",
     "InputQuestion",
     "InputRequest",
@@ -52,6 +62,7 @@ __all__ = [
     "OpensSessions",
     "ProviderTerminal",
     "ResumableAgentProvider",
+    "ResumesTurns",
     "SessionDescription",
     "SessionDirectory",
     "SessionPublisher",
@@ -60,6 +71,7 @@ __all__ = [
     "ToolResult",
     "TransfersChats",
     "TurnSink",
+    "UpdatesAgentInfo",
     "UserMessage",
 ]
 
@@ -146,6 +158,17 @@ class AgentInfo:
     #: Declaring none is fully conformant. It does not mean "no auth needed" --
     #: it means this agent does not front anything that asks for one.
     protected_resources: Sequence[Mapping[str, Any]] = field(default_factory=tuple)
+    #: `AgentInfo.customizations` -- the customizations the agent itself
+    #: brings: the plugins it bundles and the directories it watches in any
+    #: workspace (`plugin` / `directory` containers), or top-level `mcpServer`
+    #: entries. Plain wire dicts, like `SessionDescription.customizations`,
+    #: because a `Customization` is a deep union the host passes through
+    #: untouched (invariant 4). "When a session is created with this agent,
+    #: these entries are augmented ... and propagated into the session's
+    #: `customizations` list" -- by the PROVIDER, through
+    #: `DescribesSession` / `SessionPublisher.customizations_changed`; the
+    #: host only advertises them here. Empty means the field is omitted.
+    customizations: Sequence[Mapping[str, Any]] = field(default_factory=tuple)
 
     def _model_wire(self, model: ModelInfo | Mapping[str, Any]) -> dict[str, Any]:
         if isinstance(model, ModelInfo):
@@ -165,6 +188,8 @@ class AgentInfo:
             wire["capabilities"] = dict(self.capabilities)
         if self.protected_resources:
             wire["protectedResources"] = [dict(r) for r in self.protected_resources]
+        if self.customizations:
+            wire["customizations"] = [dict(c) for c in self.customizations]
         return wire
 
 
@@ -212,6 +237,38 @@ class UserMessage:
     #: `AgentSelection` -- the custom agent the user picked, as a URI matching
     #: an `AgentCustomization.uri`. Same courier rule.
     agent_uri: str | None = None
+    #: The chat this message was sent to. Set by the host on every turn; a
+    #: session has one agent session shared by all its chats, and before this
+    #: existed a provider could not tell a side chat's message from the default
+    #: chat's -- every chat's turn ran in one conversation. ``None`` only for a
+    #: message built outside a turn (a test, a `ToolConfirmationOutcome`'s
+    #: `user_suggestion`).
+    chat_uri: str | None = None
+    #: The chats this message attaches (`MessageChatAttachment`), resolved.
+    #: "When accepting the message, the host MUST resolve the referenced
+    #: chat's retained transcript ... and supply it as model context" -- so the
+    #: transcript is here, bounded by the attachment's `endTurn`, which the
+    #: host pins when the client left it out. In attachment order.
+    attached_chats: Sequence[AttachedChat] = ()
+
+
+@dataclass(frozen=True)
+class AttachedChat:
+    """One `MessageChatAttachment`, with the transcript it stands for.
+
+    `turns` are the referenced chat's retained turns from the first through
+    `end_turn` inclusive, in the host's published `Turn` shape. Empty when the
+    chat had no completed turn -- "the resolved transcript is empty and hosts
+    MUST NOT reject the attachment on that basis" -- or when it has since been
+    pruned. Chat attachments *inside* those turns stay references: "Hosts MUST
+    NOT recursively expand chat attachments found inside the referenced
+    transcript."
+    """
+
+    resource: str
+    end_turn: str | None = None
+    label: str | None = None
+    turns: Sequence[Mapping[str, Any]] = ()
 
 
 @dataclass(frozen=True)
@@ -260,6 +317,46 @@ class InputOutcome:
 
 
 @dataclass(frozen=True)
+class ConfirmationOption:
+    """One choice offered on a tool confirmation (`ConfirmationOption`).
+
+    Richer than approve/deny -- "Approve in this Session", "Deny with reason".
+    ``kind`` is ``"approve"`` or ``"deny"`` (non-exhaustive upstream, so
+    another string passes through), and it decides which way the call goes:
+    the host refuses a client's `chat/toolCallConfirmed` whose `approved`
+    contradicts the kind of the option it selected. ``group`` is a number;
+    clients "MAY use differing group numbers to insert dividers".
+    """
+
+    id: str
+    label: str
+    kind: str = "approve"
+    group: int | None = None
+
+    def to_wire(self) -> dict[str, Any]:
+        wire: dict[str, Any] = {"id": self.id, "label": self.label, "kind": self.kind}
+        if self.group is not None:
+            wire["group"] = self.group
+        return wire
+
+    @classmethod
+    def from_wire(cls, value: Any) -> ConfirmationOption | None:
+        """Read one back out of reduced state, or ``None`` if it is not one."""
+        if not isinstance(value, Mapping):
+            return None
+        identifier, label, kind = value.get("id"), value.get("label"), value.get("kind")
+        if not isinstance(identifier, str) or not isinstance(label, str):
+            return None
+        group = value.get("group")
+        return cls(
+            id=identifier,
+            label=label,
+            kind=kind if isinstance(kind, str) else "approve",
+            group=group if isinstance(group, int) and not isinstance(group, bool) else None,
+        )
+
+
+@dataclass(frozen=True)
 class ToolConfirmation:
     """The agent wants to run a tool and is asking first.
 
@@ -275,6 +372,15 @@ class ToolConfirmation:
     tool_input: Any = None
     confirmation_title: str | None = None
     editable: bool = False
+    #: Choices beyond a plain approve/deny. "When present, the client SHOULD
+    #: render these instead of a plain approve/deny UI." The one the user
+    #: picked comes back as `ToolConfirmationOutcome.selected_option`.
+    options: Sequence[ConfirmationOption] = ()
+    #: What the tool will change, for a client to preview as a diff before
+    #: the user decides -- published as `chat/toolCallReady.edits`. The bytes
+    #: go into the session's content store and the call carries `ContentRef`s
+    #: to them, served by `resourceRead`, exactly as a changeset's are.
+    edits: Sequence[FileChange] = ()
 
 
 @dataclass(frozen=True)
@@ -284,6 +390,25 @@ class ToolConfirmationOutcome:
     #: unless the call was `editable` and a client changed it -- in which case
     #: running the original would execute something nobody agreed to.
     tool_input: Any = None
+    #: The option the user picked, if the confirmation offered any. The host
+    #: has already checked it names one of them.
+    selected_option: ConfirmationOption | None = None
+    #: `ChatToolCallDeniedAction.reason`: ``"denied"`` or ``"skipped"``.
+    #: ``None`` for an approval.
+    reason: str | None = None
+    #: The user's explanation for a denial (`reasonMessage`), as text --
+    #: a `{markdown}` value is unwrapped. Give it to the model: a denial
+    #: without its reason is an agent that tries the same thing again.
+    reason_message: str | None = None
+    #: "What the user suggested doing instead" (`userSuggestion`, a whole
+    #: `Message`): `text` is the suggestion, `raw` the wire message with any
+    #: attachments.
+    user_suggestion: UserMessage | None = None
+
+    @property
+    def selected_option_id(self) -> str | None:
+        """`selectedOptionId` as the client sent it."""
+        return self.selected_option.id if self.selected_option is not None else None
 
 
 @dataclass(frozen=True)
@@ -345,10 +470,18 @@ class ForkedFrom:
 
     ``turns`` is the host's published shape, deliberately not translated into
     provider terms -- the adapter knows what its model wants; the host does not.
+
+    Also describes a chat's source (:class:`ChatContext`), so ``chat_uri`` and
+    ``turn_id`` say which chat and turn it branched at: ``turns`` then runs
+    from that chat's first turn through ``turn_id`` inclusive. A
+    session-level fork sets them too (the source's default chat, and the
+    `fork.turnId` it named, ``None`` for "the whole chat").
     """
 
     session_uri: str
     turns: Sequence[Mapping[str, Any]] = ()
+    chat_uri: str | None = None
+    turn_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -377,6 +510,53 @@ class AgentSessionContext:
     #: Set when this session was created with `createSession.fork`. The turns
     #: it carries are already published as this session's history.
     fork: ForkedFrom | None = None
+
+
+@dataclass(frozen=True)
+class ChatContext:
+    """A chat beyond the session's default one, as :class:`HostsChats` sees it.
+
+    The default chat is `AgentSessionContext.chat_uri`; every other chat the
+    agent session hosts is announced with one of these.
+    """
+
+    session_uri: str
+    chat_uri: str
+    #: `ChatOrigin` as published -- ``{"kind": "fork" | "sideChat" | "tool",
+    #: "chat": ..., ...}`` -- or ``None`` for a chat created with no source.
+    #: Kept as the wire value (invariant 4: the kind set is non-exhaustive).
+    origin: Mapping[str, Any] | None = None
+    #: A fork (`origin.kind == "fork"`): the source chat, the turn it branched
+    #: at, and the turns copied from it -- which are ALREADY this chat's
+    #: visible history, so the agent must be given them or it answers the
+    #: next message with no context while the client shows a transcript.
+    fork: ForkedFrom | None = None
+    #: A side chat (`origin.kind == "sideChat"`): the source chat and turn,
+    #: and its turns through that one, as context. Unlike a fork's they are
+    #: NOT in this chat's history -- "a side chat receives the source turn as
+    #: context without copying the source transcript into its own visible
+    #: history". Any text selection is `origin["selection"]`.
+    side_chat: ForkedFrom | None = None
+    #: The chat's own working-directory subset (`ChatState.workingDirectories`).
+    #: ``None`` inherits the session's whole set; an empty sequence means "no
+    #: working-directory tool access at all" -- the two are different, so
+    #: test with ``is None``.
+    working_directories: Sequence[str] | None = None
+    #: The chat existed before this agent session did -- a restored session
+    #: getting its agent back after a host restart, or a session whose agent
+    #: came up after the chat was created. Its history is whatever the chat
+    #: already holds; the provider's own resume state is where to find the
+    #: conversation behind it.
+    restored: bool = False
+    #: The session the chat was moved from (`moveChat`), when it arrives by a
+    #: move rather than by being created.
+    moved_from: str | None = None
+
+    @property
+    def origin_kind(self) -> str | None:
+        """`origin.kind`, or ``None`` for a chat with no origin."""
+        kind = self.origin.get("kind") if self.origin is not None else None
+        return kind if isinstance(kind, str) else None
 
 
 @runtime_checkable
@@ -832,6 +1012,133 @@ class FollowsWorkingDirectories(Protocol):
 
 
 @runtime_checkable
+class FollowsChatWorkingDirectories(Protocol):
+    """An agent session that follows ONE chat's folders changing.
+
+    `chat/workingDirectorySet` and `chat/workingDirectoryRemoved` narrow or
+    widen a chat's subset of the session's folders (1.0.0); the host has
+    already refused a directory the session does not have ("a host MUST
+    reject a directory that is not") and an agent without
+    `multipleWorkingDirectories`. Called after the reducer has applied the
+    change, with the chat's whole subset as it now stands, then the session is
+    saved. Also called when the host prunes a subset because the SESSION lost
+    a directory in it -- a subset entry "MUST be present in the owning
+    session's `workingDirectories`" -- and, for a replaced session directory,
+    carries the replacement in its place.
+
+    A chat with no subset follows the session's set, which arrives through
+    :class:`FollowsWorkingDirectories`, not here. Raising is logged; it does
+    not undo the change.
+    """
+
+    async def chat_working_directories_changed(
+        self, chat_uri: str, directories: Sequence[str]
+    ) -> None: ...
+
+
+@runtime_checkable
+class HostsChats(Protocol):
+    """An agent session that runs a separate conversation per chat.
+
+    A session has ONE agent session, and every chat's turns reach it through
+    `send_user_message` -- whose `UserMessage.chat_uri` says which chat. That
+    is enough for an agent that keeps one conversation; one that keeps a
+    conversation per chat also has to know when a chat starts and stops
+    existing, which is this. The default chat is never announced: it is
+    `AgentSessionContext.chat_uri`, and it lives as long as the session.
+
+    When the host calls it:
+
+    * ``chat_opened`` -- during `createChat`, before anything is created: raise
+      and the command fails (an `AhpError` keeps its code; anything else is
+      `InternalError`) with no channel registered and nothing published. Then
+      for every chat that already exists when this agent session comes up:
+      after `resume_session` on a restored session, and after
+      `create_session` for chats a client created while bring-up was still
+      running -- both with ``restored=True``. And for each chat that arrives
+      by a cross-session `moveChat` (``moved_from`` set), after the move has
+      committed. Worker chats you open yourself (`open_tool_chat`) are not
+      announced when you open them -- you already hold them -- but are
+      included when an agent session comes up.
+    * ``chat_closed`` -- after `disposeChat` has cancelled the chat's turn and
+      before its channel is dropped, and on the SOURCE session's agent for
+      each chat a `moveChat` takes away. Not at session disposal: `disposed`
+      and `aclose` end every chat at once.
+
+    Raising anywhere but `createChat` is logged and changes nothing. A
+    provider still advertises `AgentCapabilities.multipleChats` itself; the
+    host refuses `createChat` without it whatever this protocol says.
+    """
+
+    async def chat_opened(self, context: ChatContext) -> None: ...
+
+    async def chat_closed(self, chat_uri: str) -> None: ...
+
+
+@runtime_checkable
+class CancelsChats(Protocol):
+    """An agent session that can stop ONE chat's turn.
+
+    `AgentSession.cancel` is session-scoped, so the host sends it only when
+    nothing else in the session is still running -- a provider that treats it
+    as "stop everything" would otherwise truncate an innocent chat's answer
+    because a different chat was cancelled. With this, the host calls
+    ``cancel_chat`` instead whenever a chat had a turn running to cancel (a
+    client stopping it, `chat/truncated`, `disposeChat`), whatever else is
+    running, and never `cancel`. The turn's task is cancelled as well, as
+    always. Not called for worker chats
+    you opened yourself: your `run_turn` callback gets the `CancelledError`.
+    """
+
+    async def cancel_chat(self, chat_uri: str, reason: str | None = None) -> None: ...
+
+
+@runtime_checkable
+class ResumesTurns(Protocol):
+    """An agent session that can pick up a turn that failed.
+
+    With this, `TurnSink.turn_failed(..., resumable=True)` publishes an error
+    part marked `resumable`, and a client may answer it with
+    `chat/turnResume`. The host accepts that only when the spec's
+    preconditions hold -- the turn is the chat's latest, its state is
+    `error`, its final part is a resumable error -- and then calls
+    ``resume_turn`` with the same turn id and a fresh sink, on the reopened
+    turn: what you add appears after the error. It ends like any turn --
+    return to complete it, raise or `turn_failed` to fail it again,
+    cancellation to cancel it.
+
+    Without this protocol `resumable=True` is ignored (logged), so a client is
+    never offered a resume nothing would answer.
+    """
+
+    async def resume_turn(self, chat_uri: str, turn_id: str, sink: TurnSink) -> None: ...
+
+
+#: Handed to an :class:`UpdatesAgentInfo` provider. Awaiting it makes the host
+#: re-read every provider's `agent` and publish `root/agentsChanged` if the
+#: published list differs; it returns whether it published.
+AgentInfoChanged = Callable[[], Awaitable[bool]]
+
+
+@runtime_checkable
+class UpdatesAgentInfo(Protocol):
+    """A provider whose `AgentInfo` can change after the host started.
+
+    The host reads `provider.agent` when it builds the root channel; an agent
+    that learns its models late -- start-up model discovery that failed and
+    retried, models reported per session -- could otherwise never update the
+    picker. The host calls ``attach_agent_updates`` once, when the root
+    channel is first built, with a notifier: change what `agent` returns,
+    then await the notifier. It must not block.
+
+    The provider id must not change: it keys every session the agent serves,
+    so a notifier call that finds a different id publishes nothing.
+    """
+
+    async def attach_agent_updates(self, changed: AgentInfoChanged) -> None: ...
+
+
+@runtime_checkable
 class FollowsActiveClients(Protocol):
     """An agent session that follows which clients can run tools for it.
 
@@ -1057,11 +1364,50 @@ class TurnSink(Protocol):
     ) -> None:
         """Finish a call. `success` and `pastTenseMessage` are REQUIRED by the
         protocol, so they are keyword arguments with defaults rather than
-        something an adapter can forget."""
+        something an adapter can forget.
+
+        *result* is a `ToolCallResult` mapping (``{"content": [...], ...}``),
+        or just the content list, which the host wraps."""
+        ...
+
+    async def file_edit(self, change: FileChange) -> Mapping[str, Any]:
+        """A `fileEdit` tool-result content item for *change*, ready to place.
+
+        Stores the before/after bytes in the session's content store -- the
+        one changesets use, served by `resourceRead` to whoever may see the
+        session -- and returns ``{"type": "fileEdit", "before": ..., "after":
+        ..., "diff": {"added", "removed"}}`` with `ContentRef`s to them. Put it
+        in `tool_call_completed`'s ``content`` (or `tool_call_output`'s) so a
+        client renders the edit as a diff. Publishes nothing itself.
+
+        The store is a bounded cache, not an archive: the oldest content is
+        evicted past its budget, and it does not survive a host restart, so a
+        diff from long ago may no longer open.
+        """
+        ...
+
+    async def system_notification(
+        self, text: str, *, markdown: bool = False, meta: Mapping[str, Any] | None = None
+    ) -> None:
+        """Put a note from the agent harness in the transcript.
+
+        A `systemNotification` response part: something both the agent and the
+        user should see -- the conversation was compacted, a message was sent
+        from another device, a background task finished. *markdown* renders
+        the text as Markdown; *meta* is the part's `_meta`, where a
+        machine-readable descriptor lets clients categorise it ("clients ...
+        MUST render coherently from `content` alone"). It ends the current
+        text segment, so what the agent says next starts below it.
+        """
         ...
 
     async def turn_failed(
-        self, message: str, error_type: str = "agent.turn", duration_ms: int = 0
+        self,
+        message: str,
+        error_type: str = "agent.turn",
+        duration_ms: int = 0,
+        *,
+        resumable: bool = False,
     ) -> None:
         """End the turn in error. `errorType` is REQUIRED by the protocol.
 
@@ -1069,6 +1415,11 @@ class TurnSink(Protocol):
         Any non-empty string renders -- the schema declares `errorType: string`
         with no enum -- so the default matches the reference host's dotted
         vocabulary rather than inventing one.
+
+        *resumable* marks the error part `resumable`, inviting a client to
+        send `chat/turnResume`. Honoured only for an agent session that is
+        :class:`ResumesTurns`; otherwise it is dropped, since nothing would
+        answer the resume.
         """
         ...
 
@@ -1273,6 +1624,35 @@ class Completes(Protocol):
     """
 
     async def complete(self, request: CompletionRequest) -> Sequence[CompletionItem]: ...
+
+
+@runtime_checkable
+class DeclaresCompletionTriggers(Protocol):
+    """A :class:`Completes` provider that names the characters opening its picker.
+
+    `InitializeResult.completionTriggerCharacters` -- "characters that, when
+    typed in a Message input, SHOULD cause the client to issue a `completions`
+    request" -- is the only thing that makes a client ever call `complete`:
+    it asks for no other character. It used to be settable only as
+    `Host(completion_trigger_characters=...)`, so a provider could not say
+    that its slash commands start with ``/``, and a host built without the
+    argument (`ahp-node`) never reached any provider's completions.
+
+    A plain attribute or a property. Read at every `initialize`, so a
+    provider may decide late -- but clients cache it when they register, so
+    a change reaches a client only when it reconnects from scratch.
+
+    The merge rule: an explicit `Host(completion_trigger_characters=...)`
+    wins outright, ``()`` included (advertise none). Without one, the host
+    advertises the union of every `Completes` provider's declaration, in
+    provider order, each character once. A provider that declares but is
+    not `Completes` contributes nothing -- a trigger is a promise to answer.
+    Separate from `Completes` so a provider written before this still
+    satisfies that protocol's runtime check.
+    """
+
+    @property
+    def completion_trigger_characters(self) -> Sequence[str]: ...
 
 
 @runtime_checkable

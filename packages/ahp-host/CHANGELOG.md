@@ -12,6 +12,14 @@ versions each release speaks.
 
 ### Changed
 
+- `Host.completion_trigger_characters` is `None` when the embedder passed
+  none (it was `()`), because `None` now means "use the providers'
+  declarations" and `()` means "advertise none".
+- `chat/turnResume` is accepted for an agent that is `ResumesTurns` (see
+  Added); for any other agent the rejection reason is now "this agent cannot
+  resume a failed turn".
+- `ContentStore` is bounded: past `max_bytes` (default 128 MiB per session) the
+  least recently used content is evicted, and a ref to it reads `NotFound`.
 - `ContentStore.owns()` checks the blob is held, not just the URI scheme. The
   scheme test made the first session answer for every session's changeset
   content, so a second session's diffs were refused as missing.
@@ -31,6 +39,56 @@ versions each release speaks.
 - **Renamed from `agent-host-server` to `ahp-host`** (import `agent_host_server` → `ahp_host`), and moved into the `ahp-py` monorepo as `packages/ahp-host`. Commands: `agent-host-server` → `ahp-host`, `agent-host-node` → `ahp-node`; the node's launchd label is `io.ahp.node`, and example configs live under `~/.config/ahp/`. Tags are now per package: `ahp-host/v<version>`.
 
 ### Added
+
+- **A conversation per chat** for providers that keep one. `UserMessage.chat_uri`
+  names the chat every turn (and steering message) is for; until now a provider
+  could not tell a side chat's message from the default chat's. The optional
+  `HostsChats` protocol (`chat_opened(ChatContext)` / `chat_closed(chat_uri)`)
+  announces every chat beyond the default one: during `createChat` before
+  anything is created (raise and the command fails with nothing created), to a
+  restored or late-starting agent for every chat it missed (`restored=True`),
+  and on both sides of a cross-session `moveChat`. `ChatContext` carries the
+  chat's `origin`, a fork's copied turns (`fork`), a side chat's source turns
+  (`side_chat`), its working-directory subset and `moved_from`. `ForkedFrom`
+  gained `chat_uri` and `turn_id`. `CancelsChats.cancel_chat(chat_uri, reason)`
+  replaces the session-wide `cancel` for an agent that implements it.
+- **Resumable turns** (`chat/turnResume`): `TurnSink.turn_failed(...,
+  resumable=True)` marks the error part resumable for an agent session that is
+  `ResumesTurns`, and the host accepts a resume only when the spec's
+  preconditions hold (latest turn, state `error`, final part a resumable
+  error), then runs `resume_turn(chat_uri, turn_id, sink)` on the reopened turn
+  and ends it like any other. Without the protocol `resumable` is dropped, so
+  no client is offered a resume nothing would answer.
+- **Tool confirmations say more, both ways.** `ToolConfirmation.options`
+  (`ConfirmationOption`: id, label, kind, group) and `ToolConfirmation.edits`
+  (`FileChange`s, published as a `FileEditCollection` whose before/after
+  content `resourceRead` serves) go out on `chat/toolCallReady` and in the
+  `session/inputNeeded` mirror, which now also carries the input and title.
+  `ToolConfirmationOutcome` gained `selected_option`, `reason`,
+  `reason_message` and `user_suggestion`, so a denial's explanation reaches the
+  agent. A `selectedOptionId` the call did not offer, or whose kind contradicts
+  `approved`, is rejected.
+- **`fileEdit` tool results**: `TurnSink.file_edit(change)` stores a
+  `FileChange`'s bytes in the session's content store and returns the
+  `ToolResultFileEditContent` item to put in a result's content.
+  `tool_call_completed` also accepts a bare content list.
+- **`TurnSink.system_notification(text, *, markdown=, meta=)`** publishes a
+  `systemNotification` part -- compaction notices, "sent from another device".
+  The steering note no longer carries an `id` the part does not declare.
+- **`root/agentsChanged`**: a provider that is `UpdatesAgentInfo` is handed a
+  notifier at start-up (`attach_agent_updates`); after it changes what `agent`
+  returns, awaiting the notifier republishes `RootState.agents` if the wire
+  value differs. `Host.refresh_agents()` does the same for an embedder.
+- **`AgentInfo.customizations`** (1.0.0), published on the root channel.
+- **Completion triggers declared by the provider**: a `Completes` provider that
+  is `DeclaresCompletionTriggers` (a `completion_trigger_characters` attribute)
+  has them advertised when the embedder passes none; an explicit
+  `Host(completion_trigger_characters=...)` still wins, `()` included. So
+  `ahp-node`, which passes none, now reaches its agents' completions; its echo
+  agent declares `#`, and `EchoProvider(completion_trigger_characters=)` exists.
+  `Host.completion_triggers()` reports what is advertised.
+- **`Host(max_content_bytes=...)`** bounds each session's content store
+  (128 MiB by default), least recently used out first; `ContentStore(max_bytes=)`.
 
 - **Worker chats for tool calls**: `SessionPublisher.open_tool_chat` opens a
   chat with a `tool` origin, read-only by default, and its `run_turn` runs a
@@ -204,6 +262,24 @@ versions each release speaks.
 
 ### Fixed
 
+- **`chat/workingDirectorySet` is validated** (1.0.0 MUST): a directory that
+  is not one of the session's `workingDirectories`, or either chat action
+  without `multipleWorkingDirectories`, is rejected with a reason. Accepted
+  changes reach the agent through the new `FollowsChatWorkingDirectories`
+  (`chat_working_directories_changed(chat_uri, directories)`) and are saved; a
+  folder the session loses leaves every chat subset, and a replaced one is
+  replaced there too.
+- **`MessageChatAttachment.endTurn` is pinned** (1.0.0 MUST): an attachment
+  without one gets the referenced chat's latest completed turn in the accepted
+  `chat/turnStarted`, `chat/pendingMessageSet` or `createChat.initialMessage`;
+  one naming an unknown or invisible chat, or an unknown or active `endTurn`, is
+  rejected. The resolved transcript reaches the provider as
+  `UserMessage.attached_chats` (`AttachedChat`).
+- A moved chat's content refs (edit previews, `fileEdit` results, changeset
+  diffs) come with it; only what it references is copied.
+- A restored session resumed by two first turns at once no longer starts two
+  agents.
+
 - **Named roots accept a plain absolute URI inside a root.** A node with
   named roots took only its tree spelling (`file:///llm/...`), so a session
   stored with `file:///G:/llm` -- from before the roots were named -- failed
@@ -276,7 +352,8 @@ versions each release speaks.
 - **A failed turn publishes its error as an `ErrorResponsePart`**
   (`chat/error.part`), so it stays in the transcript. It is never marked
   `resumable`, and a client's `chat/turnResume` is rejected so the client
-  reverts rather than showing a reopened turn nothing is running.
+  reverts rather than showing a reopened turn nothing is running. (Resumable
+  turns arrived later, for an agent that is `ResumesTurns`: see Added.)
 - **Terminals carry a lifecycle.** New terminals start `{status: "running"}`,
   `terminal/exited` moves them to `exited`, and the root catalogue's
   `TerminalInfo` carries `lifecycle` in place of `exitCode`.

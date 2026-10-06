@@ -190,13 +190,14 @@ async def _run() -> None:
             capabilities=(
                 {"multipleChats": {"fork": True, "sideChat": True}} if args.multi_chat else None
             ),
+            # Echo's `complete()` scans for "#" and nothing else, so "#" is the
+            # only honest advertisement. Naming "@" as well would open a picker
+            # that is always empty. Declared by the PROVIDER, which is the one
+            # that knows; the host advertises it (`DeclaresCompletionTriggers`).
+            completion_trigger_characters=("#",),
         ),
         LoopbackSingleUserPolicy(),
         info=HostInfo(name="ahp-host (demo)"),
-        # Echo's `complete()` scans for "#" and nothing else, so "#" is the
-        # only honest advertisement. Naming "@" as well would open a picker
-        # that is always empty.
-        completion_trigger_characters=("#",),
         # `Path(None)` crashed the host outright when --terminal was passed
         # without --serve-directory. And the backend's own docstring says it
         # "does not choose a working directory ... a backend that defaulted to
