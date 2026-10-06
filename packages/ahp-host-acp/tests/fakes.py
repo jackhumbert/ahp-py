@@ -24,10 +24,21 @@ FAKE_AGENT = (sys.executable, str(Path(__file__).with_name("fake_agent.py")))
 
 
 class RecordingSink:
-    def __init__(self, approve: bool = True, edited_input: Any = None) -> None:
+    def __init__(
+        self,
+        approve: bool = True,
+        edited_input: Any = None,
+        *,
+        pick: str | None = None,
+        reason_message: str | None = None,
+    ) -> None:
         self.events: list[tuple[Any, ...]] = []
         self.approve = approve
         self.edited_input = edited_input
+        #: The confirmation option a user picks, by id; None answers plainly.
+        self.pick = pick
+        self.reason_message = reason_message
+        self.file_edits: list[FileChange] = []
         self.confirmations: list[ToolConfirmation] = []
         #: The latest line under each call's name, and each call's past tense.
         self.invocations: dict[str, str] = {}
@@ -114,7 +125,9 @@ class RecordingSink:
         self.events.append(("failed", message, error_type))
 
     async def file_edit(self, change: FileChange) -> Mapping[str, Any]:
-        raise AssertionError("not used")
+        """A stand-in for the host's item: the real one carries `ContentRef`s."""
+        self.file_edits.append(change)
+        return {"type": "fileEdit", "after": {"uri": change.uri}}
 
     async def system_notification(
         self, text: str, *, markdown: bool = False, meta: Mapping[str, Any] | None = None
@@ -127,9 +140,13 @@ class RecordingSink:
     async def confirm_tool_call(self, call: ToolConfirmation) -> ToolConfirmationOutcome:
         self.confirmations.append(call)
         self.events.append(("confirm", call.call_id))
+        picked = next((o for o in call.options if o.id == self.pick), None)
         return ToolConfirmationOutcome(
-            approved=self.approve,
+            approved=picked.kind == "approve" if picked is not None else self.approve,
             tool_input=self.edited_input if self.edited_input is not None else call.tool_input,
+            selected_option=picked,
+            reason=None if self.approve else "denied",
+            reason_message=self.reason_message,
         )
 
     async def request_authentication(self, call_id: str, challenge: AuthChallenge) -> None:

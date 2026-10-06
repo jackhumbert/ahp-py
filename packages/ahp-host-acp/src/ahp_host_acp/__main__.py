@@ -26,7 +26,6 @@ from ahp_host.core.store import FileSessionStore
 from ahp_host.ws import serve_websocket
 
 from ahp_host_acp import __version__
-from ahp_host_acp.commands import TRIGGER
 from ahp_host_acp.config import ConfigError, Settings, load
 from ahp_host_acp.provider import (
     CATALOGUE_FILE,
@@ -109,9 +108,8 @@ async def _run(settings: Settings) -> None:
         default_directory=settings.roots.default_directory(),
         store=FileSessionStore(state / "sessions"),
         sequence_file=state / "sequence",
-        # The agent's slash commands are completions; a client asks only
-        # after a character the host names.
-        completion_trigger_characters=(TRIGGER,),
+        # No `completion_trigger_characters`: the provider declares `/` for
+        # its slash commands, and the host advertises what providers declare.
     )
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()

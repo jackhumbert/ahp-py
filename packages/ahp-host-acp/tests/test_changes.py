@@ -1,4 +1,4 @@
-"""ACP `diff` tool content -> the session's changeset, checked against the disk."""
+"""ACP `diff` tool content -> previews, per-call edits and the session's changeset."""
 
 from __future__ import annotations
 
@@ -33,7 +33,7 @@ def test_whole_file_diff_announced_before_the_write(tmp_path: Path) -> None:
     diff = Diff(str(path), "one\n", "one\ntwo\n")
     edits.announced([diff], tmp_path)
     path.write_text("one\ntwo\n")
-    assert edits.completed([diff], tmp_path)
+    assert edits.completed([diff], tmp_path)[1]
     assert _only(edits) == (b"one\n", b"one\ntwo\n")
     assert edits.changes()[0].uri == path.as_uri()
 
@@ -43,7 +43,7 @@ def test_a_fragment_diff_is_rebuilt_into_whole_files(tmp_path: Path) -> None:
     path = tmp_path / "code.py"
     path.write_text("a = 1\nb = 3\nc = 4\n")
     edits = _edits(tmp_path)
-    assert edits.completed([Diff(str(path), "b = 2", "b = 3")], tmp_path)
+    assert edits.completed([Diff(str(path), "b = 2", "b = 3")], tmp_path)[1]
     assert _only(edits) == (b"a = 1\nb = 2\nc = 4\n", b"a = 1\nb = 3\nc = 4\n")
 
 
@@ -59,7 +59,7 @@ def test_an_ambiguous_fragment_is_left_out_rather_than_guessed(tmp_path: Path) -
     path = tmp_path / "code.py"
     path.write_text("x = 3\ny = 3\n")
     edits = _edits(tmp_path)
-    assert not edits.completed([Diff(str(path), "2", "3")], tmp_path)
+    assert edits.completed([Diff(str(path), "2", "3")], tmp_path) == ([], False)
     assert edits.changes() == []
 
 
@@ -119,3 +119,44 @@ def test_later_edits_keep_the_first_before_and_a_revert_drops_out(tmp_path: Path
     edits.completed([Diff(str(path), "v3\n", "v1\n")], tmp_path)
     assert edits.changes() == []
     assert edits.changeset.change_kind == "session"
+
+
+def test_each_call_gets_its_own_before_and_after(tmp_path: Path) -> None:
+    path = tmp_path / "notes.txt"
+    path.write_text("v1\n")
+    edits = _edits(tmp_path)
+    first = Diff(str(path), "v1\n", "v2\n")
+    edits.announced([first], tmp_path)
+    path.write_text("v2\n")
+    ((diff, change),) = edits.completed([first], tmp_path)[0]
+    assert diff is first
+    assert (change.before, change.after) == (b"v1\n", b"v2\n")
+    # The second call's edit is from v2, while the session's runs from v1.
+    second = Diff(str(path), "v2", "v3")  # a fragment, seen only once written
+    path.write_text("v3\n")
+    ((_, change),) = edits.completed([second], tmp_path)[0]
+    assert (change.before, change.after) == (b"v2\n", b"v3\n")
+    assert _only(edits) == (b"v1\n", b"v3\n")
+
+
+def test_previews_read_the_file_before_the_write(tmp_path: Path) -> None:
+    whole = tmp_path / "whole.txt"
+    whole.write_text("one\n")
+    fragment = tmp_path / "code.py"
+    fragment.write_bytes(b"a = 1\r\nb = 2\r\n")
+    edits = _edits(tmp_path)
+    previews = edits.preview(
+        [
+            Diff(str(whole), "one\n", "one\ntwo\n"),
+            Diff(str(fragment), "b = 2", "b = 3"),
+            Diff("new.txt", None, "hi\n"),
+            Diff(str(whole), "not in the file", "x"),  # neither matches: left out
+        ],
+        tmp_path,
+    )
+    assert [(Path(c.uri).name, c.before, c.after) for c in previews] == [
+        ("whole.txt", b"one\n", b"one\ntwo\n"),
+        ("code.py", b"a = 1\r\nb = 2\r\n", b"a = 1\r\nb = 3\r\n"),
+        ("new.txt", None, b"hi\n"),
+    ]
+    assert whole.read_text() == "one\n"  # a preview writes nothing

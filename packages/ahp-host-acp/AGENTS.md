@@ -14,17 +14,27 @@ server's AGENTS.md requires ("Adding a provider adapter"). It is the ACP
   small modules: `options.py` (ACP config options and modes <-> session
   config), `catalogue.py` (what the agent reported last, `agent.json`),
   `commands.py` (slash commands -> completions), `plan.py` (plan -> a row per
-  update), `changes.py` (tool diffs -> the session changeset), `mcp.py`
-  (configured MCP servers). Each module's docstring says why it maps the way
-  it does; keep that reasoning current when the spec moves.
-- `_request_permission` is the approval policy (grant once, never always).
-  Changing it is a security decision: say so in the commit, and test it.
+  update), `changes.py` (tool diffs -> approval previews, `fileEdit` results
+  and the session changeset), `mcp.py` (configured MCP servers). Each
+  module's docstring says why it maps the way it does; keep that reasoning
+  current when the spec moves.
+- `permissions.py` is the approval policy: the user is offered the agent's
+  own options, *allow always* included, and the agent gets exactly the one
+  the user picked; a plain approve or deny is *once*, and nothing broader is
+  ever picked for the user. Changing it is a security decision: say so in the
+  commit, and test it.
+- One agent process per AHP session, one ACP session per AHP chat
+  (`provider._Chat`). Per-turn and per-conversation state lives on the chat;
+  the session config, title and changeset are the session's. A fork is made
+  with ACP's `session/fork` only when the source chat's turn count says the
+  copy matches what the fork shows; keep that check if you touch it.
 - `roots.py` and `paths.py` re-export `ahp_host.node`'s; fix bugs
   there.
 - `agent.py` is the `acp` agent type for `ahp-node`; keep its options
   in step with `config.py`'s per-agent keys.
 - Tests run `tests/fake_agent.py` as a real subprocess; no network, no real
-  agent.
+  agent. `tests/test_host.py` drives it through a real `Host` over an
+  in-memory transport (`tests/hosting.py`).
 - Conventional commits; `CHANGELOG.md` under `[Unreleased]`.
 
 ## Keep it generic

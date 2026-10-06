@@ -90,21 +90,54 @@ async def test_options_reach_the_schema_once_the_agent_has_reported_them(
     tmp_path: Path, log: Path, catalogue: Path
 ) -> None:
     provider = _provider(tmp_path, log, "CONFIG_OPTIONS", catalogue=catalogue)
+    notified: list[bool] = []
+
+    async def changed() -> bool:
+        notified.append(True)
+        return True
+
+    await provider.attach_agent_updates(changed)
     assert (await provider.resolve_config(ConfigRequest())).properties == {}
+    assert provider.agent.to_wire()["models"] == []
     session = await provider.create_session(context(tmp_path))
     try:
         await _whoami(session)
     finally:
         await session.aclose()
+    # The agent's models reach the picker without a restart...
+    assert notified
+    assert [m["id"] for m in provider.agent.to_wire()["models"]] == ["a", "b"]
+    assert provider.default_model is None  # the agent keeps the model it starts with
+    # ...and with a picker, the model option is the picker's, not the config's.
     resolved = await provider.resolve_config(ConfigRequest(values={"mode": "plan", "x": 1}))
-    assert list(resolved.properties) == ["mode", "model", "yolo"]
-    assert resolved.values == {"mode": "plan", "model": "a", "yolo": False}
-    # Kept across a restart; and with the agent's models now in a picker,
-    # the model option is the picker's, not the session config's.
+    assert list(resolved.properties) == ["mode", "yolo"]
+    assert resolved.values == {"mode": "plan", "yolo": False}
+    # Kept across a restart.
     again = _provider(tmp_path, log, "CONFIG_OPTIONS", catalogue=catalogue)
-    assert [m["id"] for m in again.agent.to_wire()["models"]] == ["a", "b"]
-    assert again.default_model is None  # the agent keeps the model it starts with
+    assert again.agent.to_wire() == provider.agent.to_wire()
     assert list((await again.resolve_config(ConfigRequest())).properties) == ["mode", "yolo"]
+
+
+async def test_without_a_picker_the_model_option_is_session_config(
+    tmp_path: Path, log: Path
+) -> None:
+    provider = _provider(tmp_path, log, "CONFIG_OPTIONS")
+    provider.catalogue.remember_new_session(
+        {
+            "sessionId": "s",
+            "configOptions": [
+                {
+                    "id": "model",
+                    "name": "Model",
+                    "category": "model",
+                    "type": "select",
+                    "currentValue": "a",
+                    "options": [{"value": "a", "name": "A"}],
+                }
+            ],
+        }
+    )
+    assert "model" in (await provider.resolve_config(ConfigRequest())).properties  # no picker yet
 
 
 async def test_configured_models_win_over_the_agents(

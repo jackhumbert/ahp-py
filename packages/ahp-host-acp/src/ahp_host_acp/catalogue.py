@@ -11,7 +11,8 @@ Two things a client sees are decided before any agent process is running:
 
 So the provider keeps what the agent's most recent `session/new` said -- its
 config options or modes with their starting values, and its models -- plus
-its latest slash commands and each model's context window, and, given a
+its latest slash commands, each model's context window and the capabilities
+its last `initialize` declared (whether it can fork a session), and, given a
 file, keeps them across restarts. Only `session/new` updates the options: a
 value changed later in one session is that session's, not the default a new
 one starts with.
@@ -50,6 +51,8 @@ class Catalogue:
         self._legacy_models: list[Any] = []
         self._legacy_current: str | None = None
         self.context_windows: dict[str, int] = {}
+        #: `agentCapabilities` from the agent's last `initialize`.
+        self.capabilities: dict[str, Any] = {}
         self._saved: str | None = None
         if path is not None:
             self._load(path)
@@ -67,6 +70,7 @@ class Catalogue:
                 "currentModelId": self._legacy_current,
             },
             "contextWindows": self.context_windows,
+            "agentCapabilities": self.capabilities,
         }
 
     def _load(self, path: Path) -> None:
@@ -98,6 +102,8 @@ class Catalogue:
             self.context_windows = {
                 str(k): v for k, v in windows.items() if isinstance(v, int) and v > 0
             }
+        capabilities = data.get("agentCapabilities")
+        self.capabilities = dict(capabilities) if isinstance(capabilities, Mapping) else {}
         self._saved = json.dumps(self._wire(), sort_keys=True)
 
     def save(self) -> None:
@@ -142,6 +148,15 @@ class Catalogue:
         self._legacy_current = current if isinstance(current, str) else None
         return (self._legacy_models, self._legacy_current) != before
 
+    def remember_capabilities(self, raw: Any) -> bool:
+        """An `initialize` answer's `agentCapabilities`. True if they changed."""
+        capabilities = dict(raw) if isinstance(raw, Mapping) else {}
+        if capabilities == self.capabilities:
+            return False
+        self.capabilities = capabilities
+        self.save()
+        return True
+
     def remember_commands(self, raw: Any) -> None:
         if isinstance(raw, list) and raw != self._commands:
             self._commands = list(raw)
@@ -155,6 +170,11 @@ class Catalogue:
             self.save()
 
     # -- derived -----------------------------------------------------------------
+
+    def session_capability(self, name: str) -> bool:
+        """Whether `sessionCapabilities.<name>` is declared (``{}`` means yes)."""
+        session = self.capabilities.get("sessionCapabilities")
+        return isinstance(session, Mapping) and isinstance(session.get(name), Mapping)
 
     @property
     def commands(self) -> tuple[Command, ...]:

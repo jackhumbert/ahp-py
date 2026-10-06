@@ -17,6 +17,10 @@ The prompt text picks the behaviour:
 - ``fragment``     edit `code.py` with a fragment diff, reported only once written
 - ``create``       create `new.txt`
 - ``badedit``      a diff on `notes.txt` whose call fails, writing nothing
+- ``askedit``      an edit to `notes.txt` that asks permission first, with its diff
+
+Each session keeps its history (the prompts it was sent, ``whoami`` aside),
+which ``whoami`` reports, so tests can tell sessions -- and forks -- apart.
 
 Environment: ``FAKE_ACP_NATIVE_MODELS=1`` reports ACP session models and
 accepts `session/set_model`; ``FAKE_ACP_MODEL_OPTION=1`` offers the model as a
@@ -25,7 +29,9 @@ config option of category `model`; ``FAKE_ACP_CONFIG_OPTIONS=1`` offers
 config options, refusing `mode = forbidden`; ``FAKE_ACP_MODES=1`` offers
 legacy session modes; ``FAKE_ACP_COMMANDS=1`` sends slash commands right
 behind `session/new`; ``FAKE_ACP_MCP_HTTP=1`` advertises http MCP servers;
-``FAKE_ACP_LOG`` names a file each received method is appended to.
+``FAKE_ACP_FORK=1`` and ``FAKE_ACP_CLOSE=1`` offer `session/fork` and
+`session/close`; ``FAKE_ACP_LOG`` names a file each received method is
+appended to.
 """
 
 from __future__ import annotations
@@ -48,6 +54,7 @@ state: dict[str, Any] = {
     "mode": "ask",
     "yolo": False,
     "next_id": 1000,
+    "histories": {},
 }
 OPTIONS = os.environ.get("FAKE_ACP_CONFIG_OPTIONS") == "1"
 MODES = os.environ.get("FAKE_ACP_MODES") == "1"
@@ -148,10 +155,10 @@ def wait_for(predicate: Any) -> dict[str, Any]:
         message = inbox.get()
         if message is None:
             sys.exit(0)
-        if predicate(message):
-            return message
         if message.get("method"):
             log(message["method"], message.get("params"))
+        if predicate(message):
+            return message
 
 
 def ask(method: str, params: dict[str, Any]) -> dict[str, Any]:
@@ -182,7 +189,23 @@ def finish(session_id: str, call_id: str, status: str = "completed") -> None:
     )
 
 
+PERMISSION_OPTIONS = [
+    {"optionId": "always", "name": "Always", "kind": "allow_always"},
+    {"optionId": "once", "name": "Once", "kind": "allow_once"},
+    {"optionId": "no", "name": "No", "kind": "reject_once"},
+    {"optionId": "never", "name": "", "kind": "reject_always"},
+    {"optionId": "odd", "name": "Odd", "kind": "allow_sometimes"},
+]
+
+
+def chosen(reply: dict[str, Any]) -> Any:
+    outcome = reply.get("result", {}).get("outcome", {})
+    return outcome.get("optionId", outcome.get("outcome"))
+
+
 def prompt(session_id: str, words: str) -> dict[str, Any]:
+    if words != "whoami":
+        state["histories"].setdefault(session_id, []).append(words)
     cwd = Path(state["cwd"] or ".")
     if words.startswith("/model "):
         state["model"] = words.split()[1]
@@ -205,19 +228,10 @@ def prompt(session_id: str, words: str) -> dict[str, Any]:
         update(session_id, {"sessionUpdate": "tool_call", **call})
         reply = ask(
             "session/request_permission",
-            {
-                "sessionId": session_id,
-                "toolCall": call,
-                "options": [
-                    {"optionId": "always", "name": "Always", "kind": "allow_always"},
-                    {"optionId": "once", "name": "Once", "kind": "allow_once"},
-                    {"optionId": "no", "name": "No", "kind": "reject_once"},
-                ],
-            },
+            {"sessionId": session_id, "toolCall": call, "options": PERMISSION_OPTIONS},
         )
-        outcome = reply.get("result", {}).get("outcome", {})
-        chosen = outcome.get("optionId", outcome.get("outcome"))
-        if chosen == "once":
+        picked = chosen(reply)
+        if picked in ("once", "always"):
             update(
                 session_id,
                 {
@@ -230,7 +244,7 @@ def prompt(session_id: str, words: str) -> dict[str, Any]:
             finish(session_id, "call_1")
         else:
             finish(session_id, "call_1", "failed")
-        text(session_id, f"chose {chosen}")
+        text(session_id, f"chose {picked}")
         return {"stopReason": "end_turn"}
     if words == "whoami":
         text(
@@ -244,12 +258,18 @@ def prompt(session_id: str, words: str) -> dict[str, Any]:
                     "options": state["options"],
                     "mode": state["mode"],
                     "yolo": state["yolo"],
+                    "history": state["histories"].get(session_id, []),
                 }
             ),
         )
         return {"stopReason": "end_turn"}
     if words == "slow":
-        wait_for(lambda m: m.get("method") == "session/cancel")
+        wait_for(
+            lambda m: (
+                m.get("method") == "session/cancel"
+                and m.get("params", {}).get("sessionId") == session_id
+            )
+        )
         return {"stopReason": "cancelled"}
     if words == "crash":
         text(session_id, "about to crash")
@@ -331,6 +351,28 @@ def prompt(session_id: str, words: str) -> dict[str, Any]:
         path.write_text("hello\n", encoding="utf-8")
         edit_call(session_id, "edit_3", {"path": str(path), "newText": "hello\n"}, "completed")
         return {"stopReason": "end_turn"}
+    if words == "askedit":
+        path = cwd / "notes.txt"
+        old = path.read_text(encoding="utf-8")
+        diff = {"path": str(path), "oldText": old, "newText": old + "asked\n"}
+        asked: dict[str, Any] = {
+            "toolCallId": "edit_5",
+            "title": "Edit notes.txt",
+            "kind": "edit",
+            "status": "pending",
+            "content": [{"type": "diff", **diff}],
+        }
+        update(session_id, {"sessionUpdate": "tool_call", **asked})
+        reply = ask(
+            "session/request_permission",
+            {"sessionId": session_id, "toolCall": asked, "options": PERMISSION_OPTIONS[:3]},
+        )
+        if chosen(reply) in ("once", "always"):
+            path.write_text(diff["newText"], encoding="utf-8")
+            finish(session_id, "edit_5")
+        else:
+            finish(session_id, "edit_5", "failed")
+        return {"stopReason": "end_turn"}
     if words == "badedit":
         path = cwd / "notes.txt"
         diff = {"path": str(path), "oldText": path.read_text("utf-8"), "newText": "gone\n"}
@@ -388,13 +430,25 @@ def main() -> None:
             }
             if os.environ.get("FAKE_ACP_MCP_HTTP") == "1":
                 capabilities["mcpCapabilities"] = {"http": True}
+            for flag, name in (("FAKE_ACP_FORK", "fork"), ("FAKE_ACP_CLOSE", "close")):
+                if os.environ.get(flag) == "1":
+                    capabilities["sessionCapabilities"][name] = {}
             result = {"protocolVersion": 1, "agentCapabilities": capabilities, "authMethods": []}
-        elif method in ("session/new", "session/resume", "session/load"):
+        elif method in ("session/new", "session/resume", "session/load", "session/fork"):
+            if method == "session/fork" and os.environ.get("FAKE_ACP_FORK") != "1":
+                send({"id": request_id, "error": {"code": -32601, "message": "no fork"}})
+                continue
             state["cwd"] = params.get("cwd")
             state["opened"] = method
-            session_id = params.get("sessionId") or str(uuid.uuid4())
+            if method in ("session/new", "session/fork"):
+                session_id = str(uuid.uuid4())
+                source = state["histories"].get(params.get("sessionId"), [])
+                state["histories"][session_id] = list(source) if method == "session/fork" else []
+            else:
+                session_id = params["sessionId"]
+                state["histories"].setdefault(session_id, [])
             state["session"] = session_id
-            result = {"sessionId": session_id} if method == "session/new" else {}
+            result = {"sessionId": session_id} if method in ("session/new", "session/fork") else {}
             if (config_options() and method == "session/new") or OPTIONS:
                 result["configOptions"] = config_options()
             if MODES:
@@ -432,6 +486,9 @@ def main() -> None:
                 send({"id": request_id, "error": {"code": -32602, "message": "no such mode"}})
                 continue
             state["mode"] = params["modeId"]
+            result = {}
+        elif method == "session/close" and os.environ.get("FAKE_ACP_CLOSE") == "1":
+            state["histories"].pop(params["sessionId"], None)
             result = {}
         elif method == "session/set_model" and native:
             state["model"] = params["modelId"]

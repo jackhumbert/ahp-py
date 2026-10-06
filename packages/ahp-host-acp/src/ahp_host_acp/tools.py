@@ -10,7 +10,7 @@ acted on.
 from __future__ import annotations
 
 import os
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Final
 
@@ -143,19 +143,21 @@ class ToolCall:
         return f"{verb} {self._target()}" if verb else f"Done: {self.progress_line()}"
 
 
-def text_of(content: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+def text_of(
+    content: Sequence[Mapping[str, Any]], *, shown: Collection[str] = ()
+) -> list[dict[str, Any]]:
     """ACP tool-call content as the host's text parts.
 
     `content` blocks carry their text; `terminal` ids mean nothing without
     ACP's terminal methods, which this client does not offer.
 
-    A `diff` becomes a unified-looking text summary *here*. AHP 1.0.0 does
-    have a diff content item for a tool result (`fileEdit`: before/after
-    `ContentRef`s plus +/- counts), but its content has to be stored and
-    served by the host, and the provider API this adapter is built on has no
-    way to do that from a tool result yet. The edit is not lost meanwhile: the
-    same diffs feed the session's changeset (:mod:`ahp_host_acp.changes`),
-    which is where a client's Changes view and +/- counts come from.
+    A `diff` becomes a unified-looking text summary, except for the paths in
+    *shown*: those have a `fileEdit` item beside it (AHP 1.0.0's tool-result
+    diff, before/after `ContentRef`s and +/- counts, made by the turn sink from
+    the file itself), and a second, text-only copy of the same edit would only
+    be noise. A diff whose file could not be settled (see
+    :mod:`ahp_host_acp.changes`) keeps its summary, and so does a call still
+    running, whose edit has not happened yet.
     """
     parts: list[dict[str, Any]] = []
     for item in content:
@@ -168,6 +170,8 @@ def text_of(content: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
                 parts.append({"type": "text", "text": str(block.get("uri", ""))})
         elif kind == "diff":
             path = str(item.get("path", ""))
+            if path in shown:
+                continue
             new = str(item.get("newText", ""))
             old = item.get("oldText")
             header = f"--- {path}\n+++ {path}\n" if old is not None else f"+++ {path} (new)\n"

@@ -1,22 +1,30 @@
-"""The adapter: one ACP agent process per AHP session.
+"""The adapter: one ACP agent process per AHP session, one ACP session per chat.
 
 Each session spawns the configured agent command (`openclaw acp`, or any
-other ACP agent), opens one ACP session in it, and translates:
+other ACP agent) and opens an ACP session in it for each of its chats -- the
+default chat, and every chat a client creates (`HostsChats`) -- so each chat
+is its own conversation. Per chat it translates:
 
 - `session/prompt` <- a user turn; its streamed `session/update`s become the
   host's neutral `TurnSink` events (text, reasoning, tool calls, usage);
-- `session/request_permission` -> the host's `confirm_tool_call`, which is
-  where a client shows an approval prompt;
-- a stop -> `session/cancel`.
+- `session/request_permission` -> the host's `confirm_tool_call`, with the
+  agent's own options (:mod:`ahp_host_acp.permissions`);
+- a stop -> `session/cancel` for that chat's session (`CancelsChats`).
 
 Out of turn, through the session's `SessionPublisher`:
 
 - the agent's config options and modes are the session's config, both ways
-  (:mod:`ahp_host_acp.options`); the title it reports (`session_info_update`)
-  is the session's title; the files its tool calls edit are the session's
-  changeset (:mod:`ahp_host_acp.changes`);
-- its slash commands are offered as completions (:mod:`ahp_host_acp.commands`),
-  and its plan is shown as a row per update (:mod:`ahp_host_acp.plan`).
+  (:mod:`ahp_host_acp.options`); the title the default chat's session
+  reports (`session_info_update`) is the session's title; the files tool
+  calls edit are the session's changeset (:mod:`ahp_host_acp.changes`);
+- slash commands are offered as completions (:mod:`ahp_host_acp.commands`),
+  and a plan is shown as a row per update (:mod:`ahp_host_acp.plan`).
+
+What follows the chat and what stays the session's: a chat has its own ACP
+session, model, commands, plan, usage and turns in flight. The session config
+is one set of values for the whole session (AHP has no per-chat config), kept
+in every chat's ACP session; the title comes from the default chat; the
+changeset covers every chat's edits, since they are edits to the same files.
 
 What this adapter cannot do is decide *which* calls need approval: the agent
 asks, or it does not. See the README's Security section.
@@ -28,8 +36,8 @@ ACP has since removed), with `session/set_model`. One that does neither
 ``/model {model} -s`` sent as its own turn whenever the picked model changes;
 its reply is not shown.
 
-Sessions are resumable: the ACP session id is the resume state, restored with
-`session/resume` (or `session/load`) when the agent offers it.
+Sessions are resumable: each chat's ACP session id is the resume state,
+restored with `session/resume` (or `session/load`) when the agent offers it.
 """
 
 from __future__ import annotations
@@ -40,19 +48,23 @@ import logging
 import re
 import uuid
 import weakref
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Final, Protocol
 
+from ahp_host import AhpError
 from ahp_host.provider.base import (
     AgentInfo,
+    AgentInfoChanged,
     AgentSessionContext,
+    ChatContext,
     CompletionItem,
     CompletionRequest,
     ConfigRequest,
     ConfigResolution,
     ConfigValue,
+    ForkedFrom,
     ModelInfo,
     ToolConfirmation,
     TurnSink,
@@ -60,7 +72,7 @@ from ahp_host.provider.base import (
 )
 
 from ahp_host_acp import commands as slash
-from ahp_host_acp import jsonrpc
+from ahp_host_acp import jsonrpc, permissions
 from ahp_host_acp import plan as plans
 from ahp_host_acp.catalogue import Catalogue
 from ahp_host_acp.changes import Diff, SessionEdits, diffs_of
@@ -88,6 +100,10 @@ _PROVIDER_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}")
 #: How long a new turn waits for a stopped turn's prompt to wind down, so the
 #: old turn's trailing updates never land in the new one.
 SETTLE_TIMEOUT: Final = 15.0
+#: `PermissionDenied`: what this host will not do (`ahp_protocol` error table).
+PERMISSION_DENIED: Final = -32009
+
+AgentChanged = Callable[[], Awaitable[None]]
 
 
 def is_valid_provider_id(value: str) -> bool:
@@ -123,6 +139,95 @@ class AgentSpec:
     mcp_servers: Sequence[McpServer] = ()
 
 
+class _Chat:
+    """One AHP chat's own ACP session, in its AHP session's agent process."""
+
+    def __init__(
+        self,
+        uri: str,
+        *,
+        acp_session_id: str | None = None,
+        model: str | None = None,
+        turns: int | None = 0,
+    ) -> None:
+        self.uri = uri
+        self.acp_session_id = acp_session_id
+        #: The agent process this chat's session is open in; see
+        #: `AcpSession._generation`. 0: none yet.
+        self.generation = 0
+        #: The model the user wants, and the one the agent was last switched to.
+        self.model = model
+        self.applied_model: str | None = None
+        self.native_models = False
+        #: What this session reported it can be configured with; `verified`
+        #: says whether the current agent process has reported its values.
+        self.options = AgentOptions()
+        self.verified = False
+        #: What has been sent to this session in the current process, per option.
+        self.applied: dict[str, Any] = {}
+        #: While non-zero, its values are not republished: they are about to
+        #: be overwritten with the session's own.
+        self.hold = 0
+        self.config_lock = asyncio.Lock()
+        #: Held for a whole turn: one turn at a time per chat.
+        self.lock = asyncio.Lock()
+        self.sink: TurnSink | None = None
+        #: While true, updates are dropped: a model switch's reply, or history
+        #: an agent replays on `session/load`.
+        self.quiet = False
+        self.calls: dict[str, ToolCall] = {}
+        self.announced: set[str] = set()
+        #: The last diffs each running call showed: its final update may
+        #: replace them with a plain result.
+        self.diffs: dict[str, list[Diff]] = {}
+        self.context_used: int | None = None
+        self.context_size: int | None = None
+        self.cost: Mapping[str, Any] | None = None
+        self.inflight: asyncio.Task[Any] | None = None
+        #: The agent's slash commands, once this session reports them.
+        self.commands: tuple[slash.Command, ...] | None = None
+        self.plan: tuple[plans.Entry, ...] | None = None
+        #: How many AHP turns this conversation has been given, so a fork can
+        #: tell whether ACP's whole-session fork copies exactly the turns the
+        #: forked chat shows. ``None``: not known (a lost or replaced agent
+        #: session, a state saved before this was kept).
+        self.turns = turns
+
+    @classmethod
+    def restored(cls, uri: str, state: Mapping[str, Any], model: str | None) -> _Chat:
+        session_id, saved_model, turns = (
+            state.get("acpSessionId"),
+            state.get("model"),
+            state.get("turns"),
+        )
+        return cls(
+            uri,
+            acp_session_id=session_id if isinstance(session_id, str) else None,
+            model=saved_model if isinstance(saved_model, str) else model,
+            turns=turns if isinstance(turns, int) and not isinstance(turns, bool) else None,
+        )
+
+    def state(self) -> dict[str, Any]:
+        state: dict[str, Any] = {}
+        if self.acp_session_id:
+            state["acpSessionId"] = self.acp_session_id
+        if self.model:
+            state["model"] = self.model
+        if self.turns is not None:
+            state["turns"] = self.turns
+        return state
+
+    @property
+    def model_option(self) -> str | None:
+        """The id of the agent's model config option (`category: "model"`), if any."""
+        option = self.options.model_option
+        return option.id if option is not None else None
+
+
+async def _nothing() -> None:
+    return None
+
+
 class AcpSession:
     def __init__(
         self,
@@ -136,7 +241,9 @@ class AcpSession:
         directory: Path | None = None,
         catalogue: Catalogue | None = None,
         config_properties: Mapping[str, Mapping[str, Any]] | None = None,
-        on_models_changed: Callable[[], None] | None = None,
+        on_agent_changed: AgentChanged | None = None,
+        turns: int | None = 0,
+        chats: Mapping[str, Mapping[str, Any]] | None = None,
     ) -> None:
         self.context = context
         self._roots = as_roots(roots)
@@ -144,39 +251,31 @@ class AcpSession:
         self._connect = connect
         #: Set on resume: the folder the session was started in.
         self.directory = directory
-        self.acp_session_id = acp_session_id
-        #: The model the user wants, and the one the agent was last switched to.
-        self.model: str | None = context.model or default_model
-        self._applied_model: str | None = None
-        self._native_models = False
+        self._default = _Chat(
+            context.chat_uri,
+            acp_session_id=acp_session_id,
+            model=context.model or default_model,
+            turns=turns,
+        )
+        self._chats: dict[str, _Chat] = {context.chat_uri: self._default}
+        #: Restored chats' saved state, until `chat_opened` announces them.
+        self._saved_chats: dict[str, Mapping[str, Any]] = {
+            uri: state for uri, state in (chats or {}).items() if isinstance(state, Mapping)
+        }
         self._conn: AcpConnection | None = None
+        #: Counts agent processes: a chat whose `generation` differs has no
+        #: session open in the current one.
+        self._generation = 0
+        self._process_lock = asyncio.Lock()
+        #: One session opened at a time, so an update for a session id not
+        #: known yet can only belong to `_opening`.
+        self._open_lock = asyncio.Lock()
+        self._opening: _Chat | None = None
         self._capabilities: Mapping[str, Any] = {}
-        self._sink: TurnSink | None = None
-        #: While true, updates are dropped: a model switch's reply, or history
-        #: an agent replays on `session/load`.
-        self._quiet = False
-        #: While a session is being opened its id is not known yet, and an
-        #: agent may send updates right behind its `session/new` answer.
-        self._opening = False
-        self._calls: dict[str, ToolCall] = {}
-        self._announced: set[str] = set()
-        #: The last diffs each running call showed: its final update may
-        #: replace them with a plain result.
-        self._diffs: dict[str, list[Diff]] = {}
-        self._context_used: int | None = None
-        self._context_size: int | None = None
-        self._cost: Mapping[str, Any] | None = None
-        self._inflight: asyncio.Task[Any] | None = None
-        self._lock = asyncio.Lock()
         self._catalogue = catalogue if catalogue is not None else Catalogue()
-        self._on_models_changed = on_models_changed or (lambda: None)
+        self._on_agent_changed = on_agent_changed or _nothing
 
         # -- session config ----------------------------------------------------
-        #: What the agent reported, kept across a restarted agent process (the
-        #: options' shape is the agent's); `_verified` says whether the
-        #: *current* process has reported its values yet.
-        self._options = AgentOptions()
-        self._verified = False
         #: The session's config values, for the properties its schema has --
         #: the provider's schema at creation, or the restored state's keys.
         #: A mirror of the session's state: at creation the host keeps the
@@ -194,18 +293,40 @@ class AcpSession:
         else:
             self._properties = set(context.config)
             self._config = dict(context.config)
-        #: What has been sent to the current agent process, per option.
-        self._applied: dict[str, Any] = {}
-        self._config_lock = asyncio.Lock()
-        #: While non-zero, the agent's values are not republished: they are
-        #: about to be overwritten with the session's own.
-        self._hold = 0
 
-        #: The agent's slash commands, once this session's process reports them.
-        self.commands: tuple[slash.Command, ...] | None = None
         self._title: str | None = None
-        self._plan: tuple[plans.Entry, ...] | None = None
         self._edits = SessionEdits(self._roots)
+
+    # -- the default chat, as callers have always seen it -------------------------
+
+    @property
+    def acp_session_id(self) -> str | None:
+        """The default chat's ACP session id."""
+        return self._default.acp_session_id
+
+    @property
+    def model(self) -> str | None:
+        return self._default.model
+
+    @model.setter
+    def model(self, value: str | None) -> None:
+        self._default.model = value
+
+    @property
+    def commands(self) -> tuple[slash.Command, ...] | None:
+        """The default chat's slash commands, once its agent session reports them."""
+        return self._default.commands
+
+    def hosts(self, chat_uri: str) -> bool:
+        """Whether *chat_uri* is one of this session's chats."""
+        return chat_uri in self._chats or chat_uri in self._saved_chats
+
+    def commands_for(self, chat_uri: str) -> tuple[slash.Command, ...] | None:
+        """*chat_uri*'s commands, else the default chat's."""
+        chat = self._chats.get(chat_uri)
+        if chat is not None and chat.commands is not None:
+            return chat.commands
+        return self._default.commands
 
     # -- lifecycle -----------------------------------------------------------
 
@@ -225,101 +346,127 @@ class AcpSession:
                 raise PermissionError(f"{path.resolve()} is outside this host's folders")
         return self._roots.primary
 
-    async def _ensure(self) -> AcpConnection:
-        if self._conn is not None and not self._conn.closed:
-            return self._conn
-        if self._conn is not None:
-            await self._drop_connection()
-        cwd = self.working_directory()
-        self.directory = cwd
-        conn = await self._connect(
-            self._spec.command,
-            cwd=cwd,
-            env=self._spec.env,
-            on_notification=self._on_notification,
-            on_request=self._on_request,
-        )
-        self._hold += 1
-        try:
-            init = await conn.request(
-                "initialize",
-                {
-                    "protocolVersion": PROTOCOL_VERSION,
-                    # No client filesystem or terminal: the agent works with its
-                    # own tools, and every host-side read goes through the jail.
-                    "clientCapabilities": {
-                        "fs": {"readTextFile": False, "writeTextFile": False},
-                        "terminal": False,
-                    },
-                    "clientInfo": {"name": "ahp-host-acp", "version": _version()},
-                },
+    async def _ensure_process(self) -> AcpConnection:
+        """The agent process, started and initialized if it is not running."""
+        async with self._process_lock:
+            if self._conn is not None and not self._conn.closed:
+                return self._conn
+            if self._conn is not None:
+                await self._drop_connection()
+            cwd = self.working_directory()
+            self.directory = cwd
+            conn = await self._connect(
+                self._spec.command,
+                cwd=cwd,
+                env=self._spec.env,
+                on_notification=self._on_notification,
+                on_request=self._on_request,
             )
+            try:
+                init = await conn.request(
+                    "initialize",
+                    {
+                        "protocolVersion": PROTOCOL_VERSION,
+                        # No client filesystem or terminal: the agent works with
+                        # its own tools, and every host-side read goes through
+                        # the jail.
+                        "clientCapabilities": {
+                            "fs": {"readTextFile": False, "writeTextFile": False},
+                            "terminal": False,
+                        },
+                        "clientInfo": {"name": "ahp-host-acp", "version": _version()},
+                    },
+                )
+            except BaseException:
+                await conn.aclose()
+                raise
             self._capabilities = _mapping(_mapping(init).get("agentCapabilities"))
-            self._applied = {}
-            self._verified = False
-            await self._open_session(conn, cwd)
-            await self._sync_config(conn)
-        except BaseException:
-            await conn.aclose()
-            raise
-        finally:
-            self._hold -= 1
-        self._conn = conn
-        await self._publish_config()
+            self._generation += 1
+            self._conn = conn
+        if self._catalogue.remember_capabilities(self._capabilities):
+            await self._on_agent_changed()  # whether it can fork may have changed
         return conn
+
+    async def _ensure(self, chat: _Chat) -> AcpConnection:
+        """The agent process, with *chat*'s session open in it."""
+        conn = await self._ensure_process()
+        if chat.generation == self._generation:
+            return conn
+        async with self._open_lock:
+            if chat.generation != self._generation:
+                chat.hold += 1
+                try:
+                    chat.applied = {}
+                    chat.verified = False
+                    await self._open(conn, chat)
+                    chat.generation = self._generation
+                    await self._sync_config(conn, chat)
+                finally:
+                    chat.hold -= 1
+        await self._publish_config(chat)
+        return conn
+
+    def _session_capability(self, name: str) -> bool:
+        session = _mapping(self._capabilities.get("sessionCapabilities"))
+        return isinstance(session.get(name), Mapping)
 
     def _mcp_servers(self) -> list[dict[str, Any]]:
         servers = (server.to_acp(self._capabilities) for server in self._spec.mcp_servers)
         return [server for server in servers if server is not None]
 
-    async def _open_session(self, conn: AcpConnection, cwd: Path) -> None:
-        base = {"cwd": str(cwd), "mcpServers": self._mcp_servers()}
-        self._opening = True
+    def _base(self) -> dict[str, Any]:
+        return {"cwd": str(self.directory), "mcpServers": self._mcp_servers()}
+
+    async def _open(self, conn: AcpConnection, chat: _Chat) -> None:
+        """Open *chat*'s session in this process: reattach it, or start one."""
+        base = self._base()
+        self._opening = chat
         try:
-            if self.acp_session_id is not None:
-                if await self._reattach(conn, base):
+            if chat.acp_session_id is not None:
+                if await self._reattach(conn, chat, base):
                     return
                 log.warning(
-                    "could not reopen ACP session %s; starting a new one", self.acp_session_id
+                    "could not reopen ACP session %s; starting a new one", chat.acp_session_id
                 )
+                # The chat shows turns the new session never saw.
+                chat.turns = None
             result = _mapping(await conn.request("session/new", base))
             session_id = result.get("sessionId")
             if not isinstance(session_id, str) or not session_id:
                 raise AcpError("the agent's session/new returned no sessionId")
-            self.acp_session_id = session_id
+            chat.acp_session_id = session_id
         finally:
-            self._opening = False
-        self._note_session(result)
+            self._opening = None
+        self._note_session(chat, result)
         self._catalogue.remember_new_session(result)
-        self._on_models_changed()
-        self._applied_model = None
+        await self._on_agent_changed()
+        chat.applied_model = None
 
-    async def _reattach(self, conn: AcpConnection, base: Mapping[str, Any]) -> bool:
-        params = {**base, "sessionId": self.acp_session_id}
-        session_caps = _mapping(self._capabilities.get("sessionCapabilities"))
+    async def _reattach(self, conn: AcpConnection, chat: _Chat, base: Mapping[str, Any]) -> bool:
+        params = {**base, "sessionId": chat.acp_session_id}
         try:
-            if "resume" in session_caps:
+            if self._session_capability("resume"):
                 result = await conn.request("session/resume", params)
             elif self._capabilities.get("loadSession"):
                 # `session/load` replays the conversation as updates; the
                 # client already shows it, so the replay is not published.
-                self._quiet = True
+                chat.quiet = True
                 try:
                     result = await conn.request("session/load", params)
                 finally:
-                    self._quiet = False
+                    chat.quiet = False
             else:
                 return False
         except AcpError as exc:
-            log.warning("reopening ACP session %s failed: %s", self.acp_session_id, exc)
+            log.warning("reopening ACP session %s failed: %s", chat.acp_session_id, exc)
             return False
-        self._note_session(_mapping(result))
+        self._note_session(chat, _mapping(result))
         # The agent's own model may have survived, but not provably: switch again.
-        self._applied_model = None
+        chat.applied_model = None
         return True
 
-    def _note_session(self, result: Mapping[str, Any]) -> None:
-        """What a session/new, resume or load answer says about configuration.
+    def _note_session(self, chat: _Chat, result: Mapping[str, Any]) -> None:
+        """What a session/new, resume, load or fork answer says about configuration.
 
         Newer agents (opencode) offer the model as a session config option of
         category `model`; older ones report `models` for `session/set_model`.
@@ -328,16 +475,10 @@ class AcpSession:
         agent process has not said what they are.
         """
         if "models" in result:
-            self._native_models = bool(_mapping(result.get("models")).get("availableModels"))
-        self._options.note(result)
+            chat.native_models = bool(_mapping(result.get("models")).get("availableModels"))
+        chat.options.note(result)
         if _reports_options(result):
-            self._verified = True
-
-    @property
-    def _model_option(self) -> str | None:
-        """The id of the agent's model config option (`category: "model"`), if any."""
-        option = self._options.model_option
-        return option.id if option is not None else None
+            chat.verified = True
 
     async def _drop_connection(self) -> None:
         conn, self._conn = self._conn, None
@@ -350,13 +491,157 @@ class AcpSession:
     async def aclose(self) -> None:
         await self._drop_connection()
 
-    async def cancel(self, reason: str | None = None) -> None:
+    def _live(self, chat: _Chat) -> AcpConnection | None:
+        """The connection *chat*'s session is open on, if it is open now."""
         conn = self._conn
-        if conn is not None and self.acp_session_id is not None and not conn.closed:
+        if conn is None or conn.closed or chat.acp_session_id is None:
+            return None
+        return conn if chat.generation == self._generation else None
+
+    async def _cancel(self, chat: _Chat) -> None:
+        conn = self._live(chat)
+        if conn is not None:
             try:
-                await conn.notify("session/cancel", {"sessionId": self.acp_session_id})
+                await conn.notify("session/cancel", {"sessionId": chat.acp_session_id})
             except AcpError:
                 log.debug("session/cancel did not reach the agent", exc_info=True)
+
+    async def cancel(self, reason: str | None = None) -> None:
+        """Every chat's turn: the whole session is being stopped."""
+        for chat in list(self._chats.values()):
+            await self._cancel(chat)
+
+    async def cancel_chat(self, chat_uri: str, reason: str | None = None) -> None:
+        """`CancelsChats`: stop one chat's turn; the others keep going."""
+        chat = self._chats.get(chat_uri)
+        if chat is not None:
+            await self._cancel(chat)
+
+    # -- chats -----------------------------------------------------------------
+
+    def _chat_for(self, chat_uri: str | None) -> _Chat:
+        """The chat a turn is for. One never announced gets a session of its own."""
+        if chat_uri is None:
+            return self._default
+        chat = self._chats.get(chat_uri)
+        if chat is None:
+            saved = self._saved_chats.pop(chat_uri, None)
+            chat = (
+                _Chat.restored(chat_uri, saved, self._default.model)
+                if saved is not None
+                else _Chat(chat_uri, model=self._default.model)
+            )
+            self._chats[chat_uri] = chat
+        return chat
+
+    async def chat_opened(self, context: ChatContext) -> None:
+        """`HostsChats`: a chat beyond the default one, with its own ACP session.
+
+        A new chat's session starts with its first turn, as the default chat's
+        does. A restored one picks up the session it had. A fork is made at
+        once, with ACP's `session/fork`, since the conversation it copies is
+        the source's as it is now.
+        """
+        uri = context.chat_uri
+        if uri in self._chats:
+            return
+        if context.origin_kind == "sideChat":
+            # Not advertised: ACP has no way to give a session context that is
+            # not part of its own conversation.
+            raise AhpError(PERMISSION_DENIED, "this agent cannot open side chats")
+        saved = self._saved_chats.pop(uri, None)
+        if saved is not None:
+            self._chats[uri] = _Chat.restored(uri, saved, self._default.model)
+            return
+        chat = _Chat(uri, model=self._default.model)
+        if context.fork is not None:
+            await self._fork(chat, context.fork)
+        self._chats[uri] = chat
+
+    async def _fork(self, chat: _Chat, fork: ForkedFrom) -> None:
+        """Give *chat* a fork of its source chat's ACP session.
+
+        ACP's `session/fork` (unstable, `sessionCapabilities.fork`) copies the
+        source session whole: it takes no turn to branch at. An AHP fork
+        copies the source chat through one turn -- so it is made only when
+        that turn is the last one the source's agent session has seen, and
+        the source is not mid-turn. Anything else would leave the agent
+        remembering turns the forked chat does not show.
+        """
+        source = self._chats.get(fork.chat_uri or self._default.uri)
+        if source is None:
+            raise AhpError(PERMISSION_DENIED, "the chat to fork is not this agent's")
+        if source.lock.locked() or source.turns is None or source.turns != len(fork.turns):
+            raise AhpError(
+                PERMISSION_DENIED,
+                "this agent forks a whole conversation, so a chat can only be forked "
+                "at its latest turn, and not while it is answering",
+            )
+        async with source.lock:
+            conn = await self._ensure(source)
+            if not self._session_capability("fork"):
+                raise AhpError(PERMISSION_DENIED, "this agent cannot fork a session")
+            async with self._open_lock:
+                self._opening = chat
+                try:
+                    result = _mapping(
+                        await conn.request(
+                            "session/fork", {**self._base(), "sessionId": source.acp_session_id}
+                        )
+                    )
+                finally:
+                    self._opening = None
+            session_id = result.get("sessionId")
+            if not isinstance(session_id, str) or not session_id:
+                raise AcpError("the agent's session/fork returned no sessionId")
+            chat.acp_session_id = session_id
+            chat.generation = self._generation
+            chat.model, chat.applied_model = source.model, source.applied_model
+            chat.native_models = source.native_models
+            chat.turns = len(fork.turns)
+            self._note_session(chat, result)
+
+    async def chat_closed(self, chat_uri: str) -> None:
+        """`HostsChats`: the chat is gone. Its ACP session is closed, if the
+        agent can (`session/close`), and otherwise left to the agent."""
+        self._saved_chats.pop(chat_uri, None)
+        chat = self._chats.get(chat_uri)
+        if chat is None or chat is self._default:
+            return
+        del self._chats[chat_uri]
+        conn = self._live(chat)
+        if conn is None:
+            return
+        try:
+            if self._session_capability("close"):
+                await conn.request("session/close", {"sessionId": chat.acp_session_id})
+            elif chat.lock.locked():
+                await conn.notify("session/cancel", {"sessionId": chat.acp_session_id})
+        except AcpError as exc:
+            log.debug("closing ACP session %s: %s", chat.acp_session_id, exc)
+
+    def resume_state(self) -> dict[str, Any] | None:
+        """What `resume_state_of` returns: the default chat's session at the
+        top level (as before chats had their own), every other chat's under
+        `chats`."""
+        state: dict[str, Any] = {}
+        if self._default.acp_session_id:
+            state["acpSessionId"] = self._default.acp_session_id
+        chats: dict[str, Any] = dict(self._saved_chats)
+        for uri, chat in self._chats.items():
+            if chat is not self._default and chat.acp_session_id:
+                chats[uri] = chat.state()
+        if not state and not chats:
+            return None
+        if self.directory is not None:
+            state["cwd"] = str(self.directory)
+        if self._default.model:
+            state["model"] = self._default.model
+        if self._default.turns is not None:
+            state["turns"] = self._default.turns
+        if chats:
+            state["chats"] = chats
+        return state
 
     # -- session config --------------------------------------------------------
 
@@ -367,31 +652,31 @@ class AcpSession:
         wanted.update(pinned)
         return wanted
 
-    async def _sync_config(self, conn: AcpConnection) -> None:
-        """Set every option the agent does not already have as wanted.
+    async def _sync_config(self, conn: AcpConnection, chat: _Chat) -> None:
+        """Set every option *chat*'s session does not already have as wanted.
 
         Each value is sent once per agent process: a refusal is logged and not
         retried every turn, and an option the agent later changes itself is
-        not changed back. A refused or ignored client change is then undone
-        in the session's state by :meth:`_publish_config`, from what the
-        agent reports.
+        not changed back. A refused or ignored change is then undone in the
+        session's state by :meth:`_publish_config`, from what the agent
+        reports.
         """
-        async with self._config_lock:
-            self._hold += 1
+        async with chat.config_lock:
+            chat.hold += 1
             try:
                 for key, value in self._wanted().items():
-                    option = self._options.get(key)
+                    option = chat.options.get(key)
                     value = coerce(option, value) if option is not None else value
-                    if self._verified and option is not None and same(option.current, value):
-                        self._applied[key] = value
+                    if chat.verified and option is not None and same(option.current, value):
+                        chat.applied[key] = value
                         continue
-                    if key in self._applied and same(self._applied[key], value):
+                    if key in chat.applied and same(chat.applied[key], value):
                         continue
-                    self._applied[key] = value
-                    method, params = self._options.request_for(key, value)
+                    chat.applied[key] = value
+                    method, params = chat.options.request_for(key, value)
                     try:
                         result = await conn.request(
-                            method, {"sessionId": self.acp_session_id, **params}
+                            method, {"sessionId": chat.acp_session_id, **params}
                         )
                     except AgentExitedError:
                         raise
@@ -399,25 +684,37 @@ class AcpSession:
                         log.warning("the agent refused %s=%s: %s", key, value, exc)
                         continue
                     answer = _mapping(result)
-                    self._options.note(answer)
+                    chat.options.note(answer)
                     if _reports_options(answer):
-                        self._verified = True
+                        chat.verified = True
                     else:
-                        self._options.assume(key, value)
+                        chat.options.assume(key, value)
             finally:
-                self._hold -= 1
-        await self._publish_config()
+                chat.hold -= 1
+        await self._publish_config(chat)
 
-    async def _publish_config(self) -> None:
-        """Tell clients the values the agent reports, where they differ from
-        the session's. The agent is what is actually in force."""
-        if self._hold or not self._verified:
+    async def _publish_config(self, chat: _Chat) -> None:
+        """Tell clients the values *chat*'s agent session reports, where they
+        differ from the session's. The agent is what is actually in force.
+
+        Only for an option the chat's session was given the value it should
+        have: one that has not caught up with a change yet (another chat's,
+        applied to it on its next turn) is not in force anywhere a client is
+        looking, and publishing it would undo that change.
+        """
+        if chat.hold or not chat.verified:
             return
+        wanted = self._wanted()
         changed: dict[str, Any] = {}
         for key in self._properties:
-            reported = self._options.value_of(key)
-            if reported is None:
+            option = chat.options.get(key)
+            if option is None or option.current is None:
                 continue
+            if key not in wanted or key not in chat.applied:
+                continue
+            if not same(chat.applied[key], coerce(option, wanted[key])):
+                continue
+            reported = option.current
             if key not in self._config or not same(self._config[key], reported):
                 changed[key] = reported
         if not changed:
@@ -430,63 +727,71 @@ class AcpSession:
     async def config_changed(self, values: Mapping[str, Any]) -> None:
         """`ReconfiguresSessions`: a client changed a `sessionMutable` property.
 
-        Applied straight away when the agent is running (ACP lets a mode change
-        mid-turn); otherwise on its next start.
+        Applied straight away to every chat whose agent session is open (ACP
+        lets a mode change mid-turn); to the others when they next start.
         """
         for key, value in values.items():
             if key in self._properties and key not in self._spec.config_options:
                 self._config[key] = value
-        conn = self._conn
-        if conn is None or conn.closed or self.acp_session_id is None:
-            return
-        try:
-            await self._sync_config(conn)
-        except AcpError as exc:
-            log.warning("could not reconfigure ACP session %s: %s", self.acp_session_id, exc)
+        for chat in list(self._chats.values()):
+            conn = self._live(chat)
+            if conn is None:
+                continue
+            try:
+                await self._sync_config(conn, chat)
+            except AcpError as exc:
+                log.warning("could not reconfigure ACP session %s: %s", chat.acp_session_id, exc)
 
     # -- agent -> client -------------------------------------------------------
 
-    def _ours(self, session_id: Any) -> bool:
-        if session_id == self.acp_session_id:
-            return True
-        # One agent process per session: while ours is being opened, an
-        # update for a session this process just created can only be for it.
-        return self._opening and isinstance(session_id, str)
+    def _chat_of(self, session_id: Any) -> _Chat | None:
+        if isinstance(session_id, str):
+            for chat in self._chats.values():
+                if chat.acp_session_id == session_id:
+                    return chat
+            # One session is opened at a time: an update for a session this
+            # process has just created, before its id is known, is that one's.
+            if self._opening is not None:
+                return self._opening
+        return None
 
     async def _on_notification(self, method: str, params: Any) -> None:
         if method != "session/update":
             log.debug("ignoring ACP notification %s", method)
             return
         params = _mapping(params)
-        if not self._ours(params.get("sessionId")):
+        chat = self._chat_of(params.get("sessionId"))
+        if chat is None:
             return
         update = _mapping(params.get("update"))
         kind = update.get("sessionUpdate")
         # Session state first: it is true whether or not a turn is running,
         # and a `session/load` replay brings it up to date too.
         if kind == "usage_update":
-            self._on_usage(update)
+            await self._on_usage(chat, update)
             return
         if kind in ("config_option_update", "current_mode_update"):
-            self._options.note_update(update)
+            chat.options.note_update(update)
             if kind == "config_option_update":
-                self._verified = True
-            await self._publish_config()
+                chat.verified = True
+            await self._publish_config(chat)
             return
         if kind == "available_commands_update":
             raw = update.get("availableCommands")
-            self.commands = slash.parse_commands(raw)
+            chat.commands = slash.parse_commands(raw)
             self._catalogue.remember_commands(raw)
             return
         if kind == "session_info_update":
-            if not self._quiet:  # a replayed title is history, not a rename
+            # The session is named after its default chat's conversation; a
+            # replayed title is history, not a rename.
+            if chat is self._default and not chat.quiet:
                 await self._on_title(update)
             return
         if kind == "plan":
-            await self._on_plan(update)
+            await self._on_plan(chat, update)
             return
-        sink = self._sink
-        if sink is None or self._quiet:
+        sink = chat.sink
+        if sink is None or chat.quiet:
             return
         if kind == "agent_message_chunk":
             text = _text_block(update.get("content"))
@@ -497,11 +802,11 @@ class AcpSession:
             if text:
                 await sink.reasoning_delta(text)
         elif kind in ("tool_call", "tool_call_update"):
-            await self._on_tool_call(update, sink)
+            await self._on_tool_call(chat, update, sink)
         else:
             log.debug("ignoring session update %s", kind)
 
-    def _on_usage(self, update: Mapping[str, Any]) -> None:
+    async def _on_usage(self, chat: _Chat, update: Mapping[str, Any]) -> None:
         """`usage_update`: tokens in context, the window's size, and the cost.
 
         `used` stands in for a turn's input tokens when the prompt's answer
@@ -511,19 +816,13 @@ class AcpSession:
         """
         used, size, cost = update.get("used"), update.get("size"), update.get("cost")
         if isinstance(used, int) and not isinstance(used, bool):
-            self._context_used = used
+            chat.context_used = used
         if isinstance(size, int) and not isinstance(size, bool) and size > 0:
-            self._context_size = size
-            self._catalogue.remember_context_window(self._current_model(), size)
-            self._on_models_changed()
+            chat.context_size = size
+            self._catalogue.remember_context_window(_current_model(chat), size)
+            await self._on_agent_changed()
         if isinstance(cost, Mapping) and isinstance(cost.get("amount"), int | float):
-            self._cost = dict(cost)
-
-    def _current_model(self) -> str | None:
-        if self._applied_model:
-            return self._applied_model
-        option = self._options.model_option
-        return option.current if option is not None and isinstance(option.current, str) else None
+            chat.cost = dict(cost)
 
     async def _on_title(self, update: Mapping[str, Any]) -> None:
         """`session_info_update.title` renames the session.
@@ -539,14 +838,14 @@ class AcpSession:
         if publisher is not None:
             await publisher.title_changed(title)
 
-    async def _on_plan(self, update: Mapping[str, Any]) -> None:
+    async def _on_plan(self, chat: _Chat, update: Mapping[str, Any]) -> None:
         """A plan update: one finished "Update plan" row. See :mod:`ahp_host_acp.plan`."""
         entries = plans.parse_plan(update.get("entries"))
-        if entries == self._plan:
+        if entries == chat.plan:
             return  # resent unchanged
-        self._plan = entries
-        sink = self._sink
-        if sink is None or self._quiet:
+        chat.plan = entries
+        sink = chat.sink
+        if sink is None or chat.quiet:
             return
         call_id = f"acp-plan-{uuid.uuid4().hex[:12]}"
         await sink.tool_call_started(
@@ -567,56 +866,69 @@ class AcpSession:
             # After the row: the host clears the activity when a call completes.
             await publisher.activity_changed(working)
 
-    async def _on_tool_call(self, update: Mapping[str, Any], sink: TurnSink) -> None:
+    async def _on_tool_call(self, chat: _Chat, update: Mapping[str, Any], sink: TurnSink) -> None:
         call_id = update.get("toolCallId")
         if not isinstance(call_id, str) or not call_id:
             return
-        call = self._calls.setdefault(call_id, ToolCall(call_id))
+        call = chat.calls.setdefault(call_id, ToolCall(call_id))
         before = call.progress_line()
         call.merge(update)
-        await self._announce(call, sink)
+        await self._announce(chat, call, sink)
         if call.finished:
-            await self._complete(call, sink)
+            await self._complete(chat, call, sink)
             return
         if "content" in update:
-            self._note_diffs(call)
+            self._note_diffs(chat, call)
         if call.progress_line() != before:
             await sink.tool_call_delta(call_id, invocation_message=call.progress_line())
         if "content" in update and call.content:
             await sink.tool_call_output(call_id, text_of(call.content))
 
-    async def _announce(self, call: ToolCall, sink: TurnSink) -> None:
-        if call.call_id in self._announced:
+    async def _announce(self, chat: _Chat, call: ToolCall, sink: TurnSink) -> None:
+        if call.call_id in chat.announced:
             return
-        self._announced.add(call.call_id)
+        chat.announced.add(call.call_id)
         await sink.tool_call_started(
             call.call_id, call.name, call.raw_input, display_name=call.display_name
         )
         await sink.tool_call_delta(call.call_id, invocation_message=call.progress_line())
 
-    async def _complete(self, call: ToolCall, sink: TurnSink) -> None:
-        if self._calls.pop(call.call_id, None) is None:
+    async def _complete(self, chat: _Chat, call: ToolCall, sink: TurnSink) -> None:
+        """Finish a call. A completed edit's result carries a `fileEdit` per
+        file -- the diff a client renders in the row -- in place of the text
+        summary of the same diff."""
+        if chat.calls.pop(call.call_id, None) is None:
             return
+        diffs = diffs_of(call.content) or chat.diffs.pop(call.call_id, [])
+        chat.diffs.pop(call.call_id, None)
+        edits: list[dict[str, Any]] = []
+        shown: set[str] = set()
+        changed = False
+        if diffs and call.status == "completed":
+            made, changed = self._edits.completed(diffs, self.directory)
+            for diff, change in made:
+                try:
+                    edits.append(dict(await sink.file_edit(change)))
+                except Exception:  # the text summary stays in its place
+                    log.exception("could not store the edit to %s", change.uri)
+                else:
+                    shown.add(diff.path)
+        elif diffs:
+            self._edits.abandoned(diffs, self.directory)
         await sink.tool_call_completed(
             call.call_id,
-            {"content": text_of(call.content)},
+            {"content": [*text_of(call.content, shown=shown), *edits]},
             success=call.status != "failed",
             past_tense_message=call.past_tense(),
         )
-        diffs = diffs_of(call.content) or self._diffs.pop(call.call_id, [])
-        self._diffs.pop(call.call_id, None)
-        if not diffs:
-            return
-        if call.status != "completed":
-            self._edits.abandoned(diffs, self.directory)
-        elif self._edits.completed(diffs, self.directory):
+        if changed:
             await self._publish_changes()
 
-    def _note_diffs(self, call: ToolCall) -> None:
+    def _note_diffs(self, chat: _Chat, call: ToolCall) -> None:
         """A running call shows diffs: remember them, and the files before it runs."""
         diffs = diffs_of(call.content)
         if diffs:
-            self._diffs[call.call_id] = diffs
+            chat.diffs[call.call_id] = diffs
             self._edits.announced(diffs, self.directory)
 
     async def _publish_changes(self) -> None:
@@ -635,25 +947,26 @@ class AcpSession:
         raise MethodNotFoundError(method)
 
     async def _request_permission(self, params: Mapping[str, Any]) -> dict[str, Any]:
-        """Put the agent's question to the user. Only ever grants *once*.
+        """Put the agent's question, and its own choices, to the user.
 
-        An "always allow" option would widen what the agent may do without
-        asking again, in the agent's own state where this host cannot see or
-        undo it; approving here picks the one-time option whenever there is one.
+        The policy is :mod:`ahp_host_acp.permissions`: the user picks from the
+        agent's options, *always* ones included, and nothing is ever picked
+        for them. A call that shows a diff is previewed (`edits`), so the
+        change can be read before it is allowed.
         """
-        cancelled = {"outcome": {"outcome": "cancelled"}}
-        options = [o for o in params.get("options") or () if isinstance(o, Mapping)]
-        sink = self._sink
-        if sink is None or params.get("sessionId") != self.acp_session_id:
-            return cancelled
+        chat = self._chat_of(params.get("sessionId"))
+        sink = chat.sink if chat is not None else None
+        if chat is None or sink is None:
+            return permissions.CANCELLED
         update = _mapping(params.get("toolCall"))
         call_id = update.get("toolCallId")
         if not isinstance(call_id, str) or not call_id:
-            return cancelled
-        call = self._calls.setdefault(call_id, ToolCall(call_id))
+            return permissions.CANCELLED
+        offered = permissions.acp_options(params.get("options"))
+        call = chat.calls.setdefault(call_id, ToolCall(call_id))
         call.merge(update)
-        self._note_diffs(call)
-        await self._announce(call, sink)
+        self._note_diffs(chat, call)
+        await self._announce(chat, call, sink)
         try:
             outcome = await sink.confirm_tool_call(
                 ToolConfirmation(
@@ -663,112 +976,116 @@ class AcpSession:
                     invocation_message=call.approval_line(),
                     tool_input=call.raw_input,
                     confirmation_title=call.title or None,
+                    options=permissions.confirmation_options(offered),
+                    edits=self._edits.preview(diffs_of(call.content), self.directory),
                 )
             )
         except asyncio.CancelledError:
-            return cancelled  # the turn ended while the prompt was open
-        wanted = (
-            ("allow_once", "allow_always") if outcome.approved else ("reject_once", "reject_always")
-        )
-        for kind in wanted:
-            for option in options:
-                if option.get("kind") == kind and isinstance(option.get("optionId"), str):
-                    return {"outcome": {"outcome": "selected", "optionId": option["optionId"]}}
-        return cancelled
+            return permissions.CANCELLED  # the turn ended while the prompt was open
+        return permissions.answer(offered, outcome)
 
     # -- turns ---------------------------------------------------------------
 
     async def send_user_message(self, message: UserMessage, sink: TurnSink) -> None:
-        async with self._lock:
-            await self._settle()
+        chat = self._chat_for(message.chat_uri)
+        async with chat.lock:
+            await self._settle(chat)
             if message.model is not None:
-                self.model = message.model.id
+                chat.model = message.model.id
             try:
-                conn = await self._ensure()
-                await self._sync_config(conn)
-                await self._apply_model(conn)
+                conn = await self._ensure(chat)
+                await self._sync_config(conn, chat)
+                await self._apply_model(conn, chat)
             except PermissionError as error:
                 await sink.turn_failed(str(error), error_type="agent.workingDirectory")
                 return
             except (AcpError, OSError) as error:
-                await self._drop_connection()
+                if isinstance(error, AgentExitedError):
+                    await self._drop_connection()
                 await sink.turn_failed(f"Could not start the agent: {error}", "acp.start")
                 return
-            self._sink = sink
-            self._calls.clear()
-            self._announced.clear()
-            self._diffs.clear()
+            chat.sink = sink
+            chat.calls.clear()
+            chat.announced.clear()
+            chat.diffs.clear()
+            if chat.turns is not None:
+                chat.turns += 1
             try:
-                await self._run_turn(conn, message, sink)
+                await self._run_turn(conn, chat, message, sink)
             finally:
-                self._sink = None
+                chat.sink = None
 
-    async def _settle(self) -> None:
-        inflight, self._inflight = self._inflight, None
+    async def _settle(self, chat: _Chat) -> None:
+        inflight, chat.inflight = chat.inflight, None
         if inflight is not None and not inflight.done():
             await asyncio.wait({inflight}, timeout=SETTLE_TIMEOUT)
 
-    async def _prompt(self, conn: AcpConnection, text: str) -> Mapping[str, Any]:
+    async def _prompt(self, conn: AcpConnection, chat: _Chat, text: str) -> Mapping[str, Any]:
         """One `session/prompt`, shielded: a stopped turn lets it finish in the background."""
         task = asyncio.create_task(
             conn.request(
                 "session/prompt",
-                {"sessionId": self.acp_session_id, "prompt": [{"type": "text", "text": text}]},
+                {"sessionId": chat.acp_session_id, "prompt": [{"type": "text", "text": text}]},
             )
         )
-        self._inflight = task
+        chat.inflight = task
         task.add_done_callback(_consume)
         return _mapping(await asyncio.shield(task))
 
-    async def _apply_model(self, conn: AcpConnection) -> None:
-        wanted = self.model
-        if not wanted or wanted == self._applied_model:
+    async def _apply_model(self, conn: AcpConnection, chat: _Chat) -> None:
+        wanted = chat.model
+        if not wanted or wanted == chat.applied_model:
             return
-        if self._model_option is not None:
+        if chat.model_option is not None:
             result = await conn.request(
                 "session/set_config_option",
-                {"sessionId": self.acp_session_id, "configId": self._model_option, "value": wanted},
+                {"sessionId": chat.acp_session_id, "configId": chat.model_option, "value": wanted},
             )
             answer = _mapping(result)
-            self._options.note(answer)
+            chat.options.note(answer)
             if _reports_options(answer):
-                self._verified = True
-        elif self._native_models:
+                chat.verified = True
+        elif chat.native_models:
             await conn.request(
-                "session/set_model", {"sessionId": self.acp_session_id, "modelId": wanted}
+                "session/set_model", {"sessionId": chat.acp_session_id, "modelId": wanted}
             )
         elif self._spec.model_command:
-            self._quiet = True
+            chat.quiet = True
             try:
-                result = await self._prompt(conn, self._spec.model_command.format(model=wanted))
+                result = await self._prompt(
+                    conn, chat, self._spec.model_command.format(model=wanted)
+                )
             finally:
-                self._quiet = False
+                chat.quiet = False
             log.info(
                 "switched session %s to %s (%s)",
-                self.acp_session_id,
+                chat.acp_session_id,
                 wanted,
                 result.get("stopReason"),
             )
-        self._applied_model = wanted
+        chat.applied_model = wanted
 
-    async def _run_turn(self, conn: AcpConnection, message: UserMessage, sink: TurnSink) -> None:
-        self._context_used = None
+    async def _run_turn(
+        self, conn: AcpConnection, chat: _Chat, message: UserMessage, sink: TurnSink
+    ) -> None:
+        chat.context_used = None
         try:
-            result = await self._prompt(conn, message.text)
+            result = await self._prompt(conn, chat, message.text)
         except asyncio.CancelledError:
-            await self.cancel("stopped")
+            await self._cancel(chat)
             raise
         except AgentExitedError as error:
-            await self._close_open_calls(sink)
+            await self._close_open_calls(chat, sink)
             await self._drop_connection()
+            chat.turns = None  # whether the agent kept this turn is anyone's guess
             await sink.turn_failed(str(error), error_type="acp.agentExited")
             return
         except AcpError as error:
-            await self._close_open_calls(sink)
+            await self._close_open_calls(chat, sink)
             await sink.turn_failed(str(error), error_type=f"acp.{error.code}")
             return
-        await self._close_open_calls(sink)
-        await self._report_usage(result, sink)
+        await self._close_open_calls(chat, sink)
+        await self._report_usage(chat, result, sink)
         stop = result.get("stopReason")
         if stop in ("end_turn", "cancelled", None):
             return
@@ -779,15 +1096,15 @@ class AcpSession:
         }
         await sink.turn_failed(reasons.get(str(stop), f"The agent stopped: {stop}"), f"acp.{stop}")
 
-    async def _close_open_calls(self, sink: TurnSink) -> None:
+    async def _close_open_calls(self, chat: _Chat, sink: TurnSink) -> None:
         """A call the agent never finished is shown as failed, not left spinning."""
-        for call in list(self._calls.values()):
-            if call.call_id in self._announced:
+        for call in list(chat.calls.values()):
+            if call.call_id in chat.announced:
                 call.status = "failed"
-                await self._complete(call, sink)
-        self._calls.clear()
+                await self._complete(chat, call, sink)
+        chat.calls.clear()
 
-    async def _report_usage(self, result: Mapping[str, Any], sink: TurnSink) -> None:
+    async def _report_usage(self, chat: _Chat, result: Mapping[str, Any], sink: TurnSink) -> None:
         """The turn's usage, with ACP's context window and cost in `_meta`.
 
         AHP's `UsageInfo` has token counts and a model, and `_meta` for
@@ -801,14 +1118,14 @@ class AcpSession:
         input_tokens = usage.get("inputTokens")
         if not isinstance(input_tokens, int):
             # No per-turn usage: the agent's context size is the best gauge.
-            input_tokens = self._context_used
+            input_tokens = chat.context_used
         output_tokens = usage.get("outputTokens")
         cached = usage.get("cachedReadTokens")
         acp_usage: dict[str, Any] = {}
         for key, value in (
-            ("used", self._context_used),
-            ("size", self._context_size),
-            ("cost", self._cost),
+            ("used", chat.context_used),
+            ("size", chat.context_size),
+            ("cost", chat.cost),
         ):
             if value is not None:
                 acp_usage[key] = value
@@ -818,13 +1135,23 @@ class AcpSession:
             input_tokens=input_tokens,
             output_tokens=output_tokens if isinstance(output_tokens, int) else None,
             cache_read_tokens=cached if isinstance(cached, int) else None,
-            model=self._applied_model,
+            model=chat.applied_model,
             meta={"acpUsage": acp_usage} if acp_usage else None,
         )
 
 
+def _current_model(chat: _Chat) -> str | None:
+    if chat.applied_model:
+        return chat.applied_model
+    option = chat.options.model_option
+    return option.current if option is not None and isinstance(option.current, str) else None
+
+
 class AcpProvider:
     """One host, one provider: an ACP agent command, rooted at the served folders."""
+
+    #: `DeclaresCompletionTriggers`: the agent's slash commands open on `/`.
+    completion_trigger_characters: Final = (slash.TRIGGER,)
 
     def __init__(
         self,
@@ -851,21 +1178,55 @@ class AcpProvider:
         self._connect: Connector = connect or AcpConnection.spawn
         #: What the agent said about itself last time; see `catalogue`.
         self.catalogue = Catalogue(catalogue_file)
-        #: Published once: the host puts `AgentInfo` on the root channel when
-        #: it starts, and has no way yet to say it changed.
-        self._models = self.current_models()
-        self._info = AgentInfo(
-            provider=self.provider_id,
-            display_name=self._display_name,
-            description=self._description,
-            models=self._models,
-        )
-        self._by_chat: weakref.WeakValueDictionary[str, AcpSession] = weakref.WeakValueDictionary()
-        self._models_stale = False
+        self._info = self._describe()
+        self._agent_updates: AgentInfoChanged | None = None
+        self._sessions: weakref.WeakSet[AcpSession] = weakref.WeakSet()
 
     @property
     def agent(self) -> AgentInfo:
         return self._info
+
+    def _describe(self) -> AgentInfo:
+        """`AgentInfo` from the config and what the agent last reported.
+
+        `multipleChats`: every ACP agent can hold several sessions, which is
+        what a chat is here. `fork` only when the agent's last `initialize`
+        said it can (`sessionCapabilities.fork`); `sideChat` never, since ACP
+        has no way to give a session context outside its own conversation.
+        """
+        multiple: dict[str, Any] = {}
+        if self.catalogue.session_capability("fork"):
+            multiple["fork"] = True
+        return AgentInfo(
+            provider=self.provider_id,
+            display_name=self._display_name,
+            description=self._description,
+            models=self.current_models(),
+            capabilities={"multipleChats": multiple},
+        )
+
+    async def attach_agent_updates(self, changed: AgentInfoChanged) -> None:
+        """`UpdatesAgentInfo`: keep the host's notifier for `_agent_changed`."""
+        self._agent_updates = changed
+
+    async def _agent_changed(self) -> None:
+        """Republish `AgentInfo` if what the agent reported changed it.
+
+        Called whenever it might have: a session's `session/new` (models), a
+        `usage_update` (a model's context window), an `initialize` (whether
+        the agent forks). The host compares and publishes `root/agentsChanged`
+        only on a real difference.
+        """
+        described = self._describe()
+        if described.to_wire() == self._info.to_wire():
+            return
+        self._info = described
+        notify = self._agent_updates
+        if notify is not None:
+            try:
+                await notify()
+            except Exception:
+                log.exception("republishing %s's agent info failed", self.provider_id)
 
     @property
     def default_model(self) -> str | None:
@@ -905,23 +1266,6 @@ class AcpProvider:
             for model_id, name in self.catalogue.models()
         )
 
-    def _models_changed(self) -> None:
-        """The seam for a live model list.
-
-        Called whenever what the agent reported might change the picker. The
-        host publishes `AgentInfo` once, at start, and offers no way for a
-        provider to republish it (`root/agentsChanged`) yet -- so for now a
-        change is only logged, once, and seen after a restart, through the
-        catalogue file. With that host API, publish `current_models()` here.
-        """
-        if self._models_stale or self.current_models() == self._models:
-            return
-        self._models_stale = True
-        log.info(
-            "what %s reported changes its model list; clients see it after the host restarts",
-            self.provider_id,
-        )
-
     def _session(self, context: AgentSessionContext, **kwargs: Any) -> AcpSession:
         session = AcpSession(
             context,
@@ -930,10 +1274,10 @@ class AcpProvider:
             connect=self._connect,
             default_model=self.default_model,
             catalogue=self.catalogue,
-            on_models_changed=self._models_changed,
+            on_agent_changed=self._agent_changed,
             **kwargs,
         )
-        self._by_chat[context.chat_uri] = session
+        self._sessions.add(session)
         return session
 
     async def create_session(self, context: AgentSessionContext) -> AcpSession:
@@ -942,24 +1286,22 @@ class AcpProvider:
     async def resume_session(self, context: AgentSessionContext) -> AcpSession:
         state = context.resume_state or {}
         session_id = state.get("acpSessionId")
+        turns = state.get("turns")
+        chats = state.get("chats")
         session = self._session(
             context,
             acp_session_id=session_id if isinstance(session_id, str) else None,
             directory=Path(cwd) if isinstance(cwd := state.get("cwd"), str) else None,
+            # Absent in a state saved before turns were counted: not known.
+            turns=turns if isinstance(turns, int) and not isinstance(turns, bool) else None,
+            chats=chats if isinstance(chats, Mapping) else None,
         )
         if isinstance(model := state.get("model"), str):
             session.model = model
         return session
 
     async def resume_state_of(self, session: Any) -> Mapping[str, Any] | None:
-        if isinstance(session, AcpSession) and session.acp_session_id:
-            state: dict[str, Any] = {"acpSessionId": session.acp_session_id}
-            if session.directory is not None:
-                state["cwd"] = str(session.directory)
-            if session.model:
-                state["model"] = session.model
-            return state
-        return None
+        return session.resume_state() if isinstance(session, AcpSession) else None
 
     # -- ConfiguresSessions ------------------------------------------------------
 
@@ -969,7 +1311,7 @@ class AcpProvider:
         The model option is left to the model picker when there is one.
         """
         return self.catalogue.options.properties(
-            with_model=not self._models, pinned=self.spec.config_options
+            with_model=not self._info.models, pinned=self.spec.config_options
         )
 
     async def resolve_config(self, request: ConfigRequest) -> ConfigResolution:
@@ -995,16 +1337,19 @@ class AcpProvider:
     # -- Completes ---------------------------------------------------------------
 
     async def complete(self, request: CompletionRequest) -> Sequence[CompletionItem]:
-        """Slash commands: the session's own, or what the agent offered last.
+        """Slash commands: the chat's own, its session's, or what the agent offered last.
 
-        A session's agent starts on its first turn, so until then the commands
-        are the ones it reported most recently -- the same agent's, so the
-        same names, short of a project's own.
+        A chat's agent session starts on its first turn, so until then the
+        commands are the ones the agent reported most recently -- the same
+        agent's, so the same names, short of a project's own.
         """
         if request.kind not in ("", "userMessage"):
             return ()
-        session = self._by_chat.get(request.chat)
-        commands = session.commands if session is not None else None
+        commands: tuple[slash.Command, ...] | None = None
+        for session in list(self._sessions):
+            if session.hosts(request.chat):
+                commands = session.commands_for(request.chat)
+                break
         if commands is None:
             commands = self.catalogue.commands
         return slash.complete(commands, request)

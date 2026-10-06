@@ -4,6 +4,28 @@
 
 ### Added
 
+- One ACP session per chat (`HostsChats`, `CancelsChats`; `multipleChats` is
+  advertised): each chat a client creates gets its own `session/new` in the
+  session's agent process, turns route by `UserMessage.chat_uri`, stopping a
+  chat sends `session/cancel` for that chat only, a closed chat's session is
+  `session/close`d when the agent offers it, and each chat's ACP session id
+  is kept in the resume state (`chats`) and reattached after a restart.
+- Chat forks through ACP's (unstable) `session/fork`, advertised as
+  `multipleChats.fork` only when the agent declares `sessionCapabilities.fork`,
+  and made only at the source chat's latest turn -- ACP forks a whole
+  conversation, so anything earlier is refused rather than copied wrong. Side
+  chats are not offered.
+- Per-call diffs: a completed edit's result carries a `fileEdit` item per
+  file (`TurnSink.file_edit`), from the file before that call to after it, in
+  place of the diff's text summary.
+- Approval prompts offer the agent's own permission options
+  (`ConfirmationOption`s, its ids and names) and preview a call's diff
+  (`ToolConfirmation.edits`).
+- The agent's entry on the root channel follows what it reports
+  (`UpdatesAgentInfo`): a model list from its `model` option, a model's
+  context window, and whether it can fork, without a restart.
+- `completion_trigger_characters = ("/",)` on the provider
+  (`DeclaresCompletionTriggers`), so `ahp-node` offers slash commands too.
 - Session config from the agent: its ACP config options (`select`,
   `boolean`) or, failing those, its session modes become the session's config
   schema (`ConfiguresSessions`), with the agent's starting values as defaults.
@@ -19,12 +41,10 @@
 - A model picker from the agent's own `model` option (or the removed
   session-model API) when the config file has no `[[models]]`; a model's
   context window from the agent's `usage_update.size` when the config gives
-  none. Both apply from the next start: the host has no way yet to republish
-  `AgentInfo`.
+  none.
 - `session_info_update` titles rename the session.
 - `available_commands_update`: slash commands as completions after a `/` at
-  the start of a message. `python -m ahp_host_acp` advertises `/` as a
-  completion trigger.
+  the start of a message, from the chat's own ACP session.
 - `plan` updates as one finished "Update plan" row per change, the task list
   as its result, and the entry in progress as the session's activity.
 - Tool-call `diff`s as the session's changeset ("Session changes"), with
@@ -57,6 +77,13 @@
 
 ### Changed
 
+- **Approval policy (a security decision):** the user is offered the agent's
+  options as-is, *allow always* included, and the agent gets exactly the one
+  picked. Before, approving always sent *allow once* (or *allow always* when
+  that was all the agent offered). A plain approve or deny is now *once* only;
+  if the agent offers no such option the answer is `cancelled`, so nothing
+  broader than the user's answer is ever sent. ACP's answer has no field for
+  a denial's reason or a suggestion, so neither reaches the agent.
 - `[config_options]` are now shown to clients, read-only, and may be booleans.
 - Updates an agent sends right behind its `session/new` answer, before the
   session id is known, are no longer dropped.
