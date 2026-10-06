@@ -30,8 +30,12 @@ config options, refusing `mode = forbidden`; ``FAKE_ACP_MODES=1`` offers
 legacy session modes; ``FAKE_ACP_COMMANDS=1`` sends slash commands right
 behind `session/new`; ``FAKE_ACP_MCP_HTTP=1`` advertises http MCP servers;
 ``FAKE_ACP_FORK=1`` and ``FAKE_ACP_CLOSE=1`` offer `session/fork` and
-`session/close`; ``FAKE_ACP_LOG`` names a file each received method is
-appended to.
+`session/close`; ``FAKE_ACP_PROMPT_CAPS=1`` takes image, audio and embedded
+context in prompts; ``FAKE_ACP_STORE`` names a file that keeps session
+histories across processes (as an agent that stores its sessions does);
+``FAKE_ACP_LOG`` names a file each received method is appended to.
+
+The scenario is the prompt's first text block; the rest is context.
 """
 
 from __future__ import annotations
@@ -203,9 +207,30 @@ def chosen(reply: dict[str, Any]) -> Any:
     return outcome.get("optionId", outcome.get("outcome"))
 
 
+def store(load: bool = False) -> None:
+    """Share histories through `FAKE_ACP_STORE`, if there is one."""
+    path = os.environ.get("FAKE_ACP_STORE")
+    if not path:
+        return
+    if load:
+        if os.path.exists(path):
+            with open(path, encoding="utf-8") as f:
+                for key, value in json.load(f).items():
+                    state["histories"].setdefault(key, value)
+        return
+    kept: dict[str, Any] = {}
+    if os.path.exists(path):
+        with open(path, encoding="utf-8") as f:
+            kept = json.load(f)
+    kept.update(state["histories"])
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(kept, f)
+
+
 def prompt(session_id: str, words: str) -> dict[str, Any]:
     if words != "whoami":
         state["histories"].setdefault(session_id, []).append(words)
+        store()
     cwd = Path(state["cwd"] or ".")
     if words.startswith("/model "):
         state["model"] = words.split()[1]
@@ -430,6 +455,12 @@ def main() -> None:
             }
             if os.environ.get("FAKE_ACP_MCP_HTTP") == "1":
                 capabilities["mcpCapabilities"] = {"http": True}
+            if os.environ.get("FAKE_ACP_PROMPT_CAPS") == "1":
+                capabilities["promptCapabilities"] = {
+                    "image": True,
+                    "audio": True,
+                    "embeddedContext": True,
+                }
             for flag, name in (("FAKE_ACP_FORK", "fork"), ("FAKE_ACP_CLOSE", "close")):
                 if os.environ.get(flag) == "1":
                     capabilities["sessionCapabilities"][name] = {}
@@ -444,8 +475,10 @@ def main() -> None:
                 session_id = str(uuid.uuid4())
                 source = state["histories"].get(params.get("sessionId"), [])
                 state["histories"][session_id] = list(source) if method == "session/fork" else []
+                store()
             else:
                 session_id = params["sessionId"]
+                store(load=True)
                 state["histories"].setdefault(session_id, [])
             state["session"] = session_id
             result = {"sessionId": session_id} if method in ("session/new", "session/fork") else {}
@@ -494,7 +527,7 @@ def main() -> None:
             state["model"] = params["modelId"]
             result = {}
         elif method == "session/prompt":
-            words = " ".join(b.get("text", "") for b in params["prompt"] if b.get("type") == "text")
+            words = next((b["text"] for b in params["prompt"] if b.get("type") == "text"), "")
             result = prompt(params["sessionId"], words.strip())
         else:
             send({"id": request_id, "error": {"code": -32601, "message": f"no {method}"}})

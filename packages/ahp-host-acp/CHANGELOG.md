@@ -4,6 +4,17 @@
 
 ### Added
 
+- Message attachments in the prompt, per the agent's `promptCapabilities`:
+  served files embedded (`resource`, small text files) or linked
+  (`resource_link` to the real path), web links, selections named in a text
+  block, inline images and audio, other inline data as embedded resources,
+  `simple` attachments' `modelRepresentation`, and attached chats
+  (`UserMessage.attached_chats`) as a markdown transcript -- embedded, or as
+  text. Anything the agent cannot take is left out with a log line.
+- Forked sessions (`createSession.fork`) through `session/fork` on the source
+  session's agent, reopened in the new session's own process, under the chat
+  fork's latest-turn rule. Otherwise the new session's first message carries
+  the copied transcript as context, with a system notification saying so.
 - One ACP session per chat (`HostsChats`, `CancelsChats`; `multipleChats` is
   advertised): each chat a client creates gets its own `session/new` in the
   session's agent process, turns route by `UserMessage.chat_uri`, stopping a

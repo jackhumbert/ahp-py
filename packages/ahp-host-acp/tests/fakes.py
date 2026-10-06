@@ -132,7 +132,7 @@ class RecordingSink:
     async def system_notification(
         self, text: str, *, markdown: bool = False, meta: Mapping[str, Any] | None = None
     ) -> None:
-        raise AssertionError("not used")
+        self.events.append(("notice", text))
 
     async def request_input(self, request: InputRequest) -> InputOutcome:
         raise AssertionError("not used")

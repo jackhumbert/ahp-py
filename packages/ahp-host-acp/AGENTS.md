@@ -15,7 +15,8 @@ server's AGENTS.md requires ("Adding a provider adapter"). It is the ACP
   config), `catalogue.py` (what the agent reported last, `agent.json`),
   `commands.py` (slash commands -> completions), `plan.py` (plan -> a row per
   update), `changes.py` (tool diffs -> approval previews, `fileEdit` results
-  and the session changeset), `mcp.py` (configured MCP servers). Each
+  and the session changeset), `mcp.py` (configured MCP servers), `prompts.py`
+  (a message's attachments and attached chats -> ACP prompt blocks). Each
   module's docstring says why it maps the way it does; keep that reasoning
   current when the spec moves.
 - `permissions.py` is the approval policy: the user is offered the agent's

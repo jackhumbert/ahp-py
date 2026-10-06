@@ -5,8 +5,10 @@ other ACP agent) and opens an ACP session in it for each of its chats -- the
 default chat, and every chat a client creates (`HostsChats`) -- so each chat
 is its own conversation. Per chat it translates:
 
-- `session/prompt` <- a user turn; its streamed `session/update`s become the
-  host's neutral `TurnSink` events (text, reasoning, tool calls, usage);
+- `session/prompt` <- a user turn, its attachments and attached chats as the
+  agent's prompt blocks allow (:mod:`ahp_host_acp.prompts`); its streamed
+  `session/update`s become the host's neutral `TurnSink` events (text,
+  reasoning, tool calls, usage);
 - `session/request_permission` -> the host's `confirm_tool_call`, with the
   agent's own options (:mod:`ahp_host_acp.permissions`);
 - a stop -> `session/cancel` for that chat's session (`CancelsChats`).
@@ -72,7 +74,7 @@ from ahp_host.provider.base import (
 )
 
 from ahp_host_acp import commands as slash
-from ahp_host_acp import jsonrpc, permissions
+from ahp_host_acp import jsonrpc, permissions, prompts
 from ahp_host_acp import plan as plans
 from ahp_host_acp.catalogue import Catalogue
 from ahp_host_acp.changes import Diff, SessionEdits, diffs_of
@@ -296,6 +298,13 @@ class AcpSession:
 
         self._title: str | None = None
         self._edits = SessionEdits(self._roots)
+        #: A forked session's copied transcript, until the agent holds it: the
+        #: fork's ACP session reopened, or it given as context (`fork_from`).
+        self._seed: ForkedFrom | None = (
+            context.fork if context.fork is not None and context.fork.turns else None
+        )
+        if self._seed is not None:
+            self._default.turns = None  # until the fork is made
 
     # -- the default chat, as callers have always seen it -------------------------
 
@@ -424,6 +433,8 @@ class AcpSession:
         try:
             if chat.acp_session_id is not None:
                 if await self._reattach(conn, chat, base):
+                    if chat is self._default:
+                        self._seed = None  # the fork: the agent has the conversation
                     return
                 log.warning(
                     "could not reopen ACP session %s; starting a new one", chat.acp_session_id
@@ -559,14 +570,35 @@ class AcpSession:
         self._chats[uri] = chat
 
     async def _fork(self, chat: _Chat, fork: ForkedFrom) -> None:
-        """Give *chat* a fork of its source chat's ACP session.
+        """Give *chat* a fork of its source chat's ACP session."""
+        source, result = await self._forked(fork, into=chat)
+        chat.acp_session_id = str(result["sessionId"])
+        chat.generation = self._generation
+        chat.model, chat.applied_model = source.model, source.applied_model
+        chat.native_models = source.native_models
+        chat.turns = len(fork.turns)
+        self._note_session(chat, result)
+
+    async def _forked(
+        self,
+        fork: ForkedFrom,
+        *,
+        into: _Chat | None = None,
+        cwd: Path | None = None,
+    ) -> tuple[_Chat, Mapping[str, Any]]:
+        """`session/fork` of the chat *fork* names, in this session's agent process.
 
         ACP's `session/fork` (unstable, `sessionCapabilities.fork`) copies the
         source session whole: it takes no turn to branch at. An AHP fork
         copies the source chat through one turn -- so it is made only when
         that turn is the last one the source's agent session has seen, and
         the source is not mid-turn. Anything else would leave the agent
-        remembering turns the forked chat does not show.
+        remembering turns the fork does not show.
+
+        *into* is the chat that will hold the fork here; without one the fork
+        is for another AHP session (*cwd* its folder), whose own agent process
+        must then reopen it -- so the agent must also offer `session/resume`
+        or `session/load`.
         """
         source = self._chats.get(fork.chat_uri or self._default.uri)
         if source is None:
@@ -581,25 +613,64 @@ class AcpSession:
             conn = await self._ensure(source)
             if not self._session_capability("fork"):
                 raise AhpError(PERMISSION_DENIED, "this agent cannot fork a session")
+            if into is None and not (
+                self._session_capability("resume") or self._capabilities.get("loadSession")
+            ):
+                raise AhpError(PERMISSION_DENIED, "this agent cannot reopen a forked session")
+            base = self._base() if cwd is None else {**self._base(), "cwd": str(cwd)}
             async with self._open_lock:
-                self._opening = chat
+                # Without a chat here, an update for the fork's id is dropped.
+                self._opening = into
                 try:
                     result = _mapping(
                         await conn.request(
-                            "session/fork", {**self._base(), "sessionId": source.acp_session_id}
+                            "session/fork", {**base, "sessionId": source.acp_session_id}
                         )
                     )
                 finally:
                     self._opening = None
-            session_id = result.get("sessionId")
-            if not isinstance(session_id, str) or not session_id:
-                raise AcpError("the agent's session/fork returned no sessionId")
-            chat.acp_session_id = session_id
-            chat.generation = self._generation
-            chat.model, chat.applied_model = source.model, source.applied_model
-            chat.native_models = source.native_models
-            chat.turns = len(fork.turns)
-            self._note_session(chat, result)
+        session_id = result.get("sessionId")
+        if not isinstance(session_id, str) or not session_id:
+            raise AcpError("the agent's session/fork returned no sessionId")
+        return source, result
+
+    async def fork_out(self, fork: ForkedFrom, cwd: Path) -> str | None:
+        """A fork of one of this session's chats, for a new session in *cwd*.
+
+        The ACP session id of the fork, for the new session to reopen in its
+        own agent process; ``None`` (logged) when this agent or this chat
+        cannot be forked honestly.
+        """
+        try:
+            _, result = await self._forked(fork, cwd=cwd)
+        except (AhpError, AcpError, OSError, PermissionError) as exc:
+            log.info("session fork from %s not made: %s", fork.session_uri, exc)
+            return None
+        return str(result["sessionId"])
+
+    async def fork_from(self, source: AcpSession | None, fork: ForkedFrom) -> None:
+        """`createSession.fork`: start as a fork of *source*'s conversation.
+
+        With an agent that can fork (`session/fork`, then `session/resume` or
+        `session/load` here) under the same rule as a chat fork, the default
+        chat's ACP session is the fork. Otherwise -- a source that is not this
+        agent's, or not running, or not at its latest turn -- the session
+        starts fresh, and its first message carries the copied transcript as
+        context, with a system notification saying so: the agent then knows
+        what the user sees, and the user knows how. That context is not kept
+        across a host restart before the first message.
+        """
+        if source is None:
+            log.info("session fork from %s: no running session of this agent", fork.session_uri)
+            return
+        try:
+            cwd = self.working_directory()
+        except PermissionError:
+            return
+        session_id = await source.fork_out(fork, cwd)
+        if session_id is not None:
+            self._default.acp_session_id = session_id
+            self._default.turns = len(fork.turns)
 
     async def chat_closed(self, chat_uri: str) -> None:
         """`HostsChats`: the chat is gone. Its ACP session is closed, if the
@@ -1020,12 +1091,13 @@ class AcpSession:
         if inflight is not None and not inflight.done():
             await asyncio.wait({inflight}, timeout=SETTLE_TIMEOUT)
 
-    async def _prompt(self, conn: AcpConnection, chat: _Chat, text: str) -> Mapping[str, Any]:
+    async def _prompt(
+        self, conn: AcpConnection, chat: _Chat, blocks: Sequence[Mapping[str, Any]]
+    ) -> Mapping[str, Any]:
         """One `session/prompt`, shielded: a stopped turn lets it finish in the background."""
         task = asyncio.create_task(
             conn.request(
-                "session/prompt",
-                {"sessionId": chat.acp_session_id, "prompt": [{"type": "text", "text": text}]},
+                "session/prompt", {"sessionId": chat.acp_session_id, "prompt": list(blocks)}
             )
         )
         chat.inflight = task
@@ -1053,7 +1125,7 @@ class AcpSession:
             chat.quiet = True
             try:
                 result = await self._prompt(
-                    conn, chat, self._spec.model_command.format(model=wanted)
+                    conn, chat, [prompts.text(self._spec.model_command.format(model=wanted))]
                 )
             finally:
                 chat.quiet = False
@@ -1069,8 +1141,28 @@ class AcpSession:
         self, conn: AcpConnection, chat: _Chat, message: UserMessage, sink: TurnSink
     ) -> None:
         chat.context_used = None
+        builder = prompts.PromptBuilder(
+            self._roots, _mapping(self._capabilities.get("promptCapabilities"))
+        )
+        blocks = builder.blocks(message)
+        seed, self._seed = (self._seed, None) if chat is self._default else (None, self._seed)
+        if seed is not None:
+            # After the message, like any other context: the message comes first.
+            blocks.insert(
+                1,
+                prompts.chat_block(
+                    seed.chat_uri or seed.session_uri,
+                    "The conversation this session was forked from",
+                    seed.turns,
+                    builder.embedded,
+                ),
+            )
+            await sink.system_notification(
+                "This agent could not take the forked conversation over itself, so the "
+                "earlier turns were given to it as context with this message."
+            )
         try:
-            result = await self._prompt(conn, chat, message.text)
+            result = await self._prompt(conn, chat, blocks)
         except asyncio.CancelledError:
             await self._cancel(chat)
             raise
@@ -1281,7 +1373,15 @@ class AcpProvider:
         return session
 
     async def create_session(self, context: AgentSessionContext) -> AcpSession:
-        return self._session(context, config_properties=self._config_properties())
+        session = self._session(context, config_properties=self._config_properties())
+        fork = context.fork
+        if fork is not None and fork.turns:
+            source = next(
+                (s for s in list(self._sessions) if s.context.session_uri == fork.session_uri),
+                None,
+            )
+            await session.fork_from(source, fork)
+        return session
 
     async def resume_session(self, context: AgentSessionContext) -> AcpSession:
         state = context.resume_state or {}

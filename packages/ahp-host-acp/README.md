@@ -30,6 +30,18 @@ bridge (`openclaw acp`).
   forked when the agent can fork a session (ACP's `session/fork`), at its
   latest turn; stopping a chat cancels only that chat, and closing one closes
   its ACP session when the agent offers `session/close`.
+- **Forked sessions** (`createSession.fork`): under the same rule, the new
+  session's conversation is the agent's own fork (`session/fork`, reopened
+  with `session/resume` or `session/load`). When that cannot be done -- the
+  agent cannot fork, the source is another agent's or not running, or not at
+  that turn -- the session starts fresh, its first message carries the
+  copied transcript as context, and a system notification says so.
+- **Attachments**, as the agent's `promptCapabilities` allow: a served file
+  embedded (small text files, with `embeddedContext`) or linked to its real
+  path (`resource_link`), a web link as a link, a selection named in words,
+  inline images and audio, other inline data embedded, and an attached chat's
+  transcript (as the host resolved it) as context. What the agent cannot take
+  is left out, with a log line, rather than failing the turn.
 - A model picker: the config file's `[[models]]` (first is the default), or,
   without any, the agent's own list from its `model` config option, with the
   model it starts a session on first. It updates as soon as the agent reports
@@ -80,10 +92,9 @@ when the session is created, and AHP has no way to add to it later; the agent
 starts on a session's first turn, so the very first session an agent ever has
 offers no config. Every session after it does.
 
-Not yet: attachments (only the message text is sent); side chats (ACP has no
-way to give a session context outside its own conversation); a forked
-*session* (`createSession.fork` starts a fresh agent session beside the
-copied transcript); telling the agent *why* a call was declined -- ACP's
+Not yet: side chats (ACP has no way to give a session context outside its
+own conversation); annotation attachments (they live on a host channel this
+adapter does not read); telling the agent *why* a call was declined -- ACP's
 permission answer has no field for a reason or a suggestion, so they stay in
 the transcript. The client filesystem and terminal methods are deliberately
 not offered.
