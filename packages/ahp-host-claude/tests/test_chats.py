@@ -17,9 +17,10 @@ from ahp_host.provider.base import (
     UserMessage,
 )
 from claude_agent_sdk import AssistantMessage, ClaudeAgentOptions, ResultMessage, TextBlock
+from claude_agent_sdk import UserMessage as SdkUserMessage
 
 from ahp_host_claude.provider import ClaudeProvider, ClaudeSession, LocalClaudeSession
-from tests.fakes import FakeClient, FakePublisher, RecordingSink, text_of
+from tests.fakes import FakeClient, FakePublisher, RecordingSink, eventually, text_of
 
 DEFAULT = "ahp-chat:/default"
 
@@ -304,3 +305,23 @@ async def test_completions_answer_from_the_chats_own_session(tmp_path: Path) -> 
         CompletionRequest(kind="userMessage", chat="ahp-chat:/x", text="/re", offset=3)
     )
     assert [item.insert_text for item in items] == ["/review "]
+
+
+async def test_a_message_injected_into_a_chat_opens_a_turn_there(tmp_path: Path) -> None:
+    """A background task reporting back into the chat that started it.
+
+    Claude Code injects the task's notification into that chat's own
+    conversation once its turn has ended. It used to be dropped outside the
+    default chat, because `external_turn` could only open a turn there.
+    """
+    harness = Harness(tmp_path, _answer("a1"))
+    session = await harness.session()
+    await session.chat_opened(ChatContext(session_uri="s", chat_uri="ahp-chat:/x"))
+    await session.send_user_message(UserMessage(text="x", chat_uri="ahp-chat:/x"), RecordingSink())
+    harness.clients[0].push(
+        SdkUserMessage(content="task finished", uuid="n1", origin={"kind": "task-notification"}),
+        *_answer("a2"),
+    )
+    await eventually(lambda: bool(harness.publisher.turns))
+    assert harness.publisher.external_chats == ["ahp-chat:/x"]
+    assert harness.publisher.turns[0][0] == "task finished"

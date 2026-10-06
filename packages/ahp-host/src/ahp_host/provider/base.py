@@ -731,16 +731,29 @@ class SessionPublisher(Protocol):
         """
         ...
 
-    async def external_turn(self, text: str, run: Callable[[TurnSink], Awaitable[None]]) -> bool:
-        """Start a turn on the default chat that no client asked for.
+    async def external_turn(
+        self,
+        text: str,
+        run: Callable[[TurnSink], Awaitable[None]],
+        *,
+        chat: str | None = None,
+    ) -> bool:
+        """Start a turn that no client asked for, on the default chat or *chat*.
 
         For an agent that is also driven from somewhere else -- a message typed
-        on another device -- so the conversation here does not silently skip
+        on another device, a background task reporting back into the chat
+        that started it -- so the conversation here does not silently skip
         the turns that happened there. The host publishes `chat/turnStarted`
         carrying `text` as the user's message, then runs `run(sink)` exactly as
         it runs `send_user_message`: a client can cancel it, and it ends as a
         client's turn does. Returns once the turn has started, not when it
         ends; ``False`` if the chat already has a turn running.
+
+        *chat* names one of the session's own chats (a client's `createChat`).
+        ``False`` for one it does not own, and for a worker chat from
+        :meth:`open_tool_chat`: those carry a parent agent's prompts, so a
+        turn there runs through :meth:`ProviderChat.run_turn`, never as a
+        user's message.
         """
         ...
 

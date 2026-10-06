@@ -12,6 +12,10 @@ versions each release speaks.
 
 ### Changed
 
+- `SessionPublisher.external_turn` takes `chat=`, so a provider running a
+  conversation per chat can show a turn its agent started in another chat
+  (a background task reporting back). It refuses a chat the session does
+  not own and a worker chat, whose turns are a parent agent's prompts.
 - `Host.completion_trigger_characters` is `None` when the embedder passed
   none (it was `()`), because `None` now means "use the providers'
   declarations" and `()` means "advertise none".

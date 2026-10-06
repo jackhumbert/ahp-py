@@ -4,6 +4,9 @@
 
 ### Added
 
+- A message Claude Code injects into a chat other than the default one (a
+  background task reporting back) opens a turn in that chat
+  (`external_turn(chat=...)`); it used to be dropped.
 - Chats (`HostsChats`, `CancelsChats`; `multipleChats` with `fork` and
   `sideChat`). Each chat is its own Claude Code conversation on its own
   process, routed by `UserMessage.chat_uri`, with its own transcript marks,

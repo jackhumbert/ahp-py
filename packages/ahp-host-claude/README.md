@@ -98,7 +98,9 @@ Status: pre-alpha.
   command changes is not shown: nothing says which files a command touched.
 - **Chats**: a session can have several (`createChat`), each its own Claude
   Code conversation on its own Claude process, with its own history,
-  rewinds and resume state; stopping one stops only that one. A **fork** starts
+  rewinds and resume state; stopping one stops only that one, and a background
+  task reporting back after its turn ends opens a turn in the chat that
+  started it. A **fork** starts
   from a copy of the source chat's conversation cut at the turn it forked at,
   so the source is untouched; a **side chat** the same, without the source's
   turns in its own history. A source that cannot be cut there (its turns

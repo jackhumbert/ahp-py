@@ -389,6 +389,8 @@ class FakePublisher:
 
     def __init__(self) -> None:
         self.turns: list[tuple[str, RecordingSink]] = []
+        #: The `chat=` each external turn named (None: the default chat).
+        self.external_chats: list[str | None] = []
         self.tasks: list[asyncio.Task[None]] = []
         self.refusals = 0
         self.config_changes: list[dict[str, Any]] = []
@@ -404,12 +406,15 @@ class FakePublisher:
         #: Each changeset publication: (changeset, changes, chat).
         self.changesets: list[tuple[Any, list[Any], str | None]] = []
 
-    async def external_turn(self, text: str, run: Callable[[Any], Awaitable[None]]) -> bool:
+    async def external_turn(
+        self, text: str, run: Callable[[Any], Awaitable[None]], *, chat: str | None = None
+    ) -> bool:
         if any(not task.done() for task in self.tasks):
             self.refusals += 1
             return False
         sink = RecordingSink()
         self.turns.append((text, sink))
+        self.external_chats.append(chat)
 
         async def turn() -> None:
             await run(sink)

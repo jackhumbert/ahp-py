@@ -1086,10 +1086,20 @@ class _Publisher:
             self._session, parent, title, tool_call_id, interactivity
         )
 
-    async def external_turn(self, text: str, run: Callable[[TurnSink], Awaitable[None]]) -> bool:
-        return await self._host._run_external_turn(
-            self._session, self._session.chat_uri, text, run, "user"
-        )
+    async def external_turn(
+        self,
+        text: str,
+        run: Callable[[TurnSink], Awaitable[None]],
+        *,
+        chat: str | None = None,
+    ) -> bool:
+        channel = self._chat_of(chat)
+        if channel is None or channel in self._session.provider_chats:
+            # A worker chat's turns are a parent agent's prompts (origin
+            # `agent`, `ProviderChat.run_turn`); one opened here would publish
+            # them as a user's message.
+            return False
+        return await self._host._run_external_turn(self._session, channel, text, run, "user")
 
 
 class _ProviderChat:

@@ -311,7 +311,7 @@ no turn is running. Hold it for the life of the session.
 | `canvas_set(canvas, chat=)` / `canvas_removed(instance_id, chat=)` | A live canvas on a chat (experimental): an `ahp-canvas:` channel the chat references. Its `url` is never persisted and is redacted from wire logs. |
 | `open_tool_chat(title, tool_call_id=, chat=, interactivity=)` | A worker chat for a tool call — a subagent's own conversation. Returns a handle whose `run_turn(prompt, run)` runs a turn on it. |
 | `open_terminal(title, chat=, cwd=, turn_id=, tool_call_id=)` | A read-only terminal for output the agent produces; returns a handle with `resource`, `write(data)` and `exited(code)`. |
-| `external_turn(text, run)` | A turn that happened somewhere else. |
+| `external_turn(text, run, *, chat=None)` | A turn that happened somewhere else, on the default chat or one of the session's own chats (never a worker chat). |
 | `progress(progress, total=, message=)` | Report against `createSession.progressToken`. |
 
 **Background work** is a shell left running or a subagent still going: work

@@ -366,3 +366,40 @@ async def test_a_forked_session_names_the_chat_and_turn_it_came_from() -> None:
         assert [t["id"] for t in fork.turns] == ["t1"]
     finally:
         await shut(host, wire, serving)
+
+
+async def test_an_external_turn_opens_on_the_chat_it_names() -> None:
+    """A background task reporting back into the chat that started it.
+
+    `external_turn` reached only the default chat, so a provider running a
+    conversation per chat could not show a turn the agent started in another
+    one. A chat the session does not own, and a worker chat (whose turns are
+    a parent agent's prompts, not a user's), are refused.
+    """
+    provider = HostingProvider()
+    host = Host(provider, LoopbackSingleUserPolicy())
+    wire, serving = await connect(host)
+    try:
+        uri = "echo:/hc-ext"
+        default = await open_session(wire, uri)
+        side = "ahp-chat:/hc-ext-side"
+        assert "error" not in await _chat(wire, uri, side)
+        agent = provider.sessions[0]
+        publisher = agent.context.publisher
+        assert publisher is not None
+
+        async def report(sink: TurnSink) -> None:
+            await sink.text_delta("the task finished")
+
+        assert await publisher.external_turn("task done", report, chat=side)
+        assert await wire.until(lambda: bool(state(host, side).get("turns")))
+        turn = state(host, side)["turns"][-1]
+        assert turn["message"]["origin"] == {"kind": "user"}
+        assert "the task finished" in str(turn)
+        assert not state(host, default).get("turns")
+
+        assert not await publisher.external_turn("x", report, chat="ahp-chat:/not-mine")
+        worker = await publisher.open_tool_chat("Worker", tool_call_id="call-ext")
+        assert not await publisher.external_turn("x", report, chat=worker.resource)
+    finally:
+        await shut(host, wire, serving)

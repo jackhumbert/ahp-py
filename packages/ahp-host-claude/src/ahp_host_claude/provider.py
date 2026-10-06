@@ -1813,7 +1813,10 @@ class ClaudeSession:
                 self._abandon(turn)
 
         for _ in range(40):
-            if await publisher.external_turn(text, run):
+            # `chat=` is this conversation's own chat (None for the default
+            # one), so a background task reporting back into a side chat is
+            # shown there rather than dropped.
+            if await publisher.external_turn(text, run, chat=self._scope):
                 return
             await asyncio.sleep(0.05)
         log.warning("could not open a turn for a message sent from elsewhere")
@@ -2752,15 +2755,6 @@ class LocalClaudeSession(ClaudeSession):
     def _refresh_soon(self) -> None:
         if self._parent is None:
             super()._refresh_soon()
-
-    async def _external(self, text: str, prompt: str | None = None) -> None:
-        if self._parent is not None:
-            # A turn no one asked for can only be opened on the default chat
-            # (`external_turn`); in another chat Claude Code's answer to an
-            # injected message (a background task reporting back) is not shown.
-            log.info("not showing a message injected into chat %s", self._scope)
-            return
-        await super()._external(text, prompt)
 
     async def _changed(self, change: FileChange) -> None:
         """A chat's changeset is its own (`chat=`); the session's covers every chat."""
