@@ -11,8 +11,12 @@
     [env]
     OPENCLAW_HIDE_BANNER = "1"
 
-    [config_options]              # ACP session config options, set on each session
+    [config_options]              # ACP session config options, fixed on each session
     thought_level = "low"
+
+    [[mcp_servers]]               # MCP servers the agent connects to, per session
+    name = "files"
+    command = ["mcp-server-filesystem", "/Users/me/projects"]
 
     [[models]]
     id = "ollama/glm-5.3-flash:cloud"
@@ -39,6 +43,7 @@ from typing import Any
 
 from ahp_host.provider.base import ModelInfo
 
+from ahp_host_acp.mcp import TRANSPORTS, McpServer
 from ahp_host_acp.roots import Roots, parse_root_arg
 
 DEFAULT_STATE = Path.home() / ".local/state/ahp-host-acp"
@@ -63,10 +68,12 @@ _KEYS = frozenset(
         "models",
         "model_command",
         "config_options",
+        "mcp_servers",
         "verbose",
     }
 )
 _MODEL_KEYS = frozenset({"id", "name", "context_window", "vision"})
+_MCP_KEYS = frozenset({"name", "type", "command", "env", "url", "headers"})
 
 
 class ConfigError(ValueError):
@@ -87,7 +94,8 @@ class Settings:
     env: Mapping[str, str] = field(default_factory=dict)
     models: tuple[ModelInfo, ...] = ()
     model_command: str | None = None
-    config_options: Mapping[str, str] = field(default_factory=dict)
+    config_options: Mapping[str, str | bool] = field(default_factory=dict)
+    mcp_servers: tuple[McpServer, ...] = ()
     verbose: bool = False
 
 
@@ -147,6 +155,55 @@ def _strings(data: Mapping[str, Any], key: str) -> dict[str, str]:
     if not isinstance(table, Mapping) or not all(isinstance(v, str) for v in table.values()):
         raise ConfigError(f'[{key}] must be a table of name = "value" strings')
     return dict(table)
+
+
+def _option_values(data: Mapping[str, Any], key: str = "config_options") -> dict[str, str | bool]:
+    """`[config_options]`: a select's value id, or true/false for a boolean option."""
+    table = data.get(key, {})
+    if not isinstance(table, Mapping) or not all(isinstance(v, str | bool) for v in table.values()):
+        raise ConfigError(f'[{key}] must be a table of name = "value" (or true/false)')
+    return dict(table)
+
+
+def _mcp_servers(data: Mapping[str, Any]) -> tuple[McpServer, ...]:
+    entries = data.get("mcp_servers", [])
+    if not isinstance(entries, list):
+        raise ConfigError("mcp_servers must be an array of tables: [[mcp_servers]]")
+    servers = []
+    for index, entry in enumerate(entries):
+        where = f"mcp_servers[{index}]"
+        if not isinstance(entry, Mapping):
+            raise ConfigError(f"{where} must be a table")
+        unknown = sorted(set(entry) - _MCP_KEYS)
+        if unknown:
+            raise ConfigError(f"{where}: unknown setting(s): {', '.join(unknown)}")
+        name = entry.get("name")
+        if not isinstance(name, str) or not name:
+            raise ConfigError(f"{where} needs a name")
+        transport = entry.get("type", "stdio")
+        if transport not in TRANSPORTS:
+            raise ConfigError(f"{where}.type must be one of {', '.join(TRANSPORTS)}")
+        if transport == "stdio":
+            if "url" in entry or "headers" in entry:
+                raise ConfigError(f"{where}: url and headers are for http and sse servers")
+            try:
+                command = _command(None, entry)
+            except ConfigError:
+                raise ConfigError(f"{where} needs a command") from None
+            servers.append(McpServer(name, command=command, env=_strings(entry, "env")))
+        else:
+            if "command" in entry or "env" in entry:
+                raise ConfigError(f"{where}: command and env are for stdio servers")
+            url = entry.get("url")
+            if not isinstance(url, str) or not url.startswith(("https://", "http://")):
+                raise ConfigError(f"{where} needs an http(s) url")
+            servers.append(
+                McpServer(name, transport=transport, url=url, headers=_strings(entry, "headers"))
+            )
+    names = [server.name for server in servers]
+    if len(set(names)) != len(names):
+        raise ConfigError("mcp_servers: duplicate names")
+    return tuple(servers)
 
 
 def _models(flags: list[str] | None, data: Mapping[str, Any]) -> tuple[ModelInfo, ...]:
@@ -239,7 +296,8 @@ def load(args: argparse.Namespace) -> Settings:
         provider_id=str(pick(args.provider_id, "provider_id", DEFAULT_PROVIDER_ID)),
         description=str(description) if description is not None else None,
         env=_strings(data, "env"),
-        config_options=_strings(data, "config_options"),
+        config_options=_option_values(data),
+        mcp_servers=_mcp_servers(data),
         models=_models(args.model, data),
         model_command=model_command,
         verbose=bool(args.verbose or data.get("verbose", False)),

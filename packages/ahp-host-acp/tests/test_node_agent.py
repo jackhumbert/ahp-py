@@ -55,3 +55,19 @@ def test_a_command_is_required(tmp_path: Path) -> None:
 def test_a_bad_provider_id_is_refused(tmp_path: Path) -> None:
     with pytest.raises(ConfigError, match="provider id"):
         create({"provider_id": "has space", "command": ["x"]}, _node(tmp_path))
+
+
+def test_mcp_servers_and_the_catalogue_belong_to_the_agent(tmp_path: Path) -> None:
+    provider = create(
+        {
+            "command": ["goose", "acp"],
+            "config_options": {"mode": "smart_approve", "yolo": False},
+            "mcp_servers": [{"name": "files", "command": ["mcp-files", "/Users/me"]}],
+        },
+        _node(tmp_path),
+    )
+    (server,) = provider.spec.mcp_servers
+    assert (server.name, server.command) == ("files", ("mcp-files", "/Users/me"))
+    assert provider.spec.config_options == {"mode": "smart_approve", "yolo": False}
+    # What the agent reports about itself is kept in its own state directory.
+    assert provider.catalogue.path == tmp_path / "agent.json"

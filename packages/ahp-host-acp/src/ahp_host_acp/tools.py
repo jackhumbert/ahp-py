@@ -146,9 +146,16 @@ class ToolCall:
 def text_of(content: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
     """ACP tool-call content as the host's text parts.
 
-    `content` blocks carry their text; a `diff` becomes a unified-looking
-    summary (the host has no diff part); `terminal` ids mean nothing without
+    `content` blocks carry their text; `terminal` ids mean nothing without
     ACP's terminal methods, which this client does not offer.
+
+    A `diff` becomes a unified-looking text summary *here*. AHP 1.0.0 does
+    have a diff content item for a tool result (`fileEdit`: before/after
+    `ContentRef`s plus +/- counts), but its content has to be stored and
+    served by the host, and the provider API this adapter is built on has no
+    way to do that from a tool result yet. The edit is not lost meanwhile: the
+    same diffs feed the session's changeset (:mod:`ahp_host_acp.changes`),
+    which is where a client's Changes view and +/- counts come from.
     """
     parts: list[dict[str, Any]] = []
     for item in content:

@@ -80,3 +80,69 @@ def test_model_command_needs_the_placeholder(tmp_path: Path) -> None:
         load(
             _parse_args(["--root", str(tmp_path), "--command", "x", "--model-command", "/model -s"])
         )
+
+
+def test_mcp_servers_and_boolean_options(tmp_path: Path) -> None:
+    root = tmp_path.as_posix()
+    config = _write(
+        tmp_path,
+        f"""
+command = ["x"]
+root = '{root}'
+
+[config_options]
+thought_level = "low"
+auto_approve = false
+
+[[mcp_servers]]
+name = "files"
+command = "mcp-server-filesystem /Users/me/projects"
+[mcp_servers.env]
+LOG = "1"
+
+[[mcp_servers]]
+name = "docs"
+type = "http"
+url = "https://example.com/mcp"
+[mcp_servers.headers]
+Authorization = "Bearer token"
+""",
+    )
+    settings = load(_parse_args(["--config", str(config)]))
+    assert settings.config_options == {"thought_level": "low", "auto_approve": False}
+    files, docs = settings.mcp_servers
+    assert (files.transport, files.command, files.env) == (
+        "stdio",
+        ("mcp-server-filesystem", "/Users/me/projects"),
+        {"LOG": "1"},
+    )
+    assert (docs.transport, docs.url, docs.headers) == (
+        "http",
+        "https://example.com/mcp",
+        {"Authorization": "Bearer token"},
+    )
+
+
+@pytest.mark.parametrize(
+    ("server", "error"),
+    [
+        ('name = "a"', "needs a command"),
+        ('command = ["a"]', "needs a name"),
+        ('name = "a"\ntype = "ws"\nurl = "https://example.com"', "type must be"),
+        ('name = "a"\ntype = "sse"', "needs an http"),
+        ('name = "a"\ncommand = ["a"]\nurl = "https://example.com"', "url and headers"),
+        ('name = "a"\ntype = "http"\nurl = "https://example.com"\ncommand = ["a"]', "command"),
+        ('name = "a"\ncommand = ["a"]\nport = 3', "port"),
+    ],
+)
+def test_bad_mcp_servers_are_an_error(tmp_path: Path, server: str, error: str) -> None:
+    config = _write(tmp_path, f'command = ["x"]\nroot = "."\n[[mcp_servers]]\n{server}\n')
+    with pytest.raises(ConfigError, match=error):
+        load(_parse_args(["--config", str(config)]))
+
+
+def test_mcp_server_names_are_unique(tmp_path: Path) -> None:
+    server = '[[mcp_servers]]\nname = "a"\ncommand = ["a"]\n'
+    config = _write(tmp_path, f'command = ["x"]\nroot = "."\n{server}{server}')
+    with pytest.raises(ConfigError, match="duplicate"):
+        load(_parse_args(["--config", str(config)]))

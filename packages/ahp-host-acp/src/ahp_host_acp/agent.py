@@ -10,8 +10,12 @@
     [agents.env]
     OPENCODE_CONFIG = '~/.config/ahp/opencode.json'
 
-    [agents.config_options]
+    [agents.config_options]                 # fixed on every session
     thought_level = "low"
+
+    [[agents.mcp_servers]]                  # given to the agent on every session
+    name = "files"
+    command = ["mcp-server-filesystem", "/Users/me/projects"]
 
     [[agents.models]]
     id = "ollama/glm-5.3-flash:cloud"
@@ -19,8 +23,10 @@
     context_window = 1048576
 
 The same settings as this package's own config file, less what now belongs to
-the node (roots, port, bind, token, state). Registered as the `acp` entry in
-the `ahp_host.agents` group.
+the node (roots, port, bind, token, state). What the agent reports about
+itself (its options, models and commands) is kept in the node's state
+directory for this agent, `agent.json`. Registered as the `acp` entry in the
+`ahp_host.agents` group.
 """
 
 from __future__ import annotations
@@ -35,10 +41,13 @@ from ahp_host_acp.config import (
     DEFAULT_PROVIDER_ID,
     ConfigError,
     _command,
+    _mcp_servers,
     _models,
+    _option_values,
     _strings,
 )
 from ahp_host_acp.provider import (
+    CATALOGUE_FILE,
     DEFAULT_DESCRIPTION,
     AcpProvider,
     AgentSpec,
@@ -55,6 +64,7 @@ _OPTIONS = frozenset(
         "models",
         "model_command",
         "config_options",
+        "mcp_servers",
     }
 )
 
@@ -78,10 +88,12 @@ def create(options: Mapping[str, Any], node: NodeContext) -> AcpProvider:
             command=_command(None, options),
             env=_strings(options, "env"),
             model_command=model_command,
-            config_options=_strings(options, "config_options"),
+            config_options=_option_values(options),
+            mcp_servers=_mcp_servers(options),
         ),
         display_name=str(options.get("agent_name", DEFAULT_AGENT_NAME)),
         models=_models(None, options),
         provider_id=provider_id,
         description=str(description) if description is not None else DEFAULT_DESCRIPTION,
+        catalogue_file=node.state_dir / CATALOGUE_FILE,
     )

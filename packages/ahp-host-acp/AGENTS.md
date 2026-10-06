@@ -8,7 +8,15 @@ server's AGENTS.md requires ("Adding a provider adapter"). It is the ACP
   next line is read; requests from the agent run on their own tasks. Keep both.
 - `provider.py` translates ACP `session/update`s into the host's neutral
   `TurnSink` events. Never emit AHP actions directly; the host owns ordering
-  and the wire.
+  and the wire. A notification handler must never await an ACP *request*:
+  the read loop is waiting on it, so the answer could never be read.
+- Out-of-turn state goes through the session's `SessionPublisher`, built from
+  small modules: `options.py` (ACP config options and modes <-> session
+  config), `catalogue.py` (what the agent reported last, `agent.json`),
+  `commands.py` (slash commands -> completions), `plan.py` (plan -> a row per
+  update), `changes.py` (tool diffs -> the session changeset), `mcp.py`
+  (configured MCP servers). Each module's docstring says why it maps the way
+  it does; keep that reasoning current when the spec moves.
 - `_request_permission` is the approval policy (grant once, never always).
   Changing it is a security decision: say so in the commit, and test it.
 - `roots.py` and `paths.py` re-export `ahp_host.node`'s; fix bugs
