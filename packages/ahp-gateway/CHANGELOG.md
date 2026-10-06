@@ -19,8 +19,39 @@ Under construction. `docs/plan.md` is the design and its §7 is the build order.
   client's own machine. Replaces `file://<node>/<path>`.
 - A shared provider id across nodes is one agent offering every node's models;
   the working directory picks the node.
+- **A shared agent's `capabilities` are what every machine running it can
+  keep**, not the first machine's. `multipleChats`, `fork`, `sideChat` and
+  `primaryReplacement` are offered only where all have them; `immutablePrimary`
+  wherever any has it. A surface no longer offers "new chat" on a fleet where
+  one machine would refuse it.
+- **`subscribe` passes the surface's `view` and `delivery` to the node**, and
+  `listSessions` everything but its page window; both were dropped.
+- **The surface's `locale` reaches every node**, so a node localises the
+  confirmation option labels it shows that surface. Its `capabilities` are
+  deliberately not passed on (`docs/plan.md` §9).
 
 ### Added
+
+- **Telemetry.** The gateway advertises `InitializeResult.telemetry` - its own
+  `ahp-otlp://logs`, `ahp-otlp://traces` and `ahp-otlp://metrics`, each when
+  any connected node emits that signal - and a subscription to one subscribes
+  to the signal on every such node, relaying their OTLP batches verbatim onto
+  the gateway's channel, and only while the surface holds it. Previously the
+  field was never advertised, so no surface could ask. Logs are offered as
+  `ahp-otlp://logs{?level}` when every logging node filters by level, and the
+  level is expanded into each node's own template. Not resumed by a
+  `reconnect`; the client re-subscribes. See `docs/plan.md` §9.
+- **Content refs route to the machine that minted them.** A `resourceRead` or
+  `resourceResolve` of a `ContentRef` URI - a diff's before and after under
+  the host's private `ahp-changeset-content:` scheme, a large tool result -
+  goes to the node whose payload named it, and is never rerouted if that node
+  is gone. One this connection never saw is asked of each node in inventory
+  order. Previously any such read was refused as ambiguous once more than one
+  node was connected. Variable-free changeset `uriTemplate`s now route
+  directly instead of by asking every node.
+- **`moveChat` into a session on another machine is refused** (`-32602`)
+  before any node sees it; a move between sessions on the chat's own machine
+  is relayed. A `createChat`'s new chat URI routes before any payload names it.
 
 - **The orchestrator** (`Gateway(orchestrator=OrchestratorConfig(...))`,
   `Gateway.start()` / `aclose()`). An `orchestrator` agent in the merged list
@@ -81,6 +112,7 @@ Under construction. `docs/plan.md` is the design and its §7 is the build order.
   leaving an agent that signs in through it (VS Code's Copilot) unusable in a
   fleet. It now goes to every node whose agents advertise that resource, or to
   every node when none does, and succeeds if any accepts.
+  `docs/plan.md` §9 still listed it as refused; it now describes the fan-out.
 
 ### Added
 

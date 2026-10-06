@@ -32,6 +32,15 @@ client's genuine local path that starts with ``/<node id>/`` would be misread.
 The nodes keep speaking plain `file:`; the gateway translates at the edge. Only
 whole string values are rewritten; a path quoted inside prose is left alone,
 because rewriting free text would corrupt what the agent said.
+
+**Content refs** (a `ContentRef`'s `uri`: a diff's before and after, a large
+tool result, an image) are host-minted and opaque, like channels - the
+sibling host's `ahp-changeset-content:` scheme is private to it, and another
+host mints its own. So they too pass verbatim, and the gateway remembers which
+node named each one, so that a `resourceRead` of it goes back to that node.
+They cannot be rewritten the way file URIs are: a `uri` key also carries URIs
+the *client* published (a message's attachment), and the client must get back
+the exact string it sent.
 """
 
 from __future__ import annotations
@@ -50,6 +59,7 @@ __all__ = [
     "ForeignUriError",
     "from_client_alias",
     "is_virtual_root",
+    "learn_owned",
     "learn_owned_channels",
     "node_of",
     "qualify_file_uris",
@@ -71,6 +81,12 @@ _PATH_SAFE: Final = "/:@!$&'()*+,;=-._~"
 #: envelopes `channel`, chat catalogue entries `resource`, terminal and
 #: annotations references `resource`.
 _OWNED_KEYS: Final = frozenset({"resource", "channel"})
+#: A changeset's catalogue entry names its channel by template, and a
+#: template with no variable "is itself a subscribable URI".
+_TEMPLATE_KEY: Final = "uriTemplate"
+#: Where a content ref travels: `ContentRef.uri`, and the shapes that extend
+#: it (`ToolResultResourceContent`, `ResourceResponsePart`, `ToolInput`).
+_CONTENT_KEY: Final = "uri"
 
 
 class ForeignUriError(ValueError):
@@ -196,37 +212,54 @@ def unqualify_file_uris(value: Any, node_id: str, root: str | None = None) -> An
     return value
 
 
-def learn_owned_channels(value: Any) -> set[str]:
-    """Every channel URI a node's payload names as its own.
+def learn_owned(value: Any) -> tuple[set[str], set[str]]:
+    """Every channel, and every content ref, a node's payload names as its own.
 
     A walk rather than a per-shape table, so a chat or terminal the gateway has
     never seen a command for is still routable the moment it appears in any
     state the node sent - which is how a surface usually finds out about it.
+    One walk for both, since a chat snapshot can be large.
     """
-    found: set[str] = set()
-    _walk(value, found)
+    channels: set[str] = set()
+    content: set[str] = set()
+    _walk(value, channels, content)
     # The two singletons every node has its own copy of. Claimed, the first
     # node to mention one would own it, and every request for the merged
     # channel would go there.
-    found.discard(ROOT_URI)
-    found.discard(AUTOMATIONS_URI)
-    return {uri for uri in found if not uri.startswith((_FILE_PREFIX, _PREFIX))}
+    channels.discard(ROOT_URI)
+    channels.discard(AUTOMATIONS_URI)
+    # Files route by the node their URI names, never by who mentioned them.
+    files = (_FILE_PREFIX, _PREFIX)
+    return (
+        {uri for uri in channels if not uri.startswith(files)},
+        {uri for uri in content if not uri.startswith(files)},
+    )
 
 
-def _walk(value: Any, found: set[str]) -> None:
+def learn_owned_channels(value: Any) -> set[str]:
+    """Every channel URI a node's payload names as its own."""
+    return learn_owned(value)[0]
+
+
+def _walk(value: Any, channels: set[str], content: set[str]) -> None:
     if isinstance(value, Mapping):
         for key, item in value.items():
-            if key in _OWNED_KEYS and isinstance(item, str) and item:
-                found.add(item)
+            if isinstance(item, str):
+                if not item:
+                    continue
+                if key in _OWNED_KEYS or (key == _TEMPLATE_KEY and "{" not in item):
+                    channels.add(item)
+                elif key == _CONTENT_KEY:
+                    content.add(item)
             else:
-                _walk(item, found)
+                _walk(item, channels, content)
     elif isinstance(value, list):
         for item in value:
-            _walk(item, found)
+            _walk(item, channels, content)
 
 
 class ChannelOwners:
-    """Channel URI -> owning node, learned from what each node sends.
+    """Channel (or content) URI -> owning node, learned from what each node sends.
 
     First writer wins. Two nodes claiming one URI would mean two clients minted
     the same UUID, or a node echoing a URI it does not own; either way the

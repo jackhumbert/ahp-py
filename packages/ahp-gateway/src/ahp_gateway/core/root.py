@@ -9,7 +9,11 @@ protocol's own root reducer) and derives the surface's from them:
   order), with the models every node offers - the first node's in its order,
   then any the others add. A provider id is how `createSession` picks an
   agent, so it cannot appear twice; which node a session lands on is decided
-  by its working directory (see `ahp_gateway.core.uris`).
+  by its working directory (see `ahp_gateway.core.uris`). Its `capabilities`
+  are the ones every such node shares (:func:`common_agent_capabilities`):
+  the surface cannot know which machine a session will land on when it
+  decides whether to offer "new chat" or "fork", so it is told only what
+  holds on all of them.
 * `activeSessions` - the sum.
 * `terminals` - the concatenation.
 * `config` - never advertised at the root. It is a per-host settings schema,
@@ -23,9 +27,18 @@ protocol's own root reducer) and derives the surface's from them:
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from typing import Any
+from typing import Any, Final
 
-__all__ = ["merge_root", "node_details", "root_actions"]
+__all__ = ["common_agent_capabilities", "merge_root", "node_details", "root_actions"]
+
+#: Per `AgentCapabilities` field: its options that allow, and that restrict.
+_OPTIONS: Final[Mapping[str, tuple[frozenset[str], frozenset[str]]]] = {
+    "multipleChats": (frozenset({"fork", "sideChat"}), frozenset()),
+    "multipleWorkingDirectories": (
+        frozenset({"primaryReplacement"}),
+        frozenset({"immutablePrimary"}),
+    ),
+}
 
 
 def node_details(handshake: Mapping[str, Any], root: Mapping[str, Any]) -> dict[str, Any]:
@@ -69,6 +82,7 @@ def merge_root(states: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
                 agents.append(merged_agent)
                 continue
             _add_models(existing, agent.get("models"))
+            _share_capabilities(existing, agent.get("capabilities"))
         count = state.get("activeSessions")
         if isinstance(count, int) and not isinstance(count, bool):
             active += count
@@ -92,6 +106,62 @@ def _add_models(agent: dict[str, Any], extra: Any) -> None:
             known.add(model.get("id"))
             models.append(model)
     agent["models"] = models
+
+
+def _share_capabilities(agent: dict[str, Any], other: Any) -> None:
+    common = common_agent_capabilities(
+        agent.get("capabilities"), other if isinstance(other, Mapping) else None
+    )
+    if common:
+        agent["capabilities"] = common
+    else:
+        agent.pop("capabilities", None)
+
+
+def common_agent_capabilities(
+    first: Mapping[str, Any] | None, second: Mapping[str, Any] | None
+) -> dict[str, Any]:
+    """The `AgentCapabilities` both of two machines running one agent can keep.
+
+    Presence is support and absence forbids the command, so a capability is
+    kept only where both have it, and an option that *allows* something
+    (`fork`, `sideChat`, `primaryReplacement`) only where both allow it. The
+    one option that *restricts* - `immutablePrimary`, "clients MUST NOT
+    remove, reorder, or replace it" - is kept where either has it. Anything
+    this version does not define is kept only where both say exactly the
+    same, since its direction is unknown.
+    """
+    if not isinstance(first, Mapping) or not isinstance(second, Mapping):
+        return {}
+    common: dict[str, Any] = {}
+    # In the first machine's key order, so the merged entry is stable.
+    for key in [key for key in first if key in second]:
+        mine, theirs = first[key], second[key]
+        if key in _OPTIONS and isinstance(mine, Mapping) and isinstance(theirs, Mapping):
+            allows, restricts = _OPTIONS[key]
+            options = {
+                name: value
+                for name, value in mine.items()
+                if name not in allows | restricts and name in theirs and value == theirs[name]
+            }
+            options.update(
+                {
+                    name: True
+                    for name in allows
+                    if mine.get(name) is True and theirs.get(name) is True
+                }
+            )
+            options.update(
+                {
+                    name: True
+                    for name in restricts
+                    if mine.get(name) is True or theirs.get(name) is True
+                }
+            )
+            common[key] = options
+        elif mine == theirs:
+            common[key] = mine
+    return common
 
 
 def root_actions(before: Mapping[str, Any], after: Mapping[str, Any]) -> list[dict[str, Any]]:

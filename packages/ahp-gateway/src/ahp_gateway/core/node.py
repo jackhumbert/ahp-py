@@ -149,6 +149,7 @@ class AhpNodeLink:
         client_id: str,
         protocol_version: str,
         client_info: Mapping[str, Any] | None = None,
+        locale: str | None = None,
     ) -> None:
         await self._client.connect()
         self._watchdog = asyncio.create_task(self._watch_diagnostics())
@@ -163,6 +164,10 @@ class AhpNodeLink:
                 # for it, which is how a host says it has no such channel.
                 initial_subscriptions=[ROOT_URI, AUTOMATIONS_URI],
                 client_info=client_info,
+                # The surface's, so a node localises what it shows that surface
+                # (confirmation option labels). Its `capabilities` are not
+                # passed on: see docs/plan.md §9.
+                locale=locale,
             )
         except AhpClientError as exc:
             await self.aclose()
@@ -232,6 +237,7 @@ async def open_node_link(
     protocol_version: str,
     event_buffer: int = 4096,
     client_info: Mapping[str, Any] | None = None,
+    locale: str | None = None,
 ) -> AhpNodeLink:
     """Connect and handshake. The node sees the surface's own `clientId`.
 
@@ -242,6 +248,9 @@ async def open_node_link(
     config = ClientConfig(protocol_versions=(protocol_version,), event_buffer=event_buffer)
     link = AhpNodeLink(node_id, AhpClient(transport, config))
     await link.start(
-        client_id=client_id, protocol_version=protocol_version, client_info=client_info
+        client_id=client_id,
+        protocol_version=protocol_version,
+        client_info=client_info,
+        locale=locale,
     )
     return link

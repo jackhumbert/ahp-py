@@ -17,6 +17,8 @@ the surface's own `clientId`. From then on it relays:
   its folder names; everything after follows the automation's owner.
 * **Host-initiated requests** (a node reading a client-side resource, an
   elicitation) go back to the surface and their answer back to the node.
+* **Telemetry** is the gateway's own channel per OTel signal, fanned in from
+  every node that emits it (`ahp_gateway.core.telemetry`).
 
 Everything else passes through verbatim except file URIs, which gain the node
 as their authority (`ahp_gateway.core.uris`). No private method, header
@@ -75,13 +77,16 @@ from ahp_gateway.core.paging import (
 )
 from ahp_gateway.core.root import merge_root, node_details, root_actions
 from ahp_gateway.core.sequence import GatewayClock, LinkSequence
+from ahp_gateway.core.telemetry import SCHEME as TELEMETRY_SCHEME
+from ahp_gateway.core.telemetry import Wanted, advertised, expand, node_signals
+from ahp_gateway.core.telemetry import parse as parse_telemetry
 from ahp_gateway.core.uris import (
     VIRTUAL_ROOT,
     ChannelOwners,
     ForeignUriError,
     from_client_alias,
     is_virtual_root,
-    learn_owned_channels,
+    learn_owned,
     node_of,
     qualify_file_uris,
     root_of,
@@ -130,6 +135,10 @@ _MERGED: Final = frozenset({ROOT_URI, AUTOMATIONS_URI})
 _FILE_KEYS: Final = ("uri", "root", "cwd", "workingDirectory", "channel", "resource")
 #: Asked before a session exists, often before its folder is chosen.
 _SESSION_CONFIG_METHODS: Final = frozenset({"resolveSessionConfig", "sessionConfigCompletions"})
+#: Read-only, so a content ref whose node is unknown can be asked of each.
+_CONTENT_READS: Final = frozenset({"resourceRead", "resourceResolve"})
+#: `NotFound`: what a node answers for content it does not hold.
+_NOT_FOUND: Final = -32008
 
 
 @dataclass(frozen=True)
@@ -223,6 +232,12 @@ class _Node:
     subscribed: set[str] = field(default_factory=set)
     #: The node's `AutomationState`, when it advertised `automations`.
     automations: dict[str, Any] | None = None
+    #: The OTel signals it emits: signal -> its advertised URI or template.
+    telemetry: dict[str, str] = field(default_factory=dict)
+    #: Its telemetry channels the gateway holds -> the surface's channels each
+    #: feeds. Several, when one node channel answers two surface subscriptions
+    #: (a literal logs URI serves every requested level).
+    otlp: dict[str, set[str]] = field(default_factory=dict)
 
 
 class _SurfaceConnection:
@@ -248,9 +263,13 @@ class _SurfaceConnection:
         self.client_id = ""
         self.version = ""
         self.client_info: Mapping[str, Any] | None = None
+        #: The surface's `locale`, which the nodes localise option labels by.
+        self.locale: str | None = None
         self.records: dict[str, NodeRecord] = {}
         self.clock = GatewayClock()
         self.owners = ChannelOwners()
+        #: Content ref -> the node that named it, for `resourceRead`.
+        self.content_owners = ChannelOwners()
         self.root: dict[str, Any] = merge_root([])
         #: Channels the surface holds a subscription to.
         self.subscriptions: set[str] = set()
@@ -402,6 +421,8 @@ class _SurfaceConnection:
             return self._virtual_root(method)
         if method == "authenticate":
             return await self._authenticate(params)
+        if method in _CONTENT_READS and _is_content_ref(params.get("uri")):
+            return await self._read_content(method, params)
         node_id = self._route(params)
         if node_id is None and method in _SESSION_CONFIG_METHODS:
             # Asked before a folder is chosen: the default node answers, and
@@ -415,7 +436,29 @@ class _SurfaceConnection:
             # answer it. Guessing would run the command somewhere the surface
             # did not mean.
             raise invalid_params(f"cannot tell which node {method} is for")
+        if method == "createChat" and isinstance(params.get("chat"), str):
+            # Client-chosen, like a new session's URI: claimed before the
+            # request, so it routes before any payload has named it.
+            self.owners.claim(node_id, {params["chat"]})
+        if method == "moveChat":
+            self._check_move(node_id, params)
         return await self._call(node_id, method, params)
+
+    def _check_move(self, node_id: str, params: Mapping[str, Any]) -> None:
+        """Refuse moving a chat into a session on another machine.
+
+        A chat's turns, tools and content live in its node's agent host, and
+        `moveChat` is that host's own atomic operation; no host can take
+        another's chat. Refused here, with a reason, rather than handed to a
+        node that has never heard of the destination.
+        """
+        destination = params.get("destination")
+        session = destination.get("session") if isinstance(destination, Mapping) else None
+        owner = self.owners.owner_of(session) if isinstance(session, str) else None
+        if owner is not None and owner != node_id:
+            raise invalid_params(
+                f"{session} is on another machine; a chat moves only between sessions on its own"
+            )
 
     def _from_client(self, method: str, params: Mapping[str, Any]) -> Mapping[str, Any]:
         """Read a client's `file:///<node>/...` (how VS Code browses the tree) as `ahp-file`."""
@@ -475,16 +518,23 @@ class _SurfaceConnection:
             raise unsupported_protocol_version(self.gateway.supported_versions)
 
         client_info = params.get("clientInfo")
+        locale = params.get("locale")
         await self._admit(
             params.get("clientId"),
             chosen,
             client_info if isinstance(client_info, Mapping) else None,
+            locale if isinstance(locale, str) else None,
         )
 
         snapshots: list[dict[str, Any]] = []
         wanted = params.get("initialSubscriptions") or []
         for uri in wanted:
             if not isinstance(uri, str) or uri in _MERGED:
+                continue
+            if uri.startswith(TELEMETRY_SCHEME):
+                # Stateless: subscribed, with no snapshot to return.
+                with contextlib.suppress(AhpError):
+                    await self._subscribe_telemetry(uri, {})
                 continue
             with contextlib.suppress(AhpError):
                 snapshot = await self._subscribe_channel(uri, after)
@@ -510,7 +560,11 @@ class _SurfaceConnection:
         return result
 
     async def _admit(
-        self, client_id: Any, version: str, client_info: Mapping[str, Any] | None
+        self,
+        client_id: Any,
+        version: str,
+        client_info: Mapping[str, Any] | None,
+        locale: str | None = None,
     ) -> None:
         """Authenticate, then open a link to every node the principal may use.
 
@@ -525,7 +579,7 @@ class _SurfaceConnection:
         if principal is None:
             raise AhpError(_REFUSED, "Connection refused by policy")
         self.principal, self.client_id, self.version = principal, client_id, version
-        self.client_info = client_info
+        self.client_info, self.locale = client_info, locale
 
         # Admission before AHP (invariant 2): only nodes the registry admits
         # this principal to are ever dialed, so the rest cannot even appear.
@@ -561,7 +615,10 @@ class _SurfaceConnection:
         wanted = [uri for uri in params.get("subscriptions") or [] if isinstance(uri, str)]
         snapshots: list[dict[str, Any]] = []
         for uri in dict.fromkeys(wanted):
-            if uri in _MERGED:
+            if uri in _MERGED or uri.startswith(TELEMETRY_SCHEME):
+                # Telemetry is "not replayed on reconnect": stateless, so the
+                # snapshot arm leaves it out, and the client re-subscribes to
+                # the same fixed URIs from the live edge.
                 continue
             with contextlib.suppress(AhpError):
                 snapshot = await self._subscribe_channel(uri, after)
@@ -623,6 +680,7 @@ class _SurfaceConnection:
                 client_id=self.client_id,
                 protocol_version=self.version,
                 client_info=self.client_info,
+                locale=self.locale,
             )
 
         gateway = self.gateway
@@ -661,9 +719,9 @@ class _SurfaceConnection:
                 and isinstance(state.get("entries"), list)
             ):
                 automations = state
-        self.owners.claim(record.node_id, learn_owned_channels(root))
+        self._learn(record.node_id, root)
         # Each automation, and each run in its history, is this node's.
-        self.owners.claim(record.node_id, learn_owned_channels(automations))
+        self._learn(record.node_id, automations)
         node_id = record.node_id
 
         async def answer(method: str, params: Mapping[str, Any]) -> Any:
@@ -671,7 +729,12 @@ class _SurfaceConnection:
 
         link.set_request_handler(answer)
         return _Node(
-            link=link, sequence=sequence, root=root, path_root=path_root, automations=automations
+            link=link,
+            sequence=sequence,
+            root=root,
+            path_root=path_root,
+            automations=automations,
+            telemetry=node_signals(handshake),
         )
 
     def _agreed_handshake_fields(self) -> dict[str, Any]:
@@ -700,6 +763,10 @@ class _SurfaceConnection:
             # only ever sent to one of them, so nothing is promised that the
             # fleet cannot keep. The options are those all of them offer.
             agreed["automations"] = _common_capabilities(capabilities)
+        # Likewise per signal: any node that emits one (`core.telemetry`).
+        telemetry = advertised([node.telemetry for node in self.nodes.values()])
+        if telemetry is not None:
+            agreed["telemetry"] = telemetry
         if len(self.nodes) == 1:
             # One node: its root, directly.
             ((node_id, node),) = self.nodes.items()
@@ -792,11 +859,74 @@ class _SurfaceConnection:
             # No node hosts automations: the answer a host gives for a channel
             # it does not have.
             return {"snapshot": catalogue} if catalogue is not None else {}
-        snapshot = await self._subscribe_channel(channel, after)
+        # `view` and `delivery` (and whatever a later version adds) are the
+        # surface's to ask of the node, so they ride along untouched.
+        options = {key: value for key, value in params.items() if key != "channel"}
+        if channel.startswith(TELEMETRY_SCHEME):
+            await self._subscribe_telemetry(channel, options)
+            return {}
+        snapshot = await self._subscribe_channel(channel, after, options)
         return {"snapshot": snapshot} if snapshot is not None else {}
 
+    async def _subscribe_telemetry(self, channel: str, options: Mapping[str, Any]) -> None:
+        """Subscribe to one OTel signal on every node that emits it.
+
+        A stateless channel: the answer carries no snapshot, and the surface
+        is sent the nodes' batches from the moment the reply is - which is why
+        the surface's subscription is recorded last, with no await after it,
+        and nothing a node streams sooner is forwarded. One node refusing
+        costs only its own batches; all of them refusing fails the subscribe.
+        """
+        try:
+            wanted = parse_telemetry(channel)
+        except ValueError as exc:
+            raise invalid_params(str(exc)) from None
+        if wanted is None:
+            # An `ahp-otlp:` URI the gateway never advertised: the answer a
+            # host gives for a channel it does not have. The nodes' own
+            # telemetry URIs never reach a surface, so none is meant.
+            return
+        targets = [
+            (node_id, _node_telemetry_channel(node.telemetry[wanted.signal], wanted))
+            for node_id, node in self.nodes.items()
+            if wanted.signal in node.telemetry
+        ]
+        outcomes = await asyncio.gather(
+            *(
+                self._call(node_id, "subscribe", {**options, "channel": uri})
+                for node_id, uri in targets
+            ),
+            return_exceptions=True,
+        )
+        refusals: list[BaseException] = []
+        for (node_id, uri), outcome in zip(targets, outcomes, strict=True):
+            node = self.nodes.get(node_id)
+            if isinstance(outcome, BaseException) or node is None:
+                _log.warning("node %s refused telemetry %s: %r", node_id, uri, outcome)
+                refusals.append(
+                    outcome if isinstance(outcome, BaseException) else internal_error("node gone")
+                )
+                continue
+            node.otlp.setdefault(uri, set()).add(channel)
+        if targets and len(refusals) == len(targets):
+            raise refusals[0]
+        self.subscriptions.add(channel)
+
+    def _unsubscribe_telemetry(self, channel: str) -> None:
+        for node in self.nodes.values():
+            for uri, listeners in list(node.otlp.items()):
+                if channel not in listeners:
+                    continue
+                listeners.discard(channel)
+                if not listeners:
+                    del node.otlp[uri]
+                    node.link.notify("unsubscribe", {"channel": uri})
+
     async def _subscribe_channel(
-        self, channel: str, after: list[dict[str, Any]]
+        self,
+        channel: str,
+        after: list[dict[str, Any]],
+        options: Mapping[str, Any] | None = None,
     ) -> dict[str, Any] | None:
         node_id = self._route({"channel": channel})
         # The buffer opens BEFORE any node is asked - including by the probe
@@ -807,14 +937,15 @@ class _SurfaceConnection:
         buffer: list[tuple[int, dict[str, Any]]] = []
         self.pending.setdefault(channel, []).append(buffer)
         try:
+            request = {**(options or {}), "channel": channel}
             if node_id is None:
-                found = await self._probe_owner(channel)
+                found = await self._probe_owner(channel, request)
                 if found is None:
                     # The answer a host gives for a channel it does not know.
                     return None
                 node_id, result = found
             else:
-                result = await self._call(node_id, "subscribe", {"channel": channel})
+                result = await self._call(node_id, "subscribe", request)
         finally:
             buffers = self.pending[channel]
             buffers.remove(buffer)
@@ -832,7 +963,9 @@ class _SurfaceConnection:
         self._release(channel, buffer, from_seq, after)
         return {**snapshot, "fromSeq": from_seq}
 
-    async def _probe_owner(self, channel: str) -> tuple[str, Any] | None:
+    async def _probe_owner(
+        self, channel: str, request: Mapping[str, Any]
+    ) -> tuple[str, Any] | None:
         """Ask every node for `channel`; the first with a snapshot owns it.
 
         Reached when no node has named the channel yet - always the case on
@@ -848,7 +981,7 @@ class _SurfaceConnection:
         owner: tuple[str, Any] | None = None
         for node_id in list(self.nodes):
             try:
-                result = await self._call(node_id, "subscribe", {"channel": channel})
+                result = await self._call(node_id, "subscribe", request)
             except AhpError:
                 continue
             found = isinstance(result, Mapping) and isinstance(result.get("snapshot"), Mapping)
@@ -891,8 +1024,12 @@ class _SurfaceConnection:
             raise invalid_params("cursor must be a string")
         positions = decode_cursor(cursor) if cursor is not None else {}
 
+        # Anything else the surface asked (a later version's filter) goes to
+        # every node as it came; only the page window is the gateway's.
+        extra = {key: value for key, value in params.items() if key not in ("cursor", "limit")}
+
         async def fetch(node_id: str, node_cursor: str | None, count: int) -> Mapping[str, Any]:
-            request: dict[str, Any] = {"channel": ROOT_URI, "limit": count}
+            request: dict[str, Any] = {**extra, "channel": ROOT_URI, "limit": count}
             if node_cursor is not None:
                 request["cursor"] = node_cursor
             result = await self._call(node_id, "listSessions", request)
@@ -1066,8 +1203,45 @@ class _SurfaceConnection:
         result = qualify_file_uris(
             await node.link.request(method, outgoing), node_id, node.path_root
         )
-        self.owners.claim(node_id, learn_owned_channels(result))
+        self._learn(node_id, result)
         return result
+
+    def _learn(self, node_id: str, payload: Any) -> None:
+        """Remember the channels and content refs a node's payload names."""
+        channels, content = learn_owned(payload)
+        self.owners.claim(node_id, channels)
+        self.content_owners.claim(node_id, content)
+
+    async def _read_content(self, method: str, params: Mapping[str, Any]) -> Any:
+        """Read a content ref from the node that minted it.
+
+        A `ContentRef`'s URI is host-minted and opaque, so nothing in it says
+        which machine it is on. The node that named it in a payload answers,
+        and only that node: like a channel's, its read is never rerouted, since
+        another host may mint the same string for different bytes. One no
+        payload named - asked on a fresh connection, or after a `reconnect` -
+        is asked of each node in inventory order. That is safe because these
+        commands only read: a node without it answers `NotFound`, and the
+        first that has it answers and is remembered as its owner.
+        """
+        uri = params["uri"]
+        owner = self.content_owners.owner_of(uri) or self.owners.owner_of(uri)
+        if owner is not None:
+            return await self._call(owner, method, params)
+        failures: list[AhpError] = []
+        for node_id in [node_id for node_id in self.records if node_id in self.nodes]:
+            try:
+                result = await self._call(node_id, method, params)
+            except AhpError as exc:
+                failures.append(exc)
+                continue
+            self.content_owners.claim(node_id, {uri})
+            return result
+        if not failures:
+            raise AhpError(-32603, "no node is connected")
+        # The most telling refusal: a node that has it but will not share it
+        # says more than the ones that never had it.
+        raise next((exc for exc in failures if exc.code != _NOT_FOUND), failures[0])
 
     # ─── surface notifications ───────────────────────────────────────────
 
@@ -1082,6 +1256,9 @@ class _SurfaceConnection:
             if not isinstance(channel, str):
                 return
             self.subscriptions.discard(channel)
+            if channel.startswith(TELEMETRY_SCHEME):
+                self._unsubscribe_telemetry(channel)
+                return
             for node in self.nodes.values():
                 if channel in node.subscribed:
                     node.subscribed.discard(channel)
@@ -1183,7 +1360,7 @@ class _SurfaceConnection:
             if channel == ROOT_URI:
                 self._apply_root(node, envelope.get("action"))
                 return
-            self.owners.claim(node_id, learn_owned_channels(envelope))
+            self._learn(node_id, envelope)
             if channel == AUTOMATIONS_URI:
                 self._apply_automations(node, envelope)
             forwarded = {
@@ -1198,18 +1375,42 @@ class _SurfaceConnection:
                 self.delivered[channel] = stamp
                 self._send(forwarded)
             return
+        method = frame.get("method")
+        if isinstance(method, str) and method.startswith("otlp/"):
+            self._relay_telemetry(node, method, params)
+            return
         qualified = qualify_file_uris(params, node_id, node.path_root)
-        self.owners.claim(node_id, learn_owned_channels(qualified))
+        self._learn(node_id, qualified)
         if qualified.get("channel") == ROOT_URI and ROOT_URI not in self.subscriptions:
             return
-        self._send({"jsonrpc": "2.0", "method": frame.get("method"), "params": qualified})
+        self._send({"jsonrpc": "2.0", "method": method, "params": qualified})
+
+    def _relay_telemetry(self, node: _Node, method: str, params: Mapping[str, Any]) -> None:
+        """One node's OTLP batch, onto each surface channel it feeds.
+
+        Only a channel the gateway subscribed to on the surface's behalf, and
+        only while the surface still holds it: a batch for anything else was
+        never agreed to. The payload is OTLP/JSON and goes verbatim - not even
+        file URIs in it are rewritten.
+        """
+        channel = params.get("channel")
+        listeners = node.otlp.get(channel) if isinstance(channel, str) else None
+        for surface_channel in sorted(listeners or ()):
+            if surface_channel in self.subscriptions:
+                self._send(
+                    {
+                        "jsonrpc": "2.0",
+                        "method": method,
+                        "params": {**params, "channel": surface_channel},
+                    }
+                )
 
     def _apply_root(self, node: _Node, action: Any) -> None:
         if not isinstance(action, Mapping):
             return
         reduced = REDUCERS["root"](node.root, action)
         node.root = reduced if isinstance(reduced, dict) else node.root
-        self.owners.claim(node.link.node_id, learn_owned_channels(node.root))
+        self._learn(node.link.node_id, node.root)
         self._republish_root()
 
     def _apply_automations(self, node: _Node, envelope: Mapping[str, Any]) -> None:
@@ -1373,6 +1574,17 @@ class _SurfaceConnection:
             )
         else:
             future.set_result(message.get("result"))
+
+
+def _is_content_ref(uri: Any) -> bool:
+    """A URI only the node that minted it can resolve: not a file on a node
+    (`ahp-file`), and not the client's own (`file`)."""
+    return isinstance(uri, str) and not uri.startswith(("file:", "ahp-file:"))
+
+
+def _node_telemetry_channel(advertised_uri: str, wanted: Wanted) -> str:
+    """The node's own channel for what the surface asked, its template expanded."""
+    return expand(advertised_uri, {"level": wanted.level} if wanted.level is not None else {})
 
 
 def _common_capabilities(capabilities: Sequence[Mapping[str, Any]]) -> dict[str, Any]:

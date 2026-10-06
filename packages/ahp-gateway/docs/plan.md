@@ -173,9 +173,26 @@ A request routes by, in order:
 3. the one node offering the named provider;
 4. the only node, if there is one.
 
+A changeset's channel is learned from the variable-free `uriTemplate` a
+session or chat advertises it by; one with a variable is expanded by the client
+and found by asking each node, as on `reconnect` (below).
+
+**Content refs** (`ContentRef.uri`: a diff's before and after, a large tool
+result) are host-minted and opaque - the sibling host's
+`ahp-changeset-content:` is its private scheme - so, like channels, they pass
+verbatim and the gateway learns which node named each one. They cannot be
+rewritten as file URIs are, because a `uri` key also carries URIs the client
+published (an attachment), which must come back as sent. A `resourceRead` or
+`resourceResolve` of one goes to the node that named it, and only to it: a
+gone node's content is refused as not connected, never asked of another, which
+may mint the same string for different bytes. One no payload named on this
+connection is asked of each node in inventory order, and the first that has it
+answers; that is safe only because both commands read.
+
 Where several nodes run the same agent (the same provider id on two
 machines), the surface sees one agent - the first node's entry with every
-node's models - and the folder picks the machine. A request that names no
+node's models and only the capabilities they all share (below) - and the
+folder picks the machine. A request that names no
 folder yet - a plain chat's `createSession`, or the `resolveSessionConfig` /
 `sessionConfigCompletions` a client asks before a folder is chosen - goes to
 the first connected node offering it, in inventory (node id) order. Anything
@@ -186,7 +203,22 @@ folder (a `session/workingDirectorySet` of `ahp-file:///<other>/...` on a
 session owned elsewhere) is refused, not relayed: the gateway echoes the action
 back to that surface with a `rejectionReason`, stamped from its own
 `serverSeq`, so the surface reverts its optimistic prediction. Moving a session
-between nodes is a separate feature, not built.
+between nodes is a separate feature, not built; for the same reason a
+`moveChat` into a session on another node is refused (`-32602`) before any node
+sees it, while one between two sessions on the chat's own node is relayed. A
+`createChat`'s client-chosen `chat` URI is claimed for its session's node
+before the request goes out, as a new session's is.
+
+`createChat`, `disposeChat`, `moveChat`, `invokeChangesetOperation` and every
+client action (`chat/turnResume`, `chat/toolCallConfirmed` with its
+`selectedOptionId`, `reasonMessage` and `userSuggestion`) route generically by
+their channel and pass through whole: nothing on that path lists fields. The
+same holds where the gateway does build the request: `subscribe` passes the
+surface's `view` and `delivery` on, and `listSessions` everything but the page
+window it owns. The handshake passes the surface's `clientInfo` and `locale`
+(nodes localise confirmation option labels by it) but not its `capabilities`:
+`mcpApps` would ask a node to route MCP App traffic through a link whose
+server-to-client `mcp://` notifications `AhpClient` does not model (below).
 
 **One `serverSeq`.** Every node action is restamped from the gateway's own
 counter, and every snapshot's `fromSeq` is translated to the stamp of that
@@ -195,9 +227,33 @@ channel before its snapshot are held, and are released after the reply.
 
 **The root channel is merged**, not relayed: agents are the union (the first
 node wins a shared provider id), `activeSessions` is the sum, and `terminals`
-is the concatenation. `config` is never advertised. The handshake extras
-`completionTriggerCharacters` and `terminalCommandPrefix` are advertised only
-when every node agrees on them (invariant 4).
+is the concatenation. `config` is never advertised. A node's `root/*` action
+(`root/agentsChanged` when its models change at runtime) updates that node's
+copy, and the surface is sent the merged result's change, never the node's
+action itself. A shared provider's `capabilities` are those every node running
+it shares: a capability, or an option that allows something (`fork`,
+`sideChat`, `primaryReplacement`), only where all have it, and the one that
+restricts (`immutablePrimary`) where any has it - the surface decides whether
+to offer "new chat" before it knows which machine a session lands on. The
+handshake extras `completionTriggerCharacters` and `terminalCommandPrefix` are
+advertised only when every node agrees on them (invariant 4).
+
+**Telemetry is the gateway's own.** `InitializeResult.telemetry` is the host's
+alone - the client offers nothing, and agrees to a signal by subscribing to its
+channel - but it names one channel per signal, and nodes may name different
+ones. So the gateway advertises `ahp-otlp://logs`, `ahp-otlp://traces` and
+`ahp-otlp://metrics`, each when any connected node emits that signal, and a
+subscription to one subscribes to the signal on every such node. Their batches
+are relayed verbatim onto the gateway's channel, interleaved as a collector
+fans them in (each payload's resource attributes still name its host), and
+only while the surface holds that subscription; a node that refuses costs only
+its own batches. Logs are advertised as `ahp-otlp://logs{?level}` only when
+every node emitting them advertises a `{level}` template, which the gateway
+then expands per node; otherwise as a literal URI, though a level a surface
+sends anyway still reaches the nodes that take one. The URIs are fixed, so the
+ones a client learnt at `initialize` hold after a `reconnect`, which leaves
+telemetry out of its snapshots: stateless channels are re-subscribed, not
+resumed.
 
 **The automation catalogue is merged too.** Each node hosts its own
 automations (AHP 0.9.0 `ahp-automations://`), and the gateway subscribes to
@@ -259,10 +315,24 @@ moment fails. The stock client prunes any subscription a snapshot reply
 leaves out, which is why the bounce waits for the node to come back instead
 of happening at the moment of loss.
 
+**`authenticate`** names only a resource, so nothing in it picks a node. It goes
+to every node whose agents list that resource among their `protectedResources`;
+when none does (a challenge raised live, by an MCP server or a tool call), to
+every connected node, since the one that raised it takes the token and the rest
+refuse it. It succeeds if any node accepts, and fails with the first refusal if
+none does.
+
 **Not yet:**
 
-- `authenticate` and the other root-level commands when more than one node
-  could answer them: refused as ambiguous.
+- The other root-level commands when more than one node could answer them and
+  nothing in the request names one: refused as ambiguous.
+- Per-machine agent capabilities. A shared provider shows only what every
+  machine running it shares, so a fleet where one machine lacks
+  `multipleChats` hides it for all of them; the node list in `RootState._meta`
+  names each machine's providers, not their capabilities.
+- Content one node minted, read by another: a session can attach a content ref
+  from a different machine's diff, but its node can only `resourceRead` it from
+  the surface, which does not hold it either.
 - Clients that never send `reconnect` (a surface that only ever
   `initialize`s) resync after a bounce through `initialize` instead; nothing
   is lost, but that client re-subscribes on its own.
@@ -270,7 +340,9 @@ of happening at the moment of loss.
 **Gaps that belong in the siblings:**
 
 - `AhpClient` forwards only the notification methods it models, so a new
-  upstream method would be dropped at the node edge.
+  upstream method would be dropped at the node edge. The `mcp://` channel's
+  server-to-client MCP notifications are such methods today, which is why the
+  surface's `mcpApps` capability is not passed on.
 - `AhpClient`'s `events()` tap is bounded. A drop closes the link rather than
   leave a surface on a silently wrong mirror.
 - `WebSocketServer` is typed to take a concrete `Host`. `serve_gateway` casts

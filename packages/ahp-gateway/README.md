@@ -24,8 +24,12 @@ It is the newest member of the family:
 
 Status: pre-alpha. The multiplexer (build-order unit 1) works end to end:
 stock clients through the gateway to stock hosts, in-process and over
-WebSocket. [`docs/plan.md`](docs/plan.md) is the design; §9 records what is
-built and what is not.
+WebSocket. A surface sees one session list, one agent list (a shared agent
+offering only what every machine running it can do), one automation catalogue
+and one telemetry stream per OTel signal, and every node's files, chats and
+diff content route back to the machine they live on.
+[`docs/plan.md`](docs/plan.md) is the design; §9 records what is built and
+what is not.
 
 ## Install
 
