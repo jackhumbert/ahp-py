@@ -40,6 +40,15 @@ versions each release speaks.
 
 ### Added
 
+- **`ResolvesInput.input_resolved(key, *, response="accept", answers=None)`** on
+  the host's sink, with `InputRequest.key`: withdraw an input request answered
+  somewhere else. Publishes `chat/inputCompleted`, retracts the
+  `session/inputNeeded` entry and resolves a `request_input` still waiting;
+  `False` when a client answered first. The `request_input` twin of
+  `tool_call_confirmed`.
+- **`IdentifiesTurn.turn_id`**: the host's sink exposes its turn id (and
+  `chat_uri`) publicly. Both are separate protocols, not `TurnSink` members, so
+  a provider's fake sink stays a `TurnSink`.
 - **A conversation per chat** for providers that keep one. `UserMessage.chat_uri`
   names the chat every turn (and steering message) is for; until now a provider
   could not tell a side chat's message from the default chat's. The optional
@@ -262,6 +271,13 @@ versions each release speaks.
 
 ### Fixed
 
+- **A provider's customization replacement no longer wipes other state.**
+  `SessionPublisher.customizations_changed` (and `DescribesSession` at
+  bring-up) replaced `SessionState.customizations` whole, erasing a client's
+  expanded plugins, an automation run's captured copies, and every
+  `session/customizationToggled` decision. The host now keeps the entries it
+  contributed that the provider does not name, and carries `enablement` /
+  `enabled` onto the provider's entries that leave the field out.
 - **`chat/workingDirectorySet` is validated** (1.0.0 MUST): a directory that
   is not one of the session's `workingDirectories`, or either chat action
   without `multipleWorkingDirectories`, is rejected with a reason. Accepted

@@ -910,10 +910,7 @@ class _Publisher:
         customizations: Sequence[Mapping[str, Any]],
         server_tools: Sequence[Mapping[str, Any]] | None = None,
     ) -> None:
-        await self._host.sequencer.publish(
-            self._session.uri,
-            {"type": "session/customizationsChanged", "customizations": list(customizations)},
-        )
+        await self._host._replace_customizations(self._session, customizations)
         if server_tools is not None:
             await self._host.sequencer.publish(
                 self._session.uri,
@@ -1323,6 +1320,10 @@ class _Session:
     #: `(plugin id, nonce)` pairs already expanded, so a republication with an
     #: unchanged nonce does not cost a round trip per child file.
     expanded_plugins: set[tuple[Any, Any]] = field(default_factory=set)
+    #: Top-level customization ids the HOST put in `SessionState.customizations`
+    #: on someone else's behalf -- a client's expanded plugin, an automation's
+    #: captured copy. A provider's full replacement keeps them.
+    contributed_customizations: set[str] = field(default_factory=set)
     #: Chats the CURRENT agent session has been told about through
     #: `HostsChats.chat_opened`. Per agent session, so one that comes up late
     #: (bring-up, a lazy resume) is told about exactly the chats it missed.
@@ -1451,6 +1452,35 @@ def _title_from(text: str) -> str | None:
     # to find and a hard cut is the only option.
     spaced = cut.rsplit(" ", 1)[0] if " " in cut else ""
     return f"{spaced if len(spaced) >= _TITLE_LIMIT // 2 else collapsed[:body]}…"
+
+
+def _keep_decisions(new: Mapping[str, Any], old: Mapping[str, Any] | None) -> dict[str, Any]:
+    """*new*, with the enablement *old* carried where *new* leaves it out.
+
+    Matched by id and type, recursively through `children`. The fields are
+    the ones `session/customizationToggled` writes
+    (`applyCustomizationEnablement`): `enablement` on a plugin or MCP server,
+    `enabled` on any other entry. Absent is the test (`in`), never falsiness:
+    an explicit `enabled: false` or `enablement: []` is a statement.
+    """
+    merged = dict(new)
+    if old is None or old.get("type") != new.get("type"):
+        return merged
+    field_name = "enablement" if new.get("type") in ("plugin", "mcpServer") else "enabled"
+    if field_name not in new and field_name in old:
+        merged[field_name] = copy.deepcopy(old[field_name])
+    children, previous = new.get("children"), old.get("children")
+    if isinstance(children, list) and isinstance(previous, list):
+        by_id = {
+            c["id"]: c for c in previous if isinstance(c, Mapping) and isinstance(c.get("id"), str)
+        }
+        merged["children"] = [
+            _keep_decisions(child, by_id.get(child.get("id")))
+            if isinstance(child, Mapping)
+            else child
+            for child in children
+        ]
+    return merged
 
 
 def _fork_turn_id(params: Mapping[str, Any]) -> str | None:
@@ -3025,6 +3055,9 @@ class Host:
             return
         expanded = dict(plugin)
         expanded["children"] = await self._plugin_children(connection, plugin)
+        if isinstance(expanded.get("id"), str):
+            # The CLIENT's entry, kept through any later provider replacement.
+            session.contributed_customizations.add(expanded["id"])
         # `customizationUpdated` upserts one container by id and replaces it
         # entirely, children included -- there is no field-level merge and no
         # per-child action, so the whole container goes every time.
@@ -3852,6 +3885,84 @@ class Host:
         """
         capability = provider.agent.capabilities.get("multipleChats")
         return capability if isinstance(capability, Mapping) else None
+
+    # ─── customizations ──────────────────────────────────────────────────
+
+    async def _replace_customizations(
+        self, session: _Session, customizations: Sequence[Mapping[str, Any]]
+    ) -> None:
+        """Publish a provider's customization tree without wiping anyone else's.
+
+        `session/customizationsChanged` is a full replacement of the ONE list
+        `SessionState.customizations` holds -- and that list is not only the
+        provider's. The host upserts a client's published plugin into it
+        (`expand_client_plugin`) and an automation run's captured copies, and
+        `session/customizationToggled` writes the user's decisions onto its
+        entries. A provider republishing its own tree (a plugin installed, an
+        MCP server added) used to erase all three: the client's plugins were
+        gone until it republished with a NEW nonce, a run lost the plugins its
+        automation saved, and every switch the user had flipped snapped back
+        on in state while the agent had been told it was off.
+
+        So the provider's list is merged, not trusted as the whole:
+
+        * entries the host contributed (above, or published now by an active
+          client, or served from a captured copy) and that the provider's list
+          does not name are kept, after the provider's own;
+        * an entry the provider names keeps the session's current enablement
+          -- `enablement` on a plugin or MCP server, `enabled` on a child --
+          when the provider's entry leaves the field out. A field it states
+          wins: the provider may know better (settings changed elsewhere).
+          A directory's `enabled` is required, so the provider always states
+          it.
+        """
+        state = self.sequencer.state_of(session.uri)
+        current = state.get("customizations") if isinstance(state, Mapping) else None
+        current_list = (
+            [c for c in current if isinstance(c, Mapping)] if isinstance(current, list) else []
+        )
+        by_id = {c["id"]: c for c in current_list if isinstance(c.get("id"), str)}
+        merged: list[Any] = [
+            _keep_decisions(entry, by_id.get(entry.get("id")))
+            if isinstance(entry, Mapping)
+            else entry
+            for entry in customizations
+        ]
+        named = {entry.get("id") for entry in customizations if isinstance(entry, Mapping)}
+        contributed = self._contributed_customizations(session, state)
+        merged.extend(
+            dict(entry)
+            for entry in current_list
+            if entry.get("id") in contributed and entry.get("id") not in named
+        )
+        await self.sequencer.publish(
+            session.uri, {"type": "session/customizationsChanged", "customizations": merged}
+        )
+
+    def _contributed_customizations(self, session: _Session, state: Any) -> set[str]:
+        """Top-level ids in the session's list that are not the provider's.
+
+        What the host recorded itself, plus what it can still tell from state
+        after a restart lost that record: every plugin an active client
+        publishes, and every entry served from an automation's captured copy.
+        """
+        found = set(session.contributed_customizations)
+        clients = state.get("activeClients") if isinstance(state, Mapping) else None
+        for client in clients if isinstance(clients, list) else []:
+            published = client.get("customizations") if isinstance(client, Mapping) else None
+            for entry in published if isinstance(published, list) else []:
+                if isinstance(entry, Mapping) and isinstance(entry.get("id"), str):
+                    found.add(entry["id"])
+        current = state.get("customizations") if isinstance(state, Mapping) else None
+        for entry in current if isinstance(current, list) else []:
+            uri = entry.get("uri") if isinstance(entry, Mapping) else None
+            if (
+                isinstance(uri, str)
+                and uri.startswith(COPY_SCHEME)
+                and isinstance(entry.get("id"), str)
+            ):
+                found.add(entry["id"])
+        return found
 
     # ─── telling the agent which chats exist (`HostsChats`) ──────────────
 
@@ -6229,13 +6340,7 @@ class Host:
         if isinstance(session.agent_session, DescribesSession):
             described = await session.agent_session.describe()
             if described.customizations:
-                await self.sequencer.publish(
-                    session.uri,
-                    {
-                        "type": "session/customizationsChanged",
-                        "customizations": list(described.customizations),
-                    },
-                )
+                await self._replace_customizations(session, described.customizations)
             if described.server_tools:
                 await self.sequencer.publish(
                     session.uri,
@@ -8201,6 +8306,7 @@ class Host:
                     continue
                 if isinstance(entry.get("enablement"), list):
                     customization["enablement"] = copy.deepcopy(entry["enablement"])
+                session.contributed_customizations.add(str(customization["id"]))
                 await self.sequencer.publish(
                     session_uri,
                     {"type": "session/customizationUpdated", "customization": customization},

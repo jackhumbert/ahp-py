@@ -41,6 +41,18 @@ class Wire:
             if message is None:
                 return
             request_id = message.get("id")
+            if "method" in message and request_id is not None:
+                # A request FROM the host (`resource*` back to the client). This
+                # client serves nothing, and says so rather than leaving it to
+                # time out.
+                await self._transport.send(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": request_id,
+                        "error": {"code": -32008, "message": "this client serves nothing"},
+                    }
+                )
+                continue
             if "method" not in message and isinstance(request_id, int):
                 waiter = self._waiting.pop(request_id, None)
                 if waiter is not None and not waiter.done():

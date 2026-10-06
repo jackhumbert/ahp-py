@@ -139,9 +139,39 @@ So a host that wants to be usable must:
 | `system_notification(text, *, markdown=, meta=)` | A note from the harness in the transcript: "conversation compacted", "sent from another device". |
 | `turn_failed(message, error_type=, duration_ms=, *, resumable=)` | End in error. `error_type` is required — omitting it renders `Error: (undefined) …`. `resumable=True` offers `chat/turnResume`; see [Resuming a failed turn](#resuming-a-failed-turn). |
 | `usage(*, input_tokens=, output_tokens=, cache_read_tokens=, model=)` | Report the turn's tokens. No usage, no context gauge — the client renders nothing rather than a zero. |
-| `request_input(request)` | **Suspends.** Ask a human and wait. |
+| `request_input(request)` | **Suspends.** Ask a human and wait. Give the request a `key` if you may need to withdraw it. |
 | `confirm_tool_call(confirmation)` | **Suspends.** Ask before running a tool. |
 | `run_client_tool(call)` | **Suspends.** Ask the *client* to run one of its own tools. |
+
+Two more things a sink offers, as separate protocols so a test fake that
+predates them is still a `TurnSink` — check with `isinstance`:
+
+- **`IdentifiesTurn.turn_id`** (and `chat_uri` on the host's sink): the turn
+  you are publishing into, the `turnId` clients see.
+- **`ResolvesInput.input_resolved(key, *, response="accept", answers=None)`**:
+  the `request_input` twin of `tool_call_confirmed`, for an agent also driven
+  from somewhere else. Ask with `InputRequest(..., key=...)` — your own name for
+  the request, since the id clients see is the host's — and when the other place
+  answers first, stop awaiting and call this. The host publishes
+  `chat/inputCompleted` so the transcript shows the answer and no client can
+  give another, withdraws the `session/inputNeeded` entry, and hands the outcome
+  to a `request_input` still waiting. It returns `False` and does nothing if a
+  client here answered first.
+
+```python
+from ahp_host.provider.base import IdentifiesTurn, InputRequest, ResolvesInput
+
+
+async def ask_both_places(sink: TurnSink, other_place_answered) -> None:
+    request = InputRequest(message="Which file?", key="question-17")
+    asking = asyncio.create_task(sink.request_input(request))
+    answer = await other_place_answered()
+    asking.cancel()
+    if isinstance(sink, ResolvesInput):
+        await sink.input_resolved("question-17", answers=answer)
+    if isinstance(sink, IdentifiesTurn):
+        print("answered during", sink.turn_id)
+```
 
 Three of those are optional and easy to skip, and each is invisible in a
 different way. Without `tool_call_delta`/`tool_call_output`, a call that takes
@@ -273,7 +303,7 @@ no turn is running. Hold it for the life of the session.
 
 | Method | What it does |
 |---|---|
-| `customizations_changed(customizations, server_tools=)` | Republish the session's customization tree. |
+| `customizations_changed(customizations, server_tools=)` | Republish **your** customization tree. The host merges it: a client's published plugins and an automation's copies are kept, and an entry you name keeps the user's on/off decision (`enablement` on a plugin or MCP server, `enabled` on a child) unless your entry states the field itself. |
 | `mcp_server_changed(id, state, channel=)` | An MCP server's lifecycle. Publish `{"kind": "starting", "blocking": True}` if its startup holds back the next message, and implement `BackgroundsMcpServers` to let a client stop waiting. |
 | `activity_changed(activity)` / `title_changed(title)` / `config_changed(values)` | Session metadata that moved on its own. |
 | `changes_published(changeset, changes, chat=)` | Publish or refresh a changeset; a refresh shows as `recomputing`. With `chat`, it belongs to that chat's catalogue and roll-up. |

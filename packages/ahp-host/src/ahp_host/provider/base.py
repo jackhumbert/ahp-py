@@ -53,6 +53,7 @@ __all__ = [
     "ForkedFrom",
     "HandlesCustomizations",
     "HostsChats",
+    "IdentifiesTurn",
     "InputOutcome",
     "InputQuestion",
     "InputRequest",
@@ -61,6 +62,7 @@ __all__ = [
     "ModelSelection",
     "OpensSessions",
     "ProviderTerminal",
+    "ResolvesInput",
     "ResumableAgentProvider",
     "ResumesTurns",
     "SessionDescription",
@@ -298,6 +300,12 @@ class InputRequest:
     message: str | None = None
     url: str | None = None
     questions: Sequence[InputQuestion] = ()
+    #: Your own name for this request, so you can withdraw it later with
+    #: :meth:`ResolvesInput.input_resolved` -- the request id clients see is
+    #: minted by the host (ADR 0005) and you never learn it. Unique within the
+    #: chat while the request is open; the runtime's own question id is the
+    #: natural choice. ``None`` if you will never need to withdraw it.
+    key: str | None = None
 
 
 @dataclass(frozen=True)
@@ -575,7 +583,15 @@ class SessionPublisher(Protocol):
         customizations: Sequence[Mapping[str, Any]],
         server_tools: Sequence[Mapping[str, Any]] | None = None,
     ) -> None:
-        """Republish the session's customization tree. Full replacement."""
+        """Republish YOUR customization tree. Full replacement of your entries.
+
+        Not of the session's whole list, which also holds a client's published
+        plugins and an automation's captured copies, and the user's on/off
+        decisions: the host keeps the entries it contributed that you do not
+        name, and an entry you do name keeps the session's current
+        `enablement` (plugin, MCP server) or `enabled` (anything else) unless
+        your entry states that field itself -- in which case yours wins.
+        """
         ...
 
     async def activity_changed(self, activity: str | None) -> None:
@@ -1481,6 +1497,55 @@ class TurnSink(Protocol):
         `call.client_id` must name a client in the session's `activeClients`;
         the host refuses otherwise rather than parking a request no one will
         ever answer.
+        """
+        ...
+
+
+@runtime_checkable
+class IdentifiesTurn(Protocol):
+    """A sink that says which turn it publishes into.
+
+    The host's sink always does. A separate protocol rather than a member of
+    :class:`TurnSink`, so a provider's test fake that predates it still is a
+    `TurnSink`: test ``isinstance(sink, IdentifiesTurn)`` and read the id.
+    """
+
+    @property
+    def turn_id(self) -> str:
+        """The turn's id -- `Turn.id` in the chat's state, `turnId` on its actions."""
+        ...
+
+
+@runtime_checkable
+class ResolvesInput(Protocol):
+    """A sink that can withdraw an input request answered somewhere else.
+
+    The `request_input` twin of `TurnSink.tool_call_confirmed`: an agent driven
+    from two places asks both, and when the other one answers first it stops
+    waiting on its own `request_input` -- but every client here kept showing
+    the question, and the session stayed `InputNeeded`, until the turn ended.
+    The host's sink implements it; a separate protocol so a fake `TurnSink`
+    need not (test ``isinstance(sink, ResolvesInput)``).
+    """
+
+    async def input_resolved(
+        self,
+        key: str,
+        *,
+        response: str = "accept",
+        answers: Mapping[str, Any] | None = None,
+    ) -> bool:
+        """Record that the request opened with ``InputRequest(key=key)`` was answered.
+
+        *response* is ``"accept"``, ``"decline"`` or ``"cancel"``; *answers*
+        are by question id in the wire `ChatInputAnswer` shape (``{"state":
+        "submitted", "value": {...}}``), the same shape `InputOutcome.answers`
+        hands you. The host publishes `chat/inputCompleted` for it -- so the
+        transcript shows how it was answered and no client can answer it
+        again -- withdraws its `session/inputNeeded` entry, and, if your
+        `request_input` is still waiting, returns this outcome from it.
+        Returns ``False`` (publishing nothing) when there is no such open
+        request: a client here answered first, or the turn ended.
         """
         ...
 

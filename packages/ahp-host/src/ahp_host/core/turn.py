@@ -156,6 +156,11 @@ class _StreamingCall:
     partial_input: str = ""
 
 
+def _input_key(key: str) -> str:
+    """The pending-registry key an `InputRequest.key` is parked under."""
+    return f"input:{key}"
+
+
 def turn_scope(channel: str, turn_id: str) -> str:
     """The lifetime a suspended request is bound to (ADR 0005).
 
@@ -212,6 +217,16 @@ class ActionTurnSink:
         #: `chat/toolCallReady`, and what was published about each of them. See
         #: `_ensure_runnable`.
         self._streaming: dict[str, _StreamingCall] = {}
+
+    @property
+    def turn_id(self) -> str:
+        """The turn this sink publishes into (`IdentifiesTurn`). Read-only."""
+        return self._turn_id
+
+    @property
+    def chat_uri(self) -> str:
+        """The chat that turn runs on. Read-only."""
+        return self._channel
 
     async def steered(self, text: str) -> None:
         """Note in the transcript that the user steered this turn.
@@ -688,7 +703,13 @@ class ActionTurnSink:
         about yet, and the host would drop the answer.
         """
         parked = self._pending.open(
-            turn_scope(self._channel, self._turn_id), "input", channel=self._channel
+            turn_scope(self._channel, self._turn_id),
+            "input",
+            # Namespaced: tool calls park under their bare `toolCallId` in the
+            # same (channel, key) table, and a provider's question id must not
+            # be able to shadow one.
+            key=_input_key(request.key) if request.key is not None else None,
+            channel=self._channel,
         )
 
         wire: dict[str, Any] = {"id": parked.id}
@@ -722,6 +743,82 @@ class ActionTurnSink:
         outcome = await parked.future
         answers = outcome.payload if isinstance(outcome.payload, Mapping) else {}
         return InputOutcome(response=outcome.response, answers=answers)
+
+    async def input_resolved(
+        self,
+        key: str,
+        *,
+        response: str = "accept",
+        answers: Mapping[str, Any] | None = None,
+    ) -> bool:
+        """An input request was answered somewhere clients here cannot see.
+
+        The `request_input` twin of :meth:`tool_call_confirmed`. The request is
+        found by the provider's own `InputRequest.key` -- the id clients know
+        is host-minted, so the provider never learned it.
+
+        `chat/inputCompleted` is client-dispatchable, and a host may originate
+        a client-dispatchable action the way `tool_call_confirmed` publishes
+        `chat/toolCallConfirmed`: the reducer records the response and answers
+        on the open part and drops the chat out of `InputNeeded`, so the
+        transcript says how the question was settled and no client can answer
+        it a second time. Published BEFORE the park is resolved (ADR 0005), and
+        only while the part is still open -- a frame the reducer would drop
+        still costs a `serverSeq`.
+        """
+        request_id = self._pending.id_for_key(_input_key(key), channel=self._channel)
+        request = self._pending.get(request_id) if request_id is not None else None
+        if request is None or request.kind != "input":
+            return False
+        if not self._open_input_part(request.id):
+            # A client's answer is already in state and on its way to the park
+            # (`_react` resolves it right after the reducer): that answer wins,
+            # and this one would only contradict it.
+            return False
+        action: dict[str, Any] = {
+            "type": "chat/inputCompleted",
+            "requestId": request.id,
+            "response": response,
+        }
+        if answers is not None:
+            action["answers"] = {str(k): v for k, v in answers.items()}
+        await self._sequencer.publish(self._channel, action)
+        # Read back, merged with any drafts a client had synced -- the same
+        # payload a client's answer would have produced.
+        self._pending.resolve(
+            request.id,
+            RequestOutcome(response=response, payload=self._input_answers(request.id)),
+        )
+        await self._retract_input_needed(request.id)
+        return True
+
+    def _input_parts(self) -> list[Mapping[str, Any]]:
+        state = self._sequencer.state_of(self._channel)
+        active = state.get("activeTurn") if isinstance(state, Mapping) else None
+        if not isinstance(active, Mapping) or active.get("id") != self._turn_id:
+            return []
+        parts = active.get("responseParts")
+        return [
+            part
+            for part in (parts if isinstance(parts, list) else [])
+            if isinstance(part, Mapping) and part.get("kind") == "inputRequest"
+        ]
+
+    def _open_input_part(self, request_id: str) -> bool:
+        """Whether *request_id*'s part is in this turn and still unanswered."""
+        for part in self._input_parts():
+            request = part.get("request")
+            if isinstance(request, Mapping) and request.get("id") == request_id:
+                return "response" not in part
+        return False
+
+    def _input_answers(self, request_id: str) -> dict[str, Any]:
+        for part in self._input_parts():
+            request = part.get("request")
+            if isinstance(request, Mapping) and request.get("id") == request_id:
+                answers = request.get("answers")
+                return dict(answers) if isinstance(answers, Mapping) else {}
+        return {}
 
     async def confirm_tool_call(self, call: ToolConfirmation) -> ToolConfirmationOutcome:
         """Publish `chat/toolCallReady` and suspend until a client confirms.
