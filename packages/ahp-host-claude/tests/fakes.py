@@ -193,6 +193,13 @@ class RecordingSink:
         #: Each usage report's `_meta`.
         self.usage_meta: list[Mapping[str, Any] | None] = []
         self.notifications: list[str] = []
+        self.notification_meta: list[Mapping[str, Any] | None] = []
+        #: Whether each failure was offered for resuming.
+        self.resumable: list[bool] = []
+        #: Every change handed to `file_edit`.
+        self.file_edits: list[Any] = []
+        #: What `confirm_tool_call` answers, instead of approve/edited_input.
+        self.outcome: ToolConfirmationOutcome | None = None
 
     async def text_delta(self, text: str) -> None:
         self.events.append(("text", text))
@@ -257,12 +264,14 @@ class RecordingSink:
         self.events.append(("completed", call_id, success, result))
 
     async def file_edit(self, change: Any) -> Mapping[str, Any]:
-        return {"type": "fileEdit"}
+        self.file_edits.append(change)
+        return {"type": "fileEdit", "uri": change.uri}
 
     async def system_notification(
         self, text: str, *, markdown: bool = False, meta: Mapping[str, Any] | None = None
     ) -> None:
         self.notifications.append(text)
+        self.notification_meta.append(meta)
 
     async def turn_failed(
         self,
@@ -272,6 +281,7 @@ class RecordingSink:
         *,
         resumable: bool = False,
     ) -> None:
+        self.resumable.append(resumable)
         self.events.append(("failed", message, error_type))
 
     async def request_input(self, request: InputRequest) -> InputOutcome:
@@ -289,6 +299,8 @@ class RecordingSink:
         self.events.append(("confirm", call.call_id))
         if self.hold is not None:
             await self.hold.wait()  # nobody here answers
+        if self.outcome is not None:
+            return self.outcome
         return ToolConfirmationOutcome(
             approved=self.approve,
             tool_input=self.edited_input if self.edited_input is not None else call.tool_input,
@@ -310,6 +322,20 @@ class RecordingSink:
         return self.client_result
 
 
+class ResolvingSink(RecordingSink):
+    """The host's sink can withdraw an input request answered elsewhere."""
+
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.resolved: list[tuple[str, str, Mapping[str, Any] | None]] = []
+
+    async def input_resolved(
+        self, key: str, *, response: str = "accept", answers: Mapping[str, Any] | None = None
+    ) -> bool:
+        self.resolved.append((key, response, answers))
+        return True
+
+
 class FakeChat:
     """A `ProviderChat`: each worker turn runs on its own task, into a fresh sink."""
 
@@ -320,6 +346,8 @@ class FakeChat:
         self.prompts: list[str] = []
         self.sinks: list[RecordingSink] = []
         self.tasks: list[asyncio.Task[None]] = []
+        #: The chat it was opened under (None: the default chat).
+        self.parent: str | None = None
 
     async def run_turn(self, text: str, run: Callable[[Any], Awaitable[None]]) -> bool:
         if any(not task.done() for task in self.tasks):
@@ -364,13 +392,17 @@ class FakePublisher:
         self.tasks: list[asyncio.Task[None]] = []
         self.refusals = 0
         self.config_changes: list[dict[str, Any]] = []
-        #: The chat's background work as the host would hold it, by id.
+        #: The chat's background work as the host would hold it, by id, and
+        #: which chat each was published for (None: the default chat).
         self.background: dict[str, dict[str, Any]] = {}
+        self.background_chats: dict[str, str | None] = {}
         self.terminals: list[FakeTerminal] = []
         self.chats: list[FakeChat] = []
         #: Every customization tree published, and each MCP server's lifecycle.
         self.trees: list[list[dict[str, Any]]] = []
         self.mcp_states: list[tuple[str, dict[str, Any]]] = []
+        #: Each changeset publication: (changeset, changes, chat).
+        self.changesets: list[tuple[Any, list[Any], str | None]] = []
 
     async def external_turn(self, text: str, run: Callable[[Any], Awaitable[None]]) -> bool:
         if any(not task.done() for task in self.tasks):
@@ -398,7 +430,8 @@ class FakePublisher:
     async def changes_published(
         self, changeset: Any, changes: Sequence[Any], *, chat: str | None = None
     ) -> str:
-        return ""
+        self.changesets.append((changeset, list(changes), chat))
+        return str(changeset.uri)
 
     async def mcp_server_changed(
         self, customization_id: str, state: Mapping[str, Any], channel: str | None = None
@@ -425,6 +458,7 @@ class FakePublisher:
         interactivity: str = "read-only",
     ) -> FakeChat:
         opened = FakeChat(f"ahp-chat:/worker-{len(self.chats)}", title, tool_call_id)
+        opened.parent = chat
         self.chats.append(opened)
         return opened
 
@@ -449,6 +483,7 @@ class FakePublisher:
 
     async def background_work_set(self, work: BackgroundWork, *, chat: str | None = None) -> None:
         self.background[work.id] = work.to_wire()
+        self.background_chats[work.id] = chat
 
     async def background_work_removed(self, work_id: str, *, chat: str | None = None) -> None:
         self.background.pop(work_id, None)

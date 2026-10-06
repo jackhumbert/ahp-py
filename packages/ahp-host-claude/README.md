@@ -30,9 +30,9 @@ Status: pre-alpha.
   single or multiple choice, with room to type your own answer, or a text or
   number field - and your answers go back to Claude. Declining or dismissing
   them tells Claude so, and the turn carries on. Under Remote Control the
-  questions are asked on claude.ai too; answered there, the request here stays
-  up until the turn ends (the host cannot withdraw one early), and answering
-  it then changes nothing.
+  questions are asked on claude.ai too; answered there, the request here is
+  closed with the answers given there, so the transcript shows them and no
+  one can answer twice.
 - **Approvals**, chosen per session when it is created (the `permissionMode`
   session setting, which VS Code draws with its own icons):
   - **Ask** (`default`, the default): reading and searching run freely; every edit, shell
@@ -49,6 +49,22 @@ Status: pre-alpha.
     anything (apart from Claude Code's own plan file under `~/.claude/plans`),
     then shows its plan and asks to start. Approving drops the session to Ask,
     so the work itself is still approved call by call.
+
+  An approval prompt also shows:
+  - **what an edit will do**, as a diff to open before deciding: `Write`,
+    `Edit` and `MultiEdit` against the file as it is on disk, when the edit
+    can be applied exactly as Claude Code would (inside the served folders,
+    up to 2 MiB);
+  - **choices beyond yes and no**, from Claude Code's own suggestions for the
+    call: allow a rule (`Bash(npm test:*)`) for the rest of the session, or
+    switch to Accept edits or Auto from now on. Nothing is applied unless you
+    pick it; every rule is narrowed to the session, so a client here never
+    writes your Claude Code settings files; rules are not offered in Ask,
+    where every change is put to you whatever the rules say; and bypass
+    permissions and extra directories are never offered.
+
+  Saying no can carry a reason and a suggestion of what to do instead; both
+  go to Claude with the denial, so it does not try the same thing again.
 
   The mode can be switched during a session (in VS Code or the [iOS app](https://github.com/jackhumbert/ahp-client-ios)); the
   running Claude client follows, and the choice survives a host restart.
@@ -73,6 +89,37 @@ Status: pre-alpha.
   background work pointing at its chat, and its messages keep streaming there
   after the turn that started it has ended. Stopping a worker chat's turn stops
   that subagent alone.
+- **Diffs and a changeset.** Each completed `Write`, `Edit`, `MultiEdit` and
+  `NotebookEdit` call carries its diff (`fileEdit`): the file just before the
+  call ran and just after, read from disk inside the served folders (up to
+  2 MiB). The session lists one reviewable changeset of every file Claude
+  edited with them, from before its first edit to after its latest; another
+  chat's edits are also in a changeset of that chat's own. A file a shell
+  command changes is not shown: nothing says which files a command touched.
+- **Chats**: a session can have several (`createChat`), each its own Claude
+  Code conversation on its own Claude process, with its own history,
+  rewinds and resume state; stopping one stops only that one. A **fork** starts
+  from a copy of the source chat's conversation cut at the turn it forked at,
+  so the source is untouched; a **side chat** the same, without the source's
+  turns in its own history. A source that cannot be cut there (its turns
+  predate this adapter's marks, or it is not running here) is handed to Claude
+  as its transcript instead. Forking a whole session (`createSession.fork`)
+  works the same way. The approval mode, effort, folders and customizations
+  are the session's and apply to every chat; Remote Control is the default
+  chat's only, and a session listed through claude.ai cannot open a second
+  chat. A chat can be narrowed to some of the session's folders, or none: with
+  none it gets no file or shell tools, and one that leaves out the session's
+  own folder (where Claude Code works from) asks before every change whatever
+  the approval mode.
+- **Resuming** a turn that failed on something transient - an overloaded or
+  rate-limited API after Claude Code's own retries, a server error, the Claude
+  process ending - is offered (`chat/turnResume`). Resuming starts Claude Code
+  again on the conversation if need be and asks Claude to carry on; what it
+  says is added to the same turn. A failure the same request would hit again
+  (a refused login, a bad request) is not offered.
+- **Notes in the transcript** (system notifications) for what the harness did
+  rather than Claude: a compaction, a message sent from another device, a
+  background shell finishing while a turn runs.
 - **Customizations**: the session's skills, agents, plugins and MCP servers,
   as Claude Code reports them once its process is up, published as the
   protocol's customization tree - a `plugin` per plugin, `directory` entries
@@ -104,9 +151,9 @@ Status: pre-alpha.
 - **`/` and `@` completions**: `/` at the start of a message offers Claude
   Code's slash commands and skills for the session (not those bound to its
   terminal); `@` offers files and folders from Claude Code's own file index,
-  inside the served folders, as resource attachments. The host advertises the
-  trigger characters when it is told them (`ClaudeProvider.completion_trigger_characters`);
-  `python -m ahp_host_claude` does, an `ahp-node` does not yet.
+  inside the served folders, as resource attachments. The provider declares
+  its trigger characters (`completion_trigger_characters`), which ahp-host
+  advertises, under `python -m ahp_host_claude` and `ahp-node` alike.
 - **Steering**: a message sent while Claude is working joins the turn at
   its next tool call (Claude Code's own "next" queue slot) instead of waiting
   for it to finish; queued messages still run afterwards.
@@ -180,13 +227,17 @@ Status: pre-alpha.
   appear without a release of this adapter. Each model carries its context
   window (`maxContextWindow`, `maxPromptTokens`), which the start-up probe asks
   Claude Code for model by model, and its output limit (`maxOutputTokens`)
-  once a session has used it and Claude Code has said - kept in
-  `<state_dir>/claude-models.json` for the next start. Every model takes images
-  (`supportsVision`): all the ones Claude Code offers do.
+  once a session has used it and Claude Code has said - published at once
+  (`root/agentsChanged`) and kept in `<state_dir>/claude-models.json` for the
+  next start. Every model takes images (`supportsVision`): all the ones Claude
+  Code offers do. If Claude Code could not say at start-up (not signed in
+  yet), it is asked again with backoff, and the picker fills in when it can.
 - Attachments: a referenced file or folder is handed to Claude as its path
   (with the selected lines, if any); a pasted image or PDF is sent as an image
   or document block; pasted text is inlined (capped at 200k characters).
-  Chat and annotation references are named but not resolved yet.
+  Another chat attached to a message reaches Claude as its transcript, up to
+  the turn the attachment names (capped the same, keeping its end).
+  Annotation references are named but not resolved yet.
 - Sessions that survive a host restart: the Agent SDK's session id is the
   host's resume state.
 - **Automations**: a saved prompt that runs as a new session on a schedule
@@ -270,6 +321,12 @@ servers on and off for a project (Claude Code keeps that in its own config, as
 session's approval mode by picking one: what an agent's file sets is put back.
 A subagent's tool calls pass the same approval gate as the session's own,
 asked in the subagent's worker chat.
+
+The choices on an approval prompt widen what runs without asking only when
+someone picks one, and only for the session: a rule Claude Code suggests is
+applied with its destination narrowed to the session (never your settings
+files), a mode only if it is Accept edits or Auto, a directory never. Picking
+a mode moves the session's approval mode with it, for every chat.
 
 ## Development
 

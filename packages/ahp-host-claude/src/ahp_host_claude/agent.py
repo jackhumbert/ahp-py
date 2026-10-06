@@ -78,4 +78,6 @@ async def create(options: Mapping[str, Any], node: NodeContext) -> ClaudeProvide
         state_dir=node.state_dir,
         chat_tools=chat_tools,
         commands=found.commands,
+        # Start-up could not say: try again until it can.
+        rediscover=not found.models,
     )

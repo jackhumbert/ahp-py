@@ -29,6 +29,13 @@ puts it; a plugin not yet seen in `system/init` has no path, and gets a
 MCP servers are top-level, except a plugin's own (``plugin:<plugin>:<server>``),
 which is a child of its plugin. The SDK's in-process servers (this adapter's
 client tools) are not listed: they are the client's own tools coming back.
+
+Every entry states whether it is on (`enabled` on a child, `enablement` on a
+plugin or MCP server), deliberately: the host keeps a client's toggle on an
+entry whose state leaves the field out, and here the field always says what
+the agent is actually held to - a skill switched off is refused by the Skill
+tool, an MCP server is on or off in Claude Code, and an agent cannot be
+switched off at all, so a client's toggle on one does not take.
 """
 
 from __future__ import annotations
@@ -209,8 +216,9 @@ class _Builder:
             entry: dict[str, Any] = {"type": "plugin", "id": identifier, "uri": uri, "name": name}
             if version is not None:
                 entry["version"] = version
-            if identifier in self.disabled:
-                entry["enablement"] = [{"kind": "session", "enabled": False}]
+            entry["enablement"] = (
+                [{"kind": "session", "enabled": False}] if identifier in self.disabled else []
+            )
             entry["load"] = {"kind": "loaded"}
             container = _Container(entry=entry, path=path)
             self.plugins[name] = container
@@ -242,10 +250,9 @@ class _Builder:
     # -- children --------------------------------------------------------
 
     def _child(self, kind: str, identifier: str, uri: str, name: str) -> dict[str, Any]:
-        child: dict[str, Any] = {"type": kind, "id": identifier, "uri": uri, "name": name}
-        if identifier in self.disabled:
-            child["enabled"] = False
-        return child
+        # Only a skill can be switched off (a deny rule); an agent cannot.
+        enabled = kind != "skill" or identifier not in self.disabled
+        return {"type": kind, "id": identifier, "uri": uri, "name": name, "enabled": enabled}
 
     def skills(self) -> None:
         if not self.skills_usable:
@@ -363,6 +370,8 @@ class _Builder:
                     if self.workspace is not None
                     else [{"kind": "session", "enabled": False}]
                 )
+            else:
+                entry["enablement"] = []
             self.tree.mcp[identifier] = name
             parts = name.split(":")
             if len(parts) >= 3 and parts[0] == "plugin":

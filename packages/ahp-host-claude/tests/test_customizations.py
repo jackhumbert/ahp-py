@@ -281,7 +281,8 @@ async def test_what_claude_code_cannot_switch_off_is_put_back(tmp_path: Path) ->
     published = len(harness.publisher.trees)
     await session.customization_toggled("agent:planner", False)
     assert len(harness.publisher.trees) == published + 1
-    assert "enabled" not in _by_id(harness.publisher.trees[-1])["agent:planner"]
+    # Stated, so the host does not keep the client's toggle over it.
+    assert _by_id(harness.publisher.trees[-1])["agent:planner"]["enabled"] is True
     assert not harness.clients[0].disconnected
 
 
@@ -331,3 +332,12 @@ async def test_a_claude_ai_mirror_cannot_be_rewound_or_reconfigured(tmp_path: Pa
     assert isinstance(local, LocalClaudeSession)
     for protocol in (TruncatesHistory, ManagesMcpServers, HandlesCustomizations):
         assert isinstance(local, protocol)
+
+
+def test_every_entry_states_whether_it_is_on(tmp_path: Path) -> None:
+    """The host keeps a client's toggle where the field is left out; it never is."""
+    entries = _by_id(build(_sources(tmp_path), cwd=tmp_path, config=tmp_path).customizations)
+    assert entries["skill:deploy"]["enabled"] is True
+    assert entries["agent:planner"]["enabled"] is True
+    assert entries["plugin:tools"]["enablement"] == []
+    assert entries["mcp:github"]["enablement"] == []

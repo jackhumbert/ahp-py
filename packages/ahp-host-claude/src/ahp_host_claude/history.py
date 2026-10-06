@@ -38,7 +38,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Final
 
-__all__ = ["MAX_MARKS", "Cut", "Rewind", "TurnMark", "plan"]
+__all__ = ["MAX_MARKS", "Cut", "Rewind", "TurnMark", "branch_point", "plan"]
 
 #: Turns remembered per session; a cut older than this forgets everything.
 MAX_MARKS: Final = 1000
@@ -67,15 +67,23 @@ class TurnMark:
 
 @dataclass(frozen=True)
 class Rewind:
-    """A cut not yet taken: resume at ``at``, dropping the turn ``drops`` opened."""
+    """A cut not yet taken: resume at ``at``, dropping the turn ``drops`` opened.
+
+    ``fork``: take it as a new conversation (`fork_session`) rather than a
+    branch of the same one - a chat forked from another chat, whose source
+    must stay exactly as it is.
+    """
 
     at: str
     drops: str | None = None
+    fork: bool = False
 
     def to_wire(self) -> dict[str, Any]:
         wire: dict[str, Any] = {"at": self.at}
         if self.drops is not None:
             wire["drops"] = self.drops
+        if self.fork:
+            wire["fork"] = True
         return wire
 
     @classmethod
@@ -83,7 +91,11 @@ class Rewind:
         if not isinstance(value, Mapping) or not isinstance(value.get("at"), str):
             return None
         drops = value.get("drops")
-        return cls(at=value["at"], drops=drops if isinstance(drops, str) else None)
+        return cls(
+            at=value["at"],
+            drops=drops if isinstance(drops, str) else None,
+            fork=value.get("fork") is True,
+        )
 
 
 @dataclass(frozen=True)
@@ -121,3 +133,20 @@ def plan(marks: Sequence[TurnMark], turn_id: str | None, *, pending: bool = Fals
         return Cut(keep=keep)
     drops = dropped[0].prompt if len(dropped) == 1 and not pending else None
     return Cut(keep=keep, rewind=Rewind(at=keep[-1].last, drops=drops))
+
+
+def branch_point(
+    marks: Sequence[TurnMark], turn_id: str | None, *, running: TurnMark | None = None
+) -> tuple[list[TurnMark], str] | None:
+    """Where a chat forked at *turn_id* starts: the turns it keeps, and the entry to cut at.
+
+    *turn_id* None is the whole chat - its completed turns, so not *running*,
+    the turn still in flight. None if the turn is not one this adapter marked.
+    """
+    if turn_id is None:
+        done = [mark for mark in marks if mark is not running]
+        return (list(done), done[-1].last) if done else None
+    index = next((i for i, mark in enumerate(marks) if mark.turn == turn_id), None)
+    if index is None:
+        return None
+    return list(marks[: index + 1]), marks[index].last

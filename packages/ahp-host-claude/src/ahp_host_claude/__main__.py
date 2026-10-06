@@ -119,6 +119,8 @@ async def _run(settings: Settings) -> None:
             state_dir=state,
             chat_tools=CHAT_TOOLS if settings.chat_tools is None else settings.chat_tools,
             commands=found.commands,
+            # Start-up could not say: try again until it can.
+            rediscover=not models,
         ),
         LoopbackSingleUserPolicy(),
         info=HostInfo(name="ahp-host-claude", version=__version__),
@@ -130,9 +132,8 @@ async def _run(settings: Settings) -> None:
         # session. `restore()` below starts the scheduler, so they fire before
         # anyone connects.
         automations=FileAutomationStore(state / "automations"),
-        # `/` commands and `@` files (`ClaudeProvider.complete`): a client
-        # only asks for completions after a character the host names.
-        completion_trigger_characters=ClaudeProvider.completion_trigger_characters,
+        # `/` and `@` completions are advertised from the provider's own
+        # `completion_trigger_characters` (`DeclaresCompletionTriggers`).
     )
     # Bring back the sessions saved before the last stop. Without this they
     # were written to `state/sessions` and never read again, so every restart

@@ -240,9 +240,11 @@ async def test_a_turn_typed_elsewhere_is_marked_by_its_replayed_uuid(tmp_path: P
     assert session.marks[0] == TurnMark(turn=sink.turn_id, prompt="phone-1", last="a9")
 
 
-def test_the_turn_id_is_read_from_the_hosts_own_sink() -> None:
-    class HostSink:
-        _turn_id = "turn-7"
+def test_the_turn_id_is_the_sinks_own_word() -> None:
+    """`IdentifiesTurn`; a sink that does not say leaves the turn unmarked."""
 
-    assert _turn_id_of(HostSink()) == "turn-7"  # type: ignore[arg-type]
+    class Quiet:
+        pass
+
     assert _turn_id_of(RecordingSink(turn_id="t")) == "t"
+    assert _turn_id_of(Quiet()) is None  # type: ignore[arg-type]

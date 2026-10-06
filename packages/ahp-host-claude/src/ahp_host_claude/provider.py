@@ -27,26 +27,34 @@ from collections.abc import (
     Mapping,
     Sequence,
 )
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Final, Protocol
 
+from ahp_host.core import AhpError
 from ahp_host.provider.base import (
     AgentInfo,
+    AgentInfoChanged,
     AgentSessionContext,
+    ChatContext,
     ClientToolCall,
     CompletionItem,
     CompletionRequest,
     ConfigRequest,
     ConfigResolution,
     ConfigValue,
+    ForkedFrom,
+    IdentifiesTurn,
     ModelInfo,
+    ResolvesInput,
     SessionDescription,
     SessionDirectory,
     ToolConfirmation,
     TurnSink,
     UserMessage,
 )
+from ahp_host.provider.changes import FileChange
+from ahp_protocol.types import AHP_ERROR_CODES
 from claude_agent_sdk import (
     AssistantMessage,
     ClaudeAgentOptions,
@@ -69,6 +77,7 @@ from ahp_host_claude import (
     client_tools,
     completions,
     customizations,
+    edits,
     history,
     questions,
 )
@@ -104,6 +113,8 @@ from ahp_host_claude.permissions import (
     PLAN,
     QUESTION_TOOL,
     approval_mode,
+    choices,
+    denial_message,
     describe,
     past_tense,
     pre_tool_use_decision,
@@ -125,6 +136,7 @@ from ahp_host_claude.sessions import (
     is_session_id,
     title_of,
 )
+from ahp_host_claude.transcripts import transcript
 from ahp_host_claude.usage import report as usage_report
 
 log = logging.getLogger(__name__)
@@ -405,19 +417,19 @@ class _Turn:
     last_request: Mapping[str, Any] | None = None
     #: The Claude client it runs on: only that client's end can end it.
     client: Any = None
+    #: The API error Claude Code reported on the turn's last answer, if any.
+    api_error: str | None = None
 
 
 def _turn_id_of(sink: TurnSink) -> str | None:
-    """The AHP turn a sink publishes into, if the host says.
+    """The AHP turn a sink publishes into (`IdentifiesTurn`), if it says.
 
-    `TurnSink` has no turn id, and edit-and-resend names the turn to keep by
-    it. The host's own sink holds it, privately; a public ``turn_id`` is read
-    first, so a host that names it publicly needs nothing here.
+    Edit-and-resend names the turn to keep by it. A sink that does not say
+    leaves its turn unmarked, and a cut to it forgets everything.
     """
-    for name in ("turn_id", "_turn_id"):
-        value = getattr(sink, name, None)
-        if isinstance(value, str) and value:
-            return value
+    if isinstance(sink, IdentifiesTurn):
+        value = sink.turn_id
+        return value if isinstance(value, str) and value else None
     return None
 
 
@@ -593,6 +605,20 @@ class ClaudeSession:
         self._started_agent: str | None = None
         self._refreshing: asyncio.Task[None] | None = None
         self._chores: set[asyncio.Task[None]] = set()
+        #: What Claude's editing tools changed (`edits.py`).
+        self._edits = edits.Edits(self._roots)
+        #: Question calls asked here and not answered here yet, with the sink
+        #: that asked and the questions (`_ask`).
+        self._open_questions: dict[str, tuple[TurnSink, dict[str, Any]]] = {}
+        #: The chat this session's conversation is, when it is not the
+        #: session's default one: what out-of-turn publications name.
+        self._scope: str | None = None
+        #: The chat's own folders, when it has a subset of the session's.
+        self.subset: tuple[str, ...] | None = None
+        #: The transcript a new conversation starts from, when it is a fork
+        #: Claude Code could not copy (`transcripts.py`); given with its first
+        #: prompt.
+        self.seed: str | None = None
 
     @property
     def _sink(self) -> TurnSink | None:
@@ -601,9 +627,16 @@ class ClaudeSession:
     # -- lifecycle -----------------------------------------------------------
 
     def _granted(self) -> list[Path]:
-        """The session's folders as real paths, each inside a served folder."""
+        """The chat's folders as real paths, each inside a served folder.
+
+        The session's, or the chat's own subset of them (`ChatState.
+        workingDirectories`) when it has one.
+        """
         granted: list[Path] = []
-        for uri in self.working_directories:
+        folders = self.working_directories
+        if self.subset is not None:
+            folders = tuple(uri for uri in self.subset if uri in self.working_directories)
+        for uri in folders:
             real = self._roots.real_path(uri)
             if real is not None:
                 granted.append(real)
@@ -637,7 +670,28 @@ class ClaudeSession:
         cwd = self.working_directory()
         granted = self._granted()
         extra = tuple(path for path in granted if path != cwd)
+        if self.subset is not None:
+            # A chat narrowed to no folder gets no tools, whatever its `cwd`.
+            return cwd, extra, bool(granted)
         return cwd, extra, bool(granted) or cwd != self._chat_dir
+
+    def _gate(self) -> str:
+        """The approval mode the gate applies: the session's, or Ask.
+
+        Security-relevant. Claude Code's own `cwd` is the session's folder,
+        fixed for the conversation's life, and its looser modes act there
+        without asking. A chat whose folders leave that folder out is put in
+        Ask, so every change there is put to a person first.
+        """
+        if self.subset is None or self.mirror_of is not None:
+            return self.approvals
+        try:
+            cwd, _, tools = self._access()
+        except PermissionError:
+            return ASK
+        if tools and not any(cwd == path or path in cwd.parents for path in self._granted()):
+            return ASK
+        return self.approvals
 
     @property
     def is_chat(self) -> bool:
@@ -681,13 +735,17 @@ class ClaudeSession:
             options["resume_session_at"] = self.rewind.at
             if self.rewind.drops is not None:
                 options["resume_drops_turn"] = self.rewind.drops
+            if self.rewind.fork:
+                # Another chat's conversation: a copy of it, which leaves the
+                # original exactly as that chat has it.
+                options["fork_session"] = True
         return ClaudeAgentOptions(
             cwd=str(cwd),
             add_dirs=list(extra),
             resume=self.claude_session_id,
             model=None if self._model == DEFAULT_MODEL else self._model,
             effort=sdk_effort(self.effort),  # type: ignore[arg-type]
-            permission_mode=PERMISSION_MODES[self.approvals],  # type: ignore[arg-type]
+            permission_mode=PERMISSION_MODES[self._gate()],  # type: ignore[arg-type]
             # A skill switched off here is a deny rule for it: the Skill tool
             # refuses it. Not the SDK's `skills` allowlist, which also
             # allow-lists every skill it names and drops local settings.
@@ -1084,17 +1142,9 @@ class ClaudeSession:
         which is the only publication the host offers for it.
         """
         publisher = self.context.publisher
-        try:
-            cwd = self.working_directory()
-        except PermissionError:
+        tree = self._build_tree()
+        if tree is None:
             return
-        tree = customizations.build(
-            self._sources,
-            cwd=cwd,
-            disabled=self.disabled,
-            workspace=self._workspace_uri(),
-            hidden_servers=(client_tools.SERVER,),
-        )
         self._tree = tree
         published, self._published = self._published, tree.customizations
         if publisher is None or published == tree.customizations:
@@ -1110,6 +1160,19 @@ class ClaudeSession:
                 await publisher.customizations_changed(tree.customizations)
         except Exception:
             log.exception("publishing the session's customizations failed")
+
+    def _build_tree(self) -> customizations.Tree | None:
+        try:
+            cwd = self.working_directory()
+        except PermissionError:
+            return None
+        return customizations.build(
+            self._sources,
+            cwd=cwd,
+            disabled=self.disabled,
+            workspace=self._workspace_uri(),
+            hidden_servers=(client_tools.SERVER,),
+        )
 
     async def _refresh_mcp(self) -> None:
         client = self._client
@@ -1141,6 +1204,22 @@ class ClaudeSession:
             except Exception:
                 log.warning("putting the permission mode back failed", exc_info=True)
         await self._publish_customizations()
+
+    # -- chats -------------------------------------------------------------------
+
+    async def chat_opened(self, context: ChatContext) -> None:
+        """Refused: a claude.ai session has one conversation, on another machine.
+
+        A local session (`LocalClaudeSession`) runs a conversation per chat.
+        """
+        raise AhpError(
+            AHP_ERROR_CODES["PermissionDenied"],
+            "This session runs on another machine, through claude.ai, as one "
+            "conversation: it cannot open another chat.",
+        )
+
+    async def chat_closed(self, chat_uri: str) -> None:
+        return
 
     # -- completions -------------------------------------------------------------
 
@@ -1251,7 +1330,44 @@ class ClaudeSession:
                     "permissionDecision": "allow",
                 }
             }
-        return pre_tool_use_decision(name, self.approvals)
+        call_id = tool_use_id or hook_input.get("tool_use_id")
+        tool_input = hook_input.get("tool_input")
+        if name in edits.EDIT_TOOLS and isinstance(call_id, str) and isinstance(tool_input, dict):
+            # The file as it is just before the call runs, for its diff.
+            cwd = self._cwd()
+            if cwd is not None:
+                self._edits.starting(call_id, name, tool_input, cwd)
+        return pre_tool_use_decision(name, self._gate())
+
+    def _cwd(self) -> Path | None:
+        try:
+            return self.directory if self.directory is not None else self.working_directory()
+        except PermissionError:
+            return None
+
+    async def _file_edit(
+        self, sink: TurnSink, call_id: str, *, success: bool
+    ) -> Mapping[str, Any] | None:
+        """The call's `fileEdit` content, and the changeset brought up to date."""
+        change = self._edits.finished(call_id, success=success)
+        if change is None:
+            return None
+        await self._changed(change)
+        try:
+            return await sink.file_edit(change)
+        except Exception:
+            log.debug("a call's diff could not be stored", exc_info=True)
+            return None
+
+    async def _changed(self, change: FileChange) -> None:
+        """Publish the changeset that now includes *change*."""
+        publisher = self.context.publisher
+        if publisher is None:
+            return
+        try:
+            await publisher.changes_published(self._edits.changeset, self._edits.changes())
+        except Exception:
+            log.exception("publishing Claude's changes failed")
 
     # -- client tools --------------------------------------------------------
 
@@ -1339,13 +1455,22 @@ class ClaudeSession:
                 return PermissionResultDeny(message="No client is attached to approve this.")
             await self._announce(call_id, tool_name, tool_input)
         if tool_name == QUESTION_TOOL:
-            return await self._ask(sink, tool_input)
+            return await self._ask(sink, call_id, tool_input)
         plan = tool_input.get("plan") if tool_name == EXIT_PLAN_TOOL else None
         if isinstance(plan, str) and plan.strip():
             # The plan lives in the tool's input, which a client may not render
             # readably; the user must be able to read what they are approving.
             await sink.text_delta(f"\n\n{plan.strip()}\n")
         display, message = describe(tool_name, tool_input)
+        # Security-relevant: Claude Code's suggestions, narrowed to this
+        # session, offered for the user to pick (`permissions.choices`).
+        offered = choices(context.suggestions, self.approvals)
+        cwd = self._cwd()
+        preview = (
+            edits.preview(tool_name, tool_input, cwd=cwd, roots=self._roots)
+            if cwd is not None
+            else None
+        )
         try:
             outcome = await sink.confirm_tool_call(
                 ToolConfirmation(
@@ -1355,6 +1480,8 @@ class ClaudeSession:
                     invocation_message=context.title or f"{display}: {message}",
                     tool_input=tool_input,
                     confirmation_title=context.title,
+                    options=offered.options,
+                    edits=(preview,) if preview is not None else (),
                 )
             )
         except asyncio.CancelledError:
@@ -1366,11 +1493,17 @@ class ClaudeSession:
             self._answered_elsewhere[call_id] = (timer, sink)
             raise
         if not outcome.approved:
-            return PermissionResultDeny(message="The user declined this tool call.")
+            return PermissionResultDeny(message=denial_message(outcome))
         if tool_name == EXIT_PLAN_TOOL:
             await self._left_plan_mode()
         approved = outcome.tool_input if isinstance(outcome.tool_input, dict) else tool_input
-        return PermissionResultAllow(updated_input=approved)
+        chosen = offered.chosen(outcome)
+        if chosen is None:
+            return PermissionResultAllow(updated_input=approved)
+        if chosen.type == "setMode" and isinstance(chosen.mode, str):
+            # The gate moves with Claude Code's mode, before the next call asks.
+            await self._follow_mode(_APPROVAL_MODES.get(chosen.mode, ASK))
+        return PermissionResultAllow(updated_input=approved, updated_permissions=[chosen])
 
     async def _report_answer_after_grace(self, sink: TurnSink, call_id: str) -> None:
         """No result yet, so the tool is running: it was approved elsewhere."""
@@ -1394,21 +1527,44 @@ class ClaudeSession:
         await self._answered(sink, call_id, denied=denied)
 
     async def _ask(
-        self, sink: TurnSink, tool_input: dict[str, Any]
+        self, sink: TurnSink, call_id: str, tool_input: dict[str, Any]
     ) -> PermissionResultAllow | PermissionResultDeny:
         """`AskUserQuestion`: put its questions to the user, and hand back the answers.
 
         Under Remote Control the CLI asks claude.ai too, and withdraws this
-        one if the questions are answered there: this await is then cancelled
-        and the request stays up here until the turn ends, since the host
-        offers no way to withdraw an input request early. Answering it then
-        finds nothing waiting and changes nothing.
+        one if the questions are answered there: this await is then cancelled,
+        and the request is left open until the call's result says how it was
+        answered, when it is withdrawn here with those answers
+        (`_questions_answered_elsewhere`).
         """
-        request = questions.input_request(tool_input)
+        request = questions.input_request(tool_input, key=call_id)
         if request is None:
             return PermissionResultDeny(message=questions.UNREADABLE)
-        outcome = await sink.request_input(request)
+        self._open_questions[call_id] = (sink, dict(tool_input))
+        outcome = await sink.request_input(request)  # cancelled: kept open, see above
+        self._open_questions.pop(call_id, None)
         return questions.permission_result(tool_input, outcome)
+
+    async def _questions_answered_elsewhere(self, call_id: str, failed: bool, result: Any) -> None:
+        """The questions this host asked were answered on claude.ai: withdraw them here.
+
+        With the answers given there (the call's result, `tool_use_result`),
+        so the transcript here shows them and no client can answer again. A
+        turn that ended here first has no request left to withdraw.
+        """
+        asked = self._open_questions.pop(call_id, None)
+        if asked is None:
+            return
+        sink, tool_input = asked
+        if not isinstance(sink, ResolvesInput):
+            return
+        answered = result.get("answers") if isinstance(result, Mapping) else None
+        with contextlib.suppress(Exception):
+            await sink.input_resolved(
+                call_id,
+                response="decline" if failed else "accept",
+                answers=None if failed else questions.wire_answers(tool_input, answered),
+            )
 
     async def _answered(self, sink: TurnSink, call_id: str, *, denied: bool) -> None:
         await sink.tool_call_confirmed(
@@ -1543,12 +1699,8 @@ class ClaudeSession:
                 self._pick_agent(message)
                 if self._client is not None and self._agent != self._started_agent:
                     self._restart_pending = True
-            if self._restart_pending:
-                await self._restart_client()
-            try:
-                client = await self._ensure_client()
-            except PermissionError as error:
-                await sink.turn_failed(str(error), error_type="agent.workingDirectory")
+            client = await self._client_for(sink)
+            if client is None:
                 return
             turn = _Turn(sink=sink, client=client)
             turn.attached.set()
@@ -1564,19 +1716,75 @@ class ClaudeSession:
                     await client.set_model(None if picked == DEFAULT_MODEL else picked)
                     self._model = picked
                 turn.model = self._model
-                content = self._note_rewind(prompt_content(message.text, message.raw, self._roots))
-                self._steers_pending.clear()
-                message_id = self._send_id()
-                self._mark(turn, sink, message_id)
-                await client.query(_user_message(content, message_id))
-                # No await between sending and this, so a steer is either
-                # refused or sent after the message it steers.
-                self._accepting_steers = True
-                await turn.done.wait()
+                content = self._seeded(
+                    self._note_rewind(
+                        prompt_content(
+                            message.text, message.raw, self._roots, message.attached_chats
+                        )
+                    )
+                )
+                await self._query(client, turn, sink, content)
             finally:
                 self._accepting_steers = False
                 self._steers_pending.clear()
                 self._abandon(turn)
+
+    async def _client_for(self, sink: TurnSink) -> SdkClient | None:
+        """The running client, (re)started as the session now needs; None if it cannot be."""
+        if self._restart_pending:
+            await self._restart_client()
+        try:
+            return await self._ensure_client()
+        except PermissionError as error:
+            await sink.turn_failed(str(error), error_type="agent.workingDirectory")
+            return None
+
+    async def _query(
+        self,
+        client: SdkClient,
+        turn: _Turn,
+        sink: TurnSink,
+        content: str | list[dict[str, Any]],
+        *,
+        resuming: TurnMark | None = None,
+    ) -> None:
+        """Send one user message for *turn*, and wait for the turn to end.
+
+        *resuming*: the turn already has its place in the transcript (a failed
+        turn resumed), which this message continues rather than starts.
+        """
+        self._steers_pending.clear()
+        message_id = self._send_id()
+        if resuming is None:
+            self._mark(turn, sink, message_id)
+        else:
+            turn.mark = resuming
+        await client.query(_user_message(content, message_id))
+        # No await between sending and this, so a steer is either
+        # refused or sent after the message it steers.
+        self._accepting_steers = True
+        await turn.done.wait()
+
+    def _seeded(self, content: str | list[dict[str, Any]]) -> str | list[dict[str, Any]]:
+        """A new conversation that continues one Claude Code could not copy.
+
+        Its transcript (`seed`) goes before the first prompt, once - not
+        before a slash command, which Claude Code runs only from the start of
+        a message.
+        """
+        if self.seed is None or self.claude_session_id is not None:
+            return content
+        first = content if isinstance(content, str) else str((content or [{}])[0].get("text", ""))
+        if first.lstrip().startswith("/"):
+            return content
+        seed, self.seed = self.seed, None
+        preface = (
+            "[This conversation continues an earlier one, which you have not seen. "
+            f"Its transcript so far:]\n{seed}\n[End of the earlier transcript.]"
+        )
+        if isinstance(content, str):
+            return f"{preface}\n\n{content}"
+        return [{"type": "text", "text": preface}, *content]
 
     async def _external(self, text: str, prompt: str | None = None) -> None:
         """A message typed elsewhere (claude.ai, a phone) started a turn.
@@ -1638,7 +1846,11 @@ class ClaudeSession:
             # ends here only once that restart has started the next turn.
             if turn is not None and not turn.done.is_set() and turn.client in (client, None):
                 if turn.sink is not None:
-                    await turn.sink.turn_failed("Claude Code stopped", error_type="claude.exited")
+                    # Resumable: what Claude Code had done is in its transcript,
+                    # which the next process resumes.
+                    await turn.sink.turn_failed(
+                        "Claude Code stopped", error_type="claude.exited", resumable=True
+                    )
                 self._finish(turn)
 
     # -- background work -----------------------------------------------------
@@ -1681,6 +1893,19 @@ class ClaudeSession:
                 await self._show_task(task)
         if status in background.TERMINAL_STATUSES:
             del self._tasks[task_id]
+            sink = self._sink
+            if task.published and sink is not None:
+                # Work this chat listed in the background ended while a turn
+                # runs here: say so in it. With no turn running, its removal
+                # from the background work list is what a client sees.
+                summary = data.get("summary")
+                label = task.description or task.command or "Background task"
+                ending = f": {_first_line(summary)}" if isinstance(summary, str) and summary else ""
+                with contextlib.suppress(Exception):
+                    await sink.system_notification(
+                        f"{label} {status}{ending}",
+                        meta=_note_meta("task", status=status, taskId=task_id),
+                    )
             await self._hide_task(task)
             subagent = self._subagents.pop(task.tool_use_id or "", None)
             if subagent is not None:
@@ -1707,7 +1932,7 @@ class ClaudeSession:
         if publisher is None:
             return
         try:
-            await publisher.background_work_set(work)
+            await publisher.background_work_set(work, chat=self._scope)
         except Exception:
             log.exception("publishing background work failed")
             return
@@ -1719,7 +1944,7 @@ class ClaudeSession:
             return
         task.published = False
         try:
-            await publisher.background_work_removed(task.work_id)
+            await publisher.background_work_removed(task.work_id, chat=self._scope)
         except Exception:
             log.exception("withdrawing background work failed")
 
@@ -1747,7 +1972,7 @@ class ClaudeSession:
             return
         title = task.description or task.agent_type or "Subagent"
         try:
-            chat = await publisher.open_tool_chat(title, tool_call_id=call_id)
+            chat = await publisher.open_tool_chat(title, tool_call_id=call_id, chat=self._scope)
         except Exception:
             log.exception("opening a subagent's chat failed")
             return
@@ -1901,9 +2126,13 @@ class ClaudeSession:
                     text = _text_of(block.content)
                     await self._report_answer_from_result(block.tool_use_id, failed, text)
                     name, tool_input = subagent.inputs.get(block.tool_use_id, ("", {}))
+                    content: list[dict[str, Any]] = [{"type": "text", "text": text}]
+                    diff = await self._file_edit(sink, block.tool_use_id, success=not failed)
+                    if diff is not None:
+                        content.append(dict(diff))
                     await sink.tool_call_completed(
                         block.tool_use_id,
-                        {"content": [{"type": "text", "text": text}]},
+                        {"content": content},
                         success=not failed,
                         past_tense_message=past_tense(name, tool_input, failed=failed),
                     )
@@ -1933,6 +2162,8 @@ class ClaudeSession:
                 await self._on_init(item.data)
             elif item.subtype == "status" and "permissionMode" in item.data:
                 await self._on_mode_elsewhere(item.data["permissionMode"])
+            elif item.subtype == "compact_boundary":
+                await self._on_compacted(item.data)
             elif item.subtype == "commands_changed":
                 commands = item.data.get("commands")
                 if isinstance(commands, list):
@@ -1980,6 +2211,8 @@ class ClaudeSession:
             turn.model = item.model or turn.model
             if item.parent_tool_use_id is None and isinstance(item.usage, Mapping):
                 turn.last_request = item.usage
+            if item.parent_tool_use_id is None and item.error is not None:
+                turn.api_error = str(item.error)
             await self._on_assistant(item, sink)
         elif isinstance(item, SdkUserMessage):
             await self._on_tool_results(item, sink)
@@ -2001,6 +2234,23 @@ class ClaudeSession:
         if turn.mark is not None:
             turn.mark.last = entry
         self.rewind = None
+
+    async def _on_compacted(self, data: Mapping[str, Any]) -> None:
+        """Claude Code compacted the conversation: a note in the turn it happened in."""
+        sink = self._sink
+        if sink is None:
+            return
+        meta = data.get("compact_metadata")
+        meta = meta if isinstance(meta, Mapping) else {}
+        trigger, before = meta.get("trigger"), meta.get("pre_tokens")
+        how = "automatically" if trigger == "auto" else "on request" if trigger == "manual" else ""
+        size = f" from {before:,} tokens" if isinstance(before, int) and before > 0 else ""
+        text = " ".join(part for part in ("Conversation compacted", how) if part) + size
+        details = {
+            key: meta[key] for key in ("trigger", "pre_tokens", "post_tokens") if key in meta
+        }
+        with contextlib.suppress(Exception):
+            await sink.system_notification(text, meta=_note_meta("compaction", **details))
 
     def _cost_of(self, item: ResultMessage) -> float | None:
         """This result's share of the running cost total, when it can be told.
@@ -2031,9 +2281,16 @@ class ClaudeSession:
         if turn is None:
             await self._external(text, item.uuid)
         elif turn.sink is not None:
-            # Typed on claude.ai while a turn runs here: Claude Code takes it
-            # in like a steered message, so it is shown where it landed.
-            await turn.sink.text_delta(f"\n\n*Sent from another device:* {text}\n\n")
+            # Typed on claude.ai while a turn runs here, or injected by Claude
+            # Code (a background task reporting back): it takes it in like a
+            # steered message, so it is noted where it landed.
+            origin: Mapping[str, Any] = item.origin or {}
+            kind = origin.get("kind")
+            if kind == "task-notification":
+                note = f"Background task update: {_first_line(text)}"
+            else:
+                note = f"Sent from another device: {text}"
+            await turn.sink.system_notification(note, meta=_note_meta("message", origin=kind))
 
     def _took_in(self, item: SdkUserMessage) -> None:
         """A replay of our own message: if it is a steered one, it has joined."""
@@ -2091,6 +2348,9 @@ class ClaudeSession:
             failed = bool(block.is_error)
             text = _text_of(block.content)
             await self._report_answer_from_result(block.tool_use_id, failed, text)
+            await self._questions_answered_elsewhere(
+                block.tool_use_id, failed, item.tool_use_result
+            )
             name, tool_input = self._inputs.get(block.tool_use_id, ("", {}))
             content: list[dict[str, Any]] = [{"type": "text", "text": text}]
             worker = self._worker_chats.get(block.tool_use_id)
@@ -2104,6 +2364,9 @@ class ClaudeSession:
                 # moved to the background answers at once and carries on.
                 del self._subagents[block.tool_use_id]
                 subagent.done.set()
+            diff = await self._file_edit(sink, block.tool_use_id, success=not failed)
+            if diff is not None:
+                content.append(dict(diff))
             await sink.tool_call_completed(
                 block.tool_use_id,
                 {"content": content},
@@ -2133,7 +2396,11 @@ class ClaudeSession:
             return  # the user pressed stop; the host already knows
         if item.is_error:
             detail = "; ".join(item.errors or []) or item.result or item.subtype
-            await sink.turn_failed(detail, error_type=f"claude.{item.subtype}")
+            await sink.turn_failed(
+                detail,
+                error_type=f"claude.{item.subtype}",
+                resumable=_transient(item.api_error_status, turn.api_error),
+            )
 
 
 #: A completion is best-effort and the client asks again on the next key.
@@ -2144,6 +2411,34 @@ def _names(value: Any) -> set[str]:
     if not isinstance(value, Sequence) or isinstance(value, str):
         return set()
     return {item for item in value if isinstance(item, str)}
+
+
+#: HTTP statuses of a failed request that are worth trying again: a timeout,
+#: too many requests, the server failing or overloaded (Anthropic's 529).
+_TRANSIENT_STATUS: Final = frozenset({408, 429, 500, 502, 503, 504, 529})
+#: Claude Code's names for the same (`AssistantMessage.error`).
+_TRANSIENT_ERRORS: Final = frozenset({"rate_limit", "overloaded", "server_error"})
+
+
+def _transient(status: int | None, error: str | None) -> bool:
+    """Whether a turn that failed this way can be resumed as it stands.
+
+    Only for failures of the request itself, after Claude Code's own retries:
+    the conversation up to the failed request is intact, and asking again is
+    what anyone would do. Not for anything the same request would fail on
+    again - a refused login, a bad request, a model that does not exist.
+    """
+    return status in _TRANSIENT_STATUS or error in _TRANSIENT_ERRORS
+
+
+def _first_line(text: str, limit: int = 200) -> str:
+    line = text.strip().splitlines()[0] if text.strip() else ""
+    return line if len(line) <= limit else line[: limit - 1] + "…"
+
+
+def _note_meta(kind: str, **details: Any) -> dict[str, Any]:
+    """A system notification's `_meta`: what it is about, for a client to file it by."""
+    return {"claudeCode": {"kind": kind, **{k: v for k, v in details.items() if v is not None}}}
 
 
 async def _optional(client: Any, method: str, *args: Any) -> Any:
@@ -2186,13 +2481,323 @@ def _states_only(
 
 
 class LocalClaudeSession(ClaudeSession):
-    """A conversation this host runs: one that can also be rewound and reconfigured.
+    """A session this host runs: one that can also be rewound, reconfigured and split into chats.
 
     Split from `ClaudeSession` because a claude.ai mirror can do none of the
     things below - its Claude Code runs on another machine - and the host
     feature-detects each by whether the method exists (`TruncatesHistory`,
-    `ManagesMcpServers`, `HandlesCustomizations`).
+    `ManagesMcpServers`, `HandlesCustomizations`, `HostsChats`, `ResumesTurns`).
+
+    **Chats.** Each of the session's chats is its own Claude Code conversation
+    (`HostsChats`): the default chat's is this object's, and every other
+    chat's is a `LocalClaudeSession` of its own, held here and run on its own
+    Claude process, with its own transcript marks and resume state. The host
+    talks to this object only; it routes each turn, steer, truncation, resume
+    and stop by chat (`UserMessage.chat_uri`, `CancelsChats`), and passes on
+    to every chat what is true of the session (approval mode, effort,
+    folders, clients, archiving). What is the session's alone - Remote
+    Control, the customization tree, MCP servers - stays here.
     """
+
+    def __init__(
+        self,
+        context: AgentSessionContext,
+        *,
+        chat_states: Mapping[str, Any] | None = None,
+        on_chat: Callable[[str, ClaudeSession | None], None] | None = None,
+        **fields: Any,
+    ) -> None:
+        super().__init__(context, **fields)
+        #: The default chat's session, when this is another chat's.
+        self._parent: LocalClaudeSession | None = None
+        #: The session's other chats, by URI.
+        self._chats: dict[str, LocalClaudeSession] = {}
+        #: What each was saved as, for its `chat_opened(restored=True)`.
+        self._chat_states: dict[str, Any] = dict(chat_states or {})
+        #: Tells the provider which session answers a chat (completions).
+        self._on_chat = on_chat
+
+    # -- chats -------------------------------------------------------------------
+
+    @property
+    def chats(self) -> Mapping[str, LocalClaudeSession]:
+        return self._chats
+
+    def _existing(self, chat_uri: str | None) -> LocalClaudeSession | None:
+        """The conversation of *chat_uri*, if this session has it."""
+        if chat_uri is None or chat_uri == self.context.chat_uri:
+            return self
+        return self._chats.get(chat_uri)
+
+    def _routed(self, chat_uri: str | None) -> LocalClaudeSession:
+        """*chat_uri*'s conversation, opened from what was saved if no one announced it."""
+        found = self._existing(chat_uri)
+        if found is not None:
+            return found
+        assert chat_uri is not None
+        return self._open_chat(
+            ChatContext(session_uri=self.context.session_uri, chat_uri=chat_uri, restored=True)
+        )
+
+    async def chat_opened(self, context: ChatContext) -> None:
+        """A new chat in the session, or one that existed before a restart (`HostsChats`).
+
+        A fork starts from the source chat's Claude Code conversation, cut at
+        the turn it forked at and copied (`fork_session`), so the source stays
+        as its chat has it; a side chat the same, with none of the source's
+        turns in its own history. A source this adapter cannot cut - its turn
+        predates the marks, or it is not running here - is given to Claude as
+        its transcript instead. A restored chat picks up its saved
+        conversation, and starts its Claude process with its first turn.
+        """
+        if self._parent is not None:
+            await self._parent.chat_opened(context)
+            return
+        if self._existing(context.chat_uri) is not None:
+            return
+        self._open_chat(context)
+        if not context.restored:
+            await self._save()
+
+    def _open_chat(self, context: ChatContext) -> LocalClaudeSession:
+        saved = self._chat_states.get(context.chat_uri) if context.restored else None
+        child = LocalClaudeSession(
+            AgentSessionContext(
+                session_uri=self.context.session_uri,
+                chat_uri=context.chat_uri,
+                provider_id=self.context.provider_id,
+                working_directories=self.working_directories,
+                model=self._model,
+                config=self.context.config,
+                publisher=self.context.publisher,
+            ),
+            root=self._roots,
+            client_factory=self._client_factory,
+            approvals=self.approvals,
+            effort=self.effort,
+            # Claude Code keeps a conversation under the folder it started in;
+            # a fork must start where its source lives.
+            directory=self.directory,
+            archived=self.archived,
+            chat_dir=self._chat_dir,
+            chat_tools=self._chat_tools,
+            commands=self._sources.commands or (),
+            on_model_usage=self._on_model_usage,
+        )
+        child._parent = self
+        child._scope = context.chat_uri
+        child.disabled = self.disabled  # one set: a toggle is the session's
+        child._tree = self._tree
+        child._client_tools = self._client_tools
+        if isinstance(saved, Mapping):
+            _restore_conversation(child, saved)
+        # The host's word on the chat's folders, restored or not.
+        child.subset = (
+            tuple(context.working_directories) if context.working_directories is not None else None
+        )
+        if not isinstance(saved, Mapping):
+            source = context.fork or context.side_chat
+            if source is not None:
+                origin = self._existing(source.chat_uri) if source.chat_uri is not None else None
+                _branch(child, origin, source, side=context.fork is None)
+        self._chats[context.chat_uri] = child
+        if self._on_chat is not None:
+            self._on_chat(context.chat_uri, child)
+        return child
+
+    async def chat_closed(self, chat_uri: str) -> None:
+        """The chat was disposed, or moved away: its Claude process goes (`HostsChats`)."""
+        if self._parent is not None:
+            await self._parent.chat_closed(chat_uri)
+            return
+        child = self._chats.pop(chat_uri, None)
+        self._chat_states.pop(chat_uri, None)
+        if child is not None:
+            await child.aclose()
+        if self._on_chat is not None:
+            self._on_chat(chat_uri, None)
+        await self._save()
+
+    async def cancel_chat(self, chat_uri: str, reason: str | None = None) -> None:
+        """Stop one chat's turn, and only that one (`CancelsChats`)."""
+        target = self._existing(chat_uri)
+        if target is not None:
+            await ClaudeSession.cancel(target, reason)
+
+    async def chat_working_directories_changed(
+        self, chat_uri: str, directories: Sequence[str]
+    ) -> None:
+        """A chat's own folders changed (`FollowsChatWorkingDirectories`).
+
+        Security-relevant, like the session's folders: what the chat's Claude
+        may touch, and whether its gate is put in Ask (`_gate`). Restarts its
+        Claude process on the same conversation if that changes anything.
+        """
+        target = self._existing(chat_uri)
+        if target is None:
+            return
+        await target._set_folders(target.working_directories, tuple(directories))
+        await self._save()
+
+    async def send_user_message(self, message: UserMessage, sink: TurnSink) -> None:
+        if self._parent is None:
+            target = self._routed(message.chat_uri)
+            if target is not self:
+                await target.send_user_message(message, sink)
+                return
+        await super().send_user_message(message, sink)
+
+    async def steer(self, chat_uri: str, message: UserMessage) -> bool:
+        target = self._existing(chat_uri) if self._parent is None else self
+        if target is None:
+            return False
+        return await ClaudeSession.steer(target, chat_uri, message)
+
+    async def resume_turn(self, chat_uri: str, turn_id: str, sink: TurnSink) -> None:
+        """Pick up a turn that failed on something transient (`ResumesTurns`).
+
+        Only a failure that leaves the conversation intact is offered as
+        resumable (`_transient`, or the Claude process ending): Claude Code's
+        transcript holds the turn up to where it stopped, and resuming starts
+        Claude Code on it again if it is not running and asks Claude to carry
+        on - a short message Claude sees as the user's, which is how Claude
+        Code itself continues after an API error. The transcript here shows
+        no new message: what Claude says next is added to the same turn.
+        """
+        target = self._routed(chat_uri) if self._parent is None else self
+        await target._resume(turn_id, sink)
+
+    async def _resume(self, turn_id: str, sink: TurnSink) -> None:
+        async with self._lock:
+            client = await self._client_for(sink)
+            if client is None:
+                return
+            turn = _Turn(sink=sink, client=client)
+            turn.attached.set()
+            self._begin(turn)
+            turn.model = self._model
+            mark = next((m for m in reversed(self.marks) if m.turn == turn_id), None)
+            try:
+                await self._query(client, turn, sink, RESUME_PROMPT, resuming=mark)
+            finally:
+                self._accepting_steers = False
+                self._steers_pending.clear()
+                self._abandon(turn)
+
+    # -- what is the session's, passed on to every chat --------------------------
+
+    async def config_changed(self, values: Mapping[str, Any]) -> None:
+        await super().config_changed(values)
+        shared = {key: values[key] for key in (CONFIG_KEY, EFFORT_KEY) if key in values}
+        if self._parent is None and shared:
+            for child in list(self._chats.values()):
+                await ClaudeSession.config_changed(child, shared)
+
+    async def working_directories_changed(self, directories: Sequence[str]) -> None:
+        await super().working_directories_changed(directories)
+        if self._parent is None:
+            for child in list(self._chats.values()):
+                await child._set_folders(tuple(directories), child.subset)
+
+    async def active_clients_changed(self, clients: Sequence[Mapping[str, Any]]) -> None:
+        await super().active_clients_changed(clients)
+        if self._parent is None:
+            for child in list(self._chats.values()):
+                await ClaudeSession.active_clients_changed(child, clients)
+
+    async def archived_changed(self, is_archived: bool) -> None:
+        await super().archived_changed(is_archived)
+        if self._parent is None:
+            for child in list(self._chats.values()):
+                child.archived = is_archived
+                if is_archived:
+                    await child._stop_client()
+
+    async def aclose(self) -> None:
+        children, self._chats = list(self._chats.values()), {}
+        for child in children:
+            await child.aclose()
+        await super().aclose()
+
+    async def _save(self) -> None:
+        if self._parent is not None:
+            await self._parent._save()
+            return
+        await super()._save()
+
+    async def _follow_mode(self, mode: str) -> None:
+        """The approval mode is the session's: every chat follows it."""
+        if self._parent is not None:
+            await self._parent._follow_mode(mode)
+            return
+        await super()._follow_mode(mode)
+        for child in list(self._chats.values()):
+            if child.approvals == mode:
+                continue
+            child.approvals = mode
+            if child._client is not None:
+                with contextlib.suppress(Exception):
+                    await child._client.set_permission_mode(PERMISSION_MODES[child._gate()])
+
+    async def _publish_customizations(self) -> None:
+        """The tree is the session's: only the default chat's session publishes it."""
+        if self._parent is not None:
+            parent = self._parent._tree
+            self._tree = parent if parent.customizations else (self._build_tree() or parent)
+            return
+        await super()._publish_customizations()
+        for child in self._chats.values():
+            child._tree = self._tree
+
+    def _refresh_soon(self) -> None:
+        if self._parent is None:
+            super()._refresh_soon()
+
+    async def _external(self, text: str, prompt: str | None = None) -> None:
+        if self._parent is not None:
+            # A turn no one asked for can only be opened on the default chat
+            # (`external_turn`); in another chat Claude Code's answer to an
+            # injected message (a background task reporting back) is not shown.
+            log.info("not showing a message injected into chat %s", self._scope)
+            return
+        await super()._external(text, prompt)
+
+    async def _changed(self, change: FileChange) -> None:
+        """A chat's changeset is its own (`chat=`); the session's covers every chat."""
+        if self._parent is None:
+            await super()._changed(change)
+            return
+        publisher = self.context.publisher
+        if publisher is not None:
+            try:
+                await publisher.changes_published(
+                    self._edits.changeset, self._edits.changes(), chat=self._scope
+                )
+            except Exception:
+                log.exception("publishing a chat's changes failed")
+        self._parent._edits.record(change)
+        await ClaudeSession._changed(self._parent, change)
+
+    async def _set_folders(
+        self, directories: Sequence[str], subset: tuple[str, ...] | None
+    ) -> None:
+        """New folders for this conversation: restart its client if its access moved."""
+        try:
+            before: Any = self._access()
+        except PermissionError:
+            before = None
+        gate_before = self._gate()
+        self.working_directories = tuple(directories)
+        self.subset = subset
+        try:
+            after: Any = self._access()
+        except PermissionError:
+            after = None
+        if self._client is None or (before == after and gate_before == self._gate()):
+            return
+        self._restart_pending = True
+        if not self._lock.locked() and self._turn is None:
+            await self._restart_client()
 
     # -- edit-and-resend -------------------------------------------------------
 
@@ -2212,9 +2817,13 @@ class LocalClaudeSession(ClaudeSession):
         conversation was rewound and the files were not.
         """
         if chat != self.context.chat_uri:
+            target = self._chats.get(chat) if self._parent is None else None
+            if target is not None:
+                await target.history_truncated(chat, turn_id)
+                return
             # A worker chat's turns are a subagent's, which nothing here can
             # rewind; its chat is read-only besides.
-            log.info("not rewinding %s: only the session's own chat can be", chat)
+            log.info("not rewinding %s: it is no chat of this session's own", chat)
             return
         async with self._lock:
             cut = history.plan(self.marks, turn_id, pending=self.rewind is not None)
@@ -2230,7 +2839,12 @@ class LocalClaudeSession(ClaudeSession):
                 self.cost_baseline = 0.0
             else:
                 self.marks = list(cut.keep)
-                self.rewind = cut.rewind if self.claude_session_id is not None else None
+                rewind = cut.rewind if self.claude_session_id is not None else None
+                if rewind is not None and self.rewind is not None and self.rewind.fork:
+                    # Still the source chat's conversation until the fork is
+                    # taken: cut a copy of it, never the original.
+                    rewind = Rewind(at=rewind.at, fork=True)
+                self.rewind = rewind
             self.rewound = True
             self._recap = None
         await self._save()
@@ -2320,11 +2934,114 @@ class LocalClaudeSession(ClaudeSession):
         else:
             self.disabled.add(customization_id)
         await self._save()
-        if self._client is None or self._denied_skills() == self._started_denied:
+        for session in (self, *self._chats.values()):
+            if session._client is None or session._denied_skills() == session._started_denied:
+                continue
+            session._restart_pending = True
+            if not session._lock.locked() and session._turn is None:
+                await session._restart_client()
+
+
+#: What Claude is told when a failed turn is resumed (`ResumesTurns`).
+RESUME_PROMPT: Final = (
+    "[Your previous response was cut off by an error before you finished. "
+    "Carry on from where you stopped.]"
+)
+
+
+def _branch(
+    target: ClaudeSession,
+    origin: ClaudeSession | None,
+    source: ForkedFrom,
+    *,
+    side: bool,
+    check_folder: bool = False,
+) -> None:
+    """Start *target* from *origin*'s conversation, as it was at *source*'s turn.
+
+    A copy (`fork_session`) cut at the turn's last transcript entry, with the
+    turns it keeps marked as *origin* marked them (a fork's copied turns keep
+    their ids); a side chat keeps none in its own history. If *origin* cannot
+    be cut there - not running here, never started, or the turn predates its
+    marks - or (*check_folder*) its conversation lives in a folder *target*
+    was not given, *target* starts a new conversation with the transcript the
+    client shows as its seed.
+    """
+    if origin is not None and origin.claude_session_id is not None:
+        running = origin._turn.mark if origin._turn is not None else None
+        point = history.branch_point(origin.marks, source.turn_id, running=running)
+        folder = origin.directory
+        allowed = not check_folder or (folder is not None and _may_live_in(target, folder))
+        if point is not None and allowed:
+            kept, at = point
+            target.claude_session_id = origin.claude_session_id
+            if folder is not None:
+                target.directory = folder
+            target.rewind = Rewind(at=at, fork=True)
+            target.marks = [] if side else [TurnMark(m.turn, m.prompt, m.last) for m in kept]
+            target.cost_baseline = None
             return
-        self._restart_pending = True
-        if not self._lock.locked() and self._turn is None:
-            await self._restart_client()
+    target.seed = transcript(source.turns) or None
+
+
+def _may_live_in(session: ClaudeSession, folder: Path) -> bool:
+    """Whether *session* may run with its `cwd` in *folder*: one of its own folders."""
+    try:
+        granted = session._granted()
+    except PermissionError:
+        return False
+    real = folder.resolve()
+    return any(real == path or path in real.parents for path in granted)
+
+
+def _conversation_state(session: ClaudeSession) -> dict[str, Any]:
+    """One conversation's part of the resume state: a chat's, or the default chat's."""
+    state: dict[str, Any] = {}
+    if session.claude_session_id:
+        state["claudeSessionId"] = session.claude_session_id
+    if session.directory is not None:
+        state["cwd"] = str(session.directory)
+    if session.marks:
+        state["turns"] = [mark.to_wire() for mark in session.marks]
+    if session.rewind is not None:
+        state["rewind"] = session.rewind.to_wire()
+    if session.rewound:
+        state["rewound"] = True
+    if session.cost_baseline:
+        state["costUsd"] = session.cost_baseline
+    if session.subset is not None:
+        state["folders"] = list(session.subset)
+    if session.seed is not None:
+        state["seed"] = session.seed
+    return state
+
+
+def _restore_conversation(session: ClaudeSession, state: Mapping[str, Any]) -> None:
+    """The reverse of `_conversation_state`, onto a session just built."""
+    session_id = state.get("claudeSessionId")
+    session.claude_session_id = session_id if isinstance(session_id, str) else None
+    cwd = state.get("cwd")
+    if isinstance(cwd, str):
+        session.directory = Path(cwd)
+    marks = state.get("turns")
+    session.marks = [
+        mark
+        for mark in (TurnMark.from_wire(m) for m in (marks if isinstance(marks, list) else ()))
+        if mark is not None
+    ]
+    session.rewind = Rewind.from_wire(state.get("rewind"))
+    session.rewound = state.get("rewound") is True
+    cost = state.get("costUsd")
+    session.cost_baseline = (
+        float(cost)
+        if isinstance(cost, int | float) and not isinstance(cost, bool)
+        else (0.0 if session.claude_session_id is None else None)
+    )
+    folders = state.get("folders")
+    if isinstance(folders, list):
+        session.subset = tuple(f for f in folders if isinstance(f, str))
+    seed = state.get("seed")
+    session.seed = seed if isinstance(seed, str) else None
 
 
 #: Claude Code permission mode -> approval mode.
@@ -2359,6 +3076,7 @@ class ClaudeProvider:
         status_on_claude_ai: Callable[[str], Awaitable[str | None]] | None = None,
         chat_tools: Sequence[str] = CHAT_TOOLS,
         commands: Sequence[Mapping[str, Any]] = (),
+        rediscover: bool = False,
     ) -> None:
         if not is_valid_provider_id(provider_id):
             raise ValueError(f"invalid provider id: {provider_id!r}")
@@ -2413,6 +3131,62 @@ class ClaudeProvider:
         self._by_chat: weakref.WeakValueDictionary[str, ClaudeSession] = (
             weakref.WeakValueDictionary()
         )
+        self._state_dir = state_dir
+        #: Ask Claude Code for the models again, if start-up could not.
+        self._rediscover = rediscover
+        self._rediscovery: asyncio.Task[None] | None = None
+        #: The host's notifier (`UpdatesAgentInfo`), once it has given it.
+        self._agent_changed: AgentInfoChanged | None = None
+        self._announcing: set[asyncio.Task[Any]] = set()
+
+    async def attach_agent_updates(self, changed: AgentInfoChanged) -> None:
+        """The host's notifier for a changed picker (`UpdatesAgentInfo`).
+
+        Two things change it after start-up: a model's limits learned from a
+        session's results (`models.py`), and - if start-up discovery found no
+        models (Claude Code not signed in yet, say) - discovery succeeding on
+        a later try, with backoff, so the picker is not empty until a restart.
+        """
+        self._agent_changed = changed
+        if self._rediscover and not self._models and self._rediscovery is None:
+            self._rediscovery = asyncio.create_task(self._discover_again())
+
+    def _learned_from(self, model_usage: Any) -> None:
+        """A result's `model_usage`: kept for the next start, and published now."""
+        if not self.learned.record(model_usage):
+            return
+        models = _with_learned(self._models, self.learned)
+        if models != self._models:
+            self._models = models
+            self._announce_agent()
+
+    def _announce_agent(self) -> None:
+        changed = self._agent_changed
+        if changed is None:
+            return
+
+        async def announce() -> None:
+            try:
+                await changed()
+            except Exception:
+                log.exception("publishing the agent's new models failed")
+
+        task = asyncio.create_task(announce())
+        self._announcing.add(task)
+        task.add_done_callback(self._announcing.discard)
+
+    async def _discover_again(self) -> None:
+        for delay in _REDISCOVERY:
+            await asyncio.sleep(delay)
+            found = await discover(self.root, self._client_factory, state_dir=self._state_dir)
+            if found.models:
+                log.info("models: %s", ", ".join(m.id for m in found.models))
+                self._models = found.models
+                if not self._commands:
+                    self._commands = found.commands
+                self._announce_agent()
+                return
+        log.warning("Claude Code still names no models; the picker stays empty")
 
     #: What a host should advertise as `completionTriggerCharacters` for this
     #: provider (`Host(completion_trigger_characters=...)`).
@@ -2432,7 +3206,12 @@ class ClaudeProvider:
             display_name=self._display_name,
             description="Claude Code, running on this machine as its user.",
             models=self._models,
-            capabilities={"multipleWorkingDirectories": dict(WORKING_DIRECTORIES_CAPABILITY)},
+            capabilities={
+                "multipleWorkingDirectories": dict(WORKING_DIRECTORIES_CAPABILITY),
+                # A conversation per chat; a fork or side chat copies its
+                # source's (`LocalClaudeSession.chat_opened`).
+                "multipleChats": {"fork": True, "sideChat": True},
+            },
         )
 
     def _remote_control(self, value: Any) -> bool:
@@ -2488,9 +3267,16 @@ class ClaudeProvider:
             chat_dir=self.chat_dir,
             chat_tools=self.chat_tools,
             commands=self._commands,
-            on_model_usage=self.learned.record,
+            on_model_usage=self._learned_from,
+            on_chat=self._register_chat,
             **fields,
         )
+
+    def _register_chat(self, chat_uri: str, session: ClaudeSession | None) -> None:
+        if session is None:
+            self._by_chat.pop(chat_uri, None)
+        else:
+            self._by_chat[chat_uri] = session
 
     def _started(self, session: ClaudeSession) -> ClaudeSession:
         """A session on claude.ai must be reachable before its first message here.
@@ -2509,7 +3295,18 @@ class ClaudeProvider:
         chosen = context.config.get(CONTINUE_KEY)
         remote_control = self._remote_control(context.config.get(RC_CONFIG_KEY))
         if not is_session_id(chosen):
-            return self._started(self._new_local(context, remote_control=remote_control))
+            session = self._new_local(context, remote_control=remote_control)
+            if context.fork is not None:
+                # `createSession.fork`: the host has copied the source's turns
+                # into this session, so its agent starts where they end.
+                _branch(
+                    session,
+                    self._origin_of(context.fork),
+                    context.fork,
+                    side=False,
+                    check_folder=True,
+                )
+            return self._started(session)
         continuation = await self.sessions.continue_from(chosen)
         return self._started(
             self._new_local(
@@ -2524,6 +3321,15 @@ class ClaudeProvider:
             )
         )
 
+    def _origin_of(self, fork: ForkedFrom) -> ClaudeSession | None:
+        """The running conversation a fork names: its session's chat, if this host has it."""
+        for session in list(self._local):
+            if isinstance(session, LocalClaudeSession) and (
+                session.context.session_uri == fork.session_uri
+            ):
+                return session._existing(fork.chat_uri)
+        return None
+
     async def resume_session(self, context: AgentSessionContext) -> ClaudeSession:
         state = context.resume_state or {}
         mirrored = state.get(MIRROR_KEY)
@@ -2534,9 +3340,11 @@ class ClaudeProvider:
         marks = state.get("turns")
         cost = state.get("costUsd")
         disabled = state.get("disabled")
-        return self._started(
+        chats = state.get("chats")
+        session = self._started(
             self._new_local(
                 context,
+                chat_states=chats if isinstance(chats, Mapping) else None,
                 claude_session_id=session_id if isinstance(session_id, str) else None,
                 # The session's current config wins (a client may have changed
                 # the mode since the last save); then the resume state, for a
@@ -2573,38 +3381,44 @@ class ClaudeProvider:
                 else (),
             )
         )
+        folders, seed = state.get("folders"), state.get("seed")
+        if isinstance(folders, list):
+            session.subset = tuple(f for f in folders if isinstance(f, str))
+        session.seed = seed if isinstance(seed, str) else None
+        return session
 
     async def resume_state_of(self, session: Any) -> Mapping[str, Any] | None:
         if not isinstance(session, ClaudeSession):
             return None
         if session.mirror_of is not None:
             return {MIRROR_KEY: session.mirror_of, CONFIG_KEY: session.approvals}
-        if not session.claude_session_id and not session.bridge_session_id:
+        chats = (
+            {uri: _conversation_state(chat) for uri, chat in session.chats.items()}
+            if isinstance(session, LocalClaudeSession)
+            else {}
+        )
+        if (
+            not session.claude_session_id
+            and not session.bridge_session_id
+            and not chats
+            and session.seed is None
+        ):
             return None
         state: dict[str, Any] = {
             CONFIG_KEY: session.approvals,
             RC_CONFIG_KEY: session.remote_control,
+            **_conversation_state(session),
         }
         if session.effort != EFFORT_DEFAULT:
             state[EFFORT_KEY] = session.effort
-        if session.claude_session_id:
-            state["claudeSessionId"] = session.claude_session_id
         if session.bridge_session_id:
             state["bridgeSessionId"] = session.bridge_session_id
         if session.archived:
             state["archived"] = True
-        if session.directory is not None:
-            state["cwd"] = str(session.directory)
-        if session.marks:
-            state["turns"] = [mark.to_wire() for mark in session.marks]
-        if session.rewind is not None:
-            state["rewind"] = session.rewind.to_wire()
-        if session.rewound:
-            state["rewound"] = True
-        if session.cost_baseline:
-            state["costUsd"] = session.cost_baseline
         if session.disabled:
             state["disabled"] = sorted(session.disabled)
+        if chats:
+            state["chats"] = chats
         return state
 
     # -- the account's other sessions, through claude.ai ------------------------
@@ -2631,6 +3445,9 @@ class ClaudeProvider:
             self._poller = asyncio.create_task(self._watch_claude_ai())
 
     async def aclose(self) -> None:
+        rediscovery, self._rediscovery = self._rediscovery, None
+        if rediscovery is not None:
+            rediscovery.cancel()
         poller, self._poller = self._poller, None
         if poller is not None:
             poller.cancel()
@@ -2797,6 +3614,30 @@ class ClaudeProvider:
             self._dismissed_file.write_text(json.dumps(sorted(self._dismissed)))
         except OSError:
             log.warning("could not save %s", self._dismissed_file, exc_info=True)
+
+
+#: Seconds between tries at discovering the models, after start-up found none.
+_REDISCOVERY: Final = (15.0, 30.0, 60.0, 120.0, 300.0, *(600.0,) * 18)
+
+
+def _with_learned(models: Sequence[ModelInfo], learned: Learned) -> tuple[ModelInfo, ...]:
+    """*models*, with what results have said about their limits filled in."""
+    updated: list[ModelInfo] = []
+    for model in models:
+        meta = model.meta or {}
+        found = learned.for_entry({"value": model.id, "resolvedModel": meta.get("resolvedModel")})
+        window = model.max_context_window or found.context_window
+        updated.append(
+            replace(
+                model,
+                max_context_window=window,
+                max_prompt_tokens=model.max_prompt_tokens or window,
+                max_output_tokens=found.max_output
+                if found.max_output is not None
+                else model.max_output_tokens,
+            )
+        )
+    return tuple(updated)
 
 
 #: A mirrored session's resume state names its claude.ai session under this.

@@ -460,7 +460,9 @@ async def test_a_phone_message_during_a_turn_here_is_shown_in_it(tmp_path: Path)
     session = await harness.session()
     sink = RecordingSink()
     await session.send_user_message(UserMessage(text="do x"), sink)
-    assert "also do y" in _texts(sink)
+    # A note from the harness, not the agent's own text.
+    assert sink.notifications == ["Sent from another device: also do y"]
+    assert "also do y" not in _texts(sink)
     assert harness.publisher.turns == []
 
 

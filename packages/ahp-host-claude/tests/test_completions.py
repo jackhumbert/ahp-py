@@ -186,3 +186,13 @@ async def test_the_unwrapped_control_requests_have_claude_codes_shape() -> None:
         {"subtype": "file_suggestions", "query": "src/a"},
         {"subtype": "get_context_usage", "detail": "summary"},
     ]
+
+
+def test_the_host_advertises_the_providers_own_triggers(tmp_path: Path) -> None:
+    """`DeclaresCompletionTriggers`: an `ahp-node` host picks them up too."""
+    from ahp_host.core import Host, LoopbackSingleUserPolicy
+    from ahp_host.provider.base import DeclaresCompletionTriggers
+
+    provider = ClaudeProvider(tmp_path)
+    assert isinstance(provider, DeclaresCompletionTriggers)
+    assert Host(provider, LoopbackSingleUserPolicy()).completion_triggers() == ("/", "@")

@@ -12,12 +12,21 @@ server's AGENTS.md requires ("Adding a provider adapter").
   `questions.py` (`AskUserQuestion` <-> input requests), `usage.py` (per-turn
   `UsageInfo`), `models.py` (picker limits: probed at start-up, learned from
   results), `customizations.py` (the customization tree), `completions.py`
-  (`/` and `@`), `history.py` (turn marks and edit-and-resend cuts),
-  `background.py` (tasks and subagent worker chats), `client_tools.py`,
-  `remote_control.py` (control requests the SDK does not wrap), `claude_ai.py`
-  (claude.ai mirrors). `LocalClaudeSession` in `provider.py` is a session this
-  host runs; a mirror is a plain `ClaudeSession`, which lacks what only a local
-  Claude Code can do (truncate, MCP start/stop, customization toggles).
+  (`/` and `@`), `history.py` (turn marks, edit-and-resend cuts, fork points),
+  `edits.py` (edit previews, per-call diffs, changesets), `transcripts.py`
+  (another chat's turns as text), `background.py` (tasks and subagent worker
+  chats), `client_tools.py`, `remote_control.py` (control requests the SDK
+  does not wrap), `claude_ai.py` (claude.ai mirrors). `LocalClaudeSession` in
+  `provider.py` is a session this host runs, and also each of its other chats
+  (`_parent` set, held in the default chat's `_chats`); a mirror is a plain
+  `ClaudeSession`, which lacks what only a local Claude Code can do (truncate,
+  MCP start/stop, customization toggles, more chats, resuming).
+- Security decisions recorded in the code, each tested: the question tool
+  always reaches the approval callback; Claude Code's permission suggestions
+  are offered only as explicit choices, narrowed to the session, never a
+  bypass mode or a directory (`permissions.choices`); a chat narrowed away
+  from the session's folder runs its gate in Ask (`ClaudeSession._gate`); the
+  permission mode Claude Code reports at init is put back to the session's.
 - SDK behaviour not documented by the SDK was read from the CLI it bundles
   (`claude_agent_sdk/_bundled/claude`): `strings` it and search for the
   control request or message schema (`subtype:R("...")`).

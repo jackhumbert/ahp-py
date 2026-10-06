@@ -254,3 +254,61 @@ async def test_answered_on_another_device_withdraws_nothing_it_should_not(
     # Not reported as an approval given elsewhere: there was no approval prompt.
     assert not any(e[0] == "confirmed_elsewhere" for e in sink.events)
     assert any(e[0] == "completed" and e[1] == "q1" for e in sink.events)
+
+
+async def test_questions_answered_on_another_device_are_withdrawn_with_those_answers(
+    tmp_path: Path,
+) -> None:
+    """`ResolvesInput`: the request here closes, showing what was answered there."""
+    from tests.fakes import ResolvingSink
+
+    asks: list[asyncio.Task[Any]] = []
+    sink = ResolvingSink()
+    sink.input_outcome = None  # nobody here answers
+
+    async def asking(options: ClaudeAgentOptions) -> None:
+        assert options.can_use_tool is not None
+        can_use_tool = options.can_use_tool
+
+        async def ask() -> Any:
+            return await can_use_tool(
+                QUESTION_TOOL, dict(ASKED), ToolPermissionContext(tool_use_id="q1")
+            )
+
+        asks.append(asyncio.create_task(ask()))
+        await eventually(lambda: bool(sink.inputs))
+        asks[0].cancel()
+
+    answered = {
+        "questions": ASKED["questions"],
+        "answers": {"Which library should we use?": "dayjs", "Which features?": "Parsing, Zones"},
+    }
+    provider, _ = _session_harness(
+        tmp_path,
+        [
+            AssistantMessage(content=[ToolUseBlock("q1", QUESTION_TOOL, ASKED)], model="m"),
+            asking,
+            SdkUserMessage(
+                content=[ToolResultBlock("q1", "User has answered", False)],
+                tool_use_result=answered,
+            ),
+            _result(),
+        ],
+    )
+    session = await provider.create_session(_context())
+    await session.send_user_message(UserMessage(text="pick one"), sink)
+    (request,) = sink.inputs
+    assert request.key == "q1"
+    assert sink.resolved == [
+        (
+            "q1",
+            "accept",
+            {
+                "q0": {"state": "submitted", "value": {"kind": "selected", "value": "dayjs"}},
+                "q1": {
+                    "state": "submitted",
+                    "value": {"kind": "selected-many", "value": ["Parsing", "Zones"]},
+                },
+            },
+        )
+    ]

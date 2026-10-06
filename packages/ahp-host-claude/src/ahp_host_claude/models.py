@@ -158,10 +158,10 @@ class Learned:
         except OSError:
             log.warning("could not save %s", self.path, exc_info=True)
 
-    def record(self, model_usage: Any) -> None:
-        """Remember what one result's `model_usage` says about each model."""
+    def record(self, model_usage: Any) -> bool:
+        """Remember what one result's `model_usage` says about each model; whether it was new."""
         if not isinstance(model_usage, Mapping):
-            return
+            return False
         changed = False
         for model, entry in model_usage.items():
             if not isinstance(model, str) or not isinstance(entry, Mapping):
@@ -179,6 +179,7 @@ class Learned:
                 changed = True
         if changed:
             self._save()
+        return changed
 
     def for_entry(self, entry: Mapping[str, Any]) -> Limits:
         """What was learned about a picker entry, under either of its names."""

@@ -174,7 +174,43 @@ def test_simple_attachments_use_their_model_representation(tmp_path: Path) -> No
     content = prompt_content("", raw, tmp_path)
     assert content == [
         {"type": "text", "text": "def f(): ..."},
-        {"type": "text", "text": "[Attached Side chat (chat): not supported by this host]"},
+        # Not resolved by the host (no `attached_chats`): said, not guessed.
+        {"type": "text", "text": "[Attached chat Side chat: its transcript was not available]"},
+    ]
+
+
+def test_a_chat_attachment_is_its_transcript(tmp_path: Path) -> None:
+    from ahp_host.provider.base import AttachedChat
+
+    raw = {"attachments": [{"type": "chat", "label": "Plan", "resource": "ahp-chat:/plan"}]}
+    turns = [
+        {
+            "id": "t1",
+            "message": {"text": "how should we split it?"},
+            "responseParts": [
+                {"kind": "reasoning", "content": "private"},
+                {"kind": "markdown", "id": "m", "content": "Into two modules."},
+                {
+                    "kind": "toolCall",
+                    "toolCall": {
+                        "toolName": "Read",
+                        "displayName": "Read file",
+                        "pastTenseMessage": "Read a.py",
+                    },
+                },
+            ],
+        }
+    ]
+    content = prompt_content(
+        "go on", raw, tmp_path, [AttachedChat(resource="ahp-chat:/plan", turns=turns)]
+    )
+    assert content == [
+        {"type": "text", "text": "go on"},
+        {
+            "type": "text",
+            "text": "[Attached chat Plan, its transcript:]\n"
+            "User: how should we split it?\nAssistant: Into two modules.\n[Read file: Read a.py]",
+        },
     ]
 
 
@@ -274,3 +310,27 @@ async def test_picking_default_means_the_account_default(tmp_path: Path) -> None
         UserMessage(text="z", model=ModelSelection(id="default")), RecordingSink()
     )
     assert clients[0].models == ["claude-fable-5-1[1m]", None]
+
+
+async def test_a_chat_attachment_reaches_claude_with_the_message(tmp_path: Path) -> None:
+    from ahp_host.provider.base import AttachedChat
+
+    clients: list[FakeClient] = []
+
+    def factory(options: ClaudeAgentOptions) -> FakeClient:
+        clients.append(FakeClient(options, [[_result()]]))
+        return clients[-1]
+
+    provider = ClaudeProvider(tmp_path, client_factory=factory)
+    session = await provider.create_session(
+        AgentSessionContext(session_uri="s", chat_uri="c", provider_id="claude")
+    )
+    raw = {"attachments": [{"type": "chat", "label": "Other", "resource": "ahp-chat:/o"}]}
+    turns = [{"id": "t", "message": {"text": "earlier"}, "responseParts": []}]
+    await session.send_user_message(
+        UserMessage(
+            text="see", raw=raw, attached_chats=(AttachedChat(resource="ahp-chat:/o", turns=turns),)
+        ),
+        RecordingSink(),
+    )
+    assert text_of(clients[0].prompts[0])[1]["text"].endswith("User: earlier")

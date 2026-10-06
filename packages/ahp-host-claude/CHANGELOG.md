@@ -4,6 +4,43 @@
 
 ### Added
 
+- Chats (`HostsChats`, `CancelsChats`; `multipleChats` with `fork` and
+  `sideChat`). Each chat is its own Claude Code conversation on its own
+  process, routed by `UserMessage.chat_uri`, with its own transcript marks,
+  rewinds and resume state (`chats` in the resume state); restored chats
+  resume lazily, a closed chat's process stops, stopping one chat stops only
+  it. A fork or side chat starts from the source chat's conversation cut at
+  its turn and copied (`resume_session_at`, `fork_session`); a source that
+  cannot be cut is given as its transcript. `createSession.fork` the same.
+  Approval mode, effort, folders, clients and customizations are the
+  session's; Remote Control is the default chat's. A claude.ai mirror refuses
+  `chat_opened` (`PermissionDenied`).
+- Chat folder subsets (`FollowsChatWorkingDirectories`). Security: a chat
+  narrowed to no folder gets no file or shell tools; one that leaves out the
+  session's own folder runs its gate in Ask whatever the approval mode,
+  because Claude Code's looser modes act in its `cwd` unasked.
+- Approval prompt choices. Claude Code's suggestions for a call become
+  `ConfirmationOption`s - allow a rule for the session, switch to Accept edits
+  or Auto - applied (`updated_permissions`) only when the user picks one.
+  Security: rules are narrowed to the session, never the settings files;
+  rules are not offered in Ask, where they would not take; bypass permissions
+  and directories are never offered. A picked mode moves the gate at once.
+- Edit previews on approval prompts (`ToolConfirmation.edits`) for `Write`,
+  `Edit` and `MultiEdit`, computed only when exact; per-call diffs
+  (`TurnSink.file_edit`) for all four editing tools, from disk before and
+  after the call; a reviewable changeset of everything Claude edited, for the
+  session and for each other chat. Shell-made edits are not tracked.
+- Resumable turns (`ResumesTurns`): a failure on an overloaded, rate-limited
+  or failing API, or the Claude process ending, is offered for resuming;
+  `resume_turn` asks Claude to carry on in the same turn.
+- Live agent info (`UpdatesAgentInfo`): learned model limits are published
+  when learned, and start-up discovery that found no models is retried with
+  backoff (`rediscover=`).
+- System notifications for compactions, messages from another device, and
+  background work ending mid-turn.
+- Chat attachments (`UserMessage.attached_chats`) reach Claude as the
+  referenced chat's transcript.
+
 - `AskUserQuestion`. Claude's multiple-choice question tool is offered again:
   its questions become one input request (`TurnSink.request_input`,
   `chat/inputRequested`) - single or multiple choice with free-form answers
@@ -151,6 +188,17 @@
 
 ### Changed
 
+- A denial's reason and suggestion reach Claude (`reason_message`,
+  `user_suggestion`), instead of a fixed "the user declined".
+- `AskUserQuestion` answered on claude.ai is withdrawn here with those answers
+  (`ResolvesInput`, `InputRequest.key`).
+- Turn ids come from `IdentifiesTurn`; the host sink's private attribute is no
+  longer read.
+- Every customization states whether it is on, so the host never keeps a
+  client's toggle over what the agent is actually held to.
+- Completion trigger characters are the provider's own
+  (`DeclaresCompletionTriggers`), so `ahp-node` advertises them too;
+  `python -m ahp_host_claude` no longer passes them to `Host`.
 - Usage is reported per turn the way a context gauge reads it: `inputTokens`
   is the prompt of the turn's last request with its cached parts (it was the
   uncached part, summed over every request), `cacheReadTokens` the cached

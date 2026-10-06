@@ -33,7 +33,7 @@ from claude_agent_sdk import PermissionResultAllow, PermissionResultDeny
 
 from ahp_host_claude.permissions import QUESTION_TOOL
 
-__all__ = ["QUESTION_TOOL", "answers_of", "input_request", "permission_result"]
+__all__ = ["QUESTION_TOOL", "answers_of", "input_request", "permission_result", "wire_answers"]
 
 #: What the model reads when the user turns the questions down.
 DECLINED: Final = "The user declined to answer these questions."
@@ -103,8 +103,12 @@ def _question(index: int, question: Mapping[str, Any]) -> InputQuestion | None:
     )
 
 
-def input_request(tool_input: Mapping[str, Any]) -> InputRequest | None:
-    """The questions as one input request, or None if there is nothing to ask."""
+def input_request(tool_input: Mapping[str, Any], key: str | None = None) -> InputRequest | None:
+    """The questions as one input request, or None if there is nothing to ask.
+
+    *key* names it (the tool call's id), so it can be withdrawn if the
+    questions are answered somewhere else first (`ResolvesInput`).
+    """
     questions: list[InputQuestion] = []
     for index, question in enumerate(_questions(tool_input)):
         asked = _question(index, question)
@@ -113,9 +117,8 @@ def input_request(tool_input: Mapping[str, Any]) -> InputRequest | None:
     if not questions:
         return None
     title = tool_input.get("title")
-    return InputRequest(
-        message=title if isinstance(title, str) and title else None, questions=questions
-    )
+    message = title if isinstance(title, str) and title else None
+    return InputRequest(message=message, questions=questions, key=key)
 
 
 def _format_number(value: float) -> str:
@@ -184,3 +187,44 @@ def permission_result(
     return PermissionResultAllow(
         updated_input={**tool_input, "answers": answers_of(tool_input, outcome)}
     )
+
+
+def wire_answers(tool_input: Mapping[str, Any], answered: Any) -> dict[str, Any]:
+    """Answers given elsewhere, as the `ChatInputAnswer`s this host's request takes.
+
+    The reverse of `answers_of`: Claude Code reports a question's answer as a
+    string (question text -> answer, several choices joined by ``", "``), and
+    the input request here names its questions ``q0``, ``q1``... A choice that
+    is one of the options is ``selected``, several are ``selected-many``, and
+    anything else is what the user typed (``freeformValues``).
+    """
+    if not isinstance(answered, Mapping):
+        return {}
+    wire: dict[str, Any] = {}
+    for index, question in enumerate(_questions(tool_input)):
+        text = answered.get(str(question["question"]))
+        if not isinstance(text, str) or not text:
+            continue
+        kind = question.get("kind", "choice")
+        value: dict[str, Any]
+        if kind == "number":
+            try:
+                value = {"kind": "number", "value": float(text)}
+            except ValueError:
+                value = {"kind": "text", "value": text}
+        elif kind == "text":
+            value = {"kind": "text", "value": text}
+        else:
+            labels = {option["label"] for option in _options(question)}
+            if question.get("multiSelect") is True:
+                parts = [part.strip() for part in text.split(",") if part.strip()]
+                value = {"kind": "selected-many", "value": [p for p in parts if p in labels]}
+                typed = [part for part in parts if part not in labels]
+                if typed:
+                    value["freeformValues"] = typed
+            elif text in labels:
+                value = {"kind": "selected", "value": text}
+            else:
+                value = {"kind": "selected", "value": "", "freeformValues": [text]}
+        wire[_qid(index)] = {"state": "submitted", "value": value}
+    return wire
