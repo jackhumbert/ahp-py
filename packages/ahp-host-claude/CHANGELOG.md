@@ -4,6 +4,48 @@
 
 ### Added
 
+- `AskUserQuestion`. Claude's multiple-choice question tool is offered again:
+  its questions become one input request (`TurnSink.request_input`,
+  `chat/inputRequested`) - single or multiple choice with free-form answers
+  allowed, text, or number - and the answers go back as the tool's
+  `updatedInput.answers`, the way Claude Code's own dialog returns them.
+  Declining or dismissing denies the tool with a message saying which.
+  Security: the `PreToolUse` hook now sends this tool to the approval callback
+  in every mode, so an `allow` rule cannot run it with nobody asked; it asks
+  more, never less.
+- Model limits and vision. Each picker entry carries `maxContextWindow` and
+  `maxPromptTokens`, which start-up discovery asks Claude Code for, model by
+  model (`get_context_usage` in its `summary` form, on the idle probe), and
+  `maxOutputTokens` once a session's results have reported it (kept in
+  `<state_dir>/claude-models.json`). Every entry has `supportsVision`. No
+  table of models is kept here.
+- Customizations: the session's skills, agents, plugins and MCP servers are
+  published as the protocol's two-level customization tree once the Claude
+  process is up (`get_server_info`, `get_context_usage`, `get_mcp_status`,
+  `system/init`), and kept current (`system/commands_changed`, MCP status after
+  each turn, sent as `mcp_server_changed` when only a server's state moved).
+  `DescribesSession`, `ManagesMcpServers` (start reconnects, or switches back
+  on, a server; stop switches it off, as `/mcp` does, for the project) and
+  `HandlesCustomizations` (a skill or a plugin's skills switched off become
+  `Skill(name)` deny rules, kept with the session; what Claude Code cannot
+  switch off is put back).
+- Custom agents. A message's `AgentSelection` runs Claude Code as that agent
+  (`--agent`), restarting on the same conversation when the pick changes.
+  Security: the permission mode Claude Code reports at `system/init` is put
+  back to the session's own if anything (an agent's file) changed it.
+- Edit-and-resend (`TruncatesHistory`). Each turn's prompt and last
+  transcript entry are recorded (`turns` in the resume state); truncating
+  restarts Claude at the turn kept (`resume_session_at`, with
+  `resume_drops_turn` when exactly one turn goes, retried without it if Claude
+  Code refuses), on a branch of the same conversation; a pending cut survives a
+  restart. Truncating everything, or to a turn not recorded, starts a new
+  conversation. Files are not rewound; the next prompt tells Claude so.
+- Completions (`Completes`): `/` at the start of a message for Claude Code's
+  slash commands and skills, `@` for files from its own file index
+  (`file_suggestions`), inside the served folders. `python -m
+  ahp_host_claude` advertises the trigger characters
+  (`ClaudeProvider.completion_trigger_characters`).
+
 - Background shells (AHP 1.0.0 chat background work). A `Bash` command left
   running in the background is listed on the chat with its command line while
   it runs, and withdrawn when Claude Code reports it finished, failed or
@@ -13,7 +55,6 @@
   after the turn that started it has ended -- they used to be dropped. It is
   listed as background work pointing at that chat, the spawning call's result
   links to it, and stopping the chat's turn stops that subagent alone.
-  Subagents in the foreground are shown inline as before.
 
 - `effort`, a session setting (Default, Low, Medium, High, Extra high, Max)
   passed to Claude Code at start-up; changing it mid-session restarts Claude
@@ -109,6 +150,18 @@
   `ArchivesSessions`).
 
 ### Changed
+
+- Usage is reported per turn the way a context gauge reads it: `inputTokens`
+  is the prompt of the turn's last request with its cached parts (it was the
+  uncached part, summed over every request), `cacheReadTokens` the cached
+  part of it, and `_meta` has the cache-creation tokens, the turn's summed
+  totals, its estimated cost and the running total.
+- Subagents in the foreground get a worker chat too, like background ones:
+  their messages, tool calls and approvals are in it, no longer inline in the
+  parent turn, and the spawning call's result links to it. A subagent's
+  approval prompts are asked in its own chat, so a background one can be
+  approved with no turn running in the parent. Subagents' text reaches their
+  chat (`forward_subagent_text`).
 
 - **Renamed from `agent-host-server-claude` to `ahp-host-claude`** (import `agent_host_server_claude` → `ahp_host_claude`), and moved into the `ahp-py` monorepo as `packages/ahp-host-claude`. Command: `agent-host-server-claude` → `ahp-host-claude`; the default state directory follows the name. Tags are now per package: `ahp-host-claude/v<version>`.
 - `claude_ai_sessions = true` now lists only the sessions running on this

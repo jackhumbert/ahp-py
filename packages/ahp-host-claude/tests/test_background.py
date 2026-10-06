@@ -6,6 +6,8 @@ exercise the typed `Task*Message` subclasses the real stream produces.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 from pathlib import Path
 from typing import Any
 
@@ -13,8 +15,10 @@ from ahp_host.provider.base import AgentSessionContext, UserMessage
 from claude_agent_sdk import (
     AssistantMessage,
     ClaudeAgentOptions,
+    PermissionResultAllow,
     ResultMessage,
     TextBlock,
+    ToolPermissionContext,
     ToolUseBlock,
 )
 from claude_agent_sdk import UserMessage as SdkUserMessage
@@ -232,19 +236,104 @@ async def test_the_subagents_messages_stream_into_its_chat_after_the_turn(
     assert "local_agent:a1" not in harness.publisher.background
 
 
-async def test_a_foreground_subagent_is_unchanged(tmp_path: Path) -> None:
-    harness = Harness(
-        tmp_path,
-        [
-            AssistantMessage(content=[ToolUseBlock("t1", "Task", {"prompt": "x"})], model="m"),
-            _started("a2", "local_agent", tool_use_id="t1", is_backgrounded=False),
-            SdkUserMessage(content=[ToolResultBlock("t1", "done", False)]),
-            _result(),
-        ],
+def _foreground_task(*, started_first: bool = True) -> list[Step]:
+    spawn = AssistantMessage(
+        content=[ToolUseBlock("t1", "Agent", {"prompt": "look", "description": "Survey"})],
+        model="m",
     )
-    await _run_turn(harness)
-    assert harness.publisher.chats == []
+    started = _started(
+        "a2", "local_agent", tool_use_id="t1", is_backgrounded=False, description="Survey"
+    )
+    inner = [
+        AssistantMessage(
+            content=[TextBlock("Looking."), ToolUseBlock("s1", "Read", {"file_path": "/x/a.py"})],
+            model="m",
+            parent_tool_use_id="t1",
+        ),
+        SdkUserMessage(content=[ToolResultBlock("s1", "print(1)", False)], parent_tool_use_id="t1"),
+    ]
+    steps: list[Step] = [spawn, started, *inner] if started_first else [spawn, *inner, started]
+    return [
+        *steps,
+        SdkUserMessage(content=[ToolResultBlock("t1", "It is a small repo.", False)]),
+        _result(),
+    ]
+
+
+async def test_a_foreground_subagent_gets_a_worker_chat_too(tmp_path: Path) -> None:
+    harness = Harness(tmp_path, _foreground_task())
+    session = await harness.provider.create_session(harness.context())
+    parent = RecordingSink(approve=True)
+    await session.send_user_message(UserMessage(text="survey"), parent)
+
+    (chat,) = harness.publisher.chats
+    assert chat.tool_call_id == "t1"
+    assert chat.prompts == ["look"]
+    await eventually(lambda: bool(chat.tasks) and chat.tasks[0].done())
+    worker = chat.sinks[0]
+    assert ("text", "Looking.") in worker.events
+    assert ("started", "s1", "Read", "Read file") in worker.events
+    assert any(e[0] == "completed" and e[1] == "s1" for e in worker.events)
+    # Its calls are in its chat, not inline in the parent's turn.
+    assert not any(e[0] == "started" and e[1] == "s1" for e in parent.events)
+    # The spawning call links to the chat, though the subagent has ended.
+    (completed,) = [e for e in parent.events if e[0] == "completed"]
+    assert {"type": "subagent", "resource": chat.resource, "title": "Survey"} in completed[3][
+        "content"
+    ]
+    # Not background work: it ran while the parent waited for it.
     assert harness.publisher.background == {}
+
+
+async def test_a_subagents_first_message_may_come_before_its_task(tmp_path: Path) -> None:
+    harness = Harness(tmp_path, _foreground_task(started_first=False))
+    session = await harness.provider.create_session(harness.context())
+    parent = RecordingSink(approve=True)
+    await session.send_user_message(UserMessage(text="survey"), parent)
+    (chat,) = harness.publisher.chats
+    await eventually(lambda: bool(chat.tasks) and chat.tasks[0].done())
+    assert ("text", "Looking.") in chat.sinks[0].events
+    assert not any(e[0] == "started" and e[1] == "s1" for e in parent.events)
+
+
+async def test_a_subagents_approval_is_asked_in_its_own_chat(tmp_path: Path) -> None:
+    asked: list[Any] = []
+
+    async def ask(options: ClaudeAgentOptions) -> None:
+        assert options.can_use_tool is not None
+        context = ToolPermissionContext(tool_use_id="s2", agent_id="a2")
+        asked.append(await options.can_use_tool("Bash", {"command": "ls"}, context))
+
+    script = _foreground_task()
+    script.insert(4, ask)  # after the subagent's first messages
+    harness = Harness(tmp_path, script)
+    session = await harness.provider.create_session(harness.context())
+    parent = RecordingSink(approve=True)
+    await session.send_user_message(UserMessage(text="survey"), parent)
+    (chat,) = harness.publisher.chats
+    worker = chat.sinks[0]
+    assert [c.call_id for c in worker.confirmations] == ["s2"]
+    assert ("started", "s2", "Bash", "Run command") in worker.events
+    assert parent.confirmations == []
+    assert isinstance(asked[0], PermissionResultAllow)
+
+
+async def test_stopping_a_foreground_worker_stops_only_its_task(tmp_path: Path) -> None:
+    script = _foreground_task()
+    script = script[:-2]  # the subagent never finishes on its own
+    harness = Harness(tmp_path, script)
+    session = await harness.provider.create_session(harness.context())
+    turn = asyncio.create_task(session.send_user_message(UserMessage(text="x"), RecordingSink()))
+    await eventually(
+        lambda: bool(harness.publisher.chats) and bool(harness.publisher.chats[0].tasks)
+    )
+    chat = harness.publisher.chats[0]
+    chat.tasks[0].cancel()
+    await eventually(lambda: harness.clients[0].stopped_tasks == ["a2"])
+    assert not harness.clients[0].interrupted
+    turn.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await turn
 
 
 async def test_stopping_the_client_withdraws_its_shells(tmp_path: Path) -> None:
@@ -275,3 +364,23 @@ class TestWorkFor:
 
     def test_an_unknown_task_type_gets_no_entry(self) -> None:
         assert work_for(self._task(task_type="dream")) is None
+
+
+async def test_a_background_subagent_is_approved_with_no_parent_turn(tmp_path: Path) -> None:
+    """Its prompt used to need a turn running in the parent, and was denied without."""
+    harness = Harness(tmp_path, _background_task())
+    session = await harness.provider.create_session(harness.context())
+    await session.send_user_message(UserMessage(text="explore"), RecordingSink(approve=True))
+    (chat,) = harness.publisher.chats
+    await eventually(lambda: bool(chat.sinks))
+    asked: list[Any] = []
+
+    async def ask(options: ClaudeAgentOptions) -> None:
+        assert options.can_use_tool is not None
+        context = ToolPermissionContext(tool_use_id="s9", agent_id="a1")
+        asked.append(await options.can_use_tool("Bash", {"command": "make"}, context))
+
+    harness.clients[0].push(ask)
+    await eventually(lambda: bool(asked))
+    assert isinstance(asked[0], PermissionResultAllow)
+    assert [c.call_id for c in chat.sinks[0].confirmations] == ["s9"]

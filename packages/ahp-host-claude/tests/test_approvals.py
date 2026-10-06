@@ -100,7 +100,10 @@ async def test_a_resumed_session_keeps_its_mode(tmp_path: Path) -> None:
     session = await provider.create_session(_context({"permissionMode": "auto"}))
     await session.send_user_message(UserMessage(text="x"), RecordingSink())
     state = await provider.resume_state_of(session)
-    assert state == {
+    assert state is not None
+    # The turn's place in the transcript, for edit-and-resend (`history.py`).
+    assert [mark["prompt"] for mark in state["turns"]] == [clients[0].prompts[0][0]["uuid"]]
+    assert {key: value for key, value in state.items() if key != "turns"} == {
         "claudeSessionId": "abc",
         "permissionMode": "auto",
         "remoteControl": False,

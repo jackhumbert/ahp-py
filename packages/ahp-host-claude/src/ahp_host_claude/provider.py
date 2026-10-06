@@ -35,10 +35,13 @@ from ahp_host.provider.base import (
     AgentInfo,
     AgentSessionContext,
     ClientToolCall,
+    CompletionItem,
+    CompletionRequest,
     ConfigRequest,
     ConfigResolution,
     ConfigValue,
     ModelInfo,
+    SessionDescription,
     SessionDirectory,
     ToolConfirmation,
     TurnSink,
@@ -61,7 +64,14 @@ from claude_agent_sdk import (
 from claude_agent_sdk import UserMessage as SdkUserMessage
 from claude_agent_sdk.types import StreamEvent
 
-from ahp_host_claude import background, client_tools
+from ahp_host_claude import (
+    background,
+    client_tools,
+    completions,
+    customizations,
+    history,
+    questions,
+)
 from ahp_host_claude.attachments import prompt_content
 from ahp_host_claude.claude_ai import (
     ALL,
@@ -81,6 +91,8 @@ from ahp_host_claude.effort import CONFIG_KEY as EFFORT_KEY
 from ahp_host_claude.effort import DEFAULT as EFFORT_DEFAULT
 from ahp_host_claude.effort import PROPERTY as EFFORT_PROPERTY
 from ahp_host_claude.effort import effort_level, sdk_effort
+from ahp_host_claude.history import Rewind, TurnMark
+from ahp_host_claude.models import CACHE_FILE, Learned, Limits, probe_limits
 from ahp_host_claude.paths import directory_of
 from ahp_host_claude.permissions import (
     APPROVALS_PROPERTY,
@@ -90,6 +102,7 @@ from ahp_host_claude.permissions import (
     EXIT_PLAN_TOOL,
     PERMISSION_MODES,
     PLAN,
+    QUESTION_TOOL,
     approval_mode,
     describe,
     past_tense,
@@ -112,6 +125,7 @@ from ahp_host_claude.sessions import (
     is_session_id,
     title_of,
 )
+from ahp_host_claude.usage import report as usage_report
 
 log = logging.getLogger(__name__)
 
@@ -212,21 +226,32 @@ def _default_client(options: ClaudeAgentOptions) -> SdkClient:
     return RemoteControlClient(options=options)
 
 
-def models_from_server_info(info: Mapping[str, Any] | None) -> tuple[ModelInfo, ...]:
+def _entries(info: Mapping[str, Any] | None) -> list[Mapping[str, Any]]:
+    entries = (info or {}).get("models")
+    if not isinstance(entries, Sequence) or isinstance(entries, str):
+        return []
+    return [entry for entry in entries if isinstance(entry, Mapping)]
+
+
+def models_from_server_info(
+    info: Mapping[str, Any] | None,
+    *,
+    limits: Mapping[str, Limits] | None = None,
+    learned: Learned | None = None,
+) -> tuple[ModelInfo, ...]:
     """The picker entries Claude Code itself offers this account.
 
     Claude Code reports them at start-up (`get_server_info()["models"]`), with
     the account's own default first. Taking them from there, rather than from
     a list in this file, is what keeps a new model - or an account without a
     given one - right without a release of this adapter.
+
+    *limits* are what the start-up probe found each one's window to be, and
+    *learned* what earlier sessions' results said; see `models.py`, which also
+    says why every entry takes images.
     """
-    entries = (info or {}).get("models")
     models: list[ModelInfo] = []
-    if not isinstance(entries, Sequence):
-        return ()
-    for entry in entries:
-        if not isinstance(entry, Mapping):
-            continue
+    for entry in _entries(info):
         value, name = entry.get("value"), entry.get("displayName")
         if not isinstance(value, str) or not value:
             continue
@@ -235,8 +260,21 @@ def models_from_server_info(info: Mapping[str, Any] | None) -> tuple[ModelInfo, 
             for key in ("description", "resolvedModel", "supportedEffortLevels")
             if key in entry
         }
+        found = (limits or {}).get(value, Limits())
+        if learned is not None:
+            found = found.merged(learned.for_entry(entry))
         models.append(
-            ModelInfo(id=value, name=name if isinstance(name, str) else value, meta=meta or None)
+            ModelInfo(
+                id=value,
+                name=name if isinstance(name, str) else value,
+                max_context_window=found.context_window,
+                max_prompt_tokens=found.max_prompt
+                if found.max_prompt is not None
+                else found.context_window,
+                max_output_tokens=found.max_output,
+                supports_vision=True,
+                meta=meta or None,
+            )
         )
     return tuple(models)
 
@@ -249,14 +287,28 @@ class Discovery:
     #: Whether Claude Code would turn Remote Control on for a session it
     #: started itself - the user's `remoteControlAtStartup`, then org policy.
     remote_control: bool = False
+    #: Its slash commands, as offered in the served folder: what a session
+    #: completes ``/`` with until its own Claude client has said.
+    commands: tuple[Mapping[str, Any], ...] = ()
 
 
-async def discover(root: Path, client_factory: ClientFactory = _default_client) -> Discovery:
-    """Ask Claude Code once. Empty (no picker, no Remote Control) if it cannot say."""
+async def discover(
+    root: Path,
+    client_factory: ClientFactory = _default_client,
+    *,
+    state_dir: Path | None = None,
+) -> Discovery:
+    """Ask Claude Code once. Empty (no picker, no Remote Control) if it cannot say.
+
+    With *state_dir*, the models carry the limits sessions learned there.
+    """
     client = client_factory(ClaudeAgentOptions(cwd=str(root)))
     try:
         await client.connect()
         info = await client.get_server_info()
+        # The probe is idle and about to go, so trying each model on it
+        # changes nothing anyone is using.
+        limits = await probe_limits(client, _entries(info))
     except Exception:
         log.exception("could not ask Claude Code about this account; no models, no Remote Control")
         return Discovery()
@@ -265,7 +317,15 @@ async def discover(root: Path, client_factory: ClientFactory = _default_client) 
             await client.disconnect()
         except Exception:
             log.debug("disconnecting the start-up probe failed", exc_info=True)
-    return Discovery(models=models_from_server_info(info), remote_control=auto_enable(info))
+    learned = Learned(state_dir / CACHE_FILE) if state_dir is not None else None
+    commands = (info or {}).get("commands")
+    return Discovery(
+        models=models_from_server_info(info, limits=limits, learned=learned),
+        remote_control=auto_enable(info),
+        commands=tuple(c for c in commands if isinstance(c, Mapping))
+        if isinstance(commands, Sequence)
+        else (),
+    )
 
 
 async def discover_models(
@@ -339,10 +399,46 @@ class _Turn:
     attached: asyncio.Event = field(default_factory=asyncio.Event)
     done: asyncio.Event = field(default_factory=asyncio.Event)
     model: str | None = None
+    #: Where the turn sits in Claude Code's transcript (`history.py`).
+    mark: TurnMark | None = None
+    #: The usage of the turn's latest main-loop request (`usage.py`).
+    last_request: Mapping[str, Any] | None = None
+    #: The Claude client it runs on: only that client's end can end it.
+    client: Any = None
+
+
+def _turn_id_of(sink: TurnSink) -> str | None:
+    """The AHP turn a sink publishes into, if the host says.
+
+    `TurnSink` has no turn id, and edit-and-resend names the turn to keep by
+    it. The host's own sink holds it, privately; a public ``turn_id`` is read
+    first, so a host that names it publicly needs nothing here.
+    """
+    for name in ("turn_id", "_turn_id"):
+        value = getattr(sink, name, None)
+        if isinstance(value, str) and value:
+            return value
+    return None
 
 
 #: The `system` subtypes that carry a task's lifecycle (`background.py`).
 _TASK_SUBTYPES: Final = frozenset({"task_started", "task_updated", "task_notification"})
+#: `forward_subagent_text` is newer than the oldest SDK this runs on.
+_FORWARDS_SUBAGENT_TEXT: Final = "forward_subagent_text" in ClaudeAgentOptions.__dataclass_fields__
+#: A name a `Skill(name)` permission rule can carry as it is.
+_RULE_SAFE: Final = re.compile(r"[A-Za-z0-9._:-]+")
+#: The tool that starts a subagent, under both of Claude Code's names for it.
+_SUBAGENT_TOOLS: Final = frozenset({"Agent", "Task"})
+#: How Claude Code words a refused cut (`resume_drops_turn`), and a cut at a
+#: message it cannot find.
+_CUT_REFUSED: Final = "--resume-drops-turn"
+_CUT_NOT_FOUND: Final = "No message found with message.uuid"
+#: What Claude is told on the first prompt after a rewind (`history.py`).
+REWOUND_NOTE: Final = (
+    "[The user rewound this conversation to this point: what came after it is gone. "
+    "Changes made to files in that part were not undone, so check the files before "
+    "relying on them.]"
+)
 
 
 class ClaudeSession:
@@ -365,6 +461,13 @@ class ClaudeSession:
         status_on_claude_ai: Callable[[str], Awaitable[str | None]] | None = None,
         chat_tools: Sequence[str] = CHAT_TOOLS,
         effort: str | None = None,
+        marks: Sequence[TurnMark] = (),
+        rewind: Rewind | None = None,
+        rewound: bool = False,
+        cost_baseline: float | None = None,
+        disabled: Sequence[str] = (),
+        commands: Sequence[Mapping[str, Any]] = (),
+        on_model_usage: Callable[[Any], None] | None = None,
     ) -> None:
         self.context = context
         #: Chosen at creation (or restored on resume); a client may change it
@@ -435,9 +538,10 @@ class ClaudeSession:
         #: failure): each still owes an aborted result, which must not end
         #: whatever turn comes next.
         self._stale_results = 0
-        #: Approvals the other side answered: the call, and the timer that
-        #: reports it approved unless its result says otherwise first.
-        self._answered_elsewhere: dict[str, asyncio.Task[None]] = {}
+        #: Approvals the other side answered: the call, the timer that
+        #: reports it approved unless its result says otherwise first, and the
+        #: sink of the chat that asked.
+        self._answered_elsewhere: dict[str, tuple[asyncio.Task[None], TurnSink]] = {}
         #: The tools this session's clients run for it (`client_tools.py`),
         #: starting with the creator's; `active_clients_changed` keeps it current.
         creator = (
@@ -455,10 +559,40 @@ class ClaudeSession:
         #: the ones shown as chat background work and the ones that may yet
         #: be (`background.py`).
         self._tasks: dict[str, background.Task] = {}
-        #: Background subagents with a worker chat, by the `tool_use_id` of the
-        #: call that started them -- the `parent_tool_use_id` their messages
-        #: carry.
+        #: Subagents with a worker chat, by the `tool_use_id` of the call that
+        #: started them -- the `parent_tool_use_id` their messages carry.
         self._subagents: dict[str, background.Subagent] = {}
+        #: Each worker chat opened this turn, by the spawning call: its result
+        #: links to it, and a foreground subagent has ended by the time it
+        #: comes.
+        self._worker_chats: dict[str, tuple[str, str]] = {}
+        #: Each AHP turn's place in Claude Code's transcript, oldest first, and
+        #: a cut not yet taken (`history.py`).
+        self.marks: list[TurnMark] = list(marks)
+        self.rewind = rewind
+        #: A rewind happened and Claude has not been told yet (the next prompt).
+        self.rewound = rewound
+        #: The running cost total the next result's is measured from; None
+        #: when unknown (a resumed session from before it was kept).
+        if cost_baseline is None and claude_session_id is None:
+            cost_baseline = 0.0  # a new conversation has cost nothing yet
+        self.cost_baseline: float | None = cost_baseline
+        self._on_model_usage = on_model_usage
+        #: What Claude Code has said about the session's skills, agents,
+        #: plugins and MCP servers, and the tree last published from it.
+        self._sources = customizations.Sources(commands=list(commands) or None)
+        self._tree = customizations.Tree()
+        self._published: list[dict[str, Any]] | None = None
+        #: Customizations a client switched off here (ids).
+        self.disabled: set[str] = set(disabled)
+        #: The skills the running client was started without.
+        self._started_denied: tuple[str, ...] = ()
+        #: The custom agent the next turn runs as (`--agent`), and the one the
+        #: running client was started as.
+        self._agent: str | None = None
+        self._started_agent: str | None = None
+        self._refreshing: asyncio.Task[None] | None = None
+        self._chores: set[asyncio.Task[None]] = set()
 
     @property
     def _sink(self) -> TurnSink | None:
@@ -534,6 +668,19 @@ class ClaudeSession:
             options["mcp_servers"] = {
                 client_tools.SERVER: client_tools.server(self._client_tools, self._run_client_tool)
             }
+        if _FORWARDS_SUBAGENT_TEXT:
+            # A subagent's own prose, not just its tool calls, so its worker
+            # chat reads as a conversation.
+            options["forward_subagent_text"] = True
+        extra_args: dict[str, str | None] = {"replay-user-messages": None}
+        if self._agent is not None:
+            # Claude Code reads its main-thread agent at start-up only.
+            extra_args["agent"] = self._agent
+        if self.rewind is not None and self.claude_session_id is not None:
+            # Load the conversation only up to the turn kept (`history.py`).
+            options["resume_session_at"] = self.rewind.at
+            if self.rewind.drops is not None:
+                options["resume_drops_turn"] = self.rewind.drops
         return ClaudeAgentOptions(
             cwd=str(cwd),
             add_dirs=list(extra),
@@ -541,18 +688,36 @@ class ClaudeSession:
             model=None if self._model == DEFAULT_MODEL else self._model,
             effort=sdk_effort(self.effort),  # type: ignore[arg-type]
             permission_mode=PERMISSION_MODES[self.approvals],  # type: ignore[arg-type]
-            disallowed_tools=list(DISALLOWED_TOOLS),
+            # A skill switched off here is a deny rule for it: the Skill tool
+            # refuses it. Not the SDK's `skills` allowlist, which also
+            # allow-lists every skill it names and drops local settings.
+            disallowed_tools=[*DISALLOWED_TOOLS, *(f"Skill({n})" for n in self._denied_skills())],
             can_use_tool=self._can_use_tool,
             hooks={"PreToolUse": [HookMatcher(matcher=None, hooks=[self._pre_tool_use])]},
             include_partial_messages=True,
             # Echo each streamed user message when the CLI takes it in: the
             # only signal that a steered message joined the turn, and what
             # tells our own messages from ones typed elsewhere.
-            extra_args={"replay-user-messages": None},
+            extra_args=extra_args,
             system_prompt=prompt,  # type: ignore[arg-type]
             env={"CLAUDE_CODE_ENTRYPOINT": ENTRYPOINT},
             **options,
         )
+
+    def _denied_skills(self) -> tuple[str, ...]:
+        """The skills a client switched off here, alone or with their plugin.
+
+        Only names a permission rule can carry: a name with a comma, a
+        parenthesis or a space would be read as something else.
+        """
+        prefix = customizations.skill_id("")
+        # A skill's id names it, so this holds before Claude Code has listed
+        # anything; a plugin's skills are known only once it has.
+        off = {i.removeprefix(prefix) for i in self.disabled if i.startswith(prefix)}
+        for plugin, members in self._tree.plugin_skills.items():
+            if plugin in self.disabled:
+                off.update(self._tree.skills[member] for member in members)
+        return tuple(name for name in sorted(off) if _RULE_SAFE.fullmatch(name))
 
     async def working_directories_changed(self, directories: Sequence[str]) -> None:
         """A client added, removed or replaced a folder (`FollowsWorkingDirectories`).
@@ -634,17 +799,56 @@ class ClaudeSession:
     async def _ensure_client(self) -> SdkClient:
         async with self._connecting:
             if self._client is None:
-                options = self._options()
-                # Pinned: the conversation lives under this folder from now on.
-                self.directory = Path(str(options.cwd))
-                self._started_tools = self._client_tools if self.mirror_of is None else ()
-                client = self._client_factory(options)
-                await client.connect()
+                client = await self._connect()
                 self._client = client
                 self._reader = asyncio.create_task(self._read(client))
                 if self.remote_control and not self.archived:
                     await self._enable_remote_control(client)
+                self._refreshing = asyncio.create_task(self._after_start(client))
             return self._client
+
+    async def _connect(self) -> SdkClient:
+        """Start Claude Code, retrying once if it refuses a pending cut.
+
+        A cut naming the one turn it drops is refused when more would go with
+        it; it is then taken without that check (`history.py`). One at a
+        message Claude Code cannot find cannot be taken at all, so the
+        conversation is forgotten instead - the agent must not keep what the
+        user was shown being taken back.
+        """
+        for attempt in range(2):
+            options = self._options()
+            # Pinned: the conversation lives under this folder from now on.
+            self.directory = Path(str(options.cwd))
+            self._started_tools = self._client_tools if self.mirror_of is None else ()
+            self._started_agent = self._agent
+            self._started_denied = self._denied_skills()
+            client = self._client_factory(options)
+            try:
+                await client.connect()
+            except Exception as error:
+                if attempt or not self._recover_cut(str(error)):
+                    raise
+                continue
+            return client
+        raise AssertionError("unreachable")  # pragma: no cover
+
+    def _recover_cut(self, error: str) -> bool:
+        """Whether a failed start was a pending cut, now made takeable."""
+        rewind = self.rewind
+        if rewind is None:
+            return False
+        if _CUT_REFUSED in error and rewind.drops is not None:
+            log.info("Claude Code refused to drop one turn alone; cutting without the check")
+            self.rewind = Rewind(at=rewind.at)
+            return True
+        if _CUT_NOT_FOUND in error:
+            log.warning("the turn to rewind to is not in the transcript; forgetting it all")
+            self.rewind = None
+            self.claude_session_id = None
+            self.marks = []
+            return True
+        return False
 
     async def aclose(self) -> None:
         # The process and its background shells are going; say so while the
@@ -654,7 +858,10 @@ class ClaudeSession:
         reader, self._reader = self._reader, None
         if reader is not None:
             reader.cancel()
-        for timer in self._answered_elsewhere.values():
+        refreshing, self._refreshing = self._refreshing, None
+        if refreshing is not None:
+            refreshing.cancel()
+        for timer, _ in self._answered_elsewhere.values():
             timer.cancel()
         if client is not None:
             try:
@@ -728,6 +935,9 @@ class ClaudeSession:
         self._starting = None
         if reader is not None:
             reader.cancel()
+        refreshing, self._refreshing = self._refreshing, None
+        if refreshing is not None:
+            refreshing.cancel()
         if client is not None:
             try:
                 await client.disconnect()
@@ -797,6 +1007,174 @@ class ClaudeSession:
                 await self._client.remote_control(False)
             except Exception:
                 log.warning("turning Remote Control off failed", exc_info=True)
+
+    # -- customizations ------------------------------------------------------
+
+    async def describe(self) -> SessionDescription:
+        """The customization tree, as far as Claude Code has told it (`DescribesSession`).
+
+        Asked at bring-up, which is before the Claude client starts for most
+        sessions: then this is empty, and the tree is published as soon as the
+        client says what it has.
+        """
+        return SessionDescription(customizations=list(self._published or ()))
+
+    async def _after_start(self, client: SdkClient) -> None:
+        """What a newly started client can say before anyone sends it anything.
+
+        Its commands and agents (`get_server_info`), where each skill and
+        agent came from (`get_context_usage`), and its MCP servers
+        (`get_mcp_status`); then the file index is asked once, so it is built
+        by the time someone types ``@``. Each is optional - a claude.ai
+        mirror answers none of them - and none failing is an error.
+        """
+        try:
+            info = await client.get_server_info()
+        except Exception:
+            info = None
+        if isinstance(info, Mapping):
+            commands, agents = info.get("commands"), info.get("agents")
+            if isinstance(commands, Sequence):
+                self._sources.commands = [c for c in commands if isinstance(c, Mapping)]
+            if isinstance(agents, Sequence):
+                self._sources.agents = [a for a in agents if isinstance(a, Mapping)]
+        usage = await _optional(client, "context_usage")
+        if isinstance(usage, Mapping):
+            self._sources.usage = usage
+        await self._read_mcp(client)
+        await self._publish_customizations()
+        await _optional(client, "file_suggestions", "")
+        if self.mirror_of is None and self._denied_skills() != self._started_denied:
+            # A plugin switched off before a restart: its skills are known
+            # only now, so the client starts again with them refused.
+            self._restart_pending = True
+            asyncio.get_running_loop().call_soon(self._restart_when_idle)
+
+    def _restart_when_idle(self) -> None:
+        if self._restart_pending and not self._lock.locked() and self._turn is None:
+            self._background(self._restart_client())
+
+    def _background(self, work: Awaitable[None]) -> None:
+        """Run *work* on its own task, kept until it is done."""
+
+        async def run() -> None:
+            try:
+                await work
+            except Exception:
+                log.exception("background work for a session failed")
+
+        task = asyncio.create_task(run())
+        self._chores.add(task)
+        task.add_done_callback(self._chores.discard)
+
+    async def _read_mcp(self, client: SdkClient) -> None:
+        status = await _optional(client, "get_mcp_status")
+        servers = status.get("mcpServers") if isinstance(status, Mapping) else None
+        if isinstance(servers, Sequence):
+            self._sources.mcp = [server for server in servers if isinstance(server, Mapping)]
+
+    def _workspace_uri(self) -> str | None:
+        return self.working_directories[0] if self.working_directories else None
+
+    async def _publish_customizations(self) -> None:
+        """Republish the tree if it changed.
+
+        A change only in MCP servers' states goes out as each server's
+        lifecycle (`mcp_server_changed`); anything else replaces the tree,
+        which is the only publication the host offers for it.
+        """
+        publisher = self.context.publisher
+        try:
+            cwd = self.working_directory()
+        except PermissionError:
+            return
+        tree = customizations.build(
+            self._sources,
+            cwd=cwd,
+            disabled=self.disabled,
+            workspace=self._workspace_uri(),
+            hidden_servers=(client_tools.SERVER,),
+        )
+        self._tree = tree
+        published, self._published = self._published, tree.customizations
+        if publisher is None or published == tree.customizations:
+            return
+        if published is None and not tree.customizations:
+            return  # nothing to say, and nothing said before
+        try:
+            changed = _states_only(published, tree.customizations)
+            if changed is not None:
+                for identifier, state in changed:
+                    await publisher.mcp_server_changed(identifier, state)
+            else:
+                await publisher.customizations_changed(tree.customizations)
+        except Exception:
+            log.exception("publishing the session's customizations failed")
+
+    async def _refresh_mcp(self) -> None:
+        client = self._client
+        if client is None or self.mirror_of is not None:
+            return
+        await self._read_mcp(client)
+        await self._publish_customizations()
+
+    async def _on_init(self, data: Mapping[str, Any]) -> None:
+        """`system/init`: the session's tools, plugins and MCP servers, and its mode.
+
+        Security-relevant: Claude Code reports the permission mode it actually
+        started in, which a custom agent's own settings can change. Anything
+        but the mode chosen here is put back - a session never runs looser
+        than its setting because of an agent file.
+        """
+        self._sources.init = data
+        mode = data.get("permissionMode")
+        wanted = PERMISSION_MODES[self.approvals]
+        if (
+            self.mirror_of is None
+            and isinstance(mode, str)
+            and mode != wanted
+            and self._client is not None
+        ):
+            log.info("Claude Code started in %s, not %s; putting it back", mode, wanted)
+            try:
+                await self._client.set_permission_mode(wanted)
+            except Exception:
+                log.warning("putting the permission mode back failed", exc_info=True)
+        await self._publish_customizations()
+
+    # -- completions -------------------------------------------------------------
+
+    async def complete(self, request: CompletionRequest) -> Sequence[CompletionItem]:
+        """``/`` commands and ``@`` files for the message being typed (`completions.py`).
+
+        Both come from the running Claude client. A session whose client has
+        not started yet starts it now - someone is typing a message for it -
+        and completes ``/`` from what the host learned at start-up meanwhile.
+        """
+        if request.kind not in ("userMessage", ""):
+            return ()
+        token = completions.token_of(request)
+        if token is None:
+            return ()
+        if self._client is None and self.mirror_of is None and not self.archived:
+            self.start_soon()
+        if token.trigger == "/":
+            hidden = _names((self._sources.init or {}).get("terminal_slash_commands"))
+            return completions.slash_items(
+                token, request.offset, self._sources.commands or (), hidden=hidden
+            )
+        client = self._client
+        if client is None:
+            return ()
+        try:
+            async with asyncio.timeout(_COMPLETION_TIMEOUT):
+                reply = await _optional(client, "file_suggestions", token.typed)
+            cwd = self.working_directory()
+        except (TimeoutError, PermissionError):
+            return ()
+        if not isinstance(reply, Mapping):
+            return ()
+        return completions.file_items(token, request.offset, reply, cwd=cwd, roots=self._roots)
 
     # -- steering ------------------------------------------------------------
 
@@ -942,16 +1320,26 @@ class ClaudeSession:
     async def _can_use_tool(
         self, tool_name: str, tool_input: dict[str, Any], context: ToolPermissionContext
     ) -> PermissionResultAllow | PermissionResultDeny:
-        turn = self._turn
-        if turn is not None and turn.sink is None:
-            # Asked before a turn from elsewhere reached the host.
-            with contextlib.suppress(TimeoutError):
-                await asyncio.wait_for(turn.attached.wait(), _ATTACH_TIMEOUT)
-        sink = self._sink
         call_id = context.tool_use_id
-        if sink is None or not call_id:
-            return PermissionResultDeny(message="No client is attached to approve this.")
-        await self._announce(call_id, tool_name, tool_input)
+        worker = await self._worker_asking(call_id, context)
+        sink: TurnSink | None
+        if worker is not None and worker.sink is not None and call_id:
+            # A subagent's call: asked in its own chat, where its row is - and
+            # answerable while no turn runs in the parent.
+            sink = worker.sink
+            await self._announce_in(worker, call_id, tool_name, tool_input)
+        else:
+            turn = self._turn
+            if turn is not None and turn.sink is None:
+                # Asked before a turn from elsewhere reached the host.
+                with contextlib.suppress(TimeoutError):
+                    await asyncio.wait_for(turn.attached.wait(), _ATTACH_TIMEOUT)
+            sink = self._sink
+            if sink is None or not call_id:
+                return PermissionResultDeny(message="No client is attached to approve this.")
+            await self._announce(call_id, tool_name, tool_input)
+        if tool_name == QUESTION_TOOL:
+            return await self._ask(sink, tool_input)
         plan = tool_input.get("plan") if tool_name == EXIT_PLAN_TOOL else None
         if isinstance(plan, str) and plan.strip():
             # The plan lives in the tool's input, which a client may not render
@@ -974,9 +1362,8 @@ class ClaudeSession:
             # prompt, and reporting is a no-op), or it was answered on
             # claude.ai and the CLI withdrew the question. Which answer is
             # known only from the call's result, if it comes quickly.
-            self._answered_elsewhere[call_id] = asyncio.create_task(
-                self._report_answer_after_grace(sink, call_id)
-            )
+            timer = asyncio.create_task(self._report_answer_after_grace(sink, call_id))
+            self._answered_elsewhere[call_id] = (timer, sink)
             raise
         if not outcome.approved:
             return PermissionResultDeny(message="The user declined this tool call.")
@@ -994,17 +1381,34 @@ class ClaudeSession:
         except Exception:
             log.exception("reporting an approval given elsewhere failed")
 
-    async def _report_answer_from_result(
-        self, sink: TurnSink, call_id: str, failed: bool, text: str
-    ) -> None:
-        await self._report_answer(sink, call_id, denied=failed and text.startswith(_DENIED))
+    async def _report_answer_from_result(self, call_id: str, failed: bool, text: str) -> None:
+        await self._report_answer(call_id, denied=failed and text.startswith(_DENIED))
 
-    async def _report_answer(self, sink: TurnSink, call_id: str, *, denied: bool) -> None:
-        timer = self._answered_elsewhere.pop(call_id, None)
-        if timer is None:
+    async def _report_answer(self, call_id: str, *, denied: bool) -> None:
+        """Say how a prompt withdrawn here was answered, in the chat that asked."""
+        entry = self._answered_elsewhere.pop(call_id, None)
+        if entry is None:
             return
+        timer, sink = entry
         timer.cancel()
         await self._answered(sink, call_id, denied=denied)
+
+    async def _ask(
+        self, sink: TurnSink, tool_input: dict[str, Any]
+    ) -> PermissionResultAllow | PermissionResultDeny:
+        """`AskUserQuestion`: put its questions to the user, and hand back the answers.
+
+        Under Remote Control the CLI asks claude.ai too, and withdraws this
+        one if the questions are answered there: this await is then cancelled
+        and the request stays up here until the turn ends, since the host
+        offers no way to withdraw an input request early. Answering it then
+        finds nothing waiting and changes nothing.
+        """
+        request = questions.input_request(tool_input)
+        if request is None:
+            return PermissionResultDeny(message=questions.UNREADABLE)
+        outcome = await sink.request_input(request)
+        return questions.permission_result(tool_input, outcome)
 
     async def _answered(self, sink: TurnSink, call_id: str, *, denied: bool) -> None:
         await sink.tool_call_confirmed(
@@ -1063,7 +1467,60 @@ class ClaudeSession:
         self._announced.clear()
         self._inputs.clear()
         self._client_calls.clear()
+        self._worker_chats.clear()
         self._turn = turn
+
+    def _mark(self, turn: _Turn, sink: TurnSink, prompt: str) -> None:
+        """Note where *turn* starts in the transcript, for a later rewind."""
+        mark = TurnMark(turn=_turn_id_of(sink), prompt=prompt, last=prompt)
+        turn.mark = mark
+        self.marks.append(mark)
+        del self.marks[: -history.MAX_MARKS]
+
+    async def _learn_customizations(self) -> None:
+        """Start the Claude client if need be, and wait until it has said what it has."""
+        try:
+            await self._ensure_client()
+        except Exception:
+            return  # the turn's own start reports it
+        task = self._refreshing
+        if task is not None:
+            with contextlib.suppress(Exception):
+                await asyncio.wait_for(asyncio.shield(task), _ATTACH_TIMEOUT)
+
+    def _pick_agent(self, message: UserMessage) -> None:
+        """The custom agent this message asks for (`AgentSelection`), by its URI.
+
+        Only an agent this session published can be picked; an unknown URI is
+        ignored rather than started under a name Claude Code may not have.
+        """
+        uri = message.agent_uri
+        if uri is None:
+            self._agent = None
+            return
+        name = self._tree.agents.get(uri)
+        if name is None:
+            log.info("no agent is published as %s; running without one", uri)
+        self._agent = name
+
+    def _note_rewind(self, content: str | list[dict[str, Any]]) -> str | list[dict[str, Any]]:
+        """Tell Claude, once, that the conversation was rewound (`history.py`).
+
+        Not on a slash command, which Claude Code runs only from the start of
+        the message: the note waits for the next prompt instead.
+        """
+        if not self.rewound:
+            return content
+        if isinstance(content, str):
+            if content.lstrip().startswith("/"):
+                return content
+            self.rewound = False
+            return f"{REWOUND_NOTE}\n\n{content}"
+        first = content[0] if content else {}
+        if str(first.get("text", "")).lstrip().startswith("/"):
+            return content
+        self.rewound = False
+        return [{"type": "text", "text": REWOUND_NOTE}, *content]
 
     def _finish(self, turn: _Turn) -> None:
         turn.done.set()
@@ -1078,6 +1535,14 @@ class ClaudeSession:
 
     async def send_user_message(self, message: UserMessage, sink: TurnSink) -> None:
         async with self._lock:
+            if self.mirror_of is None:
+                if message.agent_uri is not None and message.agent_uri not in self._tree.agents:
+                    # Picked from a tree this process has not built yet (a
+                    # restart since): start Claude Code to learn it.
+                    await self._learn_customizations()
+                self._pick_agent(message)
+                if self._client is not None and self._agent != self._started_agent:
+                    self._restart_pending = True
             if self._restart_pending:
                 await self._restart_client()
             try:
@@ -1085,7 +1550,7 @@ class ClaudeSession:
             except PermissionError as error:
                 await sink.turn_failed(str(error), error_type="agent.workingDirectory")
                 return
-            turn = _Turn(sink=sink)
+            turn = _Turn(sink=sink, client=client)
             turn.attached.set()
             self._begin(turn)
             try:
@@ -1099,9 +1564,11 @@ class ClaudeSession:
                     await client.set_model(None if picked == DEFAULT_MODEL else picked)
                     self._model = picked
                 turn.model = self._model
-                content = prompt_content(message.text, message.raw, self._roots)
+                content = self._note_rewind(prompt_content(message.text, message.raw, self._roots))
                 self._steers_pending.clear()
-                await client.query(_user_message(content, self._send_id()))
+                message_id = self._send_id()
+                self._mark(turn, sink, message_id)
+                await client.query(_user_message(content, message_id))
                 # No await between sending and this, so a steer is either
                 # refused or sent after the message it steers.
                 self._accepting_steers = True
@@ -1111,22 +1578,26 @@ class ClaudeSession:
                 self._steers_pending.clear()
                 self._abandon(turn)
 
-    async def _external(self, text: str) -> None:
+    async def _external(self, text: str, prompt: str | None = None) -> None:
         """A message typed elsewhere (claude.ai, a phone) started a turn.
 
         Opened on the host as a turn no client asked for, so the conversation
         here does not skip it. Its messages wait until the host has started
         it; `external_turn` refuses while the chat still has a turn, which can
         be the one that just finished here, so it is retried briefly.
+        *prompt* is the message's uuid in the transcript, which marks where
+        the turn starts.
         """
         publisher = self.context.publisher
         if publisher is None:
             return
-        turn = _Turn()
+        turn = _Turn(client=self._client)
         self._begin(turn)
 
         async def run(sink: TurnSink) -> None:
             turn.sink = sink
+            if prompt is not None and self.mirror_of is None:
+                self._mark(turn, sink, prompt)
             turn.attached.set()
             try:
                 await turn.done.wait()
@@ -1152,8 +1623,10 @@ class ClaudeSession:
                     log.exception("handling a message from Claude Code failed")
         except asyncio.CancelledError:
             raise
-        except Exception:
+        except Exception as error:
             log.exception("reading from Claude Code failed")
+            # A cut it refused while loading: the next start takes it another way.
+            self._recover_cut(str(error))
         finally:
             if self._client is client:
                 # The next turn starts a new one, resuming this conversation.
@@ -1161,7 +1634,9 @@ class ClaudeSession:
                 # And whatever it was running in the background died with it.
                 await self._forget_tasks()
             turn = self._turn
-            if turn is not None and not turn.done.is_set():
+            # Not a turn on a newer client: a reader cancelled by a restart
+            # ends here only once that restart has started the next turn.
+            if turn is not None and not turn.done.is_set() and turn.client in (client, None):
                 if turn.sink is not None:
                     await turn.sink.turn_failed("Claude Code stopped", error_type="claude.exited")
                 self._finish(turn)
@@ -1186,6 +1661,7 @@ class ClaudeSession:
                 agent_type=data.get("subagent_type")
                 if isinstance(data.get("subagent_type"), str)
                 else None,
+                prompt=data.get("prompt") if isinstance(data.get("prompt"), str) else None,
             )
             self._tasks[task_id] = started
             await self._show_task(started)
@@ -1219,7 +1695,8 @@ class ClaudeSession:
         return command if isinstance(command, str) else None
 
     async def _show_task(self, task: background.Task) -> None:
-        if task.task_type in background.SUBAGENT_TASKS and task.backgrounded:
+        if task.task_type in background.SUBAGENT_TASKS:
+            # In the foreground too: its conversation is its own either way.
             await self._open_subagent(task)
         subagent = self._subagents.get(task.tool_use_id or "")
         work = background.work_for(task, subagent.chat.resource if subagent else None)
@@ -1256,25 +1733,33 @@ class ClaudeSession:
             subagent.done.set()
 
     async def _open_subagent(self, task: background.Task) -> None:
-        """Give a background subagent its own worker chat, and a turn on it."""
+        """Give a subagent its own worker chat, and a turn on it."""
         publisher = self.context.publisher
         call_id = task.tool_use_id
-        if publisher is None or call_id is None or call_id in self._subagents:
+        if publisher is None or call_id is None:
             return
+        known = self._subagents.get(call_id)
+        if known is not None:
+            # Opened from its first message, before Claude Code said which
+            # task it is: now it can be stopped, and backgrounded.
+            if task.task_id:
+                known.task = task
+            return
+        title = task.description or task.agent_type or "Subagent"
         try:
-            chat = await publisher.open_tool_chat(
-                task.description or task.agent_type or "Subagent", tool_call_id=call_id
-            )
+            chat = await publisher.open_tool_chat(title, tool_call_id=call_id)
         except Exception:
             log.exception("opening a subagent's chat failed")
             return
         subagent = background.Subagent(task=task, chat=chat)
         self._subagents[call_id] = subagent
+        self._worker_chats[call_id] = (chat.resource, title)
         _, tool_input = self._inputs.get(call_id, ("", {}))
-        prompt = tool_input.get("prompt")
+        prompt = task.prompt or tool_input.get("prompt")
 
         async def run(sink: TurnSink) -> None:
             subagent.sink = sink
+            subagent.attached.set()
             pending, subagent.pending = subagent.pending, []
             for item in pending:
                 await self._route_to_subagent(subagent, item)
@@ -1284,22 +1769,92 @@ class ClaudeSession:
                 # A client stopped the worker chat: stop that task, and only
                 # it -- the host does not interrupt the whole session for this.
                 stop = getattr(self._client, "stop_task", None)
-                if stop is not None:
+                if stop is not None and subagent.task.task_id:
                     with contextlib.suppress(Exception):
-                        await stop(task.task_id)
+                        await stop(subagent.task.task_id)
                 raise
 
         text = prompt if isinstance(prompt, str) and prompt else task.description
         if not await chat.run_turn(text, run):
             self._subagents.pop(call_id, None)
 
+    async def _subagent_of(self, parent: str) -> background.Subagent | None:
+        """The worker for messages carrying *parent*, opening one if it is new.
+
+        A subagent's first message can come before Claude Code's
+        `task_started` for it. The spawning call says enough to open its
+        chat; the task fills in when it arrives.
+        """
+        subagent = self._subagents.get(parent)
+        if subagent is not None:
+            return subagent
+        name, tool_input = self._inputs.get(parent, ("", {}))
+        if name not in _SUBAGENT_TOOLS:
+            return None
+        description, agent_type = tool_input.get("description"), tool_input.get("subagent_type")
+        await self._open_subagent(
+            background.Task(
+                task_id="",
+                task_type="local_agent",
+                description=description if isinstance(description, str) else "",
+                started_at=background.now_iso(),
+                tool_use_id=parent,
+                backgrounded=tool_input.get("run_in_background") is True,
+                agent_type=agent_type if isinstance(agent_type, str) else None,
+            )
+        )
+        return self._subagents.get(parent)
+
+    async def _worker_asking(
+        self, call_id: str | None, context: ToolPermissionContext
+    ) -> background.Subagent | None:
+        """The subagent whose tool call this permission prompt is about, if any.
+
+        Claude Code says a prompt comes from a subagent (`agent_id`), but not
+        which spawning call that is. So: the worker that already shows the
+        call, or whose task is that agent; failing both, the only worker
+        running. None means the parent turn's own call.
+        """
+        if not self._subagents:
+            return None
+        for subagent in self._subagents.values():
+            if call_id in subagent.announced or (
+                context.agent_id is not None and context.agent_id == subagent.task.task_id
+            ):
+                return await self._attached(subagent)
+        if context.agent_id is not None and len(self._subagents) == 1:
+            (only,) = self._subagents.values()
+            return await self._attached(only)
+        return None
+
+    @staticmethod
+    async def _attached(subagent: background.Subagent) -> background.Subagent:
+        if subagent.sink is None:
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(subagent.attached.wait(), _ATTACH_TIMEOUT)
+        return subagent
+
+    async def _announce_in(
+        self, subagent: background.Subagent, call_id: str, name: str, tool_input: Mapping[str, Any]
+    ) -> None:
+        sink = subagent.sink
+        if sink is None or call_id in subagent.announced:
+            return
+        subagent.announced.add(call_id)
+        subagent.inputs[call_id] = (name, dict(tool_input))
+        display, _ = describe(name, tool_input)
+        await sink.tool_call_started(call_id, name, dict(tool_input), display_name=display)
+        await sink.tool_call_delta(call_id, invocation_message=progress_line(name, tool_input))
+
     async def _to_subagent(self, item: Any) -> bool:
-        """Divert a message from a background subagent to its worker chat."""
+        """Divert a message from a subagent to its worker chat."""
         parent = getattr(item, "parent_tool_use_id", None)
-        subagent = self._subagents.get(parent) if isinstance(parent, str) else None
-        if subagent is None or not isinstance(
+        if not isinstance(parent, str) or not isinstance(
             item, StreamEvent | AssistantMessage | SdkUserMessage
         ):
+            return False
+        subagent = await self._subagent_of(parent)
+        if subagent is None:
             return False
         if subagent.sink is None:
             subagent.pending.append(item)
@@ -1330,16 +1885,8 @@ class ClaudeSession:
             elif isinstance(item, AssistantMessage):
                 streamed = item.message_id is not None and item.message_id in subagent.streamed
                 for block in item.content:
-                    if isinstance(block, ToolUseBlock) and block.id not in subagent.announced:
-                        subagent.announced.add(block.id)
-                        subagent.inputs[block.id] = (block.name, dict(block.input))
-                        display, _ = describe(block.name, block.input)
-                        await sink.tool_call_started(
-                            block.id, block.name, dict(block.input), display_name=display
-                        )
-                        await sink.tool_call_delta(
-                            block.id, invocation_message=progress_line(block.name, block.input)
-                        )
+                    if isinstance(block, ToolUseBlock):
+                        await self._announce_in(subagent, block.id, block.name, block.input)
                     elif not streamed and isinstance(block, TextBlock) and block.text:
                         await sink.text_delta(block.text)
                     elif not streamed and isinstance(block, ThinkingBlock) and block.thinking:
@@ -1351,10 +1898,12 @@ class ClaudeSession:
                     if block.tool_use_id not in subagent.announced:
                         continue
                     failed = bool(block.is_error)
+                    text = _text_of(block.content)
+                    await self._report_answer_from_result(block.tool_use_id, failed, text)
                     name, tool_input = subagent.inputs.get(block.tool_use_id, ("", {}))
                     await sink.tool_call_completed(
                         block.tool_use_id,
-                        {"content": [{"type": "text", "text": _text_of(block.content)}]},
+                        {"content": [{"type": "text", "text": text}]},
                         success=not failed,
                         past_tense_message=past_tense(name, tool_input, failed=failed),
                     )
@@ -1370,6 +1919,7 @@ class ClaudeSession:
     async def _on_message(self, item: Any) -> None:
         if await self._to_subagent(item):
             return
+        cost: float | None = None
         if isinstance(item, SdkUserMessage):
             if self._is_elsewhere(item):
                 await self._on_message_from_elsewhere(item)
@@ -1377,16 +1927,34 @@ class ClaudeSession:
             self._took_in(item)
         elif isinstance(item, SystemMessage):
             session_id = item.data.get("session_id")
-            if item.subtype == "init" and isinstance(session_id, str):
-                self.claude_session_id = session_id
+            if item.subtype == "init":
+                if isinstance(session_id, str):
+                    self.claude_session_id = session_id
+                await self._on_init(item.data)
             elif item.subtype == "status" and "permissionMode" in item.data:
                 await self._on_mode_elsewhere(item.data["permissionMode"])
+            elif item.subtype == "commands_changed":
+                commands = item.data.get("commands")
+                if isinstance(commands, list):
+                    self._sources.commands = [c for c in commands if isinstance(c, Mapping)]
+                    await self._publish_customizations()
+            elif item.subtype == "permission_denied":
+                # Before the turn check: a subagent's prompt, in its own chat,
+                # can be answered with no turn running here.
+                call_id = item.data.get("tool_use_id")
+                if isinstance(call_id, str):
+                    await self._report_answer(call_id, denied=True)
+                return
             elif item.subtype in _TASK_SUBTYPES:
                 # Before the turn check below: a background task ends whenever
                 # it ends, usually with no turn running.
                 await self._on_task(item.subtype, item.data)
         elif isinstance(item, ResultMessage):
             self.claude_session_id = item.session_id or self.claude_session_id
+            cost = self._cost_of(item)
+            if self._on_model_usage is not None:
+                self._on_model_usage(item.model_usage)
+            self._refresh_soon()
             if self._stale_results:
                 self._stale_results -= 1
                 if item.terminal_reason in _ABORTED:
@@ -1404,27 +1972,64 @@ class ClaudeSession:
                 return
         sink = turn.sink
         assert sink is not None
+        if isinstance(item, AssistantMessage | SdkUserMessage) and item.parent_tool_use_id is None:
+            self._recorded(turn, item)
         if isinstance(item, StreamEvent):
             await self._on_stream_event(item, sink)
         elif isinstance(item, AssistantMessage):
             turn.model = item.model or turn.model
+            if item.parent_tool_use_id is None and isinstance(item.usage, Mapping):
+                turn.last_request = item.usage
             await self._on_assistant(item, sink)
         elif isinstance(item, SdkUserMessage):
             await self._on_tool_results(item, sink)
-        elif isinstance(item, SystemMessage) and item.subtype == "permission_denied":
-            call_id = item.data.get("tool_use_id")
-            if isinstance(call_id, str):
-                await self._report_answer(sink, call_id, denied=True)
         elif isinstance(item, ResultMessage):
-            await self._on_result(item, sink, turn.model)
+            await self._on_result(item, sink, turn, cost)
             if not self._steers_pending:
                 self._finish(turn)
+
+    def _recorded(self, turn: _Turn, item: AssistantMessage | SdkUserMessage) -> None:
+        """A transcript entry of *turn*: the latest place a rewind could keep it to.
+
+        Also the sign a pending cut has been taken: the conversation has a
+        message after the point it was cut at, so a plain resume now loads
+        the cut one (`history.py`).
+        """
+        entry = getattr(item, "uuid", None)
+        if not isinstance(entry, str) or not entry:
+            return
+        if turn.mark is not None:
+            turn.mark.last = entry
+        self.rewind = None
+
+    def _cost_of(self, item: ResultMessage) -> float | None:
+        """This result's share of the running cost total, when it can be told.
+
+        The total is the CLI's, "cumulative across turns": a turn's cost is
+        how far it moved. A total that went down (a fresh process that kept no
+        total) or a baseline never known gives no figure, only a new baseline.
+        """
+        total = item.total_cost_usd
+        if not isinstance(total, int | float) or isinstance(total, bool):
+            return None
+        baseline, self.cost_baseline = self.cost_baseline, float(total)
+        if baseline is None or total < baseline:
+            return None
+        return float(total) - baseline
+
+    def _refresh_soon(self) -> None:
+        """Ask for the MCP servers' states again, off the reader: a turn may have moved them."""
+        if self.mirror_of is not None or self._client is None:
+            return
+        if self._refreshing is not None and not self._refreshing.done():
+            return
+        self._refreshing = asyncio.create_task(self._refresh_mcp())
 
     async def _on_message_from_elsewhere(self, item: SdkUserMessage) -> None:
         text = _text_of(item.content).strip()
         turn = self._turn
         if turn is None:
-            await self._external(text)
+            await self._external(text, item.uuid)
         elif turn.sink is not None:
             # Typed on claude.ai while a turn runs here: Claude Code takes it
             # in like a steered message, so it is shown where it landed.
@@ -1485,19 +2090,20 @@ class ClaudeSession:
                 continue
             failed = bool(block.is_error)
             text = _text_of(block.content)
-            await self._report_answer_from_result(sink, block.tool_use_id, failed, text)
+            await self._report_answer_from_result(block.tool_use_id, failed, text)
             name, tool_input = self._inputs.get(block.tool_use_id, ("", {}))
             content: list[dict[str, Any]] = [{"type": "text", "text": text}]
-            subagent = self._subagents.get(block.tool_use_id)
-            if subagent is not None:
+            worker = self._worker_chats.get(block.tool_use_id)
+            if worker is not None:
                 # The forward edge of the worker chat's `tool` origin.
-                content.append(
-                    {
-                        "type": "subagent",
-                        "resource": subagent.chat.resource,
-                        "title": subagent.task.description or "Subagent",
-                    }
-                )
+                resource, title = worker
+                content.append({"type": "subagent", "resource": resource, "title": title})
+            subagent = self._subagents.get(block.tool_use_id)
+            if subagent is not None and not subagent.task.backgrounded:
+                # A foreground subagent answers its call when it is done; one
+                # moved to the background answers at once and carries on.
+                del self._subagents[block.tool_use_id]
+                subagent.done.set()
             await sink.tool_call_completed(
                 block.tool_use_id,
                 {"content": content},
@@ -1505,19 +2111,220 @@ class ClaudeSession:
                 past_tense_message=past_tense(name, tool_input, failed=failed),
             )
 
-    async def _on_result(self, item: ResultMessage, sink: TurnSink, model: str | None) -> None:
-        usage = item.usage or {}
+    async def _on_result(
+        self, item: ResultMessage, sink: TurnSink, turn: _Turn, cost: float | None
+    ) -> None:
+        reported = usage_report(
+            item.usage,
+            turn.last_request,
+            model=turn.model,
+            model_usage=item.model_usage,
+            cost=cost,
+            total_cost=item.total_cost_usd,
+        )
         await sink.usage(
-            input_tokens=usage.get("input_tokens"),
-            output_tokens=usage.get("output_tokens"),
-            cache_read_tokens=usage.get("cache_read_input_tokens"),
-            model=model,
+            input_tokens=reported.input_tokens,
+            output_tokens=reported.output_tokens,
+            cache_read_tokens=reported.cache_read_tokens,
+            model=reported.model,
+            meta=reported.meta,
         )
         if item.terminal_reason in _ABORTED:
             return  # the user pressed stop; the host already knows
         if item.is_error:
             detail = "; ".join(item.errors or []) or item.result or item.subtype
             await sink.turn_failed(detail, error_type=f"claude.{item.subtype}")
+
+
+#: A completion is best-effort and the client asks again on the next key.
+_COMPLETION_TIMEOUT: Final = 2.0
+
+
+def _names(value: Any) -> set[str]:
+    if not isinstance(value, Sequence) or isinstance(value, str):
+        return set()
+    return {item for item in value if isinstance(item, str)}
+
+
+async def _optional(client: Any, method: str, *args: Any) -> Any:
+    """Call a client method that not every client has; None if it fails or is absent."""
+    call = getattr(client, method, None)
+    if call is None:
+        return None
+    try:
+        return await call(*args)
+    except Exception:
+        log.debug("%s failed", method, exc_info=True)
+        return None
+
+
+def _states_only(
+    before: Sequence[Mapping[str, Any]] | None, after: Sequence[Mapping[str, Any]]
+) -> list[tuple[str, Mapping[str, Any]]] | None:
+    """The MCP servers whose state alone changed, or None if anything else did."""
+    if before is None or len(before) != len(after):
+        return None
+    changed: list[tuple[str, Mapping[str, Any]]] = []
+
+    def walk(old: Mapping[str, Any], new: Mapping[str, Any]) -> bool:
+        if {k: v for k, v in old.items() if k not in ("state", "children")} != {
+            k: v for k, v in new.items() if k not in ("state", "children")
+        }:
+            return False
+        if old.get("state") != new.get("state"):
+            if new.get("type") != "mcpServer":
+                return False
+            changed.append((str(new["id"]), new["state"]))
+        old_children, new_children = old.get("children") or [], new.get("children") or []
+        if len(old_children) != len(new_children):
+            return False
+        return all(walk(a, b) for a, b in zip(old_children, new_children, strict=True))
+
+    if not all(walk(a, b) for a, b in zip(before, after, strict=True)):
+        return None
+    return changed
+
+
+class LocalClaudeSession(ClaudeSession):
+    """A conversation this host runs: one that can also be rewound and reconfigured.
+
+    Split from `ClaudeSession` because a claude.ai mirror can do none of the
+    things below - its Claude Code runs on another machine - and the host
+    feature-detects each by whether the method exists (`TruncatesHistory`,
+    `ManagesMcpServers`, `HandlesCustomizations`).
+    """
+
+    # -- edit-and-resend -------------------------------------------------------
+
+    async def history_truncated(self, chat: str, turn_id: str | None) -> None:
+        """Forget every turn after *turn_id*, or all of them (`TruncatesHistory`).
+
+        The host has already cancelled any turn running in the chat; this
+        waits for it to finish unwinding, then lets the Claude process go and
+        notes the cut, which the next start takes (`history.py`). A session on
+        claude.ai is started again straight away, at the cut.
+
+        Files are not rewound. Claude Code could put back the files its own
+        edit tools changed (`enable_file_checkpointing`, `rewind_files`), but
+        not what a shell command did, and it would also put back anything
+        changed by hand since - silently undoing someone's work to match a
+        transcript. Instead Claude is told, with its next prompt, that the
+        conversation was rewound and the files were not.
+        """
+        if chat != self.context.chat_uri:
+            # A worker chat's turns are a subagent's, which nothing here can
+            # rewind; its chat is read-only besides.
+            log.info("not rewinding %s: only the session's own chat can be", chat)
+            return
+        async with self._lock:
+            cut = history.plan(self.marks, turn_id, pending=self.rewind is not None)
+            if cut.changes_nothing:
+                return
+            # The old process first: whatever it says from now on must not
+            # count as the cut having been taken.
+            await self._stop_client()
+            if cut.forget_all:
+                self.claude_session_id = None
+                self.marks = []
+                self.rewind = None
+                self.cost_baseline = 0.0
+            else:
+                self.marks = list(cut.keep)
+                self.rewind = cut.rewind if self.claude_session_id is not None else None
+            self.rewound = True
+            self._recap = None
+        await self._save()
+        if self.remote_control and not self.archived:
+            self.start_soon()
+
+    # -- MCP servers and customizations ---------------------------------------
+
+    def _mcp_name(self, customization_id: str) -> str | None:
+        return self._tree.mcp.get(customization_id)
+
+    def _mcp_status(self, name: str) -> str | None:
+        for server in self._sources.mcp or ():
+            if server.get("name") == name:
+                status = server.get("status")
+                return status if isinstance(status, str) else None
+        return None
+
+    async def start_mcp_server(self, customization_id: str) -> None:
+        """Start, or reconnect, one of Claude Code's MCP servers (`ManagesMcpServers`).
+
+        One switched off is switched back on - which, as with Claude Code's
+        own ``/mcp``, is for every session in the project - and any other is
+        reconnected. Its new state is published either way, so a refusal
+        shows as the state it is really in.
+        """
+        name = self._mcp_name(customization_id)
+        if name is None:
+            return
+        client = await self._ensure_client()
+        try:
+            if self._mcp_status(name) == "disabled":
+                await client.toggle_mcp_server(name, True)  # type: ignore[attr-defined]
+            else:
+                await client.reconnect_mcp_server(name)  # type: ignore[attr-defined]
+        except Exception:
+            log.warning("starting MCP server %s failed", name, exc_info=True)
+        await self._republish_mcp()
+
+    async def stop_mcp_server(self, customization_id: str) -> None:
+        """Switch one of Claude Code's MCP servers off, as its ``/mcp`` does."""
+        name = self._mcp_name(customization_id)
+        if name is None:
+            return
+        client = await self._ensure_client()
+        try:
+            await client.toggle_mcp_server(name, False)  # type: ignore[attr-defined]
+        except Exception:
+            log.warning("stopping MCP server %s failed", name, exc_info=True)
+        await self._republish_mcp()
+
+    async def _republish_mcp(self) -> None:
+        """Publish where the servers really are now, over the reducer's guess."""
+        client = self._client
+        if client is not None:
+            await self._read_mcp(client)
+        self._published = None  # whatever the client was told, say it again
+        await self._publish_customizations()
+
+    async def customization_toggled(self, customization_id: str, enabled: bool) -> None:
+        """A client switched a customization on or off (`HandlesCustomizations`).
+
+        * An MCP server is switched in Claude Code itself, as `start`/`stop`.
+        * A skill, or a plugin's skills, become deny rules (``Skill(name)``),
+          so the Skill tool refuses them; Claude Code reads those at start-up,
+          so it restarts on the same conversation, now if idle, else after the
+          turn in flight. The choice is kept with the session.
+        * Anything else - an agent, a directory - Claude Code cannot switch
+          off, so the tree is published again as it is: the toggle visibly
+          does not take, rather than looking as if it did.
+        """
+        if customization_id in self._tree.mcp:
+            if enabled:
+                await self.start_mcp_server(customization_id)
+            else:
+                await self.stop_mcp_server(customization_id)
+            return
+        skillish = customization_id in self._tree.skills or (
+            customization_id in self._tree.plugin_skills
+        )
+        if not skillish:
+            self._published = None
+            await self._publish_customizations()
+            return
+        if enabled:
+            self.disabled.discard(customization_id)
+        else:
+            self.disabled.add(customization_id)
+        await self._save()
+        if self._client is None or self._denied_skills() == self._started_denied:
+            return
+        self._restart_pending = True
+        if not self._lock.locked() and self._turn is None:
+            await self._restart_client()
 
 
 #: Claude Code permission mode -> approval mode.
@@ -1551,6 +2358,7 @@ class ClaudeProvider:
         running_here: Callable[[], Mapping[str, str]] = running_here,
         status_on_claude_ai: Callable[[str], Awaitable[str | None]] | None = None,
         chat_tools: Sequence[str] = CHAT_TOOLS,
+        commands: Sequence[Mapping[str, Any]] = (),
     ) -> None:
         if not is_valid_provider_id(provider_id):
             raise ValueError(f"invalid provider id: {provider_id!r}")
@@ -1596,6 +2404,26 @@ class ClaudeProvider:
         #: handed a tool that touches the machine.
         self.chat_tools = chat_tools_subset(chat_tools)
         self._dismissed: set[str] = self._load_dismissed()
+        #: Slash commands from start-up (`Discovery.commands`), for a session
+        #: whose own Claude client has not said yet.
+        self._commands = tuple(commands)
+        #: Model limits results report, for the next start-up's picker.
+        self.learned = Learned(state_dir / CACHE_FILE if state_dir is not None else None)
+        #: Every session by its chat, for `complete`.
+        self._by_chat: weakref.WeakValueDictionary[str, ClaudeSession] = (
+            weakref.WeakValueDictionary()
+        )
+
+    #: What a host should advertise as `completionTriggerCharacters` for this
+    #: provider (`Host(completion_trigger_characters=...)`).
+    completion_trigger_characters: Final = completions.TRIGGERS
+
+    async def complete(self, request: CompletionRequest) -> Sequence[CompletionItem]:
+        """``/`` and ``@`` completions (`Completes`), from the chat's own session."""
+        session = self._by_chat.get(request.chat)
+        if session is None:
+            return ()
+        return await session.complete(request)
 
     @property
     def agent(self) -> AgentInfo:
@@ -1652,11 +2480,24 @@ class ClaudeProvider:
             return await self._claude_ai_status.status(session_id)
         return await self._claude_ai.status(session_id)
 
+    def _new_local(self, context: AgentSessionContext, **fields: Any) -> LocalClaudeSession:
+        return LocalClaudeSession(
+            context,
+            root=self.roots,
+            client_factory=self._client_factory,
+            chat_dir=self.chat_dir,
+            chat_tools=self.chat_tools,
+            commands=self._commands,
+            on_model_usage=self.learned.record,
+            **fields,
+        )
+
     def _started(self, session: ClaudeSession) -> ClaudeSession:
         """A session on claude.ai must be reachable before its first message here.
 
         Not an archived one: starting it would reattach, which unarchives it.
         """
+        self._by_chat[session.context.chat_uri] = session
         if session.mirror_of is None:
             self._local.add(session)
             session._status_on_claude_ai = self._status_on_claude_ai
@@ -1668,28 +2509,18 @@ class ClaudeProvider:
         chosen = context.config.get(CONTINUE_KEY)
         remote_control = self._remote_control(context.config.get(RC_CONFIG_KEY))
         if not is_session_id(chosen):
-            return self._started(
-                ClaudeSession(
-                    context,
-                    root=self.roots,
-                    client_factory=self._client_factory,
-                    remote_control=remote_control,
-                    chat_dir=self.chat_dir,
-                    chat_tools=self.chat_tools,
-                )
-            )
+            return self._started(self._new_local(context, remote_control=remote_control))
         continuation = await self.sessions.continue_from(chosen)
         return self._started(
-            ClaudeSession(
+            self._new_local(
                 context,
-                root=self.roots,
-                client_factory=self._client_factory,
                 claude_session_id=continuation.session_id,
                 directory=continuation.directory,
                 recap=continuation.recap,
                 remote_control=remote_control,
-                chat_dir=self.chat_dir,
-                chat_tools=self.chat_tools,
+                # The conversation continued has cost what it has; this
+                # session's turns are measured from its first result.
+                cost_baseline=None,
             )
         )
 
@@ -1700,11 +2531,12 @@ class ClaudeProvider:
             return self._mirror(context, mirrored, backfill=state.get("backfill") is True)
         session_id = state.get("claudeSessionId")
         bridge = state.get("bridgeSessionId")
+        marks = state.get("turns")
+        cost = state.get("costUsd")
+        disabled = state.get("disabled")
         return self._started(
-            ClaudeSession(
+            self._new_local(
                 context,
-                root=self.roots,
-                client_factory=self._client_factory,
                 claude_session_id=session_id if isinstance(session_id, str) else None,
                 # The session's current config wins (a client may have changed
                 # the mode since the last save); then the resume state, for a
@@ -1724,8 +2556,21 @@ class ClaudeProvider:
                 bridge_session_id=bridge if isinstance(bridge, str) else None,
                 archived=state.get("archived") is True,
                 effort=effort_level(context.config.get(EFFORT_KEY, state.get(EFFORT_KEY))),
-                chat_dir=self.chat_dir,
-                chat_tools=self.chat_tools,
+                marks=[
+                    mark
+                    for mark in (
+                        TurnMark.from_wire(m) for m in (marks if isinstance(marks, list) else ())
+                    )
+                    if mark is not None
+                ],
+                rewind=Rewind.from_wire(state.get("rewind")),
+                rewound=state.get("rewound") is True,
+                cost_baseline=float(cost)
+                if isinstance(cost, int | float) and not isinstance(cost, bool)
+                else None,
+                disabled=[d for d in disabled if isinstance(d, str)]
+                if isinstance(disabled, list)
+                else (),
             )
         )
 
@@ -1750,6 +2595,16 @@ class ClaudeProvider:
             state["archived"] = True
         if session.directory is not None:
             state["cwd"] = str(session.directory)
+        if session.marks:
+            state["turns"] = [mark.to_wire() for mark in session.marks]
+        if session.rewind is not None:
+            state["rewind"] = session.rewind.to_wire()
+        if session.rewound:
+            state["rewound"] = True
+        if session.cost_baseline:
+            state["costUsd"] = session.cost_baseline
+        if session.disabled:
+            state["disabled"] = sorted(session.disabled)
         return state
 
     # -- the account's other sessions, through claude.ai ------------------------
@@ -1922,6 +2777,7 @@ class ClaudeProvider:
             chat_tools=self.chat_tools,
         )
         self._mirrors[remote_id] = session
+        self._by_chat[context.chat_uri] = session
         session.start_soon()
         return session
 

@@ -100,7 +100,7 @@ async def _run(settings: Settings) -> None:
 
     # Once, at start-up: the picker offers what Claude Code offers this account,
     # and new sessions go on claude.ai if Claude Code's own would.
-    found = await discover(settings.roots.primary)
+    found = await discover(settings.roots.primary, state_dir=state)
     models = found.models
     remote_control = (
         found.remote_control if settings.remote_control is None else settings.remote_control
@@ -118,6 +118,7 @@ async def _run(settings: Settings) -> None:
             claude_ai_scope=settings.claude_ai_sessions or LOCAL,
             state_dir=state,
             chat_tools=CHAT_TOOLS if settings.chat_tools is None else settings.chat_tools,
+            commands=found.commands,
         ),
         LoopbackSingleUserPolicy(),
         info=HostInfo(name="ahp-host-claude", version=__version__),
@@ -129,6 +130,9 @@ async def _run(settings: Settings) -> None:
         # session. `restore()` below starts the scheduler, so they fire before
         # anyone connects.
         automations=FileAutomationStore(state / "automations"),
+        # `/` commands and `@` files (`ClaudeProvider.complete`): a client
+        # only asks for completions after a character the host names.
+        completion_trigger_characters=ClaudeProvider.completion_trigger_characters,
     )
     # Bring back the sessions saved before the last stop. Without this they
     # were written to `state/sessions` and never read again, so every restart

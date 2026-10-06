@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import uuid
 from collections.abc import AsyncIterable, AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from dataclasses import replace
 from typing import Any
@@ -52,9 +53,23 @@ class FakeClient:
         self.connected = False
         self.interrupted = False
         self.disconnected = False
+        #: Raised by `connect`, as the CLI refusing to start would be.
+        self.connect_error: Exception | None = None
+        #: `get_mcp_status()["mcpServers"]`, and what was asked of them.
+        self.mcp_servers: list[dict[str, Any]] = []
+        self.mcp_calls: list[tuple[str, str, bool | None]] = []
+        #: What `get_context_usage` answers for each model `set_model` picked.
+        self.context_limits: dict[str | None, dict[str, Any]] = {}
+        #: `file_suggestions`: what it answers, and what it was asked.
+        self.suggestions: list[dict[str, Any]] = []
+        self.suggestion_cwd: str | None = None
+        self.suggestion_queries: list[str] = []
+        self.stopped_tasks: list[str] = []
         self._stream: asyncio.Queue[Step] = asyncio.Queue()
 
     async def connect(self) -> None:
+        if self.connect_error is not None:
+            raise self.connect_error
         self.connected = True
 
     async def query(self, prompt: str | AsyncIterable[dict[str, Any]]) -> None:
@@ -113,6 +128,37 @@ class FakeClient:
     async def disconnect(self) -> None:
         self.disconnected = True
 
+    async def get_mcp_status(self) -> dict[str, Any]:
+        return {"mcpServers": [dict(server) for server in self.mcp_servers]}
+
+    async def toggle_mcp_server(self, server_name: str, enabled: bool) -> None:
+        self.mcp_calls.append(("toggle", server_name, enabled))
+        for server in self.mcp_servers:
+            if server["name"] == server_name:
+                server["status"] = "connected" if enabled else "disabled"
+
+    async def reconnect_mcp_server(self, server_name: str) -> None:
+        self.mcp_calls.append(("reconnect", server_name, None))
+        for server in self.mcp_servers:
+            if server["name"] == server_name:
+                server["status"] = "connected"
+
+    async def context_usage(self) -> dict[str, Any]:
+        model = self.models[-1] if self.models else None
+        if model not in self.context_limits:
+            raise RuntimeError(f"no limits scripted for {model!r}")
+        return dict(self.context_limits[model])
+
+    async def file_suggestions(self, query: str) -> dict[str, Any]:
+        self.suggestion_queries.append(query)
+        reply: dict[str, Any] = {"suggestions": list(self.suggestions)}
+        if self.suggestion_cwd is not None:
+            reply["cwd"] = self.suggestion_cwd
+        return reply
+
+    async def stop_task(self, task_id: str) -> None:
+        self.stopped_tasks.append(task_id)
+
 
 def text_of(prompt: Any) -> Any:
     """What a recorded prompt said: its text, or its content blocks."""
@@ -122,7 +168,11 @@ def text_of(prompt: Any) -> Any:
 
 
 class RecordingSink:
-    def __init__(self, approve: bool = True, edited_input: Any = None) -> None:
+    def __init__(
+        self, approve: bool = True, edited_input: Any = None, turn_id: str | None = None
+    ) -> None:
+        #: The AHP turn this sink publishes into, as the host's sink knows it.
+        self.turn_id = turn_id if turn_id is not None else f"turn-{uuid.uuid4()}"
         self.events: list[tuple[Any, ...]] = []
         self.approve = approve
         self.edited_input = edited_input
@@ -137,6 +187,12 @@ class RecordingSink:
         self.client_result: ToolResult | Exception = ToolResult(
             value={"success": True, "content": [{"type": "text", "text": "ran"}]}
         )
+        #: Input requests asked, and how they are answered (`None`: never).
+        self.inputs: list[InputRequest] = []
+        self.input_outcome: InputOutcome | None = InputOutcome(response="cancel")
+        #: Each usage report's `_meta`.
+        self.usage_meta: list[Mapping[str, Any] | None] = []
+        self.notifications: list[str] = []
 
     async def text_delta(self, text: str) -> None:
         self.events.append(("text", text))
@@ -186,6 +242,7 @@ class RecordingSink:
         model: str | None = None,
         meta: Mapping[str, Any] | None = None,
     ) -> None:
+        self.usage_meta.append(meta)
         self.events.append(("usage", input_tokens, output_tokens, cache_read_tokens, model))
 
     async def tool_call_completed(
@@ -199,13 +256,33 @@ class RecordingSink:
         self.past_tense[call_id] = past_tense_message
         self.events.append(("completed", call_id, success, result))
 
+    async def file_edit(self, change: Any) -> Mapping[str, Any]:
+        return {"type": "fileEdit"}
+
+    async def system_notification(
+        self, text: str, *, markdown: bool = False, meta: Mapping[str, Any] | None = None
+    ) -> None:
+        self.notifications.append(text)
+
     async def turn_failed(
-        self, message: str, error_type: str = "agent.turn", duration_ms: int = 0
+        self,
+        message: str,
+        error_type: str = "agent.turn",
+        duration_ms: int = 0,
+        *,
+        resumable: bool = False,
     ) -> None:
         self.events.append(("failed", message, error_type))
 
     async def request_input(self, request: InputRequest) -> InputOutcome:
-        raise AssertionError("not used")
+        self.inputs.append(request)
+        self.events.append(("input", len(request.questions)))
+        if self.hold is not None:
+            await self.hold.wait()  # nobody here answers
+        if self.input_outcome is None:
+            await asyncio.Event().wait()
+        assert self.input_outcome is not None
+        return self.input_outcome
 
     async def confirm_tool_call(self, call: ToolConfirmation) -> ToolConfirmationOutcome:
         self.confirmations.append(call)
@@ -291,6 +368,9 @@ class FakePublisher:
         self.background: dict[str, dict[str, Any]] = {}
         self.terminals: list[FakeTerminal] = []
         self.chats: list[FakeChat] = []
+        #: Every customization tree published, and each MCP server's lifecycle.
+        self.trees: list[list[dict[str, Any]]] = []
+        self.mcp_states: list[tuple[str, dict[str, Any]]] = []
 
     async def external_turn(self, text: str, run: Callable[[Any], Awaitable[None]]) -> bool:
         if any(not task.done() for task in self.tasks):
@@ -310,7 +390,7 @@ class FakePublisher:
         customizations: Sequence[Mapping[str, Any]],
         server_tools: Sequence[Mapping[str, Any]] | None = None,
     ) -> None:
-        return
+        self.trees.append([dict(c) for c in customizations])
 
     async def activity_changed(self, activity: str | None) -> None:
         return
@@ -323,7 +403,7 @@ class FakePublisher:
     async def mcp_server_changed(
         self, customization_id: str, state: Mapping[str, Any], channel: str | None = None
     ) -> None:
-        return
+        self.mcp_states.append((customization_id, dict(state)))
 
     async def progress(
         self, progress: float, total: float | None = None, message: str | None = None

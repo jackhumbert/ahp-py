@@ -51,9 +51,15 @@ READ_ONLY_TOOLS: Final = frozenset(
     }
 )
 
-#: Claude Code's interactive question tool has no host-side renderer yet, so it
-#: is withheld and the agent asks in plain text instead.
-DISALLOWED_TOOLS: Final = ("AskUserQuestion",)
+#: Claude Code's multiple-choice question tool. It is answered through the
+#: host's input request (`chat/inputRequested`, `questions.py`), so the agent
+#: may use it; until that existed it was withheld here and Claude asked in
+#: plain text instead.
+QUESTION_TOOL: Final = "AskUserQuestion"
+
+#: Tools Claude is never offered. None today: the last one, the question tool,
+#: now has a renderer.
+DISALLOWED_TOOLS: Final[tuple[str, ...]] = ()
 
 
 #: The session config property. VS Code recognises this name and its values.
@@ -112,7 +118,20 @@ def pre_tool_use_decision(tool_name: str, mode: str = ASK) -> dict[str, Any]:
     The read-only set is always allowed. In ``default`` everything else goes to a
     human; in the looser modes the hook stays out of it and Claude Code's
     permission mode decides.
+
+    The question tool always goes to the approval callback, in every mode: that
+    callback is where its questions are put to a person and their answers come
+    back. Anything that allowed it past the callback - an ``allow`` rule in the
+    user's settings - would run it with no answers at all.
     """
+    if tool_name == QUESTION_TOOL:
+        return {
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": "ask",
+                "permissionDecisionReason": "Questions are put to the user.",
+            }
+        }
     if needs_approval(tool_name) and mode != ASK:
         return {}
     if needs_approval(tool_name):
@@ -171,7 +190,17 @@ def describe(tool_name: str, tool_input: Mapping[str, Any]) -> tuple[str, str]:
             return "Update plan", "Update the task list"
         case "ExitPlanMode":
             return "Start on the plan", "Approve the plan above to let Claude start"
+        case "AskUserQuestion":
+            return "Ask you", _short(_first_question(tool_input) or "Questions for you")
     return tool_name, tool_name
+
+
+def _first_question(tool_input: Mapping[str, Any]) -> str | None:
+    questions = tool_input.get("questions")
+    if isinstance(questions, list) and questions and isinstance(questions[0], Mapping):
+        text = questions[0].get("question")
+        return text if isinstance(text, str) and text else None
+    return None
 
 
 def progress_line(tool_name: str, tool_input: Mapping[str, Any]) -> str:
@@ -216,4 +245,6 @@ def past_tense(tool_name: str, tool_input: Mapping[str, Any], *, failed: bool) -
             return f"Sub-agent finished: {message}"
         case "TodoWrite":
             return "Updated the task list"
+        case "AskUserQuestion":
+            return f"Asked: {message}"
     return f"Ran {tool_name}"

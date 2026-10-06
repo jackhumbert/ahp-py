@@ -8,12 +8,13 @@ every task is *background* work, and not every one can be shown:
   or a command moved to the background mid-run. It becomes a ``shell`` entry.
   Its command line comes from the `Bash` call that started it; the task itself
   only carries the call's description.
-* A subagent (`local_agent`, `remote_agent`, `in_process_teammate`) running in
-  the background gets a worker chat of its own (`open_tool_chat`): its
-  messages -- which arrive after the turn that started it has ended -- are
-  streamed there, and it becomes a ``subagent`` entry pointing at that chat.
-  A subagent in the foreground is unchanged: its tool calls show inline in the
-  parent turn, which is still running.
+* A subagent (`local_agent`, `remote_agent`, `in_process_teammate`) gets a
+  worker chat of its own (`open_tool_chat`), in the foreground or the
+  background: its messages (those carrying the spawning call's id as their
+  `parent_tool_use_id`) are streamed there, and the spawning call's result
+  links to it. Only one running in the background becomes a ``subagent``
+  entry pointing at that chat: one in the foreground is not background work,
+  until it is moved there.
 * Anything else (`local_workflow`, `monitor_mcp`, `dream`, ...) is left alone.
 
 A task ends on a terminal status from **either** `task_notification` or
@@ -75,6 +76,8 @@ class Task:
     published: bool = False
     #: A subagent's type, as Claude Code names it (`Explore`, ...).
     agent_type: str | None = None
+    #: A subagent's prompt, when `task_started` carries it.
+    prompt: str | None = None
 
     @property
     def work_id(self) -> str:
@@ -94,12 +97,16 @@ def backgrounded(data: Mapping[str, Any]) -> bool | None:
 
 @dataclass
 class Subagent:
-    """A background subagent's worker chat, and what streams into it."""
+    """A subagent's worker chat, and what streams into it."""
 
+    #: Replaced when `task_started` arrives after the subagent's first message,
+    #: which opened the chat with only what the spawning call said.
     task: Task
     chat: ProviderChat
     #: The worker turn's sink, once the host has started it.
     sink: TurnSink | None = None
+    #: Set with `sink`: a permission prompt can come before the turn starts.
+    attached: asyncio.Event = field(default_factory=asyncio.Event)
     #: Messages that arrived before the sink did, in order.
     pending: list[Any] = field(default_factory=list)
     #: Set when the task ends; the worker turn ends with it.

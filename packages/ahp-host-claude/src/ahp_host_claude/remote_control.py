@@ -74,7 +74,39 @@ def property_schema(default: bool) -> Mapping[str, Any]:
 
 
 class RemoteControlClient(ClaudeSDKClient):
-    """`ClaudeSDKClient`, plus the one control request the SDK does not wrap."""
+    """`ClaudeSDKClient`, plus the control requests the SDK does not wrap.
+
+    Three, all Claude Code's own: `remote_control`; `file_suggestions`, its
+    ``@`` file index; and `get_context_usage` in its ``summary`` form, which
+    the SDK's `get_context_usage()` cannot ask for (it always asks for the
+    full breakdown, a token-count request per category). Each one's request
+    and reply shape is read from the CLI bundled with the SDK, and a caller
+    treats a failure as "not available" rather than as a broken session.
+    """
+
+    async def _control(self, request: dict[str, Any]) -> Mapping[str, Any]:
+        query = self._query
+        if query is None:
+            raise RuntimeError("not connected")
+        reply = await query._send_control_request(request)
+        return reply if isinstance(reply, Mapping) else {}
+
+    async def context_usage(self) -> Mapping[str, Any]:
+        """`get_context_usage` from local estimates: no token-count requests.
+
+        What the context window is (``rawMaxTokens``, ``maxTokens``) does not
+        depend on counting, so asking for it should not cost a request per
+        category, for every model in the picker, at every start-up.
+        """
+        return await self._control({"subtype": "get_context_usage", "detail": "summary"})
+
+    async def file_suggestions(self, query: str) -> Mapping[str, Any]:
+        """Claude Code's ``@`` completions for *query*: ``suggestions`` and ``cwd``.
+
+        The index is built in the background when the process starts, so the
+        first answers can be empty; a client asks again as the user types.
+        """
+        return await self._control({"subtype": "file_suggestions", "query": query})
 
     async def remote_control(
         self, enabled: bool, *, reattach: str | None = None, keep: bool = True
@@ -87,9 +119,6 @@ class RemoteControlClient(ClaudeSDKClient):
         reattaches to it); a deletion needs the opposite, so it turns it off,
         back on unkept, and off again (`ClaudeSession.disposed`).
         """
-        query = self._query
-        if query is None:
-            raise RuntimeError("not connected")
         request: dict[str, Any] = {
             "subtype": "remote_control",
             "enabled": enabled,
@@ -97,5 +126,4 @@ class RemoteControlClient(ClaudeSDKClient):
         }
         if reattach is not None:
             request["reattach_session_id"] = reattach
-        reply = await query._send_control_request(request)
-        return reply if isinstance(reply, Mapping) else {}
+        return await self._control(request)

@@ -8,6 +8,19 @@ server's AGENTS.md requires ("Adding a provider adapter").
   owns ordering and the wire.
 - `permissions.py` is the approval policy. Changing what runs without asking is
   a security decision: say so in the commit, and test it.
+- The rest, each with the evidence for its choices in its docstring:
+  `questions.py` (`AskUserQuestion` <-> input requests), `usage.py` (per-turn
+  `UsageInfo`), `models.py` (picker limits: probed at start-up, learned from
+  results), `customizations.py` (the customization tree), `completions.py`
+  (`/` and `@`), `history.py` (turn marks and edit-and-resend cuts),
+  `background.py` (tasks and subagent worker chats), `client_tools.py`,
+  `remote_control.py` (control requests the SDK does not wrap), `claude_ai.py`
+  (claude.ai mirrors). `LocalClaudeSession` in `provider.py` is a session this
+  host runs; a mirror is a plain `ClaudeSession`, which lacks what only a local
+  Claude Code can do (truncate, MCP start/stop, customization toggles).
+- SDK behaviour not documented by the SDK was read from the CLI it bundles
+  (`claude_agent_sdk/_bundled/claude`): `strings` it and search for the
+  control request or message schema (`subtype:R("...")`).
 - Tests use a fake SDK client (`tests/fakes.py`); no network, no subprocess.
 - Conventional commits; `CHANGELOG.md` under `[Unreleased]`.
 

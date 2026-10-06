@@ -9,7 +9,8 @@ as a union discriminated by `type`:
 - `embeddedResource`: base64 data. Images go to Claude as image blocks, PDFs as
   document blocks, and text is decoded inline.
 - `simple`: opaque to the host; `modelRepresentation` is the text the producer
-  says the model should see.
+  says the model should see. One this host produced for a slash command
+  (`completions.py`) adds nothing: the command is already the message's text.
 - `chat` / `annotations`: references to host state this adapter cannot resolve
   yet. They are named in the prompt rather than dropped silently.
 """
@@ -23,6 +24,7 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
+from ahp_host_claude.completions import is_command
 from ahp_host_claude.paths import directory_of
 from ahp_host_claude.roots import Roots, as_roots
 
@@ -122,6 +124,8 @@ def attachment_blocks(attachments: Sequence[Any], root: Path | Roots) -> list[Bl
         elif kind == "embeddedResource":
             blocks.extend(_embedded(attachment))
         elif kind == "simple":
+            if is_command(attachment):
+                continue
             text = attachment.get("modelRepresentation")
             if isinstance(text, str) and text:
                 blocks.append({"type": "text", "text": text})

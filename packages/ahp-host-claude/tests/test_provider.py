@@ -118,7 +118,8 @@ async def test_text_streams_as_deltas_and_is_not_repeated_by_the_final_message(
     assert sink.events == [
         ("text", "Hel"),
         ("text", "lo"),
-        ("usage", 10, 3, 7, "claude-opus-5"),
+        # The prompt, cached part included: 10 uncached + 7 read from cache.
+        ("usage", 17, 3, 7, "claude-opus-5"),
     ]
     assert [text_of(p) for p in harness.clients[0].prompts] == ["hi"]
     assert session.claude_session_id == "claude-session-1"
@@ -256,7 +257,9 @@ async def test_sessions_resume_with_the_sdk_session_id(tmp_path: Path) -> None:
     session = await harness.provider.create_session(_context(tmp_path))
     await session.send_user_message(UserMessage(text="x"), RecordingSink())
     state = await harness.provider.resume_state_of(session)
-    assert state == {
+    assert state is not None
+    assert len(state["turns"]) == 1
+    assert {key: value for key, value in state.items() if key != "turns"} == {
         "claudeSessionId": "abc",
         "permissionMode": "default",
         "remoteControl": False,
@@ -327,7 +330,10 @@ def test_session_options_gate_every_tool_through_the_hook(tmp_path: Path) -> Non
     assert matchers[0].matcher is None  # every tool, not a named subset
     assert options.permission_mode == "default"
     assert options.allowed_tools == []
-    assert "AskUserQuestion" in options.disallowed_tools
+    # Claude's question tool is answered through an input request now.
+    assert "AskUserQuestion" not in options.disallowed_tools
+    # A subagent's prose reaches its worker chat, not only its tool calls.
+    assert options.forward_subagent_text is True
 
 
 async def test_a_shell_call_reads_as_what_it_does_not_as_run_command(tmp_path: Path) -> None:

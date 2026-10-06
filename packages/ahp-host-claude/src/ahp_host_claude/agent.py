@@ -58,7 +58,7 @@ async def create(options: Mapping[str, Any], node: NodeContext) -> ClaudeProvide
         raise ValueError(f"claude agent: {exc}") from exc
     # Once, at start-up: the picker offers what Claude Code offers this account,
     # and new sessions go on claude.ai if Claude Code's own would.
-    found = await discover(node.roots.primary)
+    found = await discover(node.roots.primary, state_dir=node.state_dir)
     log = logging.getLogger(__name__)
     log.info("models: %s", ", ".join(m.id for m in found.models) or "none")
     if claude_ai_sessions:
@@ -77,4 +77,5 @@ async def create(options: Mapping[str, Any], node: NodeContext) -> ClaudeProvide
         claude_ai_scope=claude_ai_sessions or LOCAL,
         state_dir=node.state_dir,
         chat_tools=chat_tools,
+        commands=found.commands,
     )
