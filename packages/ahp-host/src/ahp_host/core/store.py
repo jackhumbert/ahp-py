@@ -36,6 +36,9 @@ Three ordinary durability properties on top of that:
   middle of the fan-out path, so `save_soon` coalesces and the most recent state
   wins.
 
+The format version stays 1 when a field is added that an older reader can ignore
+(`interruptedByRestart` and `inputRequests` were); it moves only for a change that would be misread.
+
 Owner-only modes throughout -- 0o600 on files, 0o700 on the directory -- for the
 reason `core/wirelog.py` does the same: what is on disk is the entire
 conversation in plaintext.
@@ -117,6 +120,14 @@ class StoredSession:
     #: lost to a crash, which is also found mid-flight on restore but was not
     #: the host's decision: only these are carried on automatically.
     interrupted_by_restart: Sequence[str] = ()
+    #: The session's open input requests at save time, each
+    #: `{"id", "kind", "chat", "turnId"[, "key"]}` -- the pending registry's kind
+    #: vocabulary (`confirm`/`input`/`clienttool`/`auth`) and its registry key
+    #: verbatim. Nothing in the next process can answer one, so on restore each
+    #: is withdrawn with a notice naming it (`core/restart.py`). None means a
+    #: file written before this field existed; the session's own `inputNeeded`
+    #: entries are still in its channel state, and are withdrawn the same way.
+    input_requests: Sequence[Mapping[str, Any]] | None = None
 
     def to_json(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
@@ -136,6 +147,8 @@ class StoredSession:
             payload["metadata"] = dict(self.metadata)
         if self.interrupted_by_restart:
             payload["interruptedByRestart"] = list(self.interrupted_by_restart)
+        if self.input_requests is not None:
+            payload["inputRequests"] = [dict(r) for r in self.input_requests]
         return payload
 
     @classmethod
@@ -171,6 +184,19 @@ class StoredSession:
         metadata = payload.get("metadata")
         if metadata is not None and not isinstance(metadata, Mapping):
             raise ValueError("metadata must be an object or absent")
+        raw_requests = payload.get("inputRequests")
+        input_requests: list[dict[str, Any]] | None = None
+        if raw_requests is not None:
+            if not isinstance(raw_requests, list) or not all(
+                isinstance(item, Mapping)
+                and all(isinstance(item.get(k), str) for k in ("id", "kind", "chat", "turnId"))
+                and ("key" not in item or isinstance(item["key"], str))
+                for item in raw_requests
+            ):
+                raise ValueError(
+                    "inputRequests must be a list of {id, kind, chat, turnId[, key]} objects"
+                )
+            input_requests = [dict(item) for item in raw_requests]
 
         interrupted = payload.get("interruptedByRestart", [])
         if not isinstance(interrupted, list) or not all(isinstance(c, str) for c in interrupted):
@@ -185,6 +211,7 @@ class StoredSession:
             resume_state=dict(resume_state) if resume_state is not None else None,
             metadata=dict(metadata) if metadata is not None else None,
             interrupted_by_restart=tuple(interrupted),
+            input_requests=input_requests,
         )
 
 

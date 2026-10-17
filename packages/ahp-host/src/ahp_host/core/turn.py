@@ -721,6 +721,7 @@ class ActionTurnSink:
             # be able to shadow one.
             key=_input_key(request.key) if request.key is not None else None,
             channel=self._channel,
+            turn_id=self._turn_id,
         )
 
         wire: dict[str, Any] = {"id": parked.id}
@@ -843,6 +844,7 @@ class ActionTurnSink:
             "confirm",
             key=call.call_id,
             channel=self._channel,
+            turn_id=self._turn_id,
         )
 
         action: dict[str, Any] = {
@@ -1001,6 +1003,7 @@ class ActionTurnSink:
             channel=self._channel,
             resource=resource_id,
             required_scopes=challenge.required_scopes,
+            turn_id=self._turn_id,
         )
         await self._sequencer.publish(
             self._channel,
@@ -1059,6 +1062,7 @@ class ActionTurnSink:
             # Only this client may answer: it is the one being asked to run the
             # tool, and it is the one whose departure has to end the call.
             owner=call.client_id,
+            turn_id=self._turn_id,
         )
 
         action: dict[str, Any] = {

@@ -62,6 +62,16 @@ is the design; milestones M0–M10 there say what exists and what's next.
   when a request line arrives, never in a runner.
 - Every `.js` conformance script keeps a `.py` twin, checked against the same
   sidecar.
+- `FlowProvider` is a `ResumableAgentProvider` and `FlowSession` implements
+  `ResumesTurns`: `resume_turn` relaunches a run a host restart cut off, for
+  main run chats only; it declines worker chats (fails them, not resumable).
+  Whatever it needs about the run is in the resume state, because it gets only
+  the chat and turn id.
+- Continuing a run uses `RunOptions.continue_run`, never the `--resume` prefix
+  rule (plan §3 is unchanged).
+- Journal readers ignore unknown record types, so M10 gate records stay
+  readable. Keep it so.
+- A continued run's tool-call ids use the prefix `agent-r<k>`.
 - Conventional commits, scope `ahp-host-flow`; `CHANGELOG.md` under
   `[Unreleased]`.
 

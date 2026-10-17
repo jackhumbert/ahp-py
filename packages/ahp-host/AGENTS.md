@@ -249,7 +249,8 @@ Adapters live in their own distribution (`ahp-host-<name>`), never in the core �
 the core must stay installable and fully testable with no adapter present.
 
 1. Implement `AgentProvider`; add `ResumableAgentProvider` if the runtime can
-   resume across host restarts.
+   resume across host restarts, and `ResumesTurns` on its sessions if it can
+   pick up a failed turn -- which is how a turn a restart cut off is resumed.
 2. Emit **neutral provider events** into the `TurnSink` — `TextDelta`,
    `ToolCallStarted`, … — **not** AHP `StateAction`s. The host owns the mapping
    to actions and all sequencing. This keeps adapters alive across spec bumps.

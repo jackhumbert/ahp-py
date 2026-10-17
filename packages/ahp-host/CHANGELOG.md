@@ -62,6 +62,45 @@ versions each release speaks.
   provider waiting on its own callback could wait forever. An `on_end` that
   raises is logged and contained.
 
+### Added — open input requests across a restart (ahp-py extension)
+
+Builds on the graceful restarts above: an interrupted turn is failed with
+`host.restart` and resumed through `chat/turnResume`; this covers what it had
+asked the user.
+
+- `StoredSession.input_requests` (JSON `inputRequests`): the session's open input
+  requests (`id`, `kind`, `chat`, `turnId`, optional `key`), written from the
+  pending registry. Additive, beside `interruptedByRestart`; the store format
+  version is unchanged and files without either key still load.
+- `PendingRequests.in_channels` and `PendingRequest.turn_id` (set by the turn
+  sink for every request it parks), which the records are written from.
+- `core/restart.py`: `restored_requests`, which matches the stored records to
+  the restored `inputNeeded` entries (an entry with no record, from an older
+  file, is still found), and the withdrawal notice.
+
+### Changed — open input requests across a restart
+
+- On restore every open input request is withdrawn, never left dangling and
+  never dropped without a word: nothing in the new process can answer it (the
+  turn that asked is failed, and a resumed turn runs with a fresh sink and
+  raises fresh requests). Its `inputNeeded` entry is removed, so the session no
+  longer comes back stuck at "input needed", and a `systemNotification` naming
+  each request is added to the interrupted turn just before its `host.restart`
+  error, with `_meta['ahp-py/restart'] = {"event": "inputWithdrawn",
+  "requests": [<ids>]}`. A request whose turn was no longer active is removed
+  with a log line. Same after a drain-restart and after a crash.
+- Shutdown persists every session before cancelling anything (while the agents
+  can still report their resume state) and writes nothing afterwards, so the
+  store keeps the turns, the interrupted list and the input requests that were
+  open, not what cancelling them leaves behind. Every session is written at
+  close, drained or not.
+- A turn that `restore()` reopens for an automatic resume and then cannot start
+  is failed again (`host.restart`, still resumable) instead of staying active;
+  one session failing to carry on no longer stops `restore()` for the others.
+- Docs: README 'Sessions can survive a restart',
+  [ADR 0006](docs/decisions/0006-restoring-interrupted-turns.md), and
+  `docs/requests.md` entry 11 (upstream: restart semantics).
+
 ### Added — structured turns (ahp-py extension ahead of the spec)
 
 - `HostTool` (`provider.base`): a tool the host offers the agent for one turn.

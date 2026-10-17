@@ -7,7 +7,7 @@ an AHP session, and each `agent()` call is a **child chat** of it, so any AHP
 client can watch and steer the whole run. Extensions to the format are opt-in,
 and a script written for Claude Code runs unchanged.
 
-Status: M0, M1, M2, M3, M4a and M5 done, and most of M4b (typed progress, credential masking, worktrees, journal start records, the fan-out corpus run). The rest of M4b (from_config factories in ahp-host-claude and ahp-host-acp, the subagent prompt preamble, live watching of workflow dirs) is next. Milestones are in §8.
+Status: M0, M1, M2, M3, M4a, M5 and M6 done, and most of M4b (typed progress, credential masking, worktrees, journal start records, the fan-out corpus run). The rest of M4b (from_config factories in ahp-host-claude and ahp-host-acp, the subagent prompt preamble, live watching of workflow dirs) is next. Milestones are in §8.
 
 ## 1. Where it sits
 
@@ -323,26 +323,42 @@ answerable.
   when each call **starts** (with its dispatch handle: the node session's URI
   for fleet calls) and when it finishes, and every gate (`ask`, `approve`)
   with its state.
-- **Restart.** `ahp-host-flow` is a `ResumableAgentProvider`. On restore, a run
-  whose main turn was active is relaunched from its journal, under the same
-  turn, not left as transcript:
+- **Restart.** `ahp-host-flow` is a `ResumableAgentProvider`, and
+  `FlowSession` implements the existing `ResumesTurns`. `ahp-host`'s graceful
+  restarts fail a turn the restart cut off (`errorType` `host.restart`,
+  resumable) and resume it through `chat/turnResume`: by itself, once, when a
+  drain-restart cut it off; on a client's request when a crash did.
+  `resume_turn` on a run's main chat relaunches the run from its journal,
+  under the same turn, not left as transcript:
   - finished calls replay from the cache;
   - started fleet calls are **reattached**, since the node session kept
     running, so the run waits on it again;
   - in-process calls that were cut off run again live, with a `log()` line;
-  - open gates are raised again with their original ids.
+  - open gates are asked again (the old request was withdrawn on restore, see
+    below).
 
-  This needs an `ahp-host` hook that offers a resumable provider the
-  interrupted turn instead of closing it: `ResumesInterruptedTurns`.
+  The session's resume state names each live run (main chat, turn, run id,
+  and what `resume_turn` cannot read back from the turn: model, resume count,
+  phase notices published), so it knows which run a resumed turn belongs to.
+  Worker chats are not resumed: `resume_turn` declines them, and the cut-off
+  call runs again in a new worker chat.
 - **Open approvals in general (`ahp-host`).** `StoredSession` keeps the
-  session's `inputNeeded` entries. On restore, a provider that can still answer
-  one (it implements the hook above) re-binds it. Otherwise it is withdrawn
-  with a system notification saying why, rather than vanishing. That way no
-  surface has to persist approvals on its own. An approval raised in a fleet
-  call's node session lives on that node and survives the flow host's restart
-  regardless.
-- **Upstream:** whether a host must restore interrupted turns and open input
-  requests, and how a client learns which ones it did (§10).
+  session's open input requests beside its `inputNeeded` entries. Nothing in
+  the new process can answer one, so on restore each is withdrawn with a system
+  notification naming it, rather than vanishing; a resumed turn asks again
+  under a new id. That way no surface has to persist approvals on its own. An
+  approval raised in a fleet call's node session lives on that node and
+  survives the flow host's restart regardless.
+- **Typed progress on a continued run.** One `runStarted` per run: a continued
+  run emits a plain "resumed" notification instead of a second one, phases
+  already announced are not announced again, and the re-dispatched step
+  supersedes the one the restart cancelled.
+- **Later milestones.** Started fleet calls reattach in M7. Gates (`ask`,
+  `approve`) are journaled in M10, on the journal's extensible record format
+  (readers ignore unknown record types).
+- **Upstream:** what a host must do with open input requests across a restart,
+  and how a client learns they were withdrawn (§10; `ahp-host`
+  `docs/requests.md` entry 11).
 
 ### 4.9 Redaction
 
@@ -522,7 +538,7 @@ A live GLM smoke test is opt-in, behind a marker.
 | M4a | **The provider core:** config, routing, lazy provider loading, workspace/user/host sources as customizations, slash/fenced run start, `ProviderDispatcher` worker chats titled by label, model/effort/approval mode, per-chat approval mode and effort via `ReconfiguresChats`, schema as a structured turn with engine re-validation, skip/abort, approval relay, models with vendor, `python -m ahp_host_flow`, `flow run --config` | the in-memory host tests over EchoProvider and scripted fakes pass |
 | M4b | **Typed progress** (§4.7) with `ahp_protocol.ext.flow` and `flow_view()`, credential masking (§4.9), `isolation: 'worktree'`, journal start records, a `from_config`-style factory in ahp-host-claude and ahp-host-acp so flow.toml can load them directly, the subagent prompt preamble (§4.4), live watching of workflow dirs (§4.3), live corpus runs | fan-out and triage corpus scripts pass against Claude; a Review phase routed to GLM returns a schema-valid result; a run is watched and controlled from VS Code or iOS, and `flow_view()` folds it from the transcript |
 | M5 | **Python workflows** (§4.10): `.py` workflow files run by a Python runner process on the same JSON-RPC protocol as `runner.mjs`; `meta` read with `ast.literal_eval`; the verbs as a Python module; the `flow.run(...)` library API; source trust rules; `workflow()` across JS and Python; a `.py` twin of each conformance script | every conformance sidecar passes for its JS and Python twins; a `.py` workflow shows as a slash command next to the JS ones and runs, resumes and dispatches like them |
-| M6 | **Durability** (§4.8): `ResumesInterruptedTurns` and stored `inputNeeded` (re-bound or withdrawn with a notice) in `ahp-host`; the provider relaunches a run from its journal under the same turn; gates journaled | killing the host mid-run, the run continues where it stopped; an open approval is answered after the restart, or withdrawn with a notice |
+| M6 | **Durability** (§4.8): on `ahp-host`'s graceful restarts, stored open input requests (withdrawn with a notice on restore); `FlowSession.resume_turn` relaunches a run from its journal under the same turn | restarting the host mid-run, the run continues where it stopped (by itself after a drain-restart, on `chat/turnResume` after a crash); an open approval is withdrawn with a notice |
 | M7 | **Fleet** (§2): fleet tools for `flow` sessions in `ahp-gateway`, bound to the run's principal; the `flow` agent type for `ahp-node`; fleet dispatch with thin child chats; reattach after restart; the direct remote `ClientDispatcher` (`create_chat(title=)`); the delegation-origin request | a run on one node starts calls on two others, each visible from every surface; restarting the flow host reattaches to calls still running |
 | M8 | **Full corpus and operations:** the four corpus workflows unmodified; client-published workflows (+ automation capture); per-child changesets; steering a child chat (§4.5); automations | the plan/build/review corpus script lands a change; a cron automation runs a workflow |
 | M9 | **Redaction after publishing** (§4.9): `Host.redact`, the experimental capability, the stored session and audit; `flow redact`; the `requests.md` entry | a redacted part disappears from live opted-in clients, from snapshots, from the store and from the run's journal; the audit records the fact without the content |
@@ -571,6 +587,8 @@ Open for M4 (structured turns):
 
 **M5 result.** The Python runner (`sandbox/pyrunner.py`) is standard library only and speaks the runner.mjs JSON-RPC on its own copies of stdin and stdout (UTF-8 with newline line ends, ASCII-only output), so a stray `print()` goes to stderr and cannot corrupt the stream. `meta` is read by `ast.literal_eval` without running the file; a non-literal `meta` is a `MetaError`. The verbs are awaitables issued at call time, so `agent()` order follows call order. Ordinals and the current phase are now assigned by the host when a request line arrives (`Scheduler.issue`), a protocol change: the `agent` request carries no ordinal. Across runners, arrival order decides. A cross-language child runs in a runner of its own, sharing the run's counter, phase, budget and caps; the settings `child`, `spent` and `args` and the `{value}` reply carry the state, and only JSON crosses. Trust: `.py` loads only from the host and user sources unless `[workflows] python_sources` includes `workspace`; the check is `RunOptions.python_dirs`, and the catalog lists a `.py` only from an allowed source, marked with a language in `_meta["ahp-py/flow"]`. The library API (`ahp_host_flow.run`, `FlowRun`) runs in-process on the same `Scheduler` and journal with a scriptless journal header, and no runner. Every `conformance/*.js` has a `.py` twin checked against the same sidecar; `determinism.json` has a `py_result`, the one documented difference, since Python cannot ban `time` or `random`. `flow run --config` serves a `.py` script from a temporary host directory. Open: the rest of M4b.
 
+**M6 result.** Built on `ahp-host`'s graceful restarts, which landed first and are the restart model: a turn the restart cut off is failed with `errorType` `host.restart` (resumable for a resumable provider) and resumed through the standard `chat/turnResume` path, once and automatically after a drain-restart, by the user after a crash. (A first version added a provider capability that kept the turn open at restore and continued it; it was dropped for that one path.) `ahp-host`: `StoredSession` persists the open input requests as `inputRequests` beside `interruptedByRestart` (JSON only, old files still load, format version 1); on restore each is withdrawn, its `inputNeeded` entry removed and a system notification naming it added to the interrupted turn, never silently; a resumed turn asks again under new ids. Shutdown persists every session first, then stops persisting, so the store keeps the active turns and their requests. Notices carry `_meta['ahp-py/restart']`. Decision in ADR 0006; the upstream request is `docs/requests.md` entry 11. `ahp-host-flow`: `FlowProvider` is a `ResumableAgentProvider` (resume state `{flow: 1, runs: [{chat, turnId, runId, workflow, model, resumes, phasesStarted, phasesFinished}]}`) and `FlowSession` implements `ResumesTurns`: `resume_turn` on a run's main chat relaunches the run from its journal with `RunOptions.continue_run` (finished calls replay by key, cut-off calls are logged and dispatched again; the cut-off steps were cancelled when the host failed the turn), under tool-call ids with the prefix `agent-r<k>`; no second `runStarted`, a plain "resumed" line instead, and phases already announced are not announced again. A worker chat, another turn, or a run whose journal is gone is declined (the entry dropped with a log line). Tests run over a `FileSessionStore` in a tmp dir, simulating a drain-restart (`Host.drain` past its deadline) and a crash with a new host on the same store, for a `.js` and a `.py` run, twice in a row too: finished calls are not re-dispatched, the in-flight call is, and the result equals an uninterrupted run's. Open: fleet reattach (M7); gates (M10); known limits: a crash loses the store debounce window, so a run started within it may not be resumable, and a second interruption before already-finished later calls are reached runs them again, since the new journal holds only calls it has reached.
+
 ## 9. Risks
 
 - **Format drift:** Claude's workflow format is internal. Mitigation:
@@ -605,8 +623,8 @@ upstream:
    completed turn (§4.6).
 2. **Typed progress:** run, phase and step state on a chat, with actions for
    each transition, so every client renders a run the same way (§4.7).
-3. **Restart semantics:** whether a host restores a turn that was running and
-   the open input requests, and how a client learns what was restored (§4.8).
+3. **Restart semantics:** what a host does with a turn that was running and
+   the open input requests, and how a client learns what was withdrawn (§4.8; `ahp-host` `docs/requests.md` entry 11).
 4. **Redaction:** `chat/partRedacted` (and a message variant), with reducer
    semantics and the rule that only the shared view is redacted (§4.9).
 5. **Delegated sessions:** a `SessionOrigin` kind,

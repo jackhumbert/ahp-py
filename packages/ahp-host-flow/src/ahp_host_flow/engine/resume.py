@@ -42,8 +42,15 @@ class Replay:
     """
 
     def __init__(
-        self, records: Sequence[AgentRecord], *, on_log: Callable[[str], None] | None = None
+        self,
+        records: Sequence[AgentRecord],
+        *,
+        on_log: Callable[[str], None] | None = None,
+        prefix_only: bool = True,
     ) -> None:
+        # With prefix_only False (continuing an interrupted run) a miss does not end the
+        # cache: that call runs live and later calls still look up.
+        self._prefix_only = prefix_only
         self._by_key: dict[str, deque[AgentRecord]] = {}
         for rec in sorted(records, key=lambda r: r.ordinal):
             self._by_key.setdefault(rec.key, deque()).append(rec)
@@ -72,6 +79,8 @@ class Replay:
         if queue:
             self._served.append(call.ordinal)
             return dataclasses.replace(queue.popleft(), ordinal=call.ordinal)
+        if not self._prefix_only:
+            return None
         self._live = True
         self._ended_at = call.ordinal
         if self._on_log is not None:
@@ -153,10 +162,17 @@ class JournalRun:
                         where = f"started on {rec.provider} ({rec.chat or '-'})"
                     else:
                         where = "started"
-                    on_log(
-                        f"resume: agent() #{rec.ordinal} {where} but never finished; not replayed"
-                    )
-            replay = Replay(old.agents, on_log=on_log)
+                    if options.continue_run:
+                        on_log(
+                            f"resume: agent() #{rec.ordinal} {where} but was cut off by a host "
+                            "restart; dispatching it again"
+                        )
+                    else:
+                        on_log(
+                            f"resume: agent() #{rec.ordinal} {where} but never finished; "
+                            "not replayed"
+                        )
+            replay = Replay(old.agents, on_log=on_log, prefix_only=not options.continue_run)
             inherited = dict(old.workflows)
         elif source is None and not scriptless:
             raise ValueError("a script source is needed unless resuming")

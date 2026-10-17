@@ -10,10 +10,11 @@ from pathlib import Path
 from typing import Any
 
 from ahp_host import Host, LoopbackSingleUserPolicy
+from ahp_host.core.store import FileSessionStore, SessionStore
 from ahp_protocol.ext.flow import FLOW_META_KEY
 
 from ahp_host_flow import FlowProvider, load_config
-from tests.hosting import Wire, connect, found, open_session, shut, text_of
+from tests.hosting import Wire, connect, found, open_session, shut, state, text_of
 
 SESSION = "flow:/s1"
 ECHO = "ahp_host.provider.echo:EchoProvider"
@@ -49,11 +50,16 @@ async def boot_flow(
     *,
     workspace: Path | None = None,
     session_config: Mapping[str, Any] | None = None,
+    store: SessionStore | None = None,
 ) -> FlowFixture:
     workspace = workspace if workspace is not None else base / "ws"
     (workspace / ".claude" / "workflows").mkdir(parents=True, exist_ok=True)
     config = load_config(write_toml(base, node, body))
-    host = Host(FlowProvider(config, user_workflows_dir=base / "user"), LoopbackSingleUserPolicy())
+    host = Host(
+        FlowProvider(config, user_workflows_dir=base / "user"),
+        LoopbackSingleUserPolicy(),
+        store=store,
+    )
     wire, serving = await connect(host)
     chat = await open_session(
         wire,
@@ -62,6 +68,30 @@ async def boot_flow(
         working_directories=[workspace.as_uri()],
         config=session_config,
     )
+    return FlowFixture(base, host, wire, serving, chat, workspace)
+
+
+def store_for(base: Path) -> FileSessionStore:
+    """The session store a restart test shares between its two hosts."""
+    return FileSessionStore(base / "sessions", debounce=0.05)
+
+
+async def restart_flow(
+    base: Path, node: str, body: str, *, workspace: Path | None = None
+) -> FlowFixture:
+    """A new host on the same store and state dir, restored: the session as the old host left it."""
+    workspace = workspace if workspace is not None else base / "ws"
+    config = load_config(write_toml(base, node, body))
+    host = Host(
+        FlowProvider(config, user_workflows_dir=base / "user"),
+        LoopbackSingleUserPolicy(),
+        store=store_for(base),
+    )
+    await host.restore()
+    wire, serving = await connect(host)
+    await wire.request("subscribe", {"channel": SESSION})
+    chat = str(state(host, SESSION)["defaultChat"])
+    await wire.request("subscribe", {"channel": chat})
     return FlowFixture(base, host, wire, serving, chat, workspace)
 
 

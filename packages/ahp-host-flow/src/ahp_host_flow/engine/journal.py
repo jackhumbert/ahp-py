@@ -2,7 +2,9 @@
 
 The header record holds the script snapshot; each dispatched `agent()` call adds a
 start record and, when it completes, an agent record. A torn final line (a killed
-process) is ignored on read.
+process) is ignored on read. Record types other than run/workflow/agent/started are
+ignored on load, on purpose, so a later record kind (M10 gates) stays readable by
+this code; keep it so.
 """
 
 from __future__ import annotations
@@ -235,6 +237,9 @@ def _is_count(value: Any) -> TypeGuard[int]:
 
 
 def load_journal(state_dir: Path, run_id: str) -> LoadedJournal:
+    """Read a run's journal. Record types other than run/workflow/agent/started are
+    ignored, on purpose, so a later record kind (M10 gates) stays readable; keep it so.
+    """
     path = run_dir(state_dir, run_id) / JOURNAL_FILE
     if not path.is_file():
         raise JournalError(f"no journal for run {run_id!r} under {state_dir}")

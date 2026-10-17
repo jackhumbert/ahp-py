@@ -194,8 +194,9 @@ class TestRestart:
 
     async def test_an_interrupted_turn_is_not_restored_as_active(self, tmp_path: Path) -> None:
         """ "In-progress turns SHOULD be considered failed." The partial response
-        is kept -- the user should see what the agent had said -- but a turn
-        nothing is running is not active."""
+        is kept in a failed turn (errorType `host.restart`) -- the user should
+        see what the agent had said -- but a turn nothing is running is not
+        active."""
         first = _host(tmp_path)
         uri = "echo:/durable-4"
         try:
@@ -240,6 +241,7 @@ class TestRestart:
             turn = transcript["turns"][-1]
             assert (turn["id"], turn["state"]) == ("stuck", "error")
             assert turn["responseParts"][-1]["resumable"] is True
+            assert turn["responseParts"][-1]["error"]["errorType"] == "host.restart"
         finally:
             await second.aclose()
 

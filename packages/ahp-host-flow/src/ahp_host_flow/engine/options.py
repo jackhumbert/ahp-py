@@ -52,6 +52,9 @@ class RunOptions:
     run_id: str | None = None
     # Id of an earlier run whose journal serves cached agent() calls.
     resume_from: str | None = None
+    # Continue a run the host stopped, from its own journal snapshot: every finished call
+    # replays by key, not only the longest unchanged prefix.
+    continue_run: bool = False
     # Masks every value the journal stores (plan §4.9); None stores values as they are.
     redact: Callable[[Any], Any] | None = field(default=None, compare=False, repr=False)
 
@@ -79,6 +82,10 @@ class RunOptions:
                 raise ValueError(f"{name} must match [A-Za-z0-9][A-Za-z0-9_-]{{0,63}}")
         if (self.run_id is not None or self.resume_from is not None) and self.state_dir is None:
             raise ValueError("run_id and resume_from need state_dir")
+        if not isinstance(self.continue_run, bool):
+            raise ValueError("continue_run must be a bool")
+        if self.continue_run and self.resume_from is None:
+            raise ValueError("continue_run needs resume_from")
         if self.run_id is not None and self.run_id == self.resume_from:
             raise ValueError("run_id must differ from resume_from")
         if self.python_dirs is not None and not (

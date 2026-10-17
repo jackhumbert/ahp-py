@@ -152,3 +152,23 @@ class TestKeysAreScopedToTheirChannel:
 
         assert pending.id_for_key("loose", channel="ahp-chat:/anything") == parked.id
         assert pending.id_for_key("loose") == parked.id
+
+
+async def test_pending_open_keeps_the_turn_id() -> None:
+    """Persisted with the session, so a restart can say which turn's request it withdrew."""
+    pending = PendingRequests()
+    assert pending.open("s", "input", turn_id="t9").turn_id == "t9"
+    assert pending.open("s", "input").turn_id is None
+
+
+async def test_pending_in_channels() -> None:
+    pending = PendingRequests()
+    first = pending.open("s", "input", channel="a")
+    pending.open("s", "input", channel="b")
+    third = pending.open("s", "confirm", "k", channel="a")
+    pending.open("s", "input")
+
+    assert pending.in_channels({"a"}) == [first, third]
+    assert pending.in_channels(["z"]) == []
+    pending.resolve(first.id, RequestOutcome("accept"))
+    assert pending.in_channels({"a"}) == [third]

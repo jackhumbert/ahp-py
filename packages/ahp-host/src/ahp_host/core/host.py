@@ -105,6 +105,7 @@ from ahp_host.core.resources import (
     path_from_file_uri,
     uri_from_path,
 )
+from ahp_host.core.restart import RestoredInputRequest, restored_requests, withdrawn_notice
 from ahp_host.core.seq import FileSequence
 from ahp_host.core.sequencer import Sequencer
 from ahp_host.core.store import InMemorySessionStore, SessionStore, StoredSession
@@ -703,8 +704,33 @@ def _reducer_for_restored(uri: str, state: Mapping[str, Any], session_uri: str) 
 _RESTART_ERROR_TYPE: Final = "host.restart"
 
 
-def _failed_by_restart(state: Mapping[str, Any], active: Any, *, resumable: bool) -> dict[str, Any]:
+def _restart_error_part(*, resumable: bool) -> dict[str, Any]:
+    """The error part a turn the restart failed ends with."""
+    part: dict[str, Any] = {
+        "kind": "error",
+        "error": {
+            "errorType": _RESTART_ERROR_TYPE,
+            "message": "The host restarted while this turn was running.",
+        },
+    }
+    if resumable:
+        part["resumable"] = True
+    return part
+
+
+def _failed_by_restart(
+    state: Mapping[str, Any],
+    active: Any,
+    *,
+    resumable: bool,
+    notice: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
     """*state* with its `activeTurn` ended as a failed turn.
+
+    *notice* is a response part added just before the error -- the
+    `systemNotification` naming the open requests the restart withdrew
+    (`core/restart.py`), so the user reads why the question they were asked
+    is gone where they were asked it.
 
     Run through the chat reducer's own `chat/error` rather than rebuilt by
     hand, so the turn has exactly the shape a live failure produces: tools
@@ -730,15 +756,10 @@ def _failed_by_restart(state: Mapping[str, Any], active: Any, *, resumable: bool
                 and "response" not in part
             )
         ]
-    error_part: dict[str, Any] = {
-        "kind": "error",
-        "error": {
-            "errorType": _RESTART_ERROR_TYPE,
-            "message": "The host restarted while this turn was running.",
-        },
-    }
-    if resumable:
-        error_part["resumable"] = True
+    if notice is not None:
+        kept = cleaned.get("responseParts")
+        cleaned["responseParts"] = [*(kept if isinstance(kept, list) else []), dict(notice)]
+    error_part = _restart_error_part(resumable=resumable)
     ended = REDUCERS["chat"](
         {**state, "activeTurn": cleaned},
         {"type": "chat/error", "turnId": cleaned.get("id"), "part": error_part, "duration": 0},
@@ -1732,6 +1753,9 @@ class Host:
         #: only the client can read.
         self.outbound = OutboundRequests()
         self._sessions: dict[str, _Session] = {}
+        #: Set by `aclose` once it has persisted every session: from then on
+        #: `_persist` writes nothing (see there).
+        self._closing = False
         self._connections: set[Connection] = set()
         self._background: set[asyncio.Task[None]] = set()
         # No default schema, for the same reason there is no default Policy.
@@ -1892,7 +1916,9 @@ class Host:
 
         A restored session has no live `agent_session`: the provider is asked
         to resume lazily, on the first turn, so a host with a hundred stored
-        sessions does not spawn a hundred agent runtimes at startup.
+        sessions does not spawn a hundred agent runtimes at startup. A turn a
+        deliberate restart cut off is the exception: `_carry_on_after_restart`
+        resumes it, and that brings its agent back.
         """
         if self._restored:
             return 0
@@ -1926,7 +1952,12 @@ class Host:
         # Last, once every session and directory is in place: this starts
         # turns, and a turn may touch any of them.
         for session, stored in restored:
-            await self._carry_on_after_restart(session, stored)
+            try:
+                await self._carry_on_after_restart(session, stored)
+            except Exception:
+                # One session's trouble (its store write, its agent) must not
+                # stop the host from starting with the others.
+                _log.exception("could not carry on %s after a restart", session.uri)
         return count
 
     async def _carry_on_after_restart(self, session: _Session, stored: StoredSession) -> None:
@@ -1989,7 +2020,23 @@ class Host:
             _log.info("not resuming %s after the restart: %s", chat, reason)
             return
         await self.sequencer.publish(chat, action)
-        await self._start_turn(session, chat, action, resume=True)
+        try:
+            await self._start_turn(session, chat, action, resume=True)
+        except Exception:
+            # The reducer has already reopened the turn, and with nothing
+            # running it the chat would refuse every later turn as "already
+            # active", for good. Failed again -- still resumable, so the user
+            # can try once more -- rather than left wedged.
+            _log.exception("could not resume %s after the restart", chat)
+            await self.sequencer.publish(
+                chat,
+                {
+                    "type": "chat/error",
+                    "turnId": latest.get("id"),
+                    "part": _restart_error_part(resumable=True),
+                    "duration": 0,
+                },
+            )
 
     async def open_session(
         self,
@@ -2115,6 +2162,25 @@ class Host:
             resume_state=stored.resume_state,
             content=self._content_store(),
         )
+        # Every open request the previous process had published is withdrawn:
+        # the turn that asked is failed below, and a turn resumed later runs
+        # with a fresh sink and asks afresh, so nothing can answer one any more.
+        # Left in `inputNeeded`, it would hold the session at "input needed"
+        # with nobody listening; dropped without a word, the user would never
+        # learn what became of the approval they were about to give.
+        active_turns: dict[str, str] = {}
+        for uri in chat_uris:
+            active = stored.channels[uri].get("activeTurn")
+            if isinstance(active, Mapping) and isinstance(active.get("id"), str):
+                active_turns[uri] = active["id"]
+        withdrawn = restored_requests(
+            stored.input_requests,
+            session_state.get("inputNeeded") if isinstance(session_state, Mapping) else None,
+            turns=active_turns,
+        )
+        withdrawn_by_chat: dict[str, list[RestoredInputRequest]] = {}
+        for request in withdrawn:
+            withdrawn_by_chat.setdefault(request.chat_uri, []).append(request)
         for uri, state in stored.channels.items():
             reducer = _reducer_for_restored(uri, state, stored.uri)
             restored_state = dict(state)
@@ -2126,10 +2192,15 @@ class Host:
                 # active. Where the provider can resume turns the error says
                 # so, and the user (or `_carry_on_after_restart`, for a
                 # deliberate restart) can pick the turn up where it stopped.
+                # The requests it was waiting on are named in a notice first.
                 active = restored_state.get("activeTurn")
                 if active is not None:
+                    asked = withdrawn_by_chat.get(uri)
                     restored_state = _failed_by_restart(
-                        restored_state, active, resumable=self._turn_is_resumable(stored, active)
+                        restored_state,
+                        active,
+                        resumable=self._turn_is_resumable(stored, active),
+                        notice=withdrawn_notice(asked) if asked else None,
                     )
                 restored_state["turns"] = _turns_with_message_origins(restored_state.get("turns"))
                 # "Hosts must reconcile the runtime's current inventory after
@@ -2156,6 +2227,18 @@ class Host:
                 await self._refresh_config_schema(stored.provider, restored_state)
             await self.sequencer.register_channel(uri, restored_state, reducer)
 
+        for request in withdrawn:
+            await self.sequencer.publish(
+                stored.uri, {"type": "session/inputNeededRemoved", "id": request.id}
+            )
+            if request.chat_uri not in active_turns:
+                # Its turn had already ended, so there is no turn to put the
+                # notice in; the entry was stale, and only a log line says so.
+                _log.warning(
+                    "withdrew stale input request %s of %s: its turn was not running",
+                    request.id,
+                    stored.uri,
+                )
         session.publisher = _Publisher(self, session, None)
         self._sessions[stored.uri] = session
         await self.sequencer.notify(
@@ -2220,7 +2303,18 @@ class Host:
         A resumable provider is asked for its resume state each time, so what
         is stored is what it would need *now* -- its own session id once the
         first turn has minted one, a mode changed mid-session.
+
+        The open requests are written from the pending registry (which turn,
+        which tool call); `inputNeeded` in the session state is what clients
+        were shown. Restore withdraws every one, naming it (`core/restart.py`).
+
+        A no-op once `aclose` has written every session: what shutdown does
+        after that (cancelling turns, retracting their requests) is the
+        process stopping, not the session changing, and must not overwrite the
+        state the next process needs.
         """
+        if self._closing:
+            return
         provider = self._provider_of(session)
         if isinstance(provider, ResumableAgentProvider) and session.agent_session is not None:
             try:
@@ -2244,6 +2338,17 @@ class Host:
                     channels=channels,
                     title=session.title,
                     resume_state=session.resume_state,
+                    input_requests=[
+                        {
+                            "id": r.id,
+                            "kind": r.kind,
+                            "chat": r.channel,
+                            "turnId": r.turn_id,
+                            **({"key": r.key} if r.key is not None else {}),
+                        }
+                        for r in self.pending.in_channels(session.chat_uris)
+                        if r.channel is not None and r.turn_id is not None
+                    ],
                     # The embedder's, asked for at write time rather than
                     # cached: a policy that re-keys ownership between the
                     # session starting and this write should not persist a
@@ -9058,6 +9163,25 @@ class Host:
         return sessions
 
     async def aclose(self) -> None:
+        for session in self._sessions.values():
+            if session.interrupted:
+                # Only what is STILL running: a turn that finished between the
+                # drain's deadline and now was not interrupted by anything.
+                session.interrupted &= {c for c, t in session.turns.items() if not t.done()}
+        # Every session is written before anything is cancelled. The list of
+        # interrupted chats has to reach the store before the agent goes: it is
+        # the one thing the next process cannot work out for itself. So do the
+        # open requests and the active turns as they were, and `resume_state_of`
+        # is asked while the agents are still alive. A message queued while the
+        # host drained (the one thing a drain accepts and does not run) changes
+        # nothing the normal paths persist on, and is written here too.
+        # Everything shutdown does afterwards (cancelling turns, retracting their
+        # requests) is the process stopping, not the sessions changing, and
+        # `_closing` keeps it out of the store.
+        for session in list(self._sessions.values()):
+            with contextlib.suppress(Exception):
+                await self._persist(session)
+        self._closing = True
         for timer in self._token_expiry.values():
             timer.cancel()
         self._token_expiry.clear()
@@ -9072,22 +9196,10 @@ class Host:
             with contextlib.suppress(asyncio.CancelledError):
                 await task
         for session in self._sessions.values():
-            if session.interrupted:
-                # Only what is STILL running: a turn that finished between the
-                # drain's deadline and now was not interrupted by anything.
-                session.interrupted &= {c for c, t in session.turns.items() if not t.done()}
             for task in session.running():
                 task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await task
-            if session.interrupted or self._draining:
-                # The list has to reach the store before the agent goes: it is
-                # the one thing the next process cannot work out for itself.
-                # A draining host writes every session, not only those: a
-                # message queued while it drained (the one thing a drain
-                # accepts and does not run) changes nothing the normal paths
-                # persist on, and would otherwise be lost to the restart.
-                await self._persist(session)
             if session.agent_session is not None:
                 await session.agent_session.aclose()
         # Terminals die WITH the host. Without this the shells outlive it:

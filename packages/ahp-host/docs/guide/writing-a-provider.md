@@ -492,6 +492,29 @@ error — and rejects it, with a reason, otherwise. Without `ResumesTurns`,
 `resumable=True` is dropped (and logged), so no client is offered a resume
 nothing would answer.
 
+### A turn a restart cut off
+
+The same `resume_turn` is how a turn the host's restart cut off carries on;
+there is nothing else to implement. On `host.restore()` a turn that was running
+when the host stopped becomes a failed turn with `errorType` `host.restart`,
+resumable when your provider is a `ResumableAgentProvider`. The host resumes it
+once, automatically, when a drain-restart (`Host.drain`) cut it off; one lost to
+a crash waits for a client's `chat/turnResume`. Either way `resume_turn` runs on
+the session your `resume_session` returned, so whatever it needs to know about
+the turn has to be in the resume state you hand back from `resume_state_of`.
+
+Two things differ from resuming a turn you failed yourself:
+
+- **Nothing the turn had asked survives.** Each confirmation or question it had
+  open is withdrawn on restore, with a notice in the turn naming it. If you
+  still need the answer, ask again through the fresh sink; the request gets a
+  new id.
+- **Every interrupted chat is offered**, including worker or tool chats your
+  provider hosts. A chat you cannot continue is yours to decline: fail it with
+  `turn_failed` (not resumable) and say why.
+
+The reasons are in [ADR 0006](../decisions/0006-restoring-interrupted-turns.md).
+
 ## Structured turns
 
 A client can ask for a result that matches a JSON Schema by putting it in

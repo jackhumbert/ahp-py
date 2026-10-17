@@ -181,6 +181,51 @@ async with ahp_host_flow.run(dispatcher, RunOptions(budget_total=50_000)) as r:
   provider and worker chat) when a call is dispatched, before its result. A
   resume does not replay a call that never finished; it logs it.
 
+## Runs survive a restart
+
+A run continues after the host restarts when the host has a session store:
+`FileSessionStore` plus `host.restore()`, which `python -m ahp_host_flow` or an
+embedder sets up. Without a store nothing is kept and a restored chat is only
+transcript.
+
+The host fails a run's main turn that a restart cut off (`errorType`
+`host.restart`, resumable) and resumes it through `chat/turnResume`: by itself,
+once, after a graceful restart that drained past its deadline (`ahp-node
+restart`, `Host.drain`); after a crash, when a client resumes the failed turn.
+`FlowSession.resume_turn` then relaunches the run from its journal under the
+same turn id (`RunOptions.continue_run`):
+
+- finished calls replay from the journal by key;
+- a call that was cut off (a `started` record but no result) runs again, with a
+  log line naming it, under a tool call id of its own (`agent-r<k>-…`); the
+  cut-off one was cancelled when the host failed the turn.
+
+What does not continue:
+
+- Worker chats: each is failed by the restart like any interrupted turn, and
+  `resume_turn` declines it if it is offered. The re-dispatched call opens a new
+  worker chat.
+- Approvals and questions an in-process inner session had open are withdrawn
+  by the host with a notice naming them, because the inner session is gone;
+  the call runs again live and asks again.
+- Fleet calls reattach only in M7.
+
+Typed progress stays consistent: a continued run emits one `runStarted` (no
+second one), a plain "Run <old> resumed after a host restart as run <new>"
+line, phases it had announced are not announced again, and the re-dispatched
+step supersedes the one that was cut off.
+
+The provider's resume state is `{flow: 1, runs: [{chat, turnId, runId,
+workflow, model, resumes, phasesStarted, phasesFinished}]}`, one entry per live
+run (or per run a crash left resumable, until its chat starts another turn).
+
+Limits:
+
+- A crash loses the store's debounce window, so a run started within it may not
+  be resumable.
+- A second interruption before already-finished later calls are reached runs
+  them again, because the new journal holds only the calls it has reached.
+
 ## flow.toml
 
 ```toml

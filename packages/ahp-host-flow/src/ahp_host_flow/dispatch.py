@@ -184,6 +184,7 @@ class ProviderDispatcher:
         pending_overlays: MutableMapping[str, dict[str, Any]] | None = None,
         redactor: Redactor | None = None,
         on_log: Callable[[str], None] | None = None,
+        call_id_prefix: str = "agent",
     ) -> None:
         self.config = config
         self.providers = providers
@@ -199,6 +200,9 @@ class ProviderDispatcher:
         self.pending_overlays = pending_overlays
         self.redactor = redactor if redactor is not None else make_redactor(config.redact)
         self.on_log = on_log
+        #: Prefixes each call's tool call id; a continued run uses a fresh one so its ids
+        #: never collide with the ones the interrupted turn already published.
+        self.call_id_prefix = call_id_prefix
         #: The run's id, set once the run is journaled; `isolation: 'worktree'` needs it.
         self.run_id: str | None = None
         #: Calls whose tool call this dispatcher has already completed.
@@ -215,7 +219,7 @@ class ProviderDispatcher:
     async def run_agent(self, call: AgentCall) -> AgentResult:
         name = route(self.config.routing, call)
         title = worker_title(call)
-        call_id = f"agent-{call.ordinal}"
+        call_id = f"{self.call_id_prefix}-{call.ordinal}"
         started = flow.step_started(
             ordinal=call.ordinal,
             label=call.label,

@@ -372,6 +372,24 @@ content and tool results all come off the wire. `serverSeq` survives too, which
 matters more than it sounds: the reference client records it with a *maximum*,
 so a counter that restarts at zero can never replay again.
 
+A turn that was running when the host stopped is restored as a failed turn
+(`errorType` `host.restart`) with its partial response intact, and is resumed
+through the ordinary `chat/turnResume` path (`ResumesTurns.resume_turn`):
+automatically, once, after a deliberate restart, or by the user after a crash
+(see **Restarts drain first** below). Open approvals and questions are persisted
+as `inputRequests` beside the session's `inputNeeded`. Nothing in the next
+process can answer one -- the turn that asked has failed, and a resumed turn runs
+with a fresh sink and raises fresh requests of its own -- so on restore every one
+is withdrawn: its `inputNeeded` entry is removed and a `systemNotification`
+naming it is added to the interrupted turn, just before the error. Nothing
+vanishes silently, and the session is not left showing "input needed" with
+nobody listening. The notice's `_meta['ahp-py/restart']` is
+`{"event": "inputWithdrawn", "requests": [<ids>]}`; a client that does not know
+the key still shows the text. Shutdown persists every session before cancelling
+its turns, so the store keeps what was open; a hard kill loses at most the store
+debounce (1 s by default). See
+[ADR 0006](docs/decisions/0006-restoring-interrupted-turns.md).
+
 **Client-published plugins are expanded.** `resource*` is symmetrical, and the
 reverse direction exists so a host can fetch content only the client has — a
 `virtual://my-client/...` plugin lives in the client's memory and no filesystem

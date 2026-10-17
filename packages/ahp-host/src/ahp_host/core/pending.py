@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -70,6 +70,10 @@ class PendingRequest:
     #: anywhere-answerable default a channel-less park gets.
     resource: str | None = None
     required_scopes: tuple[str, ...] = ()
+    #: The turn whose scope holds this request. Persisted with the session
+    #: (`StoredSession.input_requests`), so the next process can say which
+    #: turn's request a restart withdrew.
+    turn_id: str | None = None
 
 
 class PendingRequests:
@@ -106,6 +110,7 @@ class PendingRequests:
         owner: str | None = None,
         resource: str | None = None,
         required_scopes: Sequence[str] = (),
+        turn_id: str | None = None,
     ) -> PendingRequest:
         """Park a new request and return it, un-awaited.
 
@@ -139,12 +144,17 @@ class PendingRequests:
             owner=owner,
             resource=resource,
             required_scopes=tuple(required_scopes),
+            turn_id=turn_id,
         )
         self._by_id[request_id] = request
         self._by_scope.setdefault(scope, set()).add(request_id)
         if key is not None:
             self._by_key[(channel, key)] = request_id
         return request
+
+    def in_channels(self, channels: Collection[str]) -> list[PendingRequest]:
+        """Live requests asked on any of *channels*, in insertion order."""
+        return [r for r in self._by_id.values() if r.channel in channels]
 
     def id_for_key(self, key: Any, *, channel: str | None = None) -> str | None:
         """The live request registered under *key*, if any.

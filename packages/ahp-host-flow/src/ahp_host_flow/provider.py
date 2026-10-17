@@ -5,7 +5,9 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import logging
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Final
 
@@ -18,6 +20,7 @@ from ahp_host.provider.base import (
     ConfigRequest,
     ConfigResolution,
     ConfigValue,
+    IdentifiesTurn,
     ModelInfo,
     SessionDescription,
     UserMessage,
@@ -42,9 +45,16 @@ from ahp_host_flow.config import (
     make_redactor,
 )
 from ahp_host_flow.dispatch import ProviderDispatcher, forward_overlay
-from ahp_host_flow.engine import AbortSignal, JournalError, RunOptions
+from ahp_host_flow.engine import (
+    RUN_ID,
+    AbortSignal,
+    JournalError,
+    RunOptions,
+    load_journal,
+)
 from ahp_host_flow.loading import LazyProviders
 from ahp_host_flow.sandbox import (
+    NO_ARGS,
     NodeNotFoundError,
     SandboxError,
     ScriptError,
@@ -53,7 +63,18 @@ from ahp_host_flow.sandbox import (
     run_script,
 )
 
+_log = logging.getLogger(__name__)
+
 PROVIDER_ID: Final = "flow"
+
+#: The version of the resume state a session persists (`{"flow": 1, "runs": [...]}`).
+RESUME_STATE_VERSION: Final = 1
+
+#: Why `resume_turn` declines a chat with no run of this session to continue.
+NOTHING_TO_RESUME: Final = (
+    "nothing to resume on this chat: a flow run is resumed on its main chat, "
+    "and a call cut off in a worker chat is dispatched again by its run"
+)
 
 APPROVAL_PROPERTY: Final[Mapping[str, Any]] = {
     "type": "string",
@@ -141,6 +162,80 @@ def _aggregate_models(
     return models
 
 
+@dataclass(frozen=True)
+class RunEntry:
+    """A run that was live: its main chat, the turn it runs in and its journal.
+
+    The rest is what resuming the turn needs and cannot read back from it
+    (`resume_turn` is handed only the chat and the turn id): the run's model,
+    how many times the turn was resumed already (the next continuation's
+    tool-call ids are `agent-r<k>`), and how many `phaseStarted` /
+    `phaseFinished` notices the turn holds, so a continued run does not open a
+    phase twice.
+    """
+
+    chat: str
+    turn_id: str
+    run_id: str
+    workflow: str | None
+    model: str | None = None
+    resumes: int = 0
+    phases_started: int = 0
+    phases_finished: int = 0
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "chat": self.chat,
+            "turnId": self.turn_id,
+            "runId": self.run_id,
+            "workflow": self.workflow,
+            "model": self.model,
+            "resumes": self.resumes,
+            "phasesStarted": self.phases_started,
+            "phasesFinished": self.phases_finished,
+        }
+
+
+def _count(item: Mapping[str, Any], key: str) -> int | None:
+    """A non-negative count, 0 when absent, None when malformed."""
+    value = item.get(key, 0)
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return None
+    return value
+
+
+def _parse_runs(state: Mapping[str, Any] | None) -> dict[str, RunEntry]:
+    """The runs a persisted resume state names, by main chat; malformed entries are skipped."""
+    if state is None:
+        return {}
+    runs = state.get("runs")
+    if state.get("flow") != RESUME_STATE_VERSION or not isinstance(runs, list):
+        _log.warning("ignoring flow resume state of an unknown shape")
+        return {}
+    found: dict[str, RunEntry] = {}
+    for item in runs:
+        if isinstance(item, Mapping):
+            chat, turn_id, run_id = item.get("chat"), item.get("turnId"), item.get("runId")
+            workflow, model = item.get("workflow"), item.get("model")
+            counts = [_count(item, k) for k in ("resumes", "phasesStarted", "phasesFinished")]
+            if (
+                isinstance(chat, str)
+                and isinstance(turn_id, str)
+                and isinstance(run_id, str)
+                and RUN_ID.fullmatch(run_id)
+                and (workflow is None or isinstance(workflow, str))
+                and (model is None or isinstance(model, str))
+                and None not in counts
+            ):
+                resumes, started, finished = (int(c or 0) for c in counts)
+                found[chat] = RunEntry(
+                    chat, turn_id, run_id, workflow, model, resumes, started, finished
+                )
+                continue
+        _log.warning("ignoring a malformed run entry in the flow resume state")
+    return found
+
+
 class FlowProvider:
     """Runs Claude Code workflow scripts; each `agent()` call is a worker chat."""
 
@@ -186,6 +281,12 @@ class FlowProvider:
     async def create_session(self, context: AgentSessionContext) -> FlowSession:
         return FlowSession(self, context)
 
+    async def resume_session(self, context: AgentSessionContext) -> FlowSession:
+        return FlowSession(self, context)
+
+    async def resume_state_of(self, session: AgentSession) -> Mapping[str, Any] | None:
+        return session.resume_state() if isinstance(session, FlowSession) else None
+
 
 class FlowSession:
     """One flow session: each message that starts a run is one run."""
@@ -197,6 +298,11 @@ class FlowSession:
         self._chat_overlays: dict[str, dict[str, Any]] = {}
         self._workers: dict[str, AgentSession] = {}
         self._aborts: dict[str, AbortSignal] = {}
+        #: Live runs by main chat.
+        self._runs: dict[str, RunEntry] = {}
+        #: Runs the last host process left active, until their turn is resumed
+        #: (`resume_turn`) or the chat moves on to another turn.
+        self._restored: dict[str, RunEntry] = _parse_runs(context.resume_state)
         #: The customizations last published (or described), to see when a source changes.
         self._published: list[dict[str, Any]] | None = None
 
@@ -214,6 +320,74 @@ class FlowSession:
     def _node(self) -> str | None:
         return find_node(self.provider.config.node)
 
+    def resume_state(self) -> dict[str, Any]:
+        """The runs to carry across a restart; restored ones not yet resumed are kept."""
+        entries = {**self._restored, **self._runs}
+        return {
+            "flow": RESUME_STATE_VERSION,
+            "runs": [e.to_json() for _, e in sorted(entries.items())],
+        }
+
+    async def resume_turn(self, chat_uri: str, turn_id: str, sink: TurnSink) -> None:
+        """Resume a run's main turn that a host restart failed: relaunch it from its journal.
+
+        `ResumesTurns`. The host calls it once, by itself, for a turn a
+        drain-restart cut off, and on a client's `chat/turnResume` for one a
+        crash lost. Finished `agent()` calls replay by key; one that started and
+        never finished is dispatched again live. Any other chat -- a worker chat,
+        a turn that is not the run's, a run whose journal is gone -- is declined
+        by failing the turn again, not resumable, so a client is not offered the
+        same dead end twice.
+        """
+        entry = self._restored.pop(chat_uri, None)
+        if entry is None:
+            await sink.turn_failed(NOTHING_TO_RESUME, "flow.run")
+            return
+        if entry.turn_id != turn_id:
+            _log.warning(
+                "dropping run %s: it ran in turn %s, not %s", entry.run_id, entry.turn_id, turn_id
+            )
+            await sink.turn_failed(NOTHING_TO_RESUME, "flow.run")
+            return
+        try:
+            header = load_journal(self.provider.config.state_dir, entry.run_id).header
+        except (JournalError, ValueError) as exc:
+            # Dropped, not kept: an entry nothing can continue would otherwise
+            # ride along in the resume state forever.
+            _log.warning("cannot continue run %s, dropping it: %s", entry.run_id, exc)
+            await sink.turn_failed(self.provider.redactor.mask(str(exc)), "flow.run")
+            return
+        node = self._node()
+        if node is None and language_of(header.filename) == "js":
+            # Kept, and resumable: the run can go on once Node is found.
+            self._restored[chat_uri] = entry
+            await sink.turn_failed(str(NodeNotFoundError()), "flow.node", resumable=True)
+            return
+        resumed = replace(entry, resumes=entry.resumes + 1)
+        # Live from here, before the first await: the host persists the resume
+        # state at any time (a quick second shutdown, a debounced save), and the
+        # entry has just left `_restored` while `on_run_start` has not yet put
+        # the continued run in `_runs`. Without this the run was in neither.
+        self._runs[chat_uri] = resumed
+        try:
+            # The calls the restart cut off were closed (cancelled) when the
+            # host failed the turn; the re-dispatched ones get ids of their own.
+            await self._run_workflow(
+                chat=chat_uri,
+                sink=sink,
+                source=None,
+                filename=header.filename,
+                args=NO_ARGS,
+                workflow=resumed.workflow,
+                model=resumed.model,
+                node=node,
+                dirs=self._dirs(),
+                resume_from=resumed.run_id,
+                resumed=resumed,
+            )
+        finally:
+            self._runs.pop(chat_uri, None)
+
     async def describe(self) -> SessionDescription:
         dirs = self._dirs()
         entries = await catalog.discover(
@@ -225,6 +399,9 @@ class FlowSession:
     async def send_user_message(self, message: UserMessage, sink: TurnSink) -> None:
         context = self.context
         chat = message.chat_uri or context.chat_uri
+        # A new turn on the chat: the restored run's turn is no longer the latest,
+        # so `chat/turnResume` can never reach it again.
+        self._restored.pop(chat, None)
         parsed = parse_message(message.text)
         if isinstance(parsed, BadRequest):
             await sink.text_delta(parsed.message)
@@ -258,6 +435,47 @@ class FlowSession:
             await sink.turn_failed("no session publisher", "flow.run")
             return
 
+        await self._run_workflow(
+            chat=chat,
+            sink=sink,
+            source=source,
+            filename=filename,
+            args=parsed.args,
+            workflow=parsed.name,
+            model=message.model.id if message.model else None,
+            node=node,
+            dirs=dirs,
+        )
+
+    async def _run_workflow(
+        self,
+        *,
+        chat: str,
+        sink: TurnSink,
+        source: str | None,
+        filename: str,
+        args: object,
+        workflow: str | None,
+        model: str | None,
+        node: str | None,
+        dirs: list[catalog.SourceDir],
+        resume_from: str | None = None,
+        resumed: RunEntry | None = None,
+    ) -> None:
+        """Run one workflow as the turn *sink* publishes; *resume_from* continues that run.
+
+        *resumed* is, for a continued run, its entry: how often the turn was
+        resumed (the call ids' `agent-r<k>` prefix) and how many `phaseStarted`
+        and `phaseFinished` notices the turn already holds -- the script
+        replays its `phase()` calls, and a phase the transcript has opened must
+        not be opened a second time.
+        """
+        context = self.context
+        config = self.provider.config
+        publisher = context.publisher
+        if publisher is None:
+            await sink.turn_failed("no session publisher", "flow.run")
+            return
         redactor = self.provider.redactor
         workspace = next(
             (p for d in context.working_directories if (p := catalog.directory_of(d))), None
@@ -273,6 +491,8 @@ class FlowSession:
                 python_dirs=python_dirs,
                 run_root=workspace,
                 redact=redactor.mask_value,
+                resume_from=resume_from,
+                continue_run=resume_from is not None,
             )
         except ValueError as exc:
             await sink.turn_failed(redactor.mask(str(exc)), "flow.run")
@@ -281,12 +501,34 @@ class FlowSession:
         self._aborts[chat] = abort
         notes: asyncio.Queue[tuple[str, Mapping[str, Any] | None] | None] = asyncio.Queue()
         current_phase: str | None = None
+        #: Phases are announced in script order and finish in the same order, so
+        #: the first `started_count` phase() calls and the first `finished_count`
+        #: finishes are already in the transcript (non-zero only when continuing).
+        started_count = resumed.phases_started if resumed is not None else 0
+        finished_count = resumed.phases_finished if resumed is not None else 0
+        phase_calls = 0
+        #: The phase notices the turn holds, counted as each is published (so a
+        #: persisted resume state never claims one the transcript lacks).
+        published = [started_count, finished_count]
+        resumes = resumed.resumes if resumed is not None else 0
+
+        def remember_phases() -> None:
+            entry = self._runs.get(chat)
+            if entry is not None:
+                self._runs[chat] = replace(
+                    entry, phases_started=published[0], phases_finished=published[1]
+                )
 
         async def drain() -> None:
             while (note := await notes.get()) is not None:
                 text, note_meta = note
                 if note_meta is not None:
                     await sink.system_notification(text, meta=note_meta)
+                    noted = flow.descriptor_of(note_meta) or {}
+                    if "phaseStarted" in noted or "phaseFinished" in noted:
+                        published[0] += "phaseStarted" in noted
+                        published[1] += "phaseFinished" in noted
+                        remember_phases()
                 else:
                     await sink.system_notification(text)
 
@@ -296,30 +538,56 @@ class FlowSession:
             config=config,
             providers=self.provider.providers,
             sink=sink,
-            publisher=context.publisher,
+            publisher=publisher,
             chat=chat,
             session_uri=context.session_uri,
             working_directories=context.working_directories,
             run_values=lambda: {**self._values, **self._chat_overlays.get(chat, {})},
-            run_model=message.model.id if message.model else None,
+            run_model=model,
             workers=self._workers,
             pending_overlays=self._chat_overlays,
             redactor=redactor,
             on_log=lambda text: notes.put_nowait((redactor.mask(text), None)),
+            # A continued run's calls get ids of their own: the cut-off ones stay in the turn.
+            call_id_prefix=f"agent-r{resumes}" if resumes else "agent",
         )
 
         def on_run_start(run_id: str) -> None:
             dispatcher.run_id = run_id
-            notes.put_nowait((f"Run {run_id}", flow.meta(flow.run_started(run_id, parsed.name))))
+            if isinstance(sink, IdentifiesTurn):
+                # The continued run journals under a new id, and a later resume
+                # continues from that journal.
+                self._runs[chat] = RunEntry(
+                    chat,
+                    sink.turn_id,
+                    run_id,
+                    workflow,
+                    model,
+                    resumes,
+                    published[0],
+                    published[1],
+                )
+            if resume_from is None:
+                notes.put_nowait((f"Run {run_id}", flow.meta(flow.run_started(run_id, workflow))))
+            else:
+                # No descriptor: the transcript keeps its one runStarted, and run_view
+                # keeps the original run id.
+                notes.put_nowait(
+                    (f"Run {resume_from} resumed after a host restart as run {run_id}", None)
+                )
 
         def on_phase(title: str) -> None:
-            nonlocal current_phase
+            nonlocal current_phase, phase_calls
             end_phase()
-            notes.put_nowait((f"Phase: {title}", flow.meta(flow.phase_started(title))))
+            if phase_calls >= started_count:
+                notes.put_nowait((f"Phase: {title}", flow.meta(flow.phase_started(title))))
+            phase_calls += 1
             current_phase = title
 
         def end_phase() -> None:
-            if current_phase is not None:
+            nonlocal finished_count
+            if current_phase is not None and phase_calls > finished_count:
+                finished_count = phase_calls
                 notes.put_nowait(
                     (
                         f"Phase finished: {current_phase}",
@@ -346,7 +614,8 @@ class FlowSession:
                     source,
                     node=node,
                     dispatcher=dispatcher,
-                    args=parsed.args,
+                    # NO_ARGS (the default) leaves a continued run on its journal's args.
+                    args=args,
                     filename=filename,
                     options=options,
                     abort=abort,
@@ -368,6 +637,7 @@ class FlowSession:
         finally:
             # Also reached on cancellation: the run is over, so stop the notifier.
             self._aborts.pop(chat, None)
+            self._runs.pop(chat, None)
             if not drainer.done():
                 drainer.cancel()
 

@@ -422,3 +422,50 @@ class TestInMemory:
 
 async def _wait(event: asyncio.Event) -> None:
     await event.wait()
+
+
+async def test_stored_input_requests_round_trip(tmp_path: Path) -> None:
+    requests = [
+        {"id": "confirm-3", "kind": "confirm", "chat": "ahp-chat://c", "turnId": "t1", "key": "k"},
+        {"id": "input-4", "kind": "input", "chat": "ahp-chat://c", "turnId": "t1"},
+    ]
+    store = FileSessionStore(tmp_path / "sessions")
+    original = _session(input_requests=requests)
+    await store.save(original)
+
+    (restored,) = await FileSessionStore(tmp_path / "sessions").load_all()
+    assert restored == original
+    assert restored.input_requests == requests
+
+
+async def test_stored_input_requests_absent_in_an_old_file_loads_as_none(tmp_path: Path) -> None:
+    store = FileSessionStore(tmp_path / "sessions")
+    await store.save(_session(input_requests=None))
+
+    (path,) = (tmp_path / "sessions").glob("*.json")
+    assert "inputRequests" not in path.read_text(encoding="utf-8")
+    (restored,) = await store.load_all()
+    assert restored.input_requests is None
+
+
+async def test_stored_input_requests_and_the_interrupted_list_coexist(tmp_path: Path) -> None:
+    requests = [{"id": "confirm-1", "kind": "confirm", "chat": "c", "turnId": "t1", "key": "k"}]
+    store = FileSessionStore(tmp_path / "sessions")
+    original = _session(input_requests=requests, interrupted_by_restart=("c",))
+    await store.save(original)
+
+    (restored,) = await FileSessionStore(tmp_path / "sessions").load_all()
+    assert restored == original
+    assert list(restored.interrupted_by_restart) == ["c"]
+    assert restored.input_requests == requests
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [{}, [1], [{"id": 1, "kind": "confirm", "chat": "c", "turnId": "t"}]],
+)
+def test_stored_input_requests_malformed_is_refused(bad: Any) -> None:
+    payload = _session().to_json()
+    payload["inputRequests"] = bad
+    with pytest.raises(ValueError, match="inputRequests"):
+        StoredSession.from_json(payload)

@@ -173,6 +173,46 @@ class HangingProvider:
         return session
 
 
+@dataclass
+class RestartHoldSession:
+    context: AgentSessionContext
+
+    async def send_user_message(self, message: UserMessage, sink: TurnSink) -> None:
+        RestartHoldProvider.prompts.append(message.text)
+        if message.text.startswith("hold") and RestartHoldProvider.holding:
+            await asyncio.Event().wait()
+        await sink.text_delta(f"rec: {message.text}")
+        await sink.usage(input_tokens=1, output_tokens=5)
+
+    async def cancel(self, reason: str | None = None) -> None:
+        pass
+
+    async def aclose(self) -> None:
+        pass
+
+
+class RestartHoldProvider:
+    """Answers at once, except a prompt starting `hold` waits while `holding` (a restart test)."""
+
+    prompts: ClassVar[list[str]] = []
+    holding: ClassVar[bool] = True
+
+    def __init__(self, *, provider_id: str = "hold") -> None:
+        self.provider_id = provider_id
+
+    @property
+    def agent(self) -> AgentInfo:
+        return AgentInfo(
+            provider=self.provider_id,
+            display_name="Restart hold",
+            description="Holds `hold...` prompts until the host restarts.",
+            models=(),
+        )
+
+    async def create_session(self, context: AgentSessionContext) -> RestartHoldSession:
+        return RestartHoldSession(context)
+
+
 AWS = "AKIA" + "TESTONLY" * 2
 GH = "ghp_" + "x1" * 18
 USER = "sekrit-" + "12345678"
@@ -419,6 +459,8 @@ def reset_fakes() -> None:
     StructuredSecretProvider.instances.clear()
     AskingProvider.instances.clear()
     FileWriterProvider.instances.clear()
+    RestartHoldProvider.prompts.clear()
+    RestartHoldProvider.holding = True
 
 
 class BrokenSessionProvider:

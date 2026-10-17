@@ -318,6 +318,31 @@ tool-name convention, and a different host cannot honour the request at all. The
 current shape is a stopgap that stays wire-compatible, since a stock client
 ignores `_meta` and shows an ordinary tool call.
 
+## 11. Restart semantics for interrupted turns and open input requests (upstream)
+
+**What the spec says today.** In-progress turns SHOULD be considered failed when
+a server restarts. It says nothing about `session/inputNeeded` entries or the
+approvals and questions behind them.
+
+**What ahp-py does.** A turn the restart cut off is kept as a failed turn with
+`errorType` `host.restart` and, when the agent can resume turns, a resumable
+error; it is picked up through the standard `chat/turnResume` (automatically,
+once, after a deliberate restart). Open input requests are persisted and, on
+restore, withdrawn: the `inputNeeded` entry is removed and the client is told with
+a `systemNotification` part carrying `_meta['ahp-py/restart']`
+(`{"event": "inputWithdrawn", "requests": [...]}`). A resumed turn asks again
+under new ids. See ADR 0006.
+
+**Request.** State what a host must do with open input requests across a
+restart, and give clients a standard way to learn of it: a standard
+notification kind for "withdrawn because the host restarted" that names the
+request ids, and a standard error kind for "failed by a restart" (so a turn is
+not just an error with a private `errorType`).
+
+Why upstream: every client otherwise has to learn a private `_meta` key and an
+`errorType` string, and cannot tell a request still being waited on from one
+that was withdrawn, except by trying to answer it.
+
 ## Still deliberately not requested
 
 The list above holds, and one addition:
