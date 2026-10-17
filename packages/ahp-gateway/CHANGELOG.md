@@ -8,6 +8,12 @@ Every release states the protocol versions it speaks.
 
 Under construction. `docs/plan.md` is the design and its §7 is the build order.
 
+### Changed — AHP 1.1.0 (upstream `main`, unreleased)
+
+- **A surface's `flowControl` is not passed to a node.** Windowed delivery is
+  a credit loop per hop that the frame router does not run, so the gateway
+  declines the offer and the surface gets ordinary delivery.
+
 ### Changed
 
 - **Speaks AHP 1.0.0** through `ahp-protocol`'s `spec/v1.0.0` pin. A malformed

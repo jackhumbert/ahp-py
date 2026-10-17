@@ -23,7 +23,7 @@ from ahp_protocol.transport import memory_pair
 
 from ahp_host.core import Host, LoopbackSingleUserPolicy
 from ahp_host.core.config import RootConfig
-from ahp_host.provider import EchoProvider
+from ahp_host.provider import EchoProvider, EchoSession
 
 from .test_host_end_to_end import FakeClient
 
@@ -303,6 +303,118 @@ class TestSessionConfig:
         state = (await client.request("subscribe", {"channel": uri}))["result"]["snapshot"]["state"]
         assert state["config"]["values"]["prefix"] == "Heard:"
         assert state["config"]["values"].get("style") != "shout"
+
+
+class TestChatConfig:
+    """`chat/configChanged` (1.1.0): values set on one chat, over the session's.
+
+    The echo provider marks `prefix` both `sessionMutable` and `chatMutable`,
+    and `style` neither -- enough to see the overlay reach the agent for one
+    chat only, and to see the gate refuse what may not vary per chat.
+    """
+
+    @pytest.fixture
+    async def host(self) -> AsyncIterator[Host]:
+        host = Host(
+            EchoProvider(configurable=True, capabilities={"multipleChats": {}}),
+            LoopbackSingleUserPolicy(),
+        )
+        try:
+            yield host
+        finally:
+            await host.aclose()
+
+    async def _two_chats(self, client: FakeClient, uri: str) -> tuple[str, str]:
+        await client.request("createSession", {"channel": uri, "provider": "echo"})
+        await client.collect(seconds=0.3)
+        state = (await client.request("subscribe", {"channel": uri}))["result"]["snapshot"]["state"]
+        default = state["chats"][0]["resource"]
+        other = f"ahp-chat:/{uri.rsplit('/', 1)[-1]}-b"
+        await client.request("createChat", {"channel": uri, "chat": other})
+        for chat in (default, other):
+            await client.request("subscribe", {"channel": chat})
+        return default, other
+
+    async def _set(self, client: FakeClient, chat: str, config: Any, **extra: Any) -> None:
+        await client.notify(
+            "dispatchAction",
+            {
+                "channel": chat,
+                "clientSeq": 1,
+                "action": {"type": "chat/configChanged", "config": config, **extra},
+            },
+        )
+        await client.collect(seconds=0.3)
+
+    async def _reply(self, client: FakeClient, chat: str, turn: str) -> str:
+        await client.notify(
+            "dispatchAction",
+            {
+                "channel": chat,
+                "clientSeq": 2,
+                "action": {
+                    "type": "chat/turnStarted",
+                    "turnId": turn,
+                    "startedAt": "1970-01-01T00:00:01.000Z",
+                    "message": {"text": "hello", "origin": {"kind": "user"}},
+                },
+            },
+        )
+        await client.collect(seconds=0.5)
+        return "".join(
+            e["action"].get("content", "")
+            for e in client.actions(chat)
+            if e["action"]["type"] == "chat/delta" and e["action"].get("turnId") == turn
+        )
+
+    async def test_a_chat_mutable_value_applies_to_that_chat_only(self, host: Host) -> None:
+        client = await _attach(host)
+        default, other = await self._two_chats(client, "echo:/chat-cfg-1")
+
+        await self._set(client, other, {"prefix": "Chat two heard:"})
+
+        assert _rejection(client, "chat/configChanged") is None
+        state = (await client.request("subscribe", {"channel": other}))["result"]["snapshot"]
+        assert state["state"]["config"] == {"values": {"prefix": "Chat two heard:"}}
+        assert "Chat two heard:" in await self._reply(client, other, "t-other")
+        assert "You said:" in await self._reply(client, default, "t-default")
+
+    async def test_replacing_the_overlay_resets_to_the_session(self, host: Host) -> None:
+        """ "To reset a property to the session's value, replace the overlay
+        with one that omits the property." """
+        client = await _attach(host)
+        _, other = await self._two_chats(client, "echo:/chat-cfg-2")
+
+        await self._set(client, other, {"prefix": "Briefly:"})
+        await self._set(client, other, {}, replace=True)
+
+        assert _rejection(client, "chat/configChanged") is None
+        assert "You said:" in await self._reply(client, other, "t1")
+
+    async def test_only_a_chat_mutable_property_may_vary_per_chat(self, host: Host) -> None:
+        """Every other property "is changed on the session with
+        `session/configChanged`" -- the reducer checks nothing, the host must."""
+        client = await _attach(host)
+        _, other = await self._two_chats(client, "echo:/chat-cfg-3")
+
+        await self._set(client, other, {"style": "shout"})
+
+        assert _rejection(client, "chat/configChanged") == "'style' cannot be set per chat"
+        state = (await client.request("subscribe", {"channel": other}))["result"]["snapshot"]
+        assert "config" not in state["state"]
+
+    async def test_a_restarted_agent_is_told_each_overlay(self, host: Host) -> None:
+        """The overlay lives in chat state, which outlives the agent session;
+        one attached later learns it the way a client change would tell it."""
+        client = await _attach(host)
+        _, other = await self._two_chats(client, "echo:/chat-cfg-4")
+        await self._set(client, other, {"prefix": "Again:"})
+
+        session = host._sessions["echo:/chat-cfg-4"]
+        fresh = EchoSession(session.agent_session.context)  # type: ignore[union-attr]
+        await host._attach_agent(session, fresh)
+
+        assert fresh.chat_config == {other: {"prefix": "Again:"}}
 
 
 class TestCustomizationsAndProgress:

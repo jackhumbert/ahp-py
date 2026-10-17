@@ -90,16 +90,16 @@ try:
     trips = list(round_trip_fixtures())
     # Exact counts, not "more than zero": a loader that silently finds a
     # partial tree is the failure mode a truthy check would miss.
-    if len(reducers) != 308:
-        fail("308 reducer fixtures", f"found {len(reducers)}")
+    if len(reducers) != 327:
+        fail("327 reducer fixtures", f"found {len(reducers)}")
     else:
-        check("308 reducer fixtures")
-    if len(trips) != 67:
-        fail("67 round-trip fixtures", f"found {len(trips)}")
+        check("327 reducer fixtures")
+    if len(trips) != 94:
+        fail("94 round-trip fixtures", f"found {len(trips)}")
     else:
-        check("67 round-trip fixtures")
+        check("94 round-trip fixtures")
 
-    spec = pin().get("specTag")
+    spec = pin().get("specRef")
     check(f"PIN.json readable (spec {spec})")
 
     schemas = sorted(p.name for p in (CORPUS_ROOT / "schema").glob("*.schema.json"))

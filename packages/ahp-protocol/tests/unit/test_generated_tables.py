@@ -25,16 +25,18 @@ ROOT = Path(__file__).resolve().parents[2]
 
 def test_action_tables_cover_every_action() -> None:
     """A missing entry would silently make an action non-dispatchable or unversioned."""
-    assert len(ACTION_TYPES) == 106
+    assert len(ACTION_TYPES) == 107
     assert set(IS_CLIENT_DISPATCHABLE) == set(ACTION_TYPES)
     assert set(ACTION_INTRODUCED_IN) == set(ACTION_TYPES)
 
 
 def test_client_dispatchable_count() -> None:
-    """47 of 106. Upstream has 49 `@clientDispatchable` JSDoc annotations, but its
-    own generator only counts declarations carrying `type: ActionType.X`, so the
-    generated map -- which `isClientDispatchable` reads -- is authoritative."""
-    assert sum(IS_CLIENT_DISPATCHABLE.values()) == 47
+    """48 of 107. Upstream has more `@clientDispatchable` JSDoc annotations, but
+    its own generator only counts declarations carrying `type: ActionType.X`, so
+    the generated map -- which `isClientDispatchable` reads -- is authoritative.
+    1.1.0 added one: `chat/configChanged`."""
+    assert sum(IS_CLIENT_DISPATCHABLE.values()) == 48
+    assert IS_CLIENT_DISPATCHABLE["chat/configChanged"] is True
 
 
 def test_unknown_actions_are_not_client_dispatchable() -> None:
@@ -43,11 +45,15 @@ def test_unknown_actions_are_not_client_dispatchable() -> None:
 
 
 def test_notification_versions_match_the_pinned_registry() -> None:
-    """The 8-method table from `registry.ts` (`ServerNotificationMap` minus
-    `action`), pinned verbatim so a pin bump that adds a notification cannot
-    land without its version -- upstream's `isNotificationKnownToVersion`
-    filter is unimplementable otherwise. Every current method predates the
-    oldest negotiable version, so the filter is inert at this pin."""
+    """The 14-method table from `registry.ts`, pinned verbatim so a pin bump
+    that adds a notification cannot land without its version -- upstream's
+    `isNotificationKnownToVersion` filter is unimplementable otherwise.
+
+    1.1.0 is the first pin where the filter bites: windowed delivery's
+    `channel/*` and the TCP channel's `tcp/*` are newer than every baseline,
+    so a 1.0.0 connection must never see one. The table also lists the
+    client->server methods among them (`channel/credit`, `tcp/data`, ...),
+    exactly as upstream's registry does."""
     assert NOTIFICATION_INTRODUCED_IN == {
         "root/sessionAdded": "0.1.0",
         "root/sessionRemoved": "0.1.0",
@@ -57,13 +63,27 @@ def test_notification_versions_match_the_pinned_registry() -> None:
         "otlp/exportLogs": "0.2.0",
         "otlp/exportTraces": "0.2.0",
         "otlp/exportMetrics": "0.2.0",
+        "channel/frame": "1.1.0",
+        "channel/credit": "1.1.0",
+        "channel/snapshot": "1.1.0",
+        "tcp/data": "1.1.0",
+        "tcp/eof": "1.1.0",
+        "tcp/reset": "1.1.0",
     }
 
     def parts(version: str) -> tuple[int, ...]:
         return tuple(int(p) for p in version.split("."))
 
-    oldest_negotiable = parts(UPSTREAM_SUPPORTED_PROTOCOL_VERSIONS[-1])
-    assert all(parts(v) <= oldest_negotiable for v in NOTIFICATION_INTRODUCED_IN.values())
+    newest_baseline = max(parts(v) for v in UPSTREAM_SUPPORTED_PROTOCOL_VERSIONS)
+    newer = sorted(m for m, v in NOTIFICATION_INTRODUCED_IN.items() if parts(v) > newest_baseline)
+    assert newer == [
+        "channel/credit",
+        "channel/frame",
+        "channel/snapshot",
+        "tcp/data",
+        "tcp/eof",
+        "tcp/reset",
+    ]
 
 
 def test_error_codes_match_the_spec() -> None:
@@ -78,14 +98,17 @@ def test_error_codes_match_the_spec() -> None:
     # 0.9.0 removed `ContentNotFound`; -32006 "remains reserved and unassigned".
     assert "ContentNotFound" not in AHP_ERROR_CODES
     assert -32006 not in AHP_ERROR_CODES.values()
-    assert len(AHP_ERROR_CODES) == 10
+    # 1.1.0: the TCP channel's one failure of its own.
+    assert AHP_ERROR_CODES["TcpConnectionOpenFailed"] == -32012
+    assert len(AHP_ERROR_CODES) == 11
 
 
 def test_upstream_version_constants() -> None:
-    assert UPSTREAM_PROTOCOL_VERSION == "1.0.0"
-    # Since 1.0.0 these are "released compatibility baselines, independent of
-    # the current development PROTOCOL_VERSION" (registry.ts) -- they happen to
-    # lead with it today, but nothing upstream promises that any more.
+    # The pin is a commit on upstream `main`, whose source tree declares the
+    # version under development; 1.1.0 is not released.
+    assert UPSTREAM_PROTOCOL_VERSION == "1.1.0"
+    # "Released compatibility baselines, independent of the current development
+    # PROTOCOL_VERSION" (registry.ts) -- and at this pin, no longer led by it.
     assert UPSTREAM_SUPPORTED_PROTOCOL_VERSIONS == ("1.0.0", "0.9.0")
 
 
@@ -93,7 +116,7 @@ def test_vendored_pin_matches_upstream_md() -> None:
     """The committed corpus and the documented pin must not drift apart."""
     vendored = pin()
     doc = (ROOT / "UPSTREAM.md").read_text(encoding="utf-8")
-    assert vendored["specTag"] in doc, "UPSTREAM.md does not mention the vendored spec tag"
+    assert vendored["specRef"] in doc, "UPSTREAM.md does not mention the vendored spec ref"
     assert vendored["specCommit"] in doc, "UPSTREAM.md does not mention the vendored commit"
 
 
@@ -134,8 +157,8 @@ def test_root_session_chat_action_counts() -> None:
         counts[action.split("/")[0]] = counts.get(action.split("/")[0], 0) + 1
     assert counts["root"] == 4
     assert counts["session"] == 30
-    assert counts["chat"] == 37
-    assert counts["root"] + counts["session"] + counts["chat"] == 71
+    assert counts["chat"] == 38
+    assert counts["root"] + counts["session"] + counts["chat"] == 72
 
 
 def test_schemas_are_vendored_but_not_trusted() -> None:
@@ -164,6 +187,20 @@ def test_session_status_schema_is_a_closed_enum_that_rejects_real_values() -> No
     real_values = {1, 2, 8, 24, 33, 40, 56, 65, 72, 2147483720}
     rejected = sorted(real_values - set(declared["enum"]))
     assert rejected, "the enum now accepts every real value -- re-evaluate"
+
+
+def test_empty_state_schema_admits_every_object() -> None:
+    """1.1.0's `EmptyState` schema lacks `maxProperties: 0`, so inside
+    `Snapshot.state`'s `oneOf` every non-empty state matches twice and fails.
+    `conformance.schemas.load` closes it; this pins the raw defect so the day
+    upstream fixes it, the workaround is noticed and can go."""
+    schema = json.loads((CORPUS_ROOT / "schema" / "state.schema.json").read_text(encoding="utf-8"))
+    empty = schema["$defs"]["EmptyState"]
+    fixed = "EmptyState is closed upstream now -- drop the patch in conformance/schemas.py"
+    assert "maxProperties" not in empty, fixed
+    assert "additionalProperties" not in empty, fixed
+    refs = [v.get("$ref") for v in schema["$defs"]["Snapshot"]["properties"]["state"]["oneOf"]]
+    assert "#/$defs/EmptyState" in refs
 
 
 def test_generator_parses_the_vendored_source_not_a_snapshot() -> None:

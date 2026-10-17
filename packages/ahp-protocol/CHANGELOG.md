@@ -8,6 +8,38 @@ the spec revision it targets.
 
 ## [Unreleased]
 
+### Changed — the spec pin moves to upstream `main` @ `1ef06429` (1.1.0, unreleased)
+
+- **The pinned upstream revision is a commit on `main`, not a tag:**
+  `1ef06429`, 42 commits past `spec/v1.0.0`, where upstream's tree declares
+  `PROTOCOL_VERSION = "1.1.0"`. A client built from `main` offers `1.1.0` and
+  the caret rule has every host accept it, so the tables had to be there
+  before the tag. `UPSTREAM_PROTOCOL_VERSION` is `1.1.0`; upstream's supported
+  list stays `1.0.0, 0.9.0`. 107 actions (48 client-dispatchable), 327 reducer
+  fixtures, 94 round-trips and a 124-case JS-semantics oracle — all pass.
+- **Breaking, in the `chat` reducer: one pending list.** Steering and queued
+  input share `queuedMessages`, each entry with an optional `kind`;
+  `chat/pendingMessageRemoved` matches id **and** kind; `steeringMessage` is a
+  deprecated mirror of the latest steering set. `chat/turnStarted` consumes
+  either kind and now tests `queuedMessageId !== undefined`, so `""` and
+  `null` consume. These branches also drop a field as JS `undefined` does,
+  where the old port wrote `null`.
+- **`chat/configChanged`**: a per-chat config overlay, `ChatState.config`.
+- **Wire specs** for `CreateChatParams` (with `title`), `SubscribeParams`,
+  `SubscribeResult`, `ReconnectParams`, `ReconnectResult`, the windowed
+  `channel/frame` / `channel/credit` params and the TCP channel's params;
+  `InitializeResult.tcpConnections`. Error `-32012 TcpConnectionOpenFailed`.
+  `NOTIFICATION_INTRODUCED_IN` gains the six 1.1.0 notifications — the first
+  the version filter withholds from a 1.0.0 connection.
+- **`scripts/vendor_upstream.sh` pins a branch as well as a tag** (`SPEC_REF`;
+  the archive is always cut from `SPEC_COMMIT`), and vendors the TCP channel's
+  `commands.ts`. `PIN.json`'s `specTag` is now `specRef`.
+- **`conformance.schemas.load` closes an upstream schema defect:** 1.1.0's
+  `EmptyState` admits every object, so `Snapshot.state`'s `oneOf` rejected
+  every real snapshot. It gets `maxProperties: 0`; a test pins the defect.
+- `DEFAULT_SUPPORTED_VERSIONS` does not move: no release has carried the 1.0.0
+  pin yet, so the one-release grace for `0.8.0`–`0.6.0` has not started.
+
 ### Changed — the spec pin moves to `spec/v1.0.0`
 
 - **The pinned upstream revision is `spec/v1.0.0` (`5f16d81b`), up from

@@ -383,6 +383,153 @@ class TestQueuedMessages:
         assert state.get("steeringMessage") is None
         assert any("actually, this" in str(turn) for turn in state["turns"])
 
+    async def test_two_steering_messages_both_join_the_running_turn(self, slow: Host) -> None:
+        """1.1.0 keeps every steering message, not only the latest: each is
+        offered to the turn in the order it was typed and removed by its own
+        id -- "a later submission MUST NOT implicitly consume an earlier one"."""
+        client = await _client(slow)
+        chat = await _session(slow, client, "echo:/q-7")
+
+        await _turn(client, chat, text="first")
+        await client.collect(seconds=0.05)
+        await self._steer(client, chat, "s1", "and bananas", 2)
+        await self._steer(client, chat, "s2", "and cherries", 3)
+        await _completed(client, chat)
+
+        state = _state(slow, chat)
+        assert state.get("queuedMessages") in (None, []), state.get("queuedMessages")
+        assert state.get("steeringMessage") is None
+        assert len(state["turns"]) == 1, "steering ran as a turn of its own"
+        removals = [a for a in _actions(client, chat) if a["type"] == "chat/pendingMessageRemoved"]
+        assert [(a["kind"], a["id"]) for a in removals] == [("steering", "s1"), ("steering", "s2")]
+
+    async def test_mixed_pending_input_runs_each_entry_once(self, host: Host) -> None:
+        """Both kinds share one list now. Taking `queuedMessages[0]` and
+        removing it as `queued` misses a steering entry -- the reducer matches
+        id AND kind -- so the entry stayed, and ran again after every turn."""
+        client = await _client(host)
+        chat = await _session(host, client, "echo:/q-10")
+        # Two steering messages no turn took, as a turn that ended first leaves
+        # them. Published straight to state: dispatched to an idle chat, the
+        # first would run at once and the list would never hold both.
+        for id_, text in (("s1", "one"), ("s2", "two")):
+            await host.sequencer.publish(
+                chat,
+                {
+                    "type": "chat/pendingMessageSet",
+                    "kind": "steering",
+                    "id": id_,
+                    "message": {"text": text, "origin": {"kind": "user"}},
+                },
+            )
+        await self._queue(client, chat, "q1", "three", 1)
+        await client.collect_until(
+            lambda: (
+                (host.sequencer.state_of(chat) or {}).get("activeTurn") is None
+                and len((host.sequencer.state_of(chat) or {}).get("turns", [])) >= 3
+            ),
+            timeout=10.0,
+        )
+        # Long enough for a wrongly repeated entry to start another turn.
+        await client.collect(seconds=0.3)
+
+        state = _state(host, chat)
+        assert state.get("queuedMessages") in (None, []), state.get("queuedMessages")
+        assert state.get("steeringMessage") is None
+        assert [t["message"]["text"] for t in state["turns"]] == ["one", "two", "three"]
+
+    async def test_an_object_id_runs_once_without_breaking_the_drain(self, host: Host) -> None:
+        """A pending id is peer-chosen and the schema's `string` is not
+        enforced, so an object can arrive. Asking a Python set whether it holds
+        one raises, which killed the drain and stranded the message."""
+        client = await _client(host)
+        chat = await _session(host, client, "echo:/q-12")
+
+        await client.notify(
+            "dispatchAction",
+            {
+                "channel": chat,
+                "clientSeq": 1,
+                "action": {
+                    "type": "chat/pendingMessageSet",
+                    "kind": "queued",
+                    "id": {"n": 1},
+                    "message": {"text": "hello", "origin": {"kind": "user"}},
+                },
+            },
+        )
+        await _completed(client, chat)
+        await client.collect(seconds=0.3)
+
+        state = _state(host, chat)
+        assert state.get("queuedMessages") in (None, []), state.get("queuedMessages")
+        assert [t["message"]["text"] for t in state["turns"]] == ["hello"]
+
+    async def test_a_consumed_id_cannot_be_set_again(self, host: Host) -> None:
+        """ "Hosts MUST reject edits or client removals that they can no longer
+        honor after handoff." Re-setting a consumed id would run it again."""
+        client = await _client(host)
+        chat = await _session(host, client, "echo:/q-8")
+
+        await self._queue(client, chat, "q1", "hello", 1)
+        await _completed(client, chat)
+        await self._queue(client, chat, "q1", "hello again", 2)
+        await client.collect(seconds=0.3)
+
+        sets = [e for e in client.actions(chat) if e["action"]["type"] == "chat/pendingMessageSet"]
+        assert "rejectionReason" not in sets[0]
+        assert "already delivered" in sets[-1].get("rejectionReason", "")
+        assert len(_state(host, chat)["turns"]) == 1
+
+    async def test_removing_what_is_not_pending_is_refused(self, host: Host) -> None:
+        """ "Server SHOULD reject the action; the reducer is a no-op" -- and a
+        steering removal must not take a queued entry of the same id."""
+        client = await _client(host)
+        chat = await _session(host, client, "echo:/q-9")
+
+        await client.notify(
+            "dispatchAction",
+            {
+                "channel": chat,
+                "clientSeq": 1,
+                "action": {"type": "chat/pendingMessageRemoved", "kind": "queued", "id": "nope"},
+            },
+        )
+        await client.collect(seconds=0.3)
+
+        echoes = [
+            e for e in client.actions(chat) if e["action"]["type"] == "chat/pendingMessageRemoved"
+        ]
+        assert echoes, "the removal was dropped rather than echoed"
+        assert "rejectionReason" in echoes[0]
+
+    async def test_a_pending_message_of_an_unknown_kind_is_refused(self, host: Host) -> None:
+        """Nothing consumes a kind the host does not know, so it would sit in
+        the list forever."""
+        client = await _client(host)
+        chat = await _session(host, client, "echo:/q-11")
+
+        await client.notify(
+            "dispatchAction",
+            {
+                "channel": chat,
+                "clientSeq": 1,
+                "action": {
+                    "type": "chat/pendingMessageSet",
+                    "kind": "later",
+                    "id": "x1",
+                    "message": {"text": "hi", "origin": {"kind": "user"}},
+                },
+            },
+        )
+        await client.collect(seconds=0.3)
+
+        echoes = [
+            e for e in client.actions(chat) if e["action"]["type"] == "chat/pendingMessageSet"
+        ]
+        assert "rejectionReason" in echoes[0]
+        assert _state(host, chat).get("queuedMessages") in (None, [])
+
 
 class TestUsage:
     """The client's rule is "no usage, no gauge" -- it renders nothing at all

@@ -302,6 +302,21 @@ async def test_subscribe_options_reach_the_owning_node_and_every_probe() -> None
     assert b.requests[-1] == ("subscribe", {"channel": "ahp-chat:/unknown", **options})
 
 
+async def test_a_window_is_not_offered_on_the_surfaces_behalf() -> None:
+    """Windowed delivery (1.1.0) is a credit loop per hop the gateway does not
+    run, so a surface's `flowControl` never reaches a node -- and the surface
+    gets the ordinary result a declining server gives."""
+    a = RecordingLink("a")
+    conn = connection(a)
+    conn.owners.claim("a", {"ahp-chat:/known"})
+    window = {"receive": {"windowBytes": 262144, "maximumFrameBytes": 16384}}
+    result = await conn._dispatch(
+        "subscribe", {"channel": "ahp-chat:/known", "view": {"turns": 2}, "flowControl": window}, []
+    )
+    assert a.requests == [("subscribe", {"channel": "ahp-chat:/known", "view": {"turns": 2}})]
+    assert "flowControl" not in (result or {})
+
+
 async def test_list_sessions_passes_on_what_it_does_not_page() -> None:
     a = RecordingLink("a", replies={"listSessions": {"items": []}})
     conn = connection(a)

@@ -62,6 +62,7 @@ __all__ = [
     "ModelSelection",
     "OpensSessions",
     "ProviderTerminal",
+    "ReconfiguresChats",
     "ResolvesInput",
     "ResumableAgentProvider",
     "ResumesTurns",
@@ -97,6 +98,11 @@ class ModelInfo:
     * ``supports_vision`` -- gates image attachments; absent means refused
     * ``policy_state`` -- ``"disabled"`` removes the model from the picker,
       which is the only way to list a model while keeping it unselectable
+
+    ``vendor`` (1.1.0) is who the provider says serves the model -- "for
+    example `Anthropic` or `Azure OpenAI`" -- and is not ``provider``, which
+    names the agent provider that owns it. Leave it ``None`` unless the runtime
+    actually reports one; "absent when the provider does not report a vendor".
     """
 
     id: str
@@ -113,6 +119,7 @@ class ModelInfo:
     policy_state: str | None = None
     config_schema: Mapping[str, Any] | None = None
     meta: Mapping[str, Any] | None = None
+    vendor: str | None = None
 
     def to_wire(self, provider: str) -> dict[str, Any]:
         wire: dict[str, Any] = {
@@ -128,6 +135,7 @@ class ModelInfo:
             ("policyState", self.policy_state),
             ("configSchema", self.config_schema),
             ("_meta", self.meta),
+            ("vendor", self.vendor),
         ):
             if value is not None:
                 wire[key] = value
@@ -994,13 +1002,14 @@ class HandlesCustomizations(Protocol):
 class SteersTurns(Protocol):
     """An agent session that can take a message into a turn already running.
 
-    A client "steers" by setting a chat's steering message
+    A client "steers" by adding a steering message to a chat's pending list
     (`chat/pendingMessageSet` with kind `steering`) while a turn is active.
-    The host offers it here; returning ``True`` means the agent took it and
-    will answer it within the current turn, and the host then removes it from
-    the chat and notes it in the transcript. ``False`` (not mid-turn, not
-    possible right now) leaves it pending, and the host runs it as the next
-    turn once the chat is idle.
+    Since 1.1.0 there can be several; the host offers them here one at a time,
+    in the order they were typed. Returning ``True`` means the agent took this
+    one and will answer it within the current turn, and the host then removes
+    it -- only it -- from the chat and notes it in the transcript. ``False``
+    (not mid-turn, not possible right now) leaves it and every later one
+    pending, and the host runs it as the next turn once the chat is idle.
     """
 
     async def steer(self, chat_uri: str, message: UserMessage) -> bool: ...
@@ -1265,6 +1274,26 @@ class ReconfiguresSessions(Protocol):
     """
 
     async def config_changed(self, values: Mapping[str, Any]) -> None: ...
+
+
+@runtime_checkable
+class ReconfiguresChats(Protocol):
+    """An agent session that follows one chat's config overlay (1.1.0).
+
+    A property the provider marks ``chatMutable`` in its session config schema
+    may be set for a single chat (`chat/configChanged`) -- upstream's case is
+    tool auto-approval, so approving in one chat stops changing every chat. The
+    host validates the change, the reducer applies it to the chat's
+    `ChatState.config`, and then this is called with the chat's whole overlay:
+    only the values set on that chat, which apply over the session's own. An
+    empty mapping means the chat follows the session again.
+
+    Without it the state would say one thing and the agent do another, so a
+    provider should only mark a property ``chatMutable`` if it implements this.
+    Raising is reported and logged; it does not undo the state change.
+    """
+
+    async def chat_config_changed(self, chat: str, values: Mapping[str, Any]) -> None: ...
 
 
 @runtime_checkable

@@ -259,10 +259,13 @@ you:
 - **The unread flag.** The host marks a session unread when a turn ends on a
   session no client has open, which is the half of `session/isReadChanged` that
   is the server's.
-- **Queued messages.** A follow-up typed while you are working is consumed as
+- **Pending messages.** A follow-up typed while you are working is consumed as
   soon as the chat goes idle, and run as its own turn — you do not poll for it.
-  Steering messages are *not* consumed: they are meant to be injected into the
-  running turn, which only a provider can do.
+  Steering input is offered to the running turn through `SteersTurns.steer`,
+  one message at a time in the order it was typed (since 1.1.0 a chat can hold
+  several); one you do not take runs as the next turn, ahead of the queue. The
+  host refuses a client's edit or removal of a message once it has gone to
+  you, so you never have to un-hear one.
 - **`!command`**, when a terminal backend is installed. A message starting with
   `!` never reaches you: the host runs the rest in a one-shot terminal and
   reports it as a tool call. Without a backend the prefix is not advertised and
@@ -386,8 +389,8 @@ it. Steering (`SteersTurns.steer`) and truncation
 (`TruncatesHistory.history_truncated`) already name the chat.
 
 To keep a conversation per chat you also need to know when chats come and go,
-how to stop just one, and which folders each may touch. Three optional
-protocols, all feature-detected:
+how to stop just one, which folders each may touch, and which settings each
+overrides. Four optional protocols, all feature-detected:
 
 | Protocol | Called |
 |---|---|
@@ -395,6 +398,7 @@ protocols, all feature-detected:
 | `HostsChats.chat_closed(chat_uri)` | After `disposeChat` has cancelled the chat's turn, while its channel still exists; and on the source after a cross-session `moveChat`. Not at session disposal — `disposed`/`aclose` end every chat at once. |
 | `CancelsChats.cancel_chat(chat_uri, reason)` | Instead of `cancel`, whenever a chat had a turn to cancel (a client stopping it, `chat/truncated`, `disposeChat`). `cancel` is session-wide, so without this the host withholds it while another chat is still running. |
 | `FollowsChatWorkingDirectories.chat_working_directories_changed(chat_uri, directories)` | After `chat/workingDirectorySet` / `...Removed`, with the chat's subset as it now stands — and when the session losing (or replacing) a folder prunes a subset. |
+| `ReconfiguresChats.chat_config_changed(chat_uri, values)` | After `chat/configChanged` (1.1.0), with the chat's whole config overlay as it now stands — the values set on that chat, which apply over the session's. Only properties you mark `chatMutable` in your session config schema can be set per chat, and you should mark one only if you implement this. An empty overlay means the chat follows the session again. |
 
 ```python
 from ahp_host.provider.base import (

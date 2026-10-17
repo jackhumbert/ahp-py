@@ -1,6 +1,6 @@
 """Typed wrappers for the client→server commands.
 
-26 of the 30 live here; `initialize`, `ping`, `reconnect` and `subscribe` are
+28 of the 32 live here; `initialize`, `ping`, `reconnect` and `subscribe` are
 connection machinery and live on `AhpClient` itself. Generated from one table
 rather than hand-written, so the parity matrix is *derived* from the code and
 cannot drift from it. The TypeScript client ships wrappers for twelve; the rest
@@ -10,7 +10,7 @@ it leaves to `request()`.
 ``channel: 'ahp-root://'`` in the protocol's own types and are forced to it here
 regardless of what a caller passes. Two (0.9.0) are declared
 ``channel: 'ahp-automations://'`` and are forced to the catalogue the same way.
-Ten carry a caller-chosen URI. The membership below is not remembered -- it is
+Twelve carry a caller-chosen URI. The membership below is not remembered -- it is
 asserted against the vendored ``ts/messages.ts`` by
 ``tests/docs/test_parity_matrix_is_true.py``.
 
@@ -80,10 +80,11 @@ CALLER_SCOPED: Final[frozenset[str]] = frozenset(
         "fetchTurns",
         "completions",
         "invokeChangesetOperation",
+        "createTcpConnection",
     }
 )
 
-#: Every client→server request. 31 of them; `unsubscribe` and `dispatchAction`
+#: Every client→server request. 32 of them; `unsubscribe` and `dispatchAction`
 #: are notifications and live on the client itself.
 COMMANDS: Final[frozenset[str]] = ROOT_SCOPED | AUTOMATIONS_SCOPED | CALLER_SCOPED
 
@@ -99,9 +100,9 @@ def _omit_none(params: Mapping[str, Any]) -> JsonObject:
 
 
 class CommandsMixin:
-    """27 wrappers, mixed into :class:`~ahp_client.client.AhpClient`.
+    """28 wrappers, mixed into :class:`~ahp_client.client.AhpClient`.
 
-    The other four of the 31 commands -- `initialize`, `ping`, `reconnect`,
+    The other four of the 32 commands -- `initialize`, `ping`, `reconnect`,
     `subscribe` -- are connection machinery and live on `AhpClient` itself.
     Kept in its own module so the command surface can be read, counted and
     tested without wading through that machinery.
@@ -229,6 +230,22 @@ class CommandsMixin:
         (ADR 0008). Checking ``movable`` before calling is the caller's job.
         """
         return await self._scoped("moveChat", chat, {"destination": dict(destination)})
+
+    async def create_tcp_connection(self, channel: str, host: str, port: int) -> JsonObject:
+        """Have the host open a TCP connection on its network, as *channel* (1.1.0).
+
+        Experimental, and only the first half: the bytes then flow over a
+        WINDOWED subscription to *channel* (`tcp/data`, `tcp/eof`, `tcp/reset`,
+        with credit), which this client does not offer -- see
+        ``events.WINDOWED_METHODS``. Here so every upstream command has a
+        wrapper, and for a caller driving the window itself.
+
+        Not gated locally on ``InitializeResult.tcpConnections``, as `move_chat`
+        is not gated on ``movable``: the client MUST NOT send it unless the host
+        advertised it, but the host refuses it anyway (ADR 0008). Check the
+        handshake before calling.
+        """
+        return await self._scoped("createTcpConnection", channel, {"host": host, "port": port})
 
     async def fetch_turns(
         self, chat: str, *, cursor: str | None = None, **extra: Any

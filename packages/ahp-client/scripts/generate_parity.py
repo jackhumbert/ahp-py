@@ -32,7 +32,7 @@ from ahp_protocol.reducers import REDUCERS
 from ahp_protocol.types import ACTION_TYPES, IS_CLIENT_DISPATCHABLE
 
 from ahp_client.client.commands import AUTOMATIONS_SCOPED, COMMANDS, ROOT_SCOPED
-from ahp_client.client.events import NOTIFICATION_METHODS
+from ahp_client.client.events import NOTIFICATION_METHODS, WINDOWED_METHODS
 from ahp_client.client.mirror import REDUCER_NAMES
 from ahp_client.serve.resources import _SNAKE, _VIRTUAL_METHODS
 from ahp_client.serve.router import REVERSE_METHODS
@@ -122,14 +122,33 @@ def render() -> str:
         )
         for method in forward
     ]
+    windowed = "windowed only"
+    # The TypeScript column was read from a client that predates windowed
+    # delivery; what upstream's newer one does with these has not been looked at.
+    unmeasured = "not measured"
     notification_rows = [
         (
             f"`{method}`",
-            tick if method in _TS_NOTIFICATIONS else cross,
-            tick if method in NOTIFICATION_METHODS else cross,
+            unmeasured
+            if method in WINDOWED_METHODS
+            else tick
+            if method in _TS_NOTIFICATIONS
+            else cross,
+            windowed
+            if method in WINDOWED_METHODS
+            else tick
+            if method in NOTIFICATION_METHODS
+            else cross,
         )
         for method in server_notifications
     ]
+    client_notification_rows = [
+        (f"`{method}`", unmeasured, windowed)
+        if method in WINDOWED_METHODS
+        else (f"`{method}`", tick, tick)
+        for method in client_notifications
+    ]
+    surfaced = [m for m in server_notifications if m not in WINDOWED_METHODS]
     dispatchable = sorted(a for a in ACTION_TYPES if IS_CLIENT_DISPATCHABLE.get(a))
     channels = sorted(REDUCERS)
 
@@ -160,15 +179,21 @@ interop suite as the evidence.
 
 ## Client → server notifications ({len(client_notifications)})
 
-{_table([(f"`{m}`", tick, tick) for m in client_notifications], ("Method", "TS client", "Here"))}
+{_table(client_notification_rows, ("Method", "TS client", "Here"))}
+
+"Windowed only" is windowed delivery and the TCP channel (1.1.0, experimental):
+those methods flow only on a subscription that offered `flowControl` and had it
+accepted, and this client never offers it — so it sends none of them and none
+can reach it (`client.events.WINDOWED_METHODS`).
 
 ## Server → client notifications ({len(server_notifications)})
 
 {_table(notification_rows, ("Method", "TS client", "Here"))}
 
-The TypeScript client surfaces {len(_TS_NOTIFICATIONS)} of {len(server_notifications)}.
-The remainder reach neither its per-URI subscriptions nor its global `events()`
-stream, because its `default:` branch returns without publishing.
+Outside a window, the TypeScript client surfaces {len(_TS_NOTIFICATIONS)} of
+{len(surfaced)}. The remainder reach neither its per-URI subscriptions nor its
+global `events()` stream, because its `default:` branch returns without
+publishing.
 
 ## Server → client requests ({len(reverse)})
 

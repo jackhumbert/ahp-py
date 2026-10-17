@@ -146,6 +146,7 @@ class InitializeResult(TypedDict):
     completionTriggerCharacters: NotRequired[list[str]]
     terminalCommandPrefix: NotRequired[str]
     telemetry: NotRequired[dict[str, Any]]
+    tcpConnections: NotRequired[dict[str, Any]]
 
 
 # ─── Specs ───────────────────────────────────────────────────────────────────
@@ -243,6 +244,8 @@ _INITIALIZE_RESULT = ObjectSpec(
         Field("completionTriggerCharacters", False, array_of(is_string)),
         Field("terminalCommandPrefix", False, is_string),
         Field("telemetry", False, is_object),
+        # 1.1.0, experimental: present (as `{}`) when `createTcpConnection` works.
+        Field("tcpConnections", False, is_object),
     ),
 )
 
@@ -405,6 +408,164 @@ _JSON_RPC_MESSAGE = ScalarSpec(
     ),
 )
 
+_CREATE_CHAT_PARAMS = ObjectSpec(
+    "CreateChatParams",
+    (
+        Field("channel", True, is_string),
+        Field("chat", True, is_string),
+        Field("initialMessage", False, is_object),
+        Field("source", False, ref("ChatSource")),
+        Field("workingDirectories", False, array_of(is_string)),
+        # 1.1.0: a client-selected initial display title.
+        Field("title", False, is_string),
+    ),
+)
+
+# ─── Windowed delivery (1.1.0, experimental) ──────────────────────────────────
+#
+# Opt-in on both sides: a `subscribe` offers `flowControl`, and a host that
+# returns none has chosen ordinary delivery. Specified here so the corpus
+# validates; no peer in this repository offers or accepts a window yet.
+
+_CHANNEL_RECEIVE_LIMITS = ObjectSpec(
+    "ChannelReceiveLimits",
+    (Field("windowBytes", True, is_int), Field("maximumFrameBytes", True, is_int)),
+)
+
+_SUBSCRIPTION_FLOW_CONTROL_OPTIONS = ObjectSpec(
+    "SubscriptionFlowControlOptions",
+    (Field("receive", True, _CHANNEL_RECEIVE_LIMITS.validate),),
+)
+
+_CHANNEL_FLOW_CONTROL = ObjectSpec(
+    "ChannelFlowControl",
+    (
+        Field("clientReceive", True, _CHANNEL_RECEIVE_LIMITS.validate),
+        Field("hostReceive", True, _CHANNEL_RECEIVE_LIMITS.validate),
+    ),
+)
+
+_SUBSCRIBE_PARAMS = ObjectSpec(
+    "SubscribeParams",
+    (
+        Field("channel", True, is_string),
+        Field("delivery", False, is_object),
+        Field("view", False, is_object),
+        Field("flowControl", False, _SUBSCRIPTION_FLOW_CONTROL_OPTIONS.validate),
+    ),
+)
+
+#: With ordinary delivery `snapshot` is present (or omitted for an `EmptyState`
+#: channel); with windowed delivery `flowControl` is, and `snapshot` is not.
+_SUBSCRIBE_RESULT = ObjectSpec(
+    "SubscribeResult",
+    (
+        Field("snapshot", False, ref("Snapshot")),
+        Field("flowControl", False, _CHANNEL_FLOW_CONTROL.validate),
+    ),
+)
+
+_RESUMED_CHANNEL_SUBSCRIPTION = ObjectSpec(
+    "ResumedChannelSubscription",
+    (
+        Field("channel", True, is_string),
+        Field("flowControl", True, _CHANNEL_FLOW_CONTROL.validate),
+        # `snapshot | replay | live`, and an @exhaustive enum -- still a string.
+        Field("recovery", True, is_string),
+    ),
+)
+
+_CHANNEL_DELIVERY_RESUME_PARAMS = ObjectSpec(
+    "ChannelDeliveryResumeParams",
+    (
+        Field("channel", True, is_string),
+        Field("flowControl", True, _SUBSCRIPTION_FLOW_CONTROL_OPTIONS.validate),
+        Field("lastAppliedServerSeq", False, is_int),
+    ),
+)
+
+_RECONNECT_PARAMS = ObjectSpec(
+    "ReconnectParams",
+    (
+        Field("channel", True, is_string),
+        Field("clientId", True, is_string),
+        Field("lastSeenServerSeq", True, is_int),
+        Field("subscriptions", True, array_of(is_string)),
+        Field(
+            "windows",
+            False,
+            ObjectSpec(
+                "ChannelDeliveryResumeOptions",
+                (Field("items", True, array_of(_CHANNEL_DELIVERY_RESUME_PARAMS.validate)),),
+            ).validate,
+        ),
+    ),
+)
+
+_RECONNECT_RESULT = UnionSpec(
+    "ReconnectResult",
+    key="type",
+    common=(
+        Field("type", True, is_string),
+        Field(
+            "windows",
+            False,
+            ObjectSpec(
+                "ChannelDeliveryResumeResult",
+                (Field("items", True, array_of(_RESUMED_CHANNEL_SUBSCRIPTION.validate)),),
+            ).validate,
+        ),
+    ),
+    variants={
+        "replay": ObjectSpec(
+            "ReconnectReplayResult",
+            (
+                Field("actions", True, array_of(ref("ActionEnvelope"))),
+                Field("missing", True, array_of(is_string)),
+            ),
+        ),
+        "snapshot": ObjectSpec(
+            "ReconnectSnapshotResult",
+            (Field("snapshots", True, array_of(ref("Snapshot"))),),
+        ),
+    },
+)
+
+_CHANNEL_FRAME_PARAMS = ObjectSpec(
+    "ChannelFrameParams",
+    (
+        Field("channel", True, is_string),
+        Field("data", True, is_string),
+        Field("final", False, is_bool),
+    ),
+)
+
+_CHANNEL_CREDIT_PARAMS = ObjectSpec(
+    "ChannelCreditParams",
+    # A running total that passes 2**32 on a long-lived stream (fixture 060).
+    (Field("channel", True, is_string), Field("consumedBytes", True, is_int)),
+)
+
+# ─── TCP channel (1.1.0, experimental) ────────────────────────────────────────
+
+_CREATE_TCP_CONNECTION_PARAMS = ObjectSpec(
+    "CreateTcpConnectionParams",
+    (
+        Field("channel", True, is_string),
+        Field("host", True, is_string),
+        Field("port", True, is_int),
+    ),
+)
+
+_TCP_DATA_PARAMS = ObjectSpec(
+    "TcpDataParams",
+    (Field("channel", True, is_string), Field("data", True, is_string)),
+)
+
+_TCP_EOF_PARAMS = ObjectSpec("TcpEofParams", (Field("channel", True, is_string),))
+
+_TCP_RESET_PARAMS = ObjectSpec("TcpResetParams", (Field("channel", True, is_string),))
+
 
 SPECS: Final[dict[str, Spec]] = {
     spec.name: spec
@@ -412,8 +573,12 @@ SPECS: Final[dict[str, Spec]] = {
         _ACTION_ENVELOPE,
         _ACTION_ORIGIN,
         _CHANGESET_OPERATION_TARGET,
+        _CHANNEL_CREDIT_PARAMS,
+        _CHANNEL_FRAME_PARAMS,
         _CHAT_INPUT_QUESTION,
         _CHAT_SOURCE,
+        _CREATE_CHAT_PARAMS,
+        _CREATE_TCP_CONNECTION_PARAMS,
         _CUSTOMIZATION,
         _IMPLEMENTATION,
         _INITIALIZE_RESULT,
@@ -421,11 +586,18 @@ SPECS: Final[dict[str, Spec]] = {
         _PARTIAL_SESSION_SUMMARY,
         _POSITION,
         _RANGE,
+        _RECONNECT_PARAMS,
+        _RECONNECT_RESULT,
         _SESSION_ADDED_PARAMS,
         _SESSION_STATUS,
         _SESSION_SUMMARY,
         _SNAPSHOT,
         _STATE_ACTION,
         _STRING_OR_MARKDOWN,
+        _SUBSCRIBE_PARAMS,
+        _SUBSCRIBE_RESULT,
+        _TCP_DATA_PARAMS,
+        _TCP_EOF_PARAMS,
+        _TCP_RESET_PARAMS,
     )
 }

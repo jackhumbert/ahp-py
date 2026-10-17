@@ -7,8 +7,11 @@
 set -euo pipefail
 
 UPSTREAM_REPO="https://github.com/microsoft/agent-host-protocol.git"
-SPEC_TAG="spec/v1.0.0"
-SPEC_COMMIT="5f16d81bb7045b66d7bc768d244feab75002d943"
+# A tag (`spec/vX.Y.Z`) or a branch (`main`). A tag must still resolve to the
+# commit below; a branch moves, so the commit must merely be on it. Either way
+# the archive is taken from the COMMIT, never the ref.
+SPEC_REF="main"
+SPEC_COMMIT="1ef0642965efaa7ef98caff287bca923fbc80ec6"
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CHECKOUT="$ROOT/.research/agent-host-protocol"
@@ -20,20 +23,26 @@ if [ ! -d "$CHECKOUT/.git" ]; then
   git clone --quiet "$UPSTREAM_REPO" "$CHECKOUT"
 fi
 
-echo "==> fetching tags"
+echo "==> fetching branches and tags"
 git -C "$CHECKOUT" fetch --quiet --tags origin
 
-actual="$(git -C "$CHECKOUT" rev-parse "$SPEC_TAG^{commit}")"
-if [ "$actual" != "$SPEC_COMMIT" ]; then
-  echo "ERROR: $SPEC_TAG resolves to $actual, but UPSTREAM.md pins $SPEC_COMMIT" >&2
-  echo "       Either the tag moved or the pin is stale. Resolve before vendoring." >&2
+if git -C "$CHECKOUT" rev-parse --quiet --verify "refs/tags/$SPEC_REF" >/dev/null; then
+  actual="$(git -C "$CHECKOUT" rev-parse "$SPEC_REF^{commit}")"
+  if [ "$actual" != "$SPEC_COMMIT" ]; then
+    echo "ERROR: $SPEC_REF resolves to $actual, but UPSTREAM.md pins $SPEC_COMMIT" >&2
+    echo "       Either the tag moved or the pin is stale. Resolve before vendoring." >&2
+    exit 1
+  fi
+elif ! git -C "$CHECKOUT" merge-base --is-ancestor "$SPEC_COMMIT" "origin/$SPEC_REF" 2>/dev/null; then
+  echo "ERROR: $SPEC_COMMIT is not on upstream $SPEC_REF" >&2
+  echo "       The branch was rewritten or the pin is wrong. Resolve before vendoring." >&2
   exit 1
 fi
 
-echo "==> vendoring $SPEC_TAG ($SPEC_COMMIT)"
+echo "==> vendoring $SPEC_REF ($SPEC_COMMIT)"
 rm -rf "$DEST"
 mkdir -p "$DEST"
-git -C "$CHECKOUT" archive "$SPEC_TAG" \
+git -C "$CHECKOUT" archive "$SPEC_COMMIT" \
   types/test-cases \
   types/version/registry.ts \
   types/action-origin.generated.ts \
@@ -48,6 +57,7 @@ git -C "$CHECKOUT" archive "$SPEC_TAG" \
   types/channels-changeset/commands.ts \
   types/channels-resource-watch/commands.ts \
   types/channels-automation/commands.ts \
+  types/channels-tcp/commands.ts \
   types/channels-session/state.ts \
   schema \
   | tar -x -C "$DEST"
@@ -68,7 +78,7 @@ mv "$DEST/types/common/messages.ts"        "$DEST/ts/messages.ts"
 # ten that are not include `completions` -- forcing that one to root silently
 # breaks every @-mention picker.
 mv "$DEST/types/common/commands.ts"        "$DEST/ts/commands.ts"
-for ch in root session chat terminal changeset resource-watch automation; do
+for ch in root session chat terminal changeset resource-watch automation tcp; do
   mv "$DEST/types/channels-$ch/commands.ts" "$DEST/ts/commands-$ch.ts"
 done
 mv "$DEST/types/channels-session/state.ts"  "$DEST/ts/session-state.ts"
@@ -77,9 +87,9 @@ rm -rf "$DEST/types"
 cat > "$DEST/PIN.json" <<EOF
 {
   "upstream": "microsoft/agent-host-protocol",
-  "specTag": "$SPEC_TAG",
+  "specRef": "$SPEC_REF",
   "specCommit": "$SPEC_COMMIT",
-  "vendored": ["test-cases/reducers", "test-cases/round-trips", "schema", "ts"]
+  "vendored": ["test-cases/reducers", "test-cases/round-trips", "test-cases/version-negotiation.json", "schema", "ts"]
 }
 EOF
 

@@ -135,29 +135,30 @@ def main() -> None:
     missing = set(wire_types) - set(introduced)
     if missing:
         sys.exit(f"ACTION_INTRODUCED_IN is missing {len(missing)} actions: {sorted(missing)[:5]}")
-    if supported[0] != current:
-        sys.exit("SUPPORTED_PROTOCOL_VERSIONS[0] must equal PROTOCOL_VERSION")
 
     pin = (ROOT / "vendor" / "upstream" / "PIN.json").read_text(encoding="utf-8")
-    spec_tag = re.search(r'"specTag":\s*"([^"]+)"', pin)
+    spec_ref = re.search(r'"specRef":\s*"([^"]+)"', pin)
     spec_commit = re.search(r'"specCommit":\s*"([^"]+)"', pin)
 
     body = f'''"""Generated from the vendored upstream TypeScript. DO NOT EDIT.
 
 Regenerate with `python scripts/generate_tables.py`.
 
-Source: {spec_tag.group(1) if spec_tag else "?"} ({spec_commit.group(1) if spec_commit else "?"})
+Source: {spec_ref.group(1) if spec_ref else "?"} ({spec_commit.group(1) if spec_commit else "?"})
 """
 
 from __future__ import annotations
 
 from typing import Final
 
-#: The protocol version upstream's own source tree declares at the pinned tag.
-#: This is NOT what we speak -- see ahp_protocol.types.versions.
+#: The protocol version upstream's own source tree declares at the pinned
+#: commit -- on a development branch, the version under development, not one
+#: that has been released. This is NOT what we speak -- see ahp_protocol.versions.
 UPSTREAM_PROTOCOL_VERSION: Final = {current!r}
 
-#: Every version the upstream client at the pinned tag will negotiate.
+#: Upstream's "released compatibility baselines, independent of the current
+#: development `PROTOCOL_VERSION`" (registry.ts) at the pinned commit. Not
+#: necessarily led by UPSTREAM_PROTOCOL_VERSION: off a release tag it is not.
 UPSTREAM_SUPPORTED_PROTOCOL_VERSIONS: Final[tuple[str, ...]] = {tuple(supported)!r}
 
 #: Every action's wire string, from `export const enum ActionType`.
@@ -176,10 +177,8 @@ ACTION_INTRODUCED_IN: Final[dict[str, str]] = {pyrepr(introduced)}
 #: Server->client notification method -> the protocol version that introduced
 #: it (`ServerNotificationMap` minus `action`, which ACTION_INTRODUCED_IN
 #: versions per action type). Upstream's `isNotificationKnownToVersion` is a
-#: `<=` compare against the negotiated version; every method here predates the
-#: oldest negotiable version at this pin, so the filter only bites after a pin
-#: bump lands a newer notification -- vendored now so that bump cannot land
-#: without the table.
+#: `<=` compare against the negotiated version, so a method introduced after
+#: the version a connection negotiated is withheld from it.
 NOTIFICATION_INTRODUCED_IN: Final[dict[str, str]] = {pyrepr(notification_introduced)}
 
 #: Standard JSON-RPC 2.0 error codes.

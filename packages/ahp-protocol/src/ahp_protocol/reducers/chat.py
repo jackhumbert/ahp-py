@@ -83,6 +83,7 @@ _TURN_CANCELLED = "cancelled"
 _TURN_ERROR = "error"
 
 _PENDING_MESSAGE_STEERING = "steering"
+_PENDING_MESSAGE_QUEUED = "queued"
 
 # SessionStatus is a bitset, not an enum. `INPUT_NEEDED` is a combination --
 # `InProgress | (1 << 4)` -- so a turn awaiting input is still in progress.
@@ -151,6 +152,13 @@ def _status_in(status: Any, states: frozenset[str]) -> bool:
     list, and ``x in <frozenset>`` raises ``TypeError`` on those.
     """
     return isinstance(status, str) and status in states
+
+
+def _pending_kind(message: Any) -> Any:
+    """``m.kind ?? PendingMessageKind.Queued`` -- an entry from a 1.0.0 snapshot
+    has no kind, and everything that predates the shared list was queued."""
+    kind = get(message, "kind")
+    return _PENDING_MESSAGE_QUEUED if kind is UNDEFINED or kind is None else kind
 
 
 def _seq(value: Any) -> list[Any]:
@@ -621,25 +629,24 @@ def chat_reducer(state: Any, action: Mapping[str, Any]) -> Any:
             get(action, "startedAt"),
         )
 
-        # If this turn was auto-started from a pending message, remove it.
-        queued_message_id = action.get("queuedMessageId")
-        if queued_message_id:  # A string in both languages: "" and absent both skip.
-            steering = next_state.get("steeringMessage")
+        # If this turn consumes a pending message, remove it -- of either kind.
+        # `action.queuedMessageId !== undefined` since 1.1.0 (it was truthiness),
+        # so an empty-string id, or an explicit null, now consumes too.
+        if "queuedMessageId" in action:
+            queued_message_id = action["queuedMessageId"]
             # `next.steeringMessage?.id === action.queuedMessageId` -- strict.
-            if strict_equal(get(steering, "id"), queued_message_id):
-                next_state = {**next_state, "steeringMessage": None}
+            if strict_equal(get(next_state.get("steeringMessage"), "id"), queued_message_id):
+                next_state = assign(dict(next_state), "steeringMessage", UNDEFINED)
             queued = next_state.get("queuedMessages")
             # `if (next.queuedMessages)`: AN EMPTY ARRAY IS TRUTHY in JavaScript,
-            # so this must test presence, not Python truthiness. With `[]` the
-            # upstream branch runs and rewrites the field to undefined.
-            if queued is not None:
+            # so with `[]` the upstream branch runs and drops the field.
+            if truthy(queued):
                 filtered = [
                     m for m in _seq(queued) if not strict_equal(get(m, "id"), queued_message_id)
                 ]
-                next_state = {
-                    **next_state,
-                    "queuedMessages": filtered if len(filtered) > 0 else None,
-                }
+                next_state = assign(
+                    dict(next_state), "queuedMessages", filtered if len(filtered) > 0 else UNDEFINED
+                )
         return next_state
 
     if action_type == "chat/delta":
@@ -1306,36 +1313,57 @@ def chat_reducer(state: Any, action: Mapping[str, Any]) -> Any:
     # ── Pending messages ─────────────────────────────────────────────────────
 
     if action_type == "chat/pendingMessageSet":
-        entry = {"id": action.get("id"), "message": action.get("message")}
-        if action.get("kind") == _PENDING_MESSAGE_STEERING:
-            return {**state, "steeringMessage": entry}
+        # Since 1.1.0 both kinds live in ONE list, `queuedMessages`, each entry
+        # carrying its `kind`; a new id appends and a known one is replaced in
+        # place, kind and all. `steeringMessage` survives only as a mirror of
+        # the latest steering set, for 1.0.0 clients that read the singleton.
+        entry: dict[str, Any] = {}
+        assign(entry, "id", get(action, "id"))
+        assign(entry, "kind", get(action, "kind"))
+        assign(entry, "message", get(action, "message"))
         existing_queue = _seq(coalesce(state.get("queuedMessages"), []))
         # `m.id === action.id` -- strict, and `get` keeps an absent action id
         # (`undefined`) matching only a message whose own id is absent.
         index = index_of(existing_queue, "id", get(action, "id"))
-        if index >= 0:
-            updated_queue = list(existing_queue)
+        updated_queue = list(existing_queue)
+        if index < 0:
+            updated_queue.append(entry)
+        else:
             updated_queue[index] = entry
-            return {**state, "queuedMessages": updated_queue}
-        return {**state, "queuedMessages": [*existing_queue, entry]}
+        next_state = {**state, "queuedMessages": updated_queue}
+        if action.get("kind") == _PENDING_MESSAGE_STEERING:
+            next_state["steeringMessage"] = entry
+        elif strict_equal(get(state.get("steeringMessage"), "id"), get(action, "id")):
+            # The same id re-set as queued input: the mirror no longer names
+            # steering, so it is cleared -- never back-filled from the list.
+            assign(next_state, "steeringMessage", UNDEFINED)
+        return next_state
 
     if action_type == "chat/pendingMessageRemoved":
-        # `... .id !== action.id` (both branches) -- strict: `1` never removes
+        # Removes the first list entry whose id AND effective kind match -- an
+        # entry with no `kind` is queued, so a steering removal cannot take an
+        # old queued entry. `... .id === action.id` is strict: `1` never removes
         # the message `true` names, and an object id removes only by reference.
         target = get(action, "id")
-        if action.get("kind") == _PENDING_MESSAGE_STEERING:
-            steering = state.get("steeringMessage")
-            if steering is None or not strict_equal(get(steering, "id"), target):
-                return state
-            return {**state, "steeringMessage": None}
-        queued = state.get("queuedMessages")
-        if queued is None:
-            return state
-        items = _seq(queued)
-        filtered = [m for m in items if not strict_equal(get(m, "id"), target)]
-        if len(filtered) == len(items):
-            return state
-        return {**state, "queuedMessages": filtered if len(filtered) > 0 else None}
+        kind = get(action, "kind")
+        next_state = state
+        if kind == _PENDING_MESSAGE_STEERING and strict_equal(
+            get(state.get("steeringMessage"), "id"), target
+        ):
+            next_state = assign(dict(state), "steeringMessage", UNDEFINED)
+        items = _seq(coalesce(state.get("queuedMessages"), []))
+        index = next(
+            (
+                i
+                for i, m in enumerate(items)
+                if strict_equal(get(m, "id"), target) and strict_equal(_pending_kind(m), kind)
+            ),
+            -1,
+        )
+        if index < 0:
+            return next_state
+        del items[index]
+        return assign(dict(next_state), "queuedMessages", items if len(items) > 0 else UNDEFINED)
 
     if action_type == "chat/queuedMessagesReordered":
         queued = state.get("queuedMessages")
@@ -1386,6 +1414,20 @@ def chat_reducer(state: Any, action: Mapping[str, Any]) -> Any:
                 _status_bits(state), _STATUS_IS_ARCHIVED, truthy(get(action, "isArchived"))
             ),
         }
+
+    # ── Config (1.1.0) ───────────────────────────────────────────────────────
+
+    if action_type == "chat/configChanged":
+        # An overlay on the session's config, never a mirror of it: merged into,
+        # or replaced outright when `replace` is set or there is no overlay yet.
+        config = state.get("config")
+        incoming = _spread_object(get(action, "config"))
+        values = (
+            incoming
+            if truthy(get(action, "replace")) or not truthy(config)
+            else {**_spread_object(get(config, "values")), **incoming}
+        )
+        return {**state, "config": {**_spread_object(config), "values": values}}
 
     # Unknown action: return the state unchanged. Never raise -- upstream's
     # `softAssertNever` logs and degrades so a peer speaking a newer version of

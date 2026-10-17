@@ -128,6 +128,38 @@ async def test_create_chat_sends_both_uris_and_they_are_not_the_same_one() -> No
     await host.stop()
 
 
+async def test_create_chat_carries_a_title_only_when_given() -> None:
+    """`CreateChatParams.title` (1.1.0): sent when the caller names the chat,
+    and omitted -- not `null` -- when it does not (invariant 7)."""
+    host = _session_host(capabilities={"multipleChats": {}})
+    await host.start()
+    async with connect(transport=host.transport()) as client:
+        session = await client.create_session(provider="echo")
+        await session.create_chat(title="Startup timing")
+        await session.create_chat()
+        titled, untitled = _sent(host, "createChat")[-2:]
+        assert titled["title"] == "Startup timing"
+        assert "title" not in untitled
+    await host.stop()
+
+
+async def test_create_tcp_connection_sends_the_destination_on_its_own_channel() -> None:
+    """Caller-scoped like `createChat`: the client mints the `ahp-tcp:` URI."""
+    host = _session_host()
+    await host.start()
+    async with connect(transport=host.transport()) as client:
+        with pytest.raises(AhpClientError):
+            # The fake host, like any that never advertised `tcpConnections`,
+            # does not open one; what matters is what went on the wire.
+            await client.protocol.create_tcp_connection("ahp-tcp:/t1", "localhost", 3000)
+        assert _sent(host, "createTcpConnection")[-1] == {
+            "channel": "ahp-tcp:/t1",
+            "host": "localhost",
+            "port": 3000,
+        }
+    await host.stop()
+
+
 async def test_create_chat_carries_the_optional_fields_it_is_given() -> None:
     # `workingDirectories` needs its own advertisement: "A client MUST NOT
     # supply this field unless the agent advertises

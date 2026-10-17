@@ -10,6 +10,33 @@ versions each release speaks.
 
 ## [Unreleased]
 
+### Changed — AHP 1.1.0 (upstream `main`, unreleased)
+
+- **The pending-message drain reads the 1.1.0 shared list.** Every steering
+  message is offered to the running turn in order and removed by its own id;
+  idle, steering runs ahead of the queue and a queued pick skips steering
+  entries. The old drain took `queuedMessages[0]` and removed it as `queued`,
+  which under the new reducer leaves a steering entry in place to run again
+  after every turn. A saved session's legacy `steeringMessage` still runs.
+- **A pending message already handed to the agent cannot be edited, re-set or
+  removed** ("Hosts MUST reject edits or client removals that they can no
+  longer honor after handoff"); a client removal must match id and kind, and
+  an unknown kind is refused.
+- `SteersTurns.steer` is now called once per steering message.
+
+### Added — AHP 1.1.0
+
+- **Per-chat config:** `chat/configChanged` is validated against the owning
+  session's schema (`chatMutable` properties only; `replace` allowed), and the
+  new `ReconfiguresChats.chat_config_changed(chat, values)` is called with the
+  chat's whole overlay — also when an agent attaches later. The echo
+  provider's `prefix` is `chatMutable`.
+- `createChat` honours `title`.
+- `ModelInfo.vendor` → `SessionModelInfo.vendor`.
+- `createTcpConnection` is dispatched and answered `PermissionDenied`; this
+  host never advertises `tcpConnections`. A `subscribe` offering
+  `flowControl` gets ordinary delivery.
+
 ### Changed
 
 - `SessionPublisher.external_turn` takes `chat=`, so a provider running a

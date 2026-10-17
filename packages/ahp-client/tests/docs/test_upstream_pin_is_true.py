@@ -19,12 +19,14 @@ from ahp_client.client.client import ClientConfig
 
 def test_the_pin_is_the_spec_revision_this_client_was_written_against() -> None:
     """Every wire shape here was read out of `spec/v0.7.0` (plan §2.3) and
-    re-checked against `spec/v0.8.0`, `spec/v0.9.0` and `spec/v1.0.0`; the
-    0.9.0 ones it reads (turn errors, terminal lifecycle, session claims)
-    accept both, and 1.0.0 only added. A dependency that vendors a different
-    tag invalidates that evidence, and the place it must fail is a test rather
-    than a field report."""
-    assert UPSTREAM_PROTOCOL_VERSION == "1.0.0"
+    re-checked against `spec/v0.8.0`, `spec/v0.9.0`, `spec/v1.0.0` and upstream
+    `main` at 1.1.0 (unreleased); the 0.9.0 ones it reads (turn errors,
+    terminal lifecycle, session claims) accept both, 1.0.0 only added, and
+    1.1.0 changed only what the shared reducers already absorb (one pending
+    list) and what this client never offers (windowed delivery). A dependency
+    that vendors a different revision invalidates that evidence, and the place
+    it must fail is a test rather than a field report."""
+    assert UPSTREAM_PROTOCOL_VERSION == "1.1.0"
 
 
 def test_the_default_offer_is_the_pins_list_not_upstreams() -> None:

@@ -8,7 +8,7 @@ all -- and a channel with no reducer keeps receiving actions while its state
 freezes. Nothing raises. Nothing logs.
 
 The corpus makes the shape classifier free to verify: every fixture declares the
-reducer it belongs to, so 308 fixtures are 308 cases written by neither peer.
+reducer it belongs to, so 327 fixtures are 327 cases written by neither peer.
 """
 
 from __future__ import annotations
@@ -24,7 +24,7 @@ from ahp_protocol.reducers import REDUCERS
 EXPECTED_PER_REDUCER = {
     "root": 7,
     "session": 92,
-    "chat": 149,
+    "chat": 168,
     "terminal": 19,
     "changeset": 17,
     "resourceWatch": 2,
@@ -54,7 +54,7 @@ def test_every_fixture_classifies_to_its_declared_reducer() -> None:
         "fixtures whose initial state carries no discriminating key:\n" + "\n".join(unclassified)
     )
     assert dict(counts) == EXPECTED_PER_REDUCER
-    assert sum(counts.values()) == 308
+    assert sum(counts.values()) == 327
 
 
 def test_every_classification_names_a_real_reducer() -> None:

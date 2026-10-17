@@ -860,8 +860,17 @@ class _SurfaceConnection:
             # it does not have.
             return {"snapshot": catalogue} if catalogue is not None else {}
         # `view` and `delivery` (and whatever a later version adds) are the
-        # surface's to ask of the node, so they ride along untouched.
-        options = {key: value for key, value in params.items() if key != "channel"}
+        # surface's to ask of the node, so they ride along untouched -- all
+        # but `flowControl`. Windowed delivery (1.1.0, experimental) is a
+        # credit loop per hop that this frame router does not run: a node that
+        # accepted the offer would answer with no snapshot, read here as "not
+        # my channel", and stall once its window filled with nobody granting
+        # credit. Withheld, the node delivers ordinarily, and so does the
+        # gateway -- "a server that ... declines the offer, omits
+        # `flowControl` and returns an ordinary result".
+        options = {
+            key: value for key, value in params.items() if key not in ("channel", "flowControl")
+        }
         if channel.startswith(TELEMETRY_SCHEME):
             await self._subscribe_telemetry(channel, options)
             return {}

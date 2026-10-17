@@ -2,18 +2,21 @@
 
 Regenerate with `python scripts/generate_tables.py`.
 
-Source: spec/v1.0.0 (5f16d81bb7045b66d7bc768d244feab75002d943)
+Source: main (1ef0642965efaa7ef98caff287bca923fbc80ec6)
 """
 
 from __future__ import annotations
 
 from typing import Final
 
-#: The protocol version upstream's own source tree declares at the pinned tag.
-#: This is NOT what we speak -- see ahp_protocol.types.versions.
-UPSTREAM_PROTOCOL_VERSION: Final = '1.0.0'
+#: The protocol version upstream's own source tree declares at the pinned
+#: commit -- on a development branch, the version under development, not one
+#: that has been released. This is NOT what we speak -- see ahp_protocol.versions.
+UPSTREAM_PROTOCOL_VERSION: Final = '1.1.0'
 
-#: Every version the upstream client at the pinned tag will negotiate.
+#: Upstream's "released compatibility baselines, independent of the current
+#: development `PROTOCOL_VERSION`" (registry.ts) at the pinned commit. Not
+#: necessarily led by UPSTREAM_PROTOCOL_VERSION: off a release tag it is not.
 UPSTREAM_SUPPORTED_PROTOCOL_VERSIONS: Final[tuple[str, ...]] = ('1.0.0', '0.9.0')
 
 #: Every action's wire string, from `export const enum ActionType`.
@@ -46,6 +49,7 @@ ACTION_TYPES: Final[frozenset[str]] = frozenset([
     'chat/backgroundWorkSet',
     'chat/canvasesChanged',
     'chat/changesetsChanged',
+    'chat/configChanged',
     'chat/delta',
     'chat/draftChanged',
     'chat/error',
@@ -197,6 +201,7 @@ IS_CLIENT_DISPATCHABLE: Final[dict[str, bool]] = {
     'chat/draftChanged': True,
     'chat/isReadChanged': True,
     'chat/isArchivedChanged': True,
+    'chat/configChanged': True,
     'chat/inputRequested': False,
     'chat/inputAnswerChanged': True,
     'chat/inputCompleted': True,
@@ -307,6 +312,7 @@ ACTION_INTRODUCED_IN: Final[dict[str, str]] = {
     'chat/draftChanged': '0.5.0',
     'chat/isReadChanged': '0.9.0',
     'chat/isArchivedChanged': '0.9.0',
+    'chat/configChanged': '1.1.0',
     'chat/inputRequested': '0.4.0',
     'chat/inputAnswerChanged': '0.4.0',
     'chat/inputCompleted': '0.4.0',
@@ -353,10 +359,8 @@ ACTION_INTRODUCED_IN: Final[dict[str, str]] = {
 #: Server->client notification method -> the protocol version that introduced
 #: it (`ServerNotificationMap` minus `action`, which ACTION_INTRODUCED_IN
 #: versions per action type). Upstream's `isNotificationKnownToVersion` is a
-#: `<=` compare against the negotiated version; every method here predates the
-#: oldest negotiable version at this pin, so the filter only bites after a pin
-#: bump lands a newer notification -- vendored now so that bump cannot land
-#: without the table.
+#: `<=` compare against the negotiated version, so a method introduced after
+#: the version a connection negotiated is withheld from it.
 NOTIFICATION_INTRODUCED_IN: Final[dict[str, str]] = {
     'root/sessionAdded': '0.1.0',
     'root/sessionRemoved': '0.1.0',
@@ -366,6 +370,12 @@ NOTIFICATION_INTRODUCED_IN: Final[dict[str, str]] = {
     'otlp/exportLogs': '0.2.0',
     'otlp/exportTraces': '0.2.0',
     'otlp/exportMetrics': '0.2.0',
+    'channel/frame': '1.1.0',
+    'channel/credit': '1.1.0',
+    'channel/snapshot': '1.1.0',
+    'tcp/data': '1.1.0',
+    'tcp/eof': '1.1.0',
+    'tcp/reset': '1.1.0',
 }
 
 #: Standard JSON-RPC 2.0 error codes.
@@ -389,4 +399,5 @@ AHP_ERROR_CODES: Final[dict[str, int]] = {
     'PermissionDenied': -32009,
     'AlreadyExists': -32010,
     'Conflict': -32011,
+    'TcpConnectionOpenFailed': -32012,
 }

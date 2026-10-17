@@ -4169,6 +4169,966 @@
     }
    ],
    "expected": null
+  },
+  {
+   "name": "chat/pendingMessageSet-steering-appends-and-mirrors",
+   "reducer": "chat",
+   "initial": {
+    "turns": [],
+    "status": 1,
+    "modifiedAt": "1970-01-01T00:00:00.000Z",
+    "queuedMessages": [
+     {
+      "id": "q1",
+      "message": {
+       "text": "m",
+       "origin": {
+        "kind": "user"
+       }
+      }
+     }
+    ]
+   },
+   "actions": [
+    {
+     "type": "chat/pendingMessageSet",
+     "kind": "steering",
+     "id": "s1",
+     "message": {
+      "text": "m",
+      "origin": {
+       "kind": "user"
+      }
+     }
+    }
+   ],
+   "expected": {
+    "turns": [],
+    "status": 1,
+    "modifiedAt": "1970-01-01T00:00:00.000Z",
+    "queuedMessages": [
+     {
+      "id": "q1",
+      "message": {
+       "text": "m",
+       "origin": {
+        "kind": "user"
+       }
+      }
+     },
+     {
+      "id": "s1",
+      "kind": "steering",
+      "message": {
+       "text": "m",
+       "origin": {
+        "kind": "user"
+       }
+      }
+     }
+    ],
+    "steeringMessage": {
+     "id": "s1",
+     "kind": "steering",
+     "message": {
+      "text": "m",
+      "origin": {
+       "kind": "user"
+      }
+     }
+    }
+   }
+  },
+  {
+   "name": "chat/pendingMessageSet-kind-absent",
+   "reducer": "chat",
+   "initial": {
+    "turns": [],
+    "status": 1,
+    "modifiedAt": "1970-01-01T00:00:00.000Z"
+   },
+   "actions": [
+    {
+     "type": "chat/pendingMessageSet",
+     "id": "q1",
+     "message": {
+      "text": "m",
+      "origin": {
+       "kind": "user"
+      }
+     }
+    }
+   ],
+   "expected": {
+    "turns": [],
+    "status": 1,
+    "modifiedAt": "1970-01-01T00:00:00.000Z",
+    "queuedMessages": [
+     {
+      "id": "q1",
+      "message": {
+       "text": "m",
+       "origin": {
+        "kind": "user"
+       }
+      }
+     }
+    ]
+   }
+  },
+  {
+   "name": "chat/pendingMessageSet-kind-null",
+   "reducer": "chat",
+   "initial": {
+    "turns": [],
+    "status": 1,
+    "modifiedAt": "1970-01-01T00:00:00.000Z"
+   },
+   "actions": [
+    {
+     "type": "chat/pendingMessageSet",
+     "kind": null,
+     "id": "q1",
+     "message": {
+      "text": "m",
+      "origin": {
+       "kind": "user"
+      }
+     }
+    }
+   ],
+   "expected": {
+    "turns": [],
+    "status": 1,
+    "modifiedAt": "1970-01-01T00:00:00.000Z",
+    "queuedMessages": [
+     {
+      "id": "q1",
+      "kind": null,
+      "message": {
+       "text": "m",
+       "origin": {
+        "kind": "user"
+       }
+      }
+     }
+    ]
+   }
+  },
+  {
+   "name": "chat/pendingMessageSet-requeue-clears-mirror",
+   "reducer": "chat",
+   "initial": {
+    "turns": [],
+    "status": 1,
+    "modifiedAt": "1970-01-01T00:00:00.000Z",
+    "steeringMessage": {
+     "id": "s1",
+     "message": {
+      "text": "m",
+      "origin": {
+       "kind": "user"
+      }
+     },
+     "kind": "steering"
+    },
+    "queuedMessages": [
+     {
+      "id": "s1",
+      "message": {
+       "text": "m",
+       "origin": {
+        "kind": "user"
+       }
+      },
+      "kind": "steering"
+     }
+    ]
+   },
+   "actions": [
+    {
+     "type": "chat/pendingMessageSet",
+     "kind": "queued",
+     "id": "s1",
+     "message": {
+      "text": "m",
+      "origin": {
+       "kind": "user"
+      }
+     }
+    }
+   ],
+   "expected": {
+    "turns": [],
+    "status": 1,
+    "modifiedAt": "1970-01-01T00:00:00.000Z",
+    "queuedMessages": [
+     {
+      "id": "s1",
+      "kind": "queued",
+      "message": {
+       "text": "m",
+       "origin": {
+        "kind": "user"
+       }
+      }
+     }
+    ]
+   }
+  },
+  {
+   "name": "chat/pendingMessageSet-null-mirror-absent-id",
+   "reducer": "chat",
+   "initial": {
+    "turns": [],
+    "status": 1,
+    "modifiedAt": "1970-01-01T00:00:00.000Z",
+    "steeringMessage": null
+   },
+   "actions": [
+    {
+     "type": "chat/pendingMessageSet",
+     "kind": "queued",
+     "message": {
+      "text": "m",
+      "origin": {
+       "kind": "user"
+      }
+     }
+    }
+   ],
+   "expected": {
+    "turns": [],
+    "status": 1,
+    "modifiedAt": "1970-01-01T00:00:00.000Z",
+    "queuedMessages": [
+     {
+      "kind": "queued",
+      "message": {
+       "text": "m",
+       "origin": {
+        "kind": "user"
+       }
+      }
+     }
+    ]
+   }
+  },
+  {
+   "name": "chat/pendingMessageSet-true-vs-1",
+   "reducer": "chat",
+   "initial": {
+    "turns": [],
+    "status": 1,
+    "modifiedAt": "1970-01-01T00:00:00.000Z",
+    "queuedMessages": [
+     {
+      "id": 1,
+      "message": {
+       "text": "m",
+       "origin": {
+        "kind": "user"
+       }
+      }
+     }
+    ]
+   },
+   "actions": [
+    {
+     "type": "chat/pendingMessageSet",
+     "kind": "queued",
+     "id": true,
+     "message": {
+      "text": "m",
+      "origin": {
+       "kind": "user"
+      }
+     }
+    }
+   ],
+   "expected": {
+    "turns": [],
+    "status": 1,
+    "modifiedAt": "1970-01-01T00:00:00.000Z",
+    "queuedMessages": [
+     {
+      "id": 1,
+      "message": {
+       "text": "m",
+       "origin": {
+        "kind": "user"
+       }
+      }
+     },
+     {
+      "id": true,
+      "kind": "queued",
+      "message": {
+       "text": "m",
+       "origin": {
+        "kind": "user"
+       }
+      }
+     }
+    ]
+   }
+  },
+  {
+   "name": "chat/pendingMessageRemoved-last-drops-key",
+   "reducer": "chat",
+   "initial": {
+    "turns": [],
+    "status": 1,
+    "modifiedAt": "1970-01-01T00:00:00.000Z",
+    "queuedMessages": [
+     {
+      "id": "q1",
+      "message": {
+       "text": "m",
+       "origin": {
+        "kind": "user"
+       }
+      }
+     }
+    ]
+   },
+   "actions": [
+    {
+     "type": "chat/pendingMessageRemoved",
+     "kind": "queued",
+     "id": "q1"
+    }
+   ],
+   "expected": {
+    "turns": [],
+    "status": 1,
+    "modifiedAt": "1970-01-01T00:00:00.000Z"
+   }
+  },
+  {
+   "name": "chat/pendingMessageRemoved-steering-vs-kindless-entry",
+   "reducer": "chat",
+   "initial": {
+    "turns": [],
+    "status": 1,
+    "modifiedAt": "1970-01-01T00:00:00.000Z",
+    "steeringMessage": {
+     "id": "x",
+     "message": {
+      "text": "m",
+      "origin": {
+       "kind": "user"
+      }
+     }
+    },
+    "queuedMessages": [
+     {
+      "id": "x",
+      "message": {
+       "text": "m",
+       "origin": {
+        "kind": "user"
+       }
+      }
+     }
+    ]
+   },
+   "actions": [
+    {
+     "type": "chat/pendingMessageRemoved",
+     "kind": "steering",
+     "id": "x"
+    }
+   ],
+   "expected": {
+    "turns": [],
+    "status": 1,
+    "modifiedAt": "1970-01-01T00:00:00.000Z",
+    "queuedMessages": [
+     {
+      "id": "x",
+      "message": {
+       "text": "m",
+       "origin": {
+        "kind": "user"
+       }
+      }
+     }
+    ]
+   }
+  },
+  {
+   "name": "chat/pendingMessageRemoved-null-kind-entry-is-queued",
+   "reducer": "chat",
+   "initial": {
+    "turns": [],
+    "status": 1,
+    "modifiedAt": "1970-01-01T00:00:00.000Z",
+    "queuedMessages": [
+     {
+      "id": "x",
+      "message": {
+       "text": "m",
+       "origin": {
+        "kind": "user"
+       }
+      },
+      "kind": null
+     }
+    ]
+   },
+   "actions": [
+    {
+     "type": "chat/pendingMessageRemoved",
+     "kind": "queued",
+     "id": "x"
+    }
+   ],
+   "expected": {
+    "turns": [],
+    "status": 1,
+    "modifiedAt": "1970-01-01T00:00:00.000Z"
+   }
+  },
+  {
+   "name": "chat/pendingMessageRemoved-kind-absent",
+   "reducer": "chat",
+   "initial": {
+    "turns": [],
+    "status": 1,
+    "modifiedAt": "1970-01-01T00:00:00.000Z",
+    "queuedMessages": [
+     {
+      "id": "x",
+      "message": {
+       "text": "m",
+       "origin": {
+        "kind": "user"
+       }
+      }
+     }
+    ]
+   },
+   "actions": [
+    {
+     "type": "chat/pendingMessageRemoved",
+     "id": "x"
+    }
+   ],
+   "expected": {
+    "turns": [],
+    "status": 1,
+    "modifiedAt": "1970-01-01T00:00:00.000Z",
+    "queuedMessages": [
+     {
+      "id": "x",
+      "message": {
+       "text": "m",
+       "origin": {
+        "kind": "user"
+       }
+      }
+     }
+    ]
+   }
+  },
+  {
+   "name": "chat/pendingMessageRemoved-first-duplicate-only",
+   "reducer": "chat",
+   "initial": {
+    "turns": [],
+    "status": 1,
+    "modifiedAt": "1970-01-01T00:00:00.000Z",
+    "queuedMessages": [
+     {
+      "id": "d",
+      "message": {
+       "text": "1",
+       "origin": {
+        "kind": "user"
+       }
+      }
+     },
+     {
+      "id": "d",
+      "message": {
+       "text": "2",
+       "origin": {
+        "kind": "user"
+       }
+      }
+     }
+    ]
+   },
+   "actions": [
+    {
+     "type": "chat/pendingMessageRemoved",
+     "kind": "queued",
+     "id": "d"
+    }
+   ],
+   "expected": {
+    "turns": [],
+    "status": 1,
+    "modifiedAt": "1970-01-01T00:00:00.000Z",
+    "queuedMessages": [
+     {
+      "id": "d",
+      "message": {
+       "text": "2",
+       "origin": {
+        "kind": "user"
+       }
+      }
+     }
+    ]
+   }
+  },
+  {
+   "name": "chat/turnStarted-empty-queued-id",
+   "reducer": "chat",
+   "initial": {
+    "turns": [],
+    "status": 1,
+    "modifiedAt": "1970-01-01T00:00:00.000Z",
+    "queuedMessages": [
+     {
+      "id": "",
+      "message": {
+       "text": "m",
+       "origin": {
+        "kind": "user"
+       }
+      }
+     },
+     {
+      "id": "q",
+      "message": {
+       "text": "m",
+       "origin": {
+        "kind": "user"
+       }
+      }
+     }
+    ]
+   },
+   "actions": [
+    {
+     "type": "chat/turnStarted",
+     "turnId": "t2",
+     "startedAt": "1970-01-01T00:00:01.000Z",
+     "message": {
+      "text": "m",
+      "origin": {
+       "kind": "user"
+      }
+     },
+     "queuedMessageId": ""
+    }
+   ],
+   "expected": {
+    "turns": [],
+    "status": 8,
+    "modifiedAt": "1970-01-01T00:00:01.000Z",
+    "queuedMessages": [
+     {
+      "id": "q",
+      "message": {
+       "text": "m",
+       "origin": {
+        "kind": "user"
+       }
+      }
+     }
+    ],
+    "activeTurn": {
+     "id": "t2",
+     "startedAt": "1970-01-01T00:00:01.000Z",
+     "message": {
+      "text": "m",
+      "origin": {
+       "kind": "user"
+      }
+     },
+     "responseParts": []
+    }
+   }
+  },
+  {
+   "name": "chat/turnStarted-null-queued-id",
+   "reducer": "chat",
+   "initial": {
+    "turns": [],
+    "status": 1,
+    "modifiedAt": "1970-01-01T00:00:00.000Z",
+    "steeringMessage": {
+     "id": null,
+     "message": {
+      "text": "m",
+      "origin": {
+       "kind": "user"
+      }
+     },
+     "kind": "steering"
+    },
+    "queuedMessages": []
+   },
+   "actions": [
+    {
+     "type": "chat/turnStarted",
+     "turnId": "t2",
+     "startedAt": "1970-01-01T00:00:01.000Z",
+     "message": {
+      "text": "m",
+      "origin": {
+       "kind": "user"
+      }
+     },
+     "queuedMessageId": null
+    }
+   ],
+   "expected": {
+    "turns": [],
+    "status": 8,
+    "modifiedAt": "1970-01-01T00:00:01.000Z",
+    "activeTurn": {
+     "id": "t2",
+     "startedAt": "1970-01-01T00:00:01.000Z",
+     "message": {
+      "text": "m",
+      "origin": {
+       "kind": "user"
+      }
+     },
+     "responseParts": []
+    }
+   }
+  },
+  {
+   "name": "chat/turnStarted-consumes-mirror",
+   "reducer": "chat",
+   "initial": {
+    "turns": [],
+    "status": 1,
+    "modifiedAt": "1970-01-01T00:00:00.000Z",
+    "steeringMessage": {
+     "id": "s1",
+     "message": {
+      "text": "m",
+      "origin": {
+       "kind": "user"
+      }
+     },
+     "kind": "steering"
+    },
+    "queuedMessages": [
+     {
+      "id": "s1",
+      "message": {
+       "text": "m",
+       "origin": {
+        "kind": "user"
+       }
+      },
+      "kind": "steering"
+     }
+    ]
+   },
+   "actions": [
+    {
+     "type": "chat/turnStarted",
+     "turnId": "t2",
+     "startedAt": "1970-01-01T00:00:01.000Z",
+     "message": {
+      "text": "m",
+      "origin": {
+       "kind": "user"
+      }
+     },
+     "queuedMessageId": "s1"
+    }
+   ],
+   "expected": {
+    "turns": [],
+    "status": 8,
+    "modifiedAt": "1970-01-01T00:00:01.000Z",
+    "activeTurn": {
+     "id": "t2",
+     "startedAt": "1970-01-01T00:00:01.000Z",
+     "message": {
+      "text": "m",
+      "origin": {
+       "kind": "user"
+      }
+     },
+     "responseParts": []
+    }
+   }
+  },
+  {
+   "name": "chat/turnStarted-no-queued-id-keeps-empty-list",
+   "reducer": "chat",
+   "initial": {
+    "turns": [],
+    "status": 1,
+    "modifiedAt": "1970-01-01T00:00:00.000Z",
+    "queuedMessages": []
+   },
+   "actions": [
+    {
+     "type": "chat/turnStarted",
+     "turnId": "t2",
+     "startedAt": "1970-01-01T00:00:01.000Z",
+     "message": {
+      "text": "m",
+      "origin": {
+       "kind": "user"
+      }
+     }
+    }
+   ],
+   "expected": {
+    "turns": [],
+    "status": 8,
+    "modifiedAt": "1970-01-01T00:00:01.000Z",
+    "queuedMessages": [],
+    "activeTurn": {
+     "id": "t2",
+     "startedAt": "1970-01-01T00:00:01.000Z",
+     "message": {
+      "text": "m",
+      "origin": {
+       "kind": "user"
+      }
+     },
+     "responseParts": []
+    }
+   }
+  },
+  {
+   "name": "chat/configChanged-merge-keeps-null-and-siblings",
+   "reducer": "chat",
+   "initial": {
+    "turns": [],
+    "status": 1,
+    "modifiedAt": "1970-01-01T00:00:00.000Z",
+    "config": {
+     "values": {
+      "a": 1,
+      "b": 2
+     },
+     "extra": true
+    }
+   },
+   "actions": [
+    {
+     "type": "chat/configChanged",
+     "config": {
+      "b": null,
+      "c": 3
+     }
+    }
+   ],
+   "expected": {
+    "turns": [],
+    "status": 1,
+    "modifiedAt": "1970-01-01T00:00:00.000Z",
+    "config": {
+     "values": {
+      "a": 1,
+      "b": null,
+      "c": 3
+     },
+     "extra": true
+    }
+   }
+  },
+  {
+   "name": "chat/configChanged-replace",
+   "reducer": "chat",
+   "initial": {
+    "turns": [],
+    "status": 1,
+    "modifiedAt": "1970-01-01T00:00:00.000Z",
+    "config": {
+     "values": {
+      "a": 1
+     }
+    }
+   },
+   "actions": [
+    {
+     "type": "chat/configChanged",
+     "config": {
+      "c": 3
+     },
+     "replace": true
+    }
+   ],
+   "expected": {
+    "turns": [],
+    "status": 1,
+    "modifiedAt": "1970-01-01T00:00:00.000Z",
+    "config": {
+     "values": {
+      "c": 3
+     }
+    }
+   }
+  },
+  {
+   "name": "chat/configChanged-replace-zero-merges",
+   "reducer": "chat",
+   "initial": {
+    "turns": [],
+    "status": 1,
+    "modifiedAt": "1970-01-01T00:00:00.000Z",
+    "config": {
+     "values": {
+      "a": 1
+     }
+    }
+   },
+   "actions": [
+    {
+     "type": "chat/configChanged",
+     "config": {
+      "c": 3
+     },
+     "replace": 0
+    }
+   ],
+   "expected": {
+    "turns": [],
+    "status": 1,
+    "modifiedAt": "1970-01-01T00:00:00.000Z",
+    "config": {
+     "values": {
+      "a": 1,
+      "c": 3
+     }
+    }
+   }
+  },
+  {
+   "name": "chat/configChanged-null-config-creates",
+   "reducer": "chat",
+   "initial": {
+    "turns": [],
+    "status": 1,
+    "modifiedAt": "1970-01-01T00:00:00.000Z",
+    "config": null
+   },
+   "actions": [
+    {
+     "type": "chat/configChanged",
+     "config": {
+      "a": 1
+     }
+    }
+   ],
+   "expected": {
+    "turns": [],
+    "status": 1,
+    "modifiedAt": "1970-01-01T00:00:00.000Z",
+    "config": {
+     "values": {
+      "a": 1
+     }
+    }
+   }
+  },
+  {
+   "name": "chat/configChanged-config-absent",
+   "reducer": "chat",
+   "initial": {
+    "turns": [],
+    "status": 1,
+    "modifiedAt": "1970-01-01T00:00:00.000Z",
+    "config": {
+     "values": {
+      "a": 1
+     }
+    }
+   },
+   "actions": [
+    {
+     "type": "chat/configChanged"
+    }
+   ],
+   "expected": {
+    "turns": [],
+    "status": 1,
+    "modifiedAt": "1970-01-01T00:00:00.000Z",
+    "config": {
+     "values": {
+      "a": 1
+     }
+    }
+   }
+  },
+  {
+   "name": "chat/configChanged-values-absent",
+   "reducer": "chat",
+   "initial": {
+    "turns": [],
+    "status": 1,
+    "modifiedAt": "1970-01-01T00:00:00.000Z",
+    "config": {
+     "other": 1
+    }
+   },
+   "actions": [
+    {
+     "type": "chat/configChanged",
+     "config": {
+      "a": 1
+     }
+    }
+   ],
+   "expected": {
+    "turns": [],
+    "status": 1,
+    "modifiedAt": "1970-01-01T00:00:00.000Z",
+    "config": {
+     "other": 1,
+     "values": {
+      "a": 1
+     }
+    }
+   }
+  },
+  {
+   "name": "chat/configChanged-string-config",
+   "reducer": "chat",
+   "initial": {
+    "turns": [],
+    "status": 1,
+    "modifiedAt": "1970-01-01T00:00:00.000Z",
+    "config": {
+     "values": {
+      "a": 1
+     }
+    }
+   },
+   "actions": [
+    {
+     "type": "chat/configChanged",
+     "config": "ab"
+    }
+   ],
+   "expected": {
+    "turns": [],
+    "status": 1,
+    "modifiedAt": "1970-01-01T00:00:00.000Z",
+    "config": {
+     "values": {
+      "0": "a",
+      "1": "b",
+      "a": 1
+     }
+    }
+   }
   }
  ]
 }

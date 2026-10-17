@@ -46,8 +46,8 @@ exceptions below; M9 (release) is not.** The suite (count it from
 `pytest --collect-only`, never from prose — a number here went stale twice),
 `mypy --strict`, `ruff`, `ruff format` and three import-linter contracts
 green. A full turn runs against the sibling Python host. The shared layer
-([`ahp-protocol`][protocol]) is green on 308 reducer fixtures,
-67 round-trips and the JS-semantics oracle.
+([`ahp-protocol`][protocol]) is green on 327 reducer fixtures,
+94 round-trips and the JS-semantics oracle.
 
 The two exceptions, so nobody re-discovers them: **`MultiHostStateMirror`
 (§6.3) was never built** — `hosts/` supervises one host per runtime, and an
@@ -84,7 +84,8 @@ reducers in the mirror, reducer binding that is not scheme-based, real
 write-ahead reconciliation, all 10 server→client requests routed with 9 served
 (`createResourceWatch` is declined on purpose — §1.3), `clientInfo` and
 `capabilities` on the handshake, verified version negotiation, all 9 server
-notifications, and sequence-gap detection.
+notifications that can reach a client outside a window, and sequence-gap
+detection.
 
 That table is about the *protocol* layer and every row of it holds. **§1.3 is the
 other axis and is less flattering:** it found four of the seven channels with no
@@ -103,12 +104,15 @@ code they justify.
 
 ## Verified surface (count from the code, never from prose)
 
-- **31** client→server requests, **2** client notifications. The sibling host
-  dispatches all 33; `moveChat` (1.0.0) moves a chat between sessions only
-  when its provider implements `TransfersChats`
-- **10** server→client requests, **9** server→client notifications
-- **106** action types, **47** client-dispatchable
-- **308** reducer fixtures, **67** round-trips
+- **32** client→server requests, **7** client notifications of which this
+  client sends **2** — the other five exist only on a windowed subscription
+  (1.1.0, experimental), which it never offers. The sibling host dispatches
+  all 34, declining `createTcpConnection`; `moveChat` (1.0.0) moves a chat
+  between sessions only when its provider implements `TransfersChats`
+- **10** server→client requests, **15** server→client notifications, **9**
+  outside a window (`client.events.WINDOWED_METHODS` names the other six)
+- **107** action types, **48** client-dispatchable
+- **327** reducer fixtures, **94** round-trips
 
 Every design proposal that fed this plan wrote 28 or ~30 commands. Only a
 *generated* parity matrix catches that, which is why `docs/parity.md` is

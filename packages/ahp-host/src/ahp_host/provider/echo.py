@@ -147,6 +147,9 @@ class EchoSession:
         #: `sessionMutable` values changed after creation (`prefix`), which
         #: win over the creation-time config.
         self.config_overrides: dict[str, Any] = {}
+        #: Per chat, the values set on that chat alone (`chatMutable`, 1.1.0),
+        #: which win over the session's in that chat only.
+        self.chat_config: dict[str, dict[str, Any]] = {}
         #: Messages steered into the running turn, echoed before it ends.
         self.steered: list[str] = []
         self._turn_running = False
@@ -167,6 +170,14 @@ class EchoSession:
     async def config_changed(self, values: Mapping[str, Any]) -> None:
         """A client changed `prefix` mid-session; later replies use it."""
         self.config_overrides.update(values)
+
+    async def chat_config_changed(self, chat: str, values: Mapping[str, Any]) -> None:
+        """A client set `prefix` on one chat; only that chat's replies use it.
+
+        *values* is the chat's whole overlay, so it replaces what was there --
+        an empty one puts the chat back on the session's prefix.
+        """
+        self.chat_config[chat] = dict(values)
 
     async def describe(self) -> SessionDescription:
         """Contribute a fully-populated customization tree, when asked to.
@@ -251,7 +262,9 @@ class EchoSession:
         # Whatever the client settled on during `resolveSessionConfig` arrives
         # here, so the configuration is observably load-bearing rather than
         # decorative.
-        prefix = self.config_overrides.get("prefix", self.context.config.get("prefix"))
+        session_prefix = self.config_overrides.get("prefix", self.context.config.get("prefix"))
+        overlay = self.chat_config.get(message.chat_uri or self.context.chat_uri, {})
+        prefix = overlay.get("prefix", session_prefix)
         prefix = prefix if isinstance(prefix, str) else "You said:"
         text = message.text.upper() if self.context.config.get("style") == "shout" else message.text
         for chunk in (f"{prefix} ", text):
@@ -468,7 +481,8 @@ class EchoProvider:
         """A small, contextual schema -- enough to see the mechanism work.
 
         `style` is fixed at creation. `prefix` is `sessionMutable`, so it is the
-        only one a client may change afterwards, and `greeting` only appears
+        only one a client may change afterwards -- and `chatMutable`, so it can
+        also be set for one chat alone (1.1.0) -- and `greeting` only appears
         once a style is chosen -- which is the point of resolving iteratively
         rather than publishing one static schema.
         """
@@ -487,6 +501,7 @@ class EchoProvider:
                 "title": "Reply prefix",
                 "default": "You said:",
                 "sessionMutable": True,
+                "chatMutable": True,
             },
         }
         if request.values.get("style") == "shout":

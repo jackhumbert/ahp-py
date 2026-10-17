@@ -6,6 +6,16 @@ Every release states the protocol versions it speaks.
 
 ## [Unreleased]
 
+### Added — AHP 1.1.0 (upstream `main`, unreleased)
+
+- `create_tcp_connection(channel, host, port)` wraps the experimental
+  `createTcpConnection`, ungated like `move_chat`. The client still never
+  offers windowed delivery, so the TCP channel's data cannot reach it.
+- `Session.create_chat(title=...)` sends `CreateChatParams.title`.
+- `client.events.WINDOWED_METHODS` names the six notifications that exist only
+  on a windowed subscription; the parity matrix shows them as such.
+- `chat/configChanged` is listed as deliberately not modelled as a turn event.
+
 ### Added
 
 - `move_chat(chat, destination)` wraps `moveChat`, new in AHP 1.0.0. It is not

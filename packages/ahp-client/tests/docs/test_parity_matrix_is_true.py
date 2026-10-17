@@ -24,7 +24,7 @@ from ahp_client.client.commands import (
     COMMANDS,
     ROOT_SCOPED,
 )
-from ahp_client.client.events import NOTIFICATION_METHODS
+from ahp_client.client.events import NOTIFICATION_METHODS, WINDOWED_METHODS
 from ahp_client.client.mirror import REDUCER_NAMES
 from ahp_client.serve.resources import _SNAKE, _VIRTUAL_METHODS
 from ahp_client.serve.router import REVERSE_METHODS
@@ -51,12 +51,14 @@ def test_every_upstream_command_has_a_wrapper() -> None:
     )
 
 
-def test_there_are_thirty_one_of_them() -> None:
-    """Pinned because every prose description of this protocol gets it wrong."""
-    assert len(COMMANDS) == 31
-    assert len(_map_entries("ClientNotificationMap")) == 2
+def test_there_are_thirty_two_of_them() -> None:
+    """Pinned because every prose description of this protocol gets it wrong.
+    1.1.0 added `createTcpConnection`, and six notifications that exist only on
+    a windowed subscription -- five of them in the client's direction too."""
+    assert len(COMMANDS) == 32
+    assert len(_map_entries("ClientNotificationMap")) == 7
     assert len(_map_entries("ServerCommandMap")) == 10
-    assert len(_map_entries("ServerNotificationMap")) == 9
+    assert len(_map_entries("ServerNotificationMap")) == 15
 
 
 def test_the_three_scopes_partition_the_command_set() -> None:
@@ -132,11 +134,23 @@ def _channel_declaration(iface: str) -> str:
     )
 
 
-def test_all_nine_server_notifications_are_surfaced() -> None:
-    """The TypeScript client surfaces five and drops four at a `default:` branch
-    that reaches neither its subscriptions nor its `events()` stream."""
-    assert set(_map_entries("ServerNotificationMap")) == NOTIFICATION_METHODS
+def test_every_server_notification_outside_a_window_is_surfaced() -> None:
+    """All nine that can reach this client. The TypeScript client surfaces five
+    and drops four at a `default:` branch that reaches neither its
+    subscriptions nor its `events()` stream. The other six flow only on a
+    windowed subscription, which this client never offers."""
+    server = set(_map_entries("ServerNotificationMap"))
+    assert server - WINDOWED_METHODS == NOTIFICATION_METHODS
     assert len(NOTIFICATION_METHODS) == 9
+
+
+def test_the_windowed_methods_are_upstreams() -> None:
+    """Named, not assumed: every one is in a vendored notification map, and the
+    client's own two notifications are not among them."""
+    client = set(_map_entries("ClientNotificationMap"))
+    server = set(_map_entries("ServerNotificationMap"))
+    assert client | server >= WINDOWED_METHODS
+    assert client - WINDOWED_METHODS == {"unsubscribe", "dispatchAction"}
 
 
 def test_all_ten_reducers_are_available() -> None:
@@ -181,8 +195,8 @@ def test_the_reverse_here_column_matches_the_servers_dispatch_tables() -> None:
 
 def test_dispatchable_action_count_is_pinned() -> None:
     dispatchable = [a for a in ACTION_TYPES if IS_CLIENT_DISPATCHABLE.get(a)]
-    assert len(ACTION_TYPES) == 106
-    assert len(dispatchable) == 47
+    assert len(ACTION_TYPES) == 107
+    assert len(dispatchable) == 48
 
 
 def test_the_generated_matrix_is_not_stale() -> None:

@@ -54,8 +54,18 @@ __all__ = [
 
 @cache
 def load(name: str) -> dict[str, Any]:
-    """One vendored schema document, by file stem."""
+    """One vendored schema document, by file stem -- with one upstream defect closed.
+
+    1.1.0's `EmptyState` is `{"type": "object", "properties": {}}`: it admits
+    EVERY object, where the TypeScript (`[key: string]: never`) admits only
+    `{}`. `Snapshot.state` is a `oneOf` with it as a branch, so every real,
+    non-empty state matches two branches and upstream's own schema rejects
+    every snapshot. `maxProperties: 0` is what the type says; see `ahp-protocol`'s UPSTREAM.md.
+    """
     document: dict[str, Any] = json.loads((SCHEMA_DIR / f"{name}.schema.json").read_text())
+    empty = document.get("$defs", {}).get("EmptyState")
+    if isinstance(empty, dict) and "maxProperties" not in empty:
+        empty["maxProperties"] = 0
     return document
 
 

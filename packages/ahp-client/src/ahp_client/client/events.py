@@ -24,6 +24,7 @@ from typing import Any, Final, Literal, TypeAlias
 from ahp_protocol.types import JsonObject
 
 __all__ = [
+    "WINDOWED_METHODS",
     "ActionEvent",
     "ActionRejected",
     "AuthRequiredEvent",
@@ -233,6 +234,24 @@ class UnknownResponse:
 
 Diagnostic: TypeAlias = (
     SequenceGap | ActionRejected | DroppedEvents | MalformedFrame | UnknownResponse
+)
+
+#: The notifications that exist only on a WINDOWED subscription (1.1.0,
+#: experimental), in either direction: fragments, credit, the windowed
+#: snapshot, and the TCP channel's byte stream. "Neither peer can send
+#: `channel/frame` or other windowed delivery messages for the subscription
+#: unless the server has accepted" -- and this client never offers
+#: `flowControl`, so none can reach it and it sends none. Named, so the parity
+#: matrix can say so rather than show them as gaps.
+WINDOWED_METHODS: Final[frozenset[str]] = frozenset(
+    {
+        "channel/frame",
+        "channel/credit",
+        "channel/snapshot",
+        "tcp/data",
+        "tcp/eof",
+        "tcp/reset",
+    }
 )
 
 #: Notification method -> the wrapper it becomes. Handled centrally so the

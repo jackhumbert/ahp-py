@@ -51,8 +51,8 @@ specification owned by Microsoft. We implement it; we do not design it.
 
 Current state: **feature-complete for `0.1.0`; not yet published.** What was
 scoped as v0.2 landed before the first release, so it ships in `0.1.0` too.
-All **308** reducer fixtures and
-all 67 round-trip fixtures pass, the v0.1 command set is implemented, and the
+All **327** reducer fixtures and
+all 94 round-trip fixtures pass, the v0.1 command set is implemented, and the
 real published Microsoft TypeScript client drives a full turn against the host
 over WebSocket in CI. v0.1's build order is
 `docs/plan.md` §11; everything after it is scoped in
@@ -190,7 +190,7 @@ host code calls the reducers and reviews touch both sides of that line.
     echo — that asymmetry is specified.
 13. **No `Host` without a `Policy`.** No socket-binding convenience function.
 14. **A declined feature answers a specific error, never a silent stub and
-    never a blanket `MethodNotFound`.** All 33 protocol commands are dispatched
+    never a blanket `MethodNotFound`.** All 34 protocol commands are dispatched
     (`tests/docs/test_readme_is_true.py` parses the dispatcher out of
     `core/host.py` and checks the README's list both ways), so `-32601` is
     reserved for a method

@@ -11,7 +11,7 @@ matrix is self-updating and also self-congratulatory — a wrapper that exists b
 has never been exercised shows green. Treat the ticks as *implemented*, and the
 interop suite as the evidence.
 
-## Client → server requests (31)
+## Client → server requests (32)
 
 | Method | TS client wrapper | Here | Channel |
 |---|---|---|---|
@@ -22,6 +22,7 @@ interop suite as the evidence.
 | `createSession` | — | ✅ | caller |
 | `disposeSession` | — | ✅ | caller |
 | `createChat` | — | ✅ | caller |
+| `createTcpConnection` | — | ✅ | caller |
 | `moveChat` | — | ✅ | caller |
 | `disposeChat` | — | ✅ | caller |
 | `createTerminal` | — | ✅ | caller |
@@ -47,14 +48,24 @@ interop suite as the evidence.
 | `runAutomation` | — | ✅ | automations |
 | `fetchAutomationRuns` | — | ✅ | automations |
 
-## Client → server notifications (2)
+## Client → server notifications (7)
 
 | Method | TS client | Here |
 |---|---|---|
 | `unsubscribe` | ✅ | ✅ |
 | `dispatchAction` | ✅ | ✅ |
+| `channel/frame` | not measured | windowed only |
+| `channel/credit` | not measured | windowed only |
+| `tcp/data` | not measured | windowed only |
+| `tcp/eof` | not measured | windowed only |
+| `tcp/reset` | not measured | windowed only |
 
-## Server → client notifications (9)
+"Windowed only" is windowed delivery and the TCP channel (1.1.0, experimental):
+those methods flow only on a subscription that offered `flowControl` and had it
+accepted, and this client never offers it — so it sends none of them and none
+can reach it (`client.events.WINDOWED_METHODS`).
+
+## Server → client notifications (15)
 
 | Method | TS client | Here |
 |---|---|---|
@@ -67,10 +78,17 @@ interop suite as the evidence.
 | `otlp/exportLogs` | — | ✅ |
 | `otlp/exportTraces` | — | ✅ |
 | `otlp/exportMetrics` | — | ✅ |
+| `channel/frame` | not measured | windowed only |
+| `channel/credit` | not measured | windowed only |
+| `tcp/data` | not measured | windowed only |
+| `tcp/eof` | not measured | windowed only |
+| `tcp/reset` | not measured | windowed only |
+| `channel/snapshot` | not measured | windowed only |
 
-The TypeScript client surfaces 5 of 9.
-The remainder reach neither its per-URI subscriptions nor its global `events()`
-stream, because its `default:` branch returns without publishing.
+Outside a window, the TypeScript client surfaces 5 of
+9. The remainder reach neither its per-URI subscriptions nor its
+global `events()` stream, because its `default:` branch returns without
+publishing.
 
 ## Server → client requests (10)
 
@@ -114,7 +132,7 @@ mirror, which binds any of them by name at registration. The TypeScript
 | `session` | ✅ | ✅ |
 | `terminal` | ✅ | ✅ |
 
-## Client-dispatchable actions (47 of 106)
+## Client-dispatchable actions (48 of 107)
 
 Enumerated from the generated `IS_CLIENT_DISPATCHABLE` table.
 
@@ -128,6 +146,7 @@ Enumerated from the generated `IS_CLIENT_DISPATCHABLE` table.
 - `automation/updateRequested`
 - `automationRun/cancelRequested`
 - `changeset/filesReviewChanged`
+- `chat/configChanged`
 - `chat/draftChanged`
 - `chat/inputAnswerChanged`
 - `chat/inputCompleted`

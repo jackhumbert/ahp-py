@@ -607,6 +607,8 @@ _NOT_MODELLED: frozenset[str] = frozenset(
         "chat/canvasesChanged",
         "chat/isReadChanged",
         "chat/isArchivedChanged",
+        # 1.1.0: one chat's config overlay -- settings, not turn progress.
+        "chat/configChanged",
     }
 )
 

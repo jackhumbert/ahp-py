@@ -73,3 +73,26 @@ address out of the authority component entirely.
 **Workaround shipped:** none. Reading files through the agent host is unavailable until this is fixed
 upstream; the folder picker still works because it goes through `resourceResolve`/`resourceList` on the
 connection that already exists rather than minting a filesystem URI.
+
+---
+
+## U3 — `EmptyState`'s schema admits every object, so `Snapshot.state` rejects every snapshot (spec)
+
+**Measured 2026-10-17, on upstream `main` @ `1ef06429` (1.1.0, unreleased).** The generated
+`state.schema.json` (and the copies in `commands` and `notifications`) declares `EmptyState` as
+`{"type": "object", "properties": {}}` — no `maxProperties: 0`, no `additionalProperties: false`. The
+TypeScript is `interface EmptyState { [key: string]: never }` and the prose says it "is always the empty
+object `{}`", so the schema is looser than the type it is generated from.
+
+It bites because `Snapshot.state` is a `oneOf` with `EmptyState` as its last branch. Every real state —
+a `RootState` with `agents`, an `AutomationState` with `entries` — matches its own branch *and*
+`EmptyState`, and `oneOf` fails on two matches. Validating the host's ordinary `initialize` result
+against `InitializeResult` reports `snapshots/0/state: ... is valid under each of {'$ref':
+'#/$defs/EmptyState'}, {'$ref': '#/$defs/RootState'}` for every snapshot it carries.
+
+**Ask:** emit `maxProperties: 0` (or `additionalProperties: false`) for an index signature of `never`.
+
+**Workaround shipped:** both schema loaders (`ahp-protocol`'s `conformance/schemas.py` and this
+package's `tests/conformance/schemas.py`) add `maxProperties: 0` to `EmptyState` on load, and
+`ahp-protocol`'s `test_empty_state_schema_admits_every_object` pins the raw defect so a fix upstream
+is noticed.

@@ -828,6 +828,178 @@ case(
     [{"type": "canvas/stateChanged", "canvas": None}],
 )
 
+# ── 1.1.0: one pending list for both kinds, and per-chat config ──────────────
+
+_PENDING = {"text": "m", "origin": {"kind": "user"}}
+
+
+def _pending(identifier: Any, *kind: Any) -> dict[str, Any]:
+    entry: dict[str, Any] = {"id": identifier, "message": _PENDING}
+    if kind:
+        entry["kind"] = kind[0]
+    return entry
+
+
+# `{ id, kind: action.kind, message }`: an absent kind is dropped, a null one kept.
+case(
+    "chat/pendingMessageSet-steering-appends-and-mirrors",
+    "chat",
+    {**_CHAT, "queuedMessages": [_pending("q1")]},
+    [{"type": "chat/pendingMessageSet", "kind": "steering", "id": "s1", "message": _PENDING}],
+)
+case(
+    "chat/pendingMessageSet-kind-absent",
+    "chat",
+    _CHAT,
+    [{"type": "chat/pendingMessageSet", "id": "q1", "message": _PENDING}],
+)
+case(
+    "chat/pendingMessageSet-kind-null",
+    "chat",
+    _CHAT,
+    [{"type": "chat/pendingMessageSet", "kind": None, "id": "q1", "message": _PENDING}],
+)
+# Re-set as queued, the mirror is assigned `undefined`: the key goes, not null.
+case(
+    "chat/pendingMessageSet-requeue-clears-mirror",
+    "chat",
+    {
+        **_CHAT,
+        "steeringMessage": _pending("s1", "steering"),
+        "queuedMessages": [_pending("s1", "steering")],
+    },
+    [{"type": "chat/pendingMessageSet", "kind": "queued", "id": "s1", "message": _PENDING}],
+)
+# `null?.id === undefined` is true for an id-less action, so a null mirror goes.
+case(
+    "chat/pendingMessageSet-null-mirror-absent-id",
+    "chat",
+    {**_CHAT, "steeringMessage": None},
+    [{"type": "chat/pendingMessageSet", "kind": "queued", "message": _PENDING}],
+)
+case(
+    "chat/pendingMessageSet-true-vs-1",
+    "chat",
+    {**_CHAT, "queuedMessages": [_pending(1)]},
+    [{"type": "chat/pendingMessageSet", "kind": "queued", "id": True, "message": _PENDING}],
+)
+case(
+    "chat/pendingMessageRemoved-last-drops-key",
+    "chat",
+    {**_CHAT, "queuedMessages": [_pending("q1")]},
+    [{"type": "chat/pendingMessageRemoved", "kind": "queued", "id": "q1"}],
+)
+# A kindless entry is queued: a steering removal clears the mirror and no more.
+case(
+    "chat/pendingMessageRemoved-steering-vs-kindless-entry",
+    "chat",
+    {**_CHAT, "steeringMessage": _pending("x"), "queuedMessages": [_pending("x")]},
+    [{"type": "chat/pendingMessageRemoved", "kind": "steering", "id": "x"}],
+)
+case(
+    "chat/pendingMessageRemoved-null-kind-entry-is-queued",
+    "chat",
+    {**_CHAT, "queuedMessages": [_pending("x", None)]},
+    [{"type": "chat/pendingMessageRemoved", "kind": "queued", "id": "x"}],
+)
+case(
+    "chat/pendingMessageRemoved-kind-absent",
+    "chat",
+    {**_CHAT, "queuedMessages": [_pending("x")]},
+    [{"type": "chat/pendingMessageRemoved", "id": "x"}],
+)
+# `findIndex` + `splice(idx, 1)`: only the first of two equal ids goes.
+case(
+    "chat/pendingMessageRemoved-first-duplicate-only",
+    "chat",
+    {
+        **_CHAT,
+        "queuedMessages": [
+            {"id": "d", "message": {"text": "1", "origin": {"kind": "user"}}},
+            {"id": "d", "message": {"text": "2", "origin": {"kind": "user"}}},
+        ],
+    },
+    [{"type": "chat/pendingMessageRemoved", "kind": "queued", "id": "d"}],
+)
+_STARTED = {
+    "type": "chat/turnStarted",
+    "turnId": "t2",
+    "startedAt": "1970-01-01T00:00:01.000Z",
+    "message": _PENDING,
+}
+# `queuedMessageId !== undefined`: "" consumes now, and so does an explicit null.
+case(
+    "chat/turnStarted-empty-queued-id",
+    "chat",
+    {**_CHAT, "queuedMessages": [_pending(""), _pending("q")]},
+    [{**_STARTED, "queuedMessageId": ""}],
+)
+case(
+    "chat/turnStarted-null-queued-id",
+    "chat",
+    {**_CHAT, "steeringMessage": _pending(None, "steering"), "queuedMessages": []},
+    [{**_STARTED, "queuedMessageId": None}],
+)
+case(
+    "chat/turnStarted-consumes-mirror",
+    "chat",
+    {
+        **_CHAT,
+        "steeringMessage": _pending("s1", "steering"),
+        "queuedMessages": [_pending("s1", "steering")],
+    },
+    [{**_STARTED, "queuedMessageId": "s1"}],
+)
+case(
+    "chat/turnStarted-no-queued-id-keeps-empty-list",
+    "chat",
+    {**_CHAT, "queuedMessages": []},
+    [_STARTED],
+)
+# `{...state.config, values: ...}`: an overlay, merged unless `replace` or none.
+case(
+    "chat/configChanged-merge-keeps-null-and-siblings",
+    "chat",
+    {**_CHAT, "config": {"values": {"a": 1, "b": 2}, "extra": True}},
+    [{"type": "chat/configChanged", "config": {"b": None, "c": 3}}],
+)
+case(
+    "chat/configChanged-replace",
+    "chat",
+    {**_CHAT, "config": {"values": {"a": 1}}},
+    [{"type": "chat/configChanged", "config": {"c": 3}, "replace": True}],
+)
+case(
+    "chat/configChanged-replace-zero-merges",
+    "chat",
+    {**_CHAT, "config": {"values": {"a": 1}}},
+    [{"type": "chat/configChanged", "config": {"c": 3}, "replace": 0}],
+)
+case(
+    "chat/configChanged-null-config-creates",
+    "chat",
+    {**_CHAT, "config": None},
+    [{"type": "chat/configChanged", "config": {"a": 1}}],
+)
+case(
+    "chat/configChanged-config-absent",
+    "chat",
+    {**_CHAT, "config": {"values": {"a": 1}}},
+    [{"type": "chat/configChanged"}],
+)
+case(
+    "chat/configChanged-values-absent",
+    "chat",
+    {**_CHAT, "config": {"other": 1}},
+    [{"type": "chat/configChanged", "config": {"a": 1}}],
+)
+case(
+    "chat/configChanged-string-config",
+    "chat",
+    {**_CHAT, "config": {"values": {"a": 1}}},
+    [{"type": "chat/configChanged", "config": "ab"}],
+)
+
 if __name__ == "__main__":
     for entry in CASES:
         sys.stdout.write(json.dumps(entry) + "\n")

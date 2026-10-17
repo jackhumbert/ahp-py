@@ -629,8 +629,13 @@ class Session:
         initial_message: Mapping[str, Any] | str | None = None,
         source: Mapping[str, Any] | None = None,
         working_directories: Sequence[str] | None = None,
+        title: str | None = None,
     ) -> Chat:
         """Open a second chat in this session, and subscribe to it.
+
+        *title* is the chat's initial display title (1.1.0, ungated: "Keep
+        title optional without new capabilities"). A host on an older version
+        ignores the key and names the chat itself.
 
         Gated on the agent's own advertisement, which the spec states as a MUST
         NOT rather than a SHOULD: without ``capabilities.multipleChats`` a
@@ -685,6 +690,7 @@ class Session:
             workingDirectories=list(working_directories)
             if working_directories is not None
             else None,
+            title=title,
         )
         return await self.open_chat(chat_uri)
 

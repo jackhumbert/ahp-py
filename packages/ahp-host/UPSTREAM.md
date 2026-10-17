@@ -21,11 +21,11 @@ be able to arrive as a patch upgrade.
 | Field | Value |
 |---|---|
 | Upstream | [`microsoft/agent-host-protocol`](https://github.com/microsoft/agent-host-protocol) (MIT) |
-| Spec tag | `spec/v1.0.0` |
-| Spec commit | `5f16d81bb7045b66d7bc768d244feab75002d943` |
+| Spec ref | `main` — ahead of the `spec/v1.1.0` tag, which does not exist yet |
+| Spec commit | `1ef0642965efaa7ef98caff287bca923fbc80ec6` |
 | Working revision read during research | `bd27d354b39c1b2090fbcc6db392d406b743280c` (2026-07-31) |
-| **Protocol version negotiated on the wire** | **`1.0.0`** (we offer `1.0.0, 0.9.0, 0.8.0, 0.7.0, 0.6.0`) |
-| Conformance corpus | with the dependency, vendored there from `spec/v1.0.0` → `types/test-cases/` |
+| **Protocol version negotiated on the wire** | **`1.0.0`** (we offer `1.0.0, 0.9.0, 0.8.0, 0.7.0, 0.6.0`); a `1.1.0` offer is accepted under `^1.0.0` |
+| Conformance corpus | with the dependency, vendored there from `main` @ `1ef06429` → `types/test-cases/` |
 | Reference client for interop tests | `@microsoft/agent-host-protocol@1.0.0` (npm, published 2026-10-02) |
 
 ### The interop client matches the wire version
@@ -78,6 +78,25 @@ Everything 1.0.0 added is additive. Where each host-side feature stands:
 What the host *publishes* is 0.9.0-shaped for everyone: errors as response
 parts, terminal `lifecycle`, session claims with `chat`, and a `failed`
 session lifecycle.
+
+### 1.1.0, ahead of its release
+
+The dependency pins a commit on upstream `main` rather than a tag, because a
+client built from `main` offers `1.1.0` and the caret rule has every host here
+accept it. Answering "1.1.0" while reducing with 1.0.0 branches loses steering
+input, so the host absorbed the version instead. Unlike 1.0.0, it is **not**
+additive for the host: the pending-message drain had to change with the
+reducer. No npm build of the TypeScript client speaks 1.1.0 yet, so the interop
+tests still negotiate `1.0.0`.
+
+| 1.1.0 feature | Status |
+|---|---|
+| One pending list for both kinds (`PendingMessage.kind`) | Steering is offered to the running turn entry by entry, in list order, and removed by its own id; idle, steering runs ahead of the queue, and a queued pick skips steering entries. An id already handed to the agent is refused for edit or removal, a removal must match id and kind, and an unknown kind is refused. A saved session's legacy `steeringMessage` still runs |
+| `chat/configChanged`, `chatMutable` | Validated against the owning session's schema: `chatMutable` properties only, `replace` allowed (it is how a chat resets). `ReconfiguresChats.chat_config_changed` gets the chat's whole overlay, and an agent attached later is told each overlay. The echo provider's `prefix` is `chatMutable` |
+| `CreateChatParams.title` | The chat's initial title; blank falls back to "New Chat" |
+| `SessionModelInfo.vendor` | `ModelInfo.vendor`, passed through. Neither shipped provider sets it: their runtimes report none |
+| Windowed delivery (`flowControl`, `channel/*`) | Not offered: a `subscribe` or `reconnect` that asks gets ordinary delivery, which the spec allows |
+| TCP channel (`createTcpConnection`, `tcp/*`) | Declined: `tcpConnections` is never advertised and the command is answered `PermissionDenied` |
 
 ## Vendoring moved out
 

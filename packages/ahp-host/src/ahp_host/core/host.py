@@ -166,6 +166,7 @@ from ahp_host.provider.base import (
     OpensSessions,
     ProviderChat,
     ProviderTerminal,
+    ReconfiguresChats,
     ReconfiguresSessions,
     ResumableAgentProvider,
     ResumesTurns,
@@ -297,6 +298,10 @@ _CHAT_WORKING_DIRECTORY_ACTIONS: Final = frozenset(
 #: Client actions that carry a `Message` the host accepts, and so the chat
 #: attachments in it the host must resolve and pin.
 _MESSAGE_ACTIONS: Final = frozenset({"chat/turnStarted", "chat/pendingMessageSet"})
+
+#: `PendingMessageKind`. An entry with no kind is queued (1.1.0).
+_PENDING_STEERING: Final = "steering"
+_PENDING_QUEUED: Final = "queued"
 
 #: Client-dispatchable, and both name a request the host is suspended on.
 #: Upstream states their rejection rules in prose ("servers SHOULD reject...")
@@ -749,6 +754,45 @@ def _active_clients(active_client: Any) -> list[Any]:
     if not isinstance(entry.get("tools"), list):
         entry["tools"] = []
     return [entry]
+
+
+def _pending_entries(state: Any) -> list[tuple[str, Mapping[str, Any]]]:
+    """A chat's pending input as `(kind, entry)`, in the list's raw order.
+
+    1.1.0 keeps steering and queued input in one `queuedMessages` list; an
+    entry with no `kind` comes from a 1.0.0 snapshot and is queued. The
+    deprecated `steeringMessage` mirror is deduplicated against the list by id
+    -- "using the list entry and its kind when present" -- and only an entry
+    found nowhere else, which a session saved before 1.1.0 can still hold, is
+    taken from it, as steering, ahead of the list. An entry of a kind this host
+    does not know is left alone rather than run as the wrong thing.
+    """
+    if not isinstance(state, Mapping):
+        return []
+    entries: list[tuple[str, Mapping[str, Any]]] = []
+    listed = state.get("queuedMessages")
+    for entry in listed if isinstance(listed, list) else ():
+        if not isinstance(entry, Mapping):
+            continue
+        kind = entry.get("kind")
+        kind = _PENDING_QUEUED if kind is None else kind
+        if kind in (_PENDING_STEERING, _PENDING_QUEUED):
+            entries.append((kind, entry))
+    mirror = state.get("steeringMessage")
+    if isinstance(mirror, Mapping) and not any(
+        js.strict_equal(entry.get("id"), mirror.get("id"))
+        for entry in (listed if isinstance(listed, list) else ())
+        if isinstance(entry, Mapping)
+    ):
+        entries.insert(0, (_PENDING_STEERING, mirror))
+    return entries
+
+
+def _chat_config_values(state: Any) -> dict[str, Any]:
+    """`ChatState.config.values` -- the values set on one chat, or ``{}``."""
+    config = state.get("config") if isinstance(state, Mapping) else None
+    values = config.get("values") if isinstance(config, Mapping) else None
+    return dict(values) if isinstance(values, Mapping) else {}
 
 
 def _answers_of(state: Any, request_id: str) -> Mapping[str, Any]:
@@ -1338,6 +1382,12 @@ class _Session:
     #: `HostsChats.chat_opened`. Per agent session, so one that comes up late
     #: (bring-up, a lazy resume) is told about exactly the chats it missed.
     opened_chats: set[str] = field(default_factory=set)
+    #: Per chat, the pending-message ids already handed to the agent -- as a
+    #: turn or as steering. "Hosts MUST reject edits or client removals that
+    #: they can no longer honor after handoff" (1.1.0): an id is marked BEFORE
+    #: the agent is offered it, so an edit racing the handoff is refused too,
+    #: and a re-set of a consumed id cannot run the same input twice.
+    handed_off: dict[str, set[str]] = field(default_factory=dict)
 
     def running(self, chat: str | None = None) -> list[asyncio.Task[None]]:
         """Live turn tasks -- for one chat, or for the whole session.
@@ -2292,6 +2342,14 @@ class Host:
             return await self._dispose_chat(connection, params)
         if method == "moveChat":
             return await self._move_chat(connection, params)
+        if method == "createTcpConnection":
+            # Experimental (1.1.0), and only for a host that advertises
+            # `InitializeResult.tcpConnections`, which this one never does. A
+            # client sending it anyway is refused the way the spec refuses a
+            # destination: "the client is not allowed to connect".
+            raise errors.AhpError(
+                AHP_ERROR_CODES["PermissionDenied"], "This host does not open TCP connections"
+            )
         if method == "invokeChangesetOperation":
             return await self._invoke_changeset_operation(connection, params)
         if method == "createResourceWatch":
@@ -4087,22 +4145,31 @@ class Host:
         restored session after a host restart, or a chat a client created
         while bring-up was still running. Worker chats are included; the
         agent that opened them is gone.
+
+        Then each chat's config overlay (1.1.0), default chat included: it lives
+        in chat state, which outlives the agent, so one that comes up later is
+        told exactly what a client changing it would have told it.
         """
         session.opened_chats.clear()
         session.agent_session = agent
-        if not isinstance(agent, HostsChats):
-            return
-        order = self._catalogue_order(session)
-        chats = [c for c in order if c in session.chat_uris] + sorted(
-            session.chat_uris - set(order)
-        )
-        for chat in chats:
-            if chat == session.chat_uri or chat in session.opened_chats:
-                continue
-            state = self.sequencer.state_of(chat)
-            if not isinstance(state, Mapping):
-                continue
-            await self._open_chat(session, self._chat_context(session, chat, state, restored=True))
+        if isinstance(agent, HostsChats):
+            order = self._catalogue_order(session)
+            chats = [c for c in order if c in session.chat_uris] + sorted(
+                session.chat_uris - set(order)
+            )
+            for chat in chats:
+                if chat == session.chat_uri or chat in session.opened_chats:
+                    continue
+                state = self.sequencer.state_of(chat)
+                if not isinstance(state, Mapping):
+                    continue
+                await self._open_chat(
+                    session, self._chat_context(session, chat, state, restored=True)
+                )
+        if isinstance(agent, ReconfiguresChats):
+            for chat in sorted(session.chat_uris):
+                if _chat_config_values(self.sequencer.state_of(chat)):
+                    await self._tell_chat_config(session, chat)
 
     async def _create_chat(self, connection: Connection, params: Mapping[str, Any]) -> None:
         """Open a second chat in a session.
@@ -4144,9 +4211,12 @@ class Host:
         directories = self._chat_working_directories(session, params, source)
 
         created_at = now_iso()
+        # 1.1.0: "a client-selected initial display title for the target chat".
+        # Optional, with no naming mandate, so anything blank falls back.
+        title = params.get("title")
         state: dict[str, Any] = {
             "resource": chat_uri,
-            "title": _DEFAULT_CHAT_TITLE,
+            "title": title if isinstance(title, str) and title.strip() else _DEFAULT_CHAT_TITLE,
             "status": _STATUS_IDLE,
             "modifiedAt": created_at,
             # A forked CHAT inherits the source chat's transcript, exactly as a
@@ -5450,6 +5520,73 @@ class Host:
             return "replacing the whole config is not permitted"
         return None
 
+    def _validate_chat_config(
+        self, connection: Connection, channel: str, action: Mapping[str, Any]
+    ) -> str | None:
+        """Gate `chat/configChanged` (1.1.0), which is client-dispatchable.
+
+        The overlay is checked against the OWNING SESSION's schema -- a chat has
+        none of its own -- and only a property the provider marked
+        `chatMutable` may be set on one chat: "Every other property is changed
+        on the session with `session/configChanged`." The reducer checks
+        nothing. `replace` is allowed, unlike on the session: replacing the
+        overlay with one that omits a property is how a chat goes back to the
+        session's value.
+        """
+        session = self._session_for(channel)
+        if session is None or channel not in session.chat_uris:
+            return "not a chat of a session on this host"
+        state = self.sequencer.state_of(session.uri)
+        config = state.get("config") if isinstance(state, Mapping) else None
+        schema = config.get("schema") if isinstance(config, Mapping) else None
+        properties = schema.get("properties") if isinstance(schema, Mapping) else None
+        if not isinstance(properties, Mapping):
+            return "this session publishes no configuration"
+
+        values = action.get("config")
+        if not isinstance(values, Mapping):
+            return "config must be an object"
+        for key, value in values.items():
+            prop = properties.get(key) if isinstance(key, str) else None
+            if not isinstance(prop, Mapping):
+                return f"{key!r} is not a configurable property"
+            if prop.get("chatMutable") is not True:
+                return f"{key!r} cannot be set per chat"
+            if not type_matches(prop, value):
+                return f"{key!r} does not accept that value"
+            if not self.policy.may_set_root_config(connection.info, key, value):
+                return f"{key!r} rejected by policy"
+        return None
+
+    def _pending_rejection(
+        self, channel: str, state: Mapping[str, Any], action: Mapping[str, Any]
+    ) -> str | None:
+        """Gate a client's `chat/pendingMessageSet` / `chat/pendingMessageRemoved`.
+
+        Since 1.1.0 both kinds share `queuedMessages`, and the drain only knows
+        `steering` and `queued`: an entry of any other kind would sit in the
+        list forever, consumed by nothing. A removal must name an entry that is
+        there under that kind -- "Server SHOULD reject the action; the reducer
+        is a no-op" -- and neither may touch an id already handed to the agent.
+        """
+        kind = action.get("kind")
+        if kind not in (_PENDING_STEERING, _PENDING_QUEUED):
+            return "kind must be 'steering' or 'queued'"
+        identifier = action.get("id")
+        session = self._session_for(channel)
+        if (
+            isinstance(identifier, str)
+            and session is not None
+            and identifier in session.handed_off.get(channel, ())
+        ):
+            return "that pending message was already delivered to the agent"
+        if action.get("type") == "chat/pendingMessageRemoved" and not any(
+            entry_kind == kind and js.strict_equal(entry.get("id"), identifier)
+            for entry_kind, entry in _pending_entries(state)
+        ):
+            return "no pending message with that id and kind"
+        return None
+
     def _validate_review(self, channel: str) -> str | None:
         """Reject review on a changeset that never advertised it.
 
@@ -6695,6 +6832,9 @@ class Host:
         if action_type == "session/configChanged":
             return self._validate_session_config(connection, channel, action)
 
+        if action_type == "chat/configChanged":
+            return self._validate_chat_config(connection, channel, action)
+
         if action_type == "session/titleChanged" and not isinstance(action.get("title"), str):
             # `SessionTitleChangedAction` declares `"required": ["type",
             # "title"]` with `"title": {"type": "string"}`
@@ -6753,6 +6893,10 @@ class Host:
                     return "turnId does not name the active turn"
             if action_type == "chat/turnStarted" and state.get("activeTurn") is not None:
                 return "a turn is already active"
+            if action_type in ("chat/pendingMessageSet", "chat/pendingMessageRemoved"):
+                refused = self._pending_rejection(channel, state, action)
+                if refused is not None:
+                    return refused
             if action_type in _MESSAGE_ACTIONS:
                 refused = self._chat_attachment_rejection(connection, action.get("message"))
                 if refused is not None:
@@ -6819,6 +6963,9 @@ class Host:
             return
         if action_type in _CHAT_WORKING_DIRECTORY_ACTIONS:
             await self._react_to_chat_working_directories(channel)
+            return
+        if action_type == "chat/configChanged":
+            await self._react_to_chat_config(channel)
             return
         if action_type in _MCP_LIFECYCLE_ACTIONS:
             await self._react_to_mcp(channel, action)
@@ -7435,7 +7582,7 @@ class Host:
             await session.agent_session.history_truncated(channel, target)
 
     async def _drain_queue(self, session: _Session, channel: str) -> None:
-        """Consume the next queued message, if the chat is free to run it.
+        """Consume what the chat's pending list lets run now.
 
         "If the chat is idle when a queued message is set, the server SHOULD
         immediately consume it and start a new turn" -- and
@@ -7444,42 +7591,55 @@ class Host:
         agent worked stayed in the chip forever: the client showed it queued and
         waited for a host that was never coming back for it.
 
+        Since 1.1.0 steering and queued input share one list, each entry with a
+        `kind`. While a turn runs, every steering entry is offered to it in
+        list order; while idle, steering the turn never took runs next, ahead
+        of the queue -- and a queued pick skips steering entries rather than
+        taking `queuedMessages[0]`, which removing as `queued` would no longer
+        take off the list (the reducer matches the kind), so it would run again
+        after every turn.
+
         Called at both ends -- when a message is queued, and when a turn
         finishes -- because "idle" is a race either way round.
         """
         state = self.sequencer.state_of(channel)
         if not isinstance(state, Mapping):
             return
-        steering = state.get("steeringMessage")
+        handed_off = session.handed_off.setdefault(channel, set())
+        # Only string ids are tracked: an id is peer-chosen and may be an
+        # object, which a Python set cannot even be asked about.
+        entries = [
+            (kind, entry)
+            for kind, entry in _pending_entries(state)
+            if not (isinstance(entry.get("id"), str) and entry.get("id") in handed_off)
+        ]
         if state.get("activeTurn") is not None:
-            if isinstance(steering, Mapping):
-                await self._steer(session, channel, steering)
+            for kind, entry in entries:
+                if kind == _PENDING_STEERING and not await self._steer(session, channel, entry):
+                    # Not taken. The later ones wait too, so the agent never
+                    # sees steering out of the order it was typed.
+                    break
             return
-        # Idle: a steering message the turn never took (it ended first, or the
-        # agent can't be steered) runs next, ahead of the queue.
-        queued = state.get("queuedMessages")
-        if isinstance(steering, Mapping):
-            queued = [{**steering, "_kind": "steering"}]
-        if not isinstance(queued, list) or not queued:
+        picked = next(
+            (pair for pair in entries if pair[0] == _PENDING_STEERING),
+            next((pair for pair in entries if pair[0] == _PENDING_QUEUED), None),
+        )
+        if picked is None:
             return
-        entry = queued[0]
-        if not isinstance(entry, Mapping):
-            return
+        kind, entry = picked
         message = entry.get("message")
         if not isinstance(message, Mapping):
             return
+        identifier = entry.get("id")
+        if isinstance(identifier, str):
+            handed_off.add(identifier)
         # Removed BEFORE the turn starts, and awaited. The entry has to leave
-        # the queue while the chat is still idle: once `chat/turnStarted`
+        # the list while the chat is still idle: once `chat/turnStarted`
         # lands, a second `_drain_queue` would find the same entry, see a turn
         # already active, and leave it -- but a removal published *after* the
         # turn ended would race the next drain and run it twice.
         await self.sequencer.publish(
-            channel,
-            {
-                "type": "chat/pendingMessageRemoved",
-                "kind": "steering" if entry.get("_kind") == "steering" else "queued",
-                "id": entry.get("id"),
-            },
+            channel, {"type": "chat/pendingMessageRemoved", "kind": kind, "id": identifier}
         )
         started = {
             "type": "chat/turnStarted",
@@ -7496,11 +7656,13 @@ class Host:
         await self.sequencer.publish(channel, started)
         await self._start_turn(session, channel, started)
 
-    async def _steer(self, session: _Session, channel: str, entry: Mapping[str, Any]) -> None:
-        """Offer a steering message to the turn running on *channel*.
+    async def _steer(self, session: _Session, channel: str, entry: Mapping[str, Any]) -> bool:
+        """Offer one steering message to the turn running on *channel*.
 
-        Taken, it leaves the chat's pending slot and is noted in the transcript;
-        not taken, it stays, and `_drain_queue` runs it once the chat is idle.
+        Taken, it leaves the pending list -- that entry and no other: "A later
+        submission MUST NOT implicitly consume an earlier one" -- and is noted
+        in the transcript. Not taken, it stays, and `_drain_queue` runs it once
+        the chat is idle. Returns whether it was taken.
         """
         message = entry.get("message")
         runner = session.runners.get(channel)
@@ -7510,7 +7672,13 @@ class Host:
             or runner is None
             or runner.sink is None
         ):
-            return
+            return False
+        identifier = entry.get("id")
+        handed_off = session.handed_off.setdefault(channel, set())
+        # Marked before the agent is asked: an edit arriving while `steer` is
+        # awaited would otherwise be accepted and then wiped by our removal.
+        if isinstance(identifier, str):
+            handed_off.add(identifier)
         steering = user_message(
             message, chat_uri=channel, attached=attached_chats(self.sequencer, message)
         )
@@ -7519,14 +7687,17 @@ class Host:
             taken = await session.agent_session.steer(channel, steering)
         except Exception:
             _log.exception("steering %s failed", channel)
-            return
+            taken = False
         if not taken:
-            return
+            if isinstance(identifier, str):
+                handed_off.discard(identifier)
+            return False
         await self.sequencer.publish(
             channel,
-            {"type": "chat/pendingMessageRemoved", "kind": "steering", "id": entry.get("id")},
+            {"type": "chat/pendingMessageRemoved", "kind": _PENDING_STEERING, "id": identifier},
         )
         await runner.sink.steered(text)
+        return True
 
     async def _seed_title(self, session: _Session, channel: str, action: Mapping[str, Any]) -> None:
         """Name a still-unnamed session after the message that started it.
@@ -7723,6 +7894,32 @@ class Host:
                     chat, {"type": "chat/workingDirectorySet", "directory": new}
                 )
         await self._tell_chat_directories(session, chat)
+
+    async def _react_to_chat_config(self, channel: str) -> None:
+        """Tell the agent one chat's config overlay changed, then save it.
+
+        The whole overlay, read back from state as the reducer left it -- the
+        reducer decides what a merge or a `replace` produces, and an agent
+        re-deriving it would be a second reducer that could disagree.
+        Validation already limited it to `chatMutable` properties.
+        """
+        session = next((s for s in self._sessions.values() if channel in s.chat_uris), None)
+        if session is None:
+            return
+        await self._tell_chat_config(session, channel)
+        await self._persist(session)
+
+    async def _tell_chat_config(self, session: _Session, chat: str) -> None:
+        """`ReconfiguresChats`, with the overlay as the reducer left it."""
+        agent = session.agent_session
+        if not isinstance(agent, ReconfiguresChats):
+            return
+        try:
+            await agent.chat_config_changed(
+                chat, _chat_config_values(self.sequencer.state_of(chat))
+            )
+        except Exception:
+            _log.exception("chat_config_changed failed for %s", chat)
 
     async def _react_to_chat_working_directories(self, channel: str) -> None:
         """Tell the agent one chat's folder subset changed, then save it."""
