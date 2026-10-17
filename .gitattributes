@@ -7,3 +7,4 @@
 
 # Upstream's files are vendored byte-for-byte; never convert them.
 packages/ahp-protocol/vendor/** -text
+packages/ahp-host-flow/src/ahp_host_flow/sandbox/vendor/** -text

@@ -1,5 +1,5 @@
 version = 1
-revision = 3
+revision = 5
 requires-python = ">=3.11"
 resolution-markers = [
     "python_full_version >= '3.15'",
@@ -15,6 +15,7 @@ members = [
     "ahp-host",
     "ahp-host-acp",
     "ahp-host-claude",
+    "ahp-host-flow",
     "ahp-protocol",
 ]
 
@@ -191,6 +192,38 @@ requires-dist = [
 
 [package.metadata.requires-dev]
 dev = [
+    { name = "mypy", specifier = ">=1.11" },
+    { name = "pytest", specifier = ">=8" },
+    { name = "pytest-asyncio", specifier = ">=0.24" },
+    { name = "ruff", specifier = ">=0.6" },
+]
+
+[[package]]
+name = "ahp-host-flow"
+source = { editable = "packages/ahp-host-flow" }
+dependencies = [
+    { name = "ahp-client" },
+    { name = "ahp-host", extra = ["ws"] },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "import-linter" },
+    { name = "mypy" },
+    { name = "pytest" },
+    { name = "pytest-asyncio" },
+    { name = "ruff" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "ahp-client", editable = "packages/ahp-client" },
+    { name = "ahp-host", extras = ["ws"], editable = "packages/ahp-host" },
+]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "import-linter", specifier = ">=2" },
     { name = "mypy", specifier = ">=1.11" },
     { name = "pytest", specifier = ">=8" },
     { name = "pytest-asyncio", specifier = ">=0.24" },

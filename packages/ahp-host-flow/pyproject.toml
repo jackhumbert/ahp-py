@@ -1,0 +1,74 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "ahp-host-flow"
+dynamic = ["version"]
+description = "Claude Code workflow scripts run as AHP sessions, each agent() call a child chat."
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.11"
+authors = [{ name = "ahp-host-flow contributors" }]
+keywords = ["ahp", "agent-host-protocol", "workflow", "orchestration", "agent"]
+classifiers = [
+  "Development Status :: 2 - Pre-Alpha",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Typing :: Typed",
+]
+# Scripts run in a Node (>= 20) subprocess; see docs/plan.md §4.1.
+dependencies = [
+  "ahp-host[ws]~=0.1.0",
+  "ahp-client",
+]
+
+[project.scripts]
+flow = "ahp_host_flow.cli:main"
+
+[dependency-groups]
+dev = [
+  "pytest>=8",
+  "pytest-asyncio>=0.24",
+  "mypy>=1.11",
+  "ruff>=0.6",
+  "import-linter>=2",
+]
+
+[tool.hatch.version]
+path = "src/ahp_host_flow/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ahp_host_flow"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q --strict-markers"
+asyncio_mode = "auto"
+markers = ["node: needs a Node >= 20 binary (skipped when none is found)"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+files = ["src", "tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N", "UP", "B", "A", "C4", "PT", "RET", "SIM", "TID", "RUF"]
+
+[tool.importlinter]
+root_package = "ahp_host_flow"
+include_external_packages = true
+
+# The engine must stay liftable into its own distribution (docs/plan.md §7).
+[[tool.importlinter.contracts]]
+name = "the engine never imports the host"
+type = "forbidden"
+source_modules = ["ahp_host_flow.engine", "ahp_host_flow.sandbox"]
+forbidden_modules = ["ahp_host"]
