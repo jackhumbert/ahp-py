@@ -147,8 +147,8 @@ small script per row of the table above.
   (`ok`, `null`, `error`), result and usage. The header holds the script
   snapshot plus args and semantic options; each child workflow snapshot is a
   record of its own. Resume serves the matching prefix and runs the rest live.
-- **Registry:** resolves workflow names across several sources (§4.3) and
-  snapshots each run's script.
+- **Registry:** resolves workflow names across several sources (§4.3), in
+  JS or Python (§4.10), and snapshots each run's script.
 - **`Dispatcher` interface:** `run_agent(call) -> AgentResult` streaming
   events. It has two implementations: `ClientDispatcher` (remote,
   through `ahp-client`) and `ProviderDispatcher` (in-process, in the
@@ -242,14 +242,14 @@ ahp-py moved to AHP 1.1.0 while M1 was in progress. Nothing breaks, but four
 - **Steering.** 1.1.0 unifies steering and queued messages in one list with a
   per-entry kind. A child chat is read-only by default. If its profile makes
   it interactive, a steering message there is forwarded to the inner session
-  (`SteersTurns`), which lets a person nudge one agent mid-turn (M7). The run's
+  (`SteersTurns`), which lets a person nudge one agent mid-turn (M8). The run's
   main chat queues nothing while a run is active.
 - **Titles and vendors.** `createChat`/`open_tool_chat` take a title, so a
   child chat is titled by `label` (or the prompt's first line).
   `ModelInfo.vendor` lets the run session advertise every inner provider's
   models with their vendor, so a client can pick a run's default model across
   Claude and GLM. On the remote side, `ahp-client`'s `create_chat(title=)`
-  serves M6.
+  serves M7.
 
 ### 4.6 Structured turns
 
@@ -366,6 +366,58 @@ cannot remove or replace part of a channel's history. So there are two layers:
   reducer semantics, so every client applies it the same way (§10). Until
   that is agreed, the live layer stays behind its capability.
 
+### 4.10 Python workflows
+
+The engine is Python already. JavaScript only comes in through the Node
+sandbox, which speaks a small JSON-RPC protocol (`sandbox/protocol.py`) to the
+engine. A Python front end plugs in at the same point, so the scheduler, caps,
+budget, journal, resume and every dispatcher apply unchanged. Python workflows
+are an ahp-py extension: Claude Code runs only JS.
+
+- **Workflow files.** A `.py` file in any workflow source, next to the `.js`
+  ones:
+
+  ```python
+  meta = {"name": "review", "description": "...", "phases": [{"title": "Find"}]}
+
+  async def main(args):
+      phase("Find")
+      found = await parallel([lambda f=f: agent(f"review {f}", schema=FINDINGS)
+                              for f in args["files"]])
+      return [x for x in found if x]
+  ```
+
+  `meta` must be a literal and is read with `ast.literal_eval` without
+  running the file, as acorn reads a JS one. The verbs (`agent`, `parallel`,
+  `pipeline`, `phase`, `log`, `args`, `budget`, `workflow`) keep their JS
+  semantics. `agent`'s options are keyword arguments; `parallel` takes
+  zero-argument callables returning awaitables; a stage or thunk that raises
+  resolves to `None`. They are globals in the module, and also importable from
+  `ahp_host_flow.verbs` for editors and type checkers.
+- **A runner process.** A `.py` workflow runs in a separate
+  `python -I -m ahp_host_flow.sandbox.pyrunner` process that speaks the same
+  JSON-RPC as `runner.mjs`. So the host side is the same `Sandbox` client, a
+  crashing or blocking script cannot take the host down, and the per-run
+  timeout kills it the same way. The process is not a security boundary.
+- **Determinism is the author's job.** Python cannot ban `time.time()` or
+  `random` the way the Node prelude bans `Date.now()`. Resume matches calls by
+  content (§4.2), so a nondeterministic script costs cache hits, not wrong
+  results. The docs say so plainly.
+- **Trust.** A `.py` workflow is arbitrary code on the host. So by default it
+  loads only from the **host** and **user** sources. Workspace `.py` files need
+  `[workflows] python_sources = ["workspace", ...]` in `flow.toml`, and
+  client-published plugins never supply one.
+- **Mixing languages.** `workflow()` resolves a name to `.js` or `.py` (JS
+  wins a tie, so Claude Code's behaviour does not change). A child in the
+  other language runs in its own runner, sharing the run's state as primitives,
+  just as JS children do (§8, M1 result), with one level of nesting.
+- **A library API.** For Python code that is not a workflow file (a CLI,
+  tests, another tool): `async with flow.run(dispatcher, options) as r:` then
+  `await r.agent(...)`, `await r.parallel(...)` and so on, in-process, on the
+  same scheduler and journal. A trusted caller needs no runner process.
+- **Parity.** Every conformance script gets a `.py` twin, checked against the
+  same expected-result sidecar.
+
 ## 5. Routing and the first ACP target
 
 The first ACP target is **opencode on Ollama Cloud's GLM 5.3 Flash**
@@ -463,11 +515,12 @@ A live GLM smoke test is opt-in, behind a marker.
 | M2 | Journal + resume | kill mid-run, resume: identical results, and live calls start only at the first edited call |
 | M3 | **Structured turns** (§4.6), across packages: the `_meta` output schema, `ReturnsStructuredOutput`, host validation and the text fallback in `ahp-host`; `ahp-host-claude`; general client-tool support over MCP in `ahp-host-acp`; `output_schema` and `.structured` in `ahp-client`; the `requests.md` entry | a client asks Claude and an ACP agent (a fake in tests, GLM as an opt-in smoke test) for a schema and gets a validated result; a mismatch is retried, then fails with a structured-output code |
 | M4 | **The provider, in-process:** workspace/user/host workflow sources as customizations; child chats titled by `label`; model/effort; per-chat approval mode and effort (`ReconfiguresChats`, §4.5); `schema` as a structured turn; worktrees; skip/abort; approval relay; models advertised with `vendor`; Claude and opencode/GLM through routing; journal start records; **typed progress** (§4.7: the descriptors, `ahp_protocol.ext.flow`, `flow_view()`); credential **masking** before publishing (§4.9) | fan-out and triage corpus scripts pass against Claude; a Review phase routed to GLM returns a schema-valid result; a run is watched and controlled from VS Code or iOS, and `flow_view()` folds it from the transcript |
-| M5 | **Durability** (§4.8): `ResumesInterruptedTurns` and stored `inputNeeded` (re-bound or withdrawn with a notice) in `ahp-host`; the provider relaunches a run from its journal under the same turn; gates journaled | killing the host mid-run, the run continues where it stopped; an open approval is answered after the restart, or withdrawn with a notice |
-| M6 | **Fleet** (§2): fleet tools for `flow` sessions in `ahp-gateway`, bound to the run's principal; the `flow` agent type for `ahp-node`; fleet dispatch with thin child chats; reattach after restart; the direct remote `ClientDispatcher` (`create_chat(title=)`); the delegation-origin request | a run on one node starts calls on two others, each visible from every surface; restarting the flow host reattaches to calls still running |
-| M7 | **Full corpus and operations:** the four corpus workflows unmodified; client-published workflows (+ automation capture); per-child changesets; steering a child chat (§4.5); automations | the plan/build/review corpus script lands a change; a cron automation runs a workflow |
-| M8 | **Redaction after publishing** (§4.9): `Host.redact`, the experimental capability, the stored session and audit; `flow redact`; the `requests.md` entry | a redacted part disappears from live opted-in clients, from snapshots, from the store and from the run's journal; the audit records the fact without the content |
-| M9 | **Extensions** (§6) + shim | `ask()` round-trips to a phone; a dual-target script runs in both runtimes |
+| M5 | **Python workflows** (§4.10): `.py` workflow files run by a Python runner process on the same JSON-RPC protocol as `runner.mjs`; `meta` read with `ast.literal_eval`; the verbs as a Python module; the `flow.run(...)` library API; source trust rules; `workflow()` across JS and Python; a `.py` twin of each conformance script | every conformance sidecar passes for its JS and Python twins; a `.py` workflow shows as a slash command next to the JS ones and runs, resumes and dispatches like them |
+| M6 | **Durability** (§4.8): `ResumesInterruptedTurns` and stored `inputNeeded` (re-bound or withdrawn with a notice) in `ahp-host`; the provider relaunches a run from its journal under the same turn; gates journaled | killing the host mid-run, the run continues where it stopped; an open approval is answered after the restart, or withdrawn with a notice |
+| M7 | **Fleet** (§2): fleet tools for `flow` sessions in `ahp-gateway`, bound to the run's principal; the `flow` agent type for `ahp-node`; fleet dispatch with thin child chats; reattach after restart; the direct remote `ClientDispatcher` (`create_chat(title=)`); the delegation-origin request | a run on one node starts calls on two others, each visible from every surface; restarting the flow host reattaches to calls still running |
+| M8 | **Full corpus and operations:** the four corpus workflows unmodified; client-published workflows (+ automation capture); per-child changesets; steering a child chat (§4.5); automations | the plan/build/review corpus script lands a change; a cron automation runs a workflow |
+| M9 | **Redaction after publishing** (§4.9): `Host.redact`, the experimental capability, the stored session and audit; `flow redact`; the `requests.md` entry | a redacted part disappears from live opted-in clients, from snapshots, from the store and from the run's journal; the audit records the fact without the content |
+| M10 | **Extensions** (§6) + shim | `ask()` round-trips to a phone; a dual-target script runs in both runtimes |
 
 **M0 spike result.** `tests/integration/test_spike_worker_chat.py` showed:
 
