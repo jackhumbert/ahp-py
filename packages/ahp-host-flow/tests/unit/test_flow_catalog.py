@@ -15,6 +15,7 @@ from ahp_host_flow.catalog import (
     customizations,
     directory_of,
     discover,
+    python_dirs,
     resolve,
     source_dirs,
     visible_names,
@@ -180,3 +181,83 @@ async def test_meta_is_read_not_executed(tmp_path: Path, node_path: str) -> None
     child = customizations(entries, dirs, version="1")[0]["children"][0]
     assert child["description"] == "when"
     assert child["_meta"][FLOW_META_KEY]["phases"] == [{"title": "P1"}]
+
+
+def _python_tree(tmp_path: Path) -> list[SourceDir]:
+    dirs = {"workspace": "w", "user": "u", "host": "h"}
+    result: list[SourceDir] = []
+    for source, name in dirs.items():
+        directory = tmp_path / source
+        directory.mkdir()
+        (directory / f"{name}.py").write_text(
+            f"meta = {{'whenToUse': 'use {name}'}}\n", encoding="utf-8"
+        )
+        result.append(SourceDir(source, directory, f"id.{source}", source))
+    return result
+
+
+async def test_discover_python_default_sources(tmp_path: Path) -> None:
+    entries = await discover(_python_tree(tmp_path), node=None)
+    assert [(e.name, e.source, e.language) for e in entries] == [
+        ("u", "user", "python"),
+        ("h", "host", "python"),
+    ]
+    assert entries[0].meta == {"whenToUse": "use u"}
+
+
+async def test_discover_python_workspace_allowed(tmp_path: Path) -> None:
+    entries = await discover(
+        _python_tree(tmp_path), node=None, python_sources=("workspace", "user", "host")
+    )
+    assert [e.name for e in entries] == ["w", "u", "h"]
+
+
+def test_python_dirs_workspace_is_its_workflows_directory_only(tmp_path: Path) -> None:
+    dirs = _dirs(tmp_path)
+    trusted = python_dirs(dirs, ("workspace", "user", "host"))
+    wd = tmp_path / "proj"
+    assert wd / ".claude" / "workflows" in trusted
+    assert wd not in trusted
+    assert python_dirs(dirs, ("user", "host")) == (
+        tmp_path / "user",
+        *(tmp_path / f"host{i}" for i in (1, 2)),
+    )
+
+
+def test_python_dirs_needs_the_source_enabled(tmp_path: Path) -> None:
+    dirs = _dirs(tmp_path, sources=("user", "host"))
+    trusted = python_dirs(dirs, ("workspace", "user", "host"))
+    assert all("proj" not in str(path) for path in trusted)
+    assert trusted
+
+
+async def test_discover_python_js_wins_tie(tmp_path: Path) -> None:
+    (tmp_path / "x.js").write_text("return 1\n", encoding="utf-8")
+    (tmp_path / "x.py").write_text("meta = {}\n", encoding="utf-8")
+    dirs = [SourceDir("user", tmp_path, USER_ID, "Workflows (user)")]
+    entries = await discover(dirs, node=None)
+    assert [(e.name, e.language) for e in entries] == [("x", "js")]
+
+
+async def test_discover_python_bad_meta(tmp_path: Path) -> None:
+    (tmp_path / "bad.py").write_text("meta = {'a': f()}\n", encoding="utf-8")
+    dirs = [SourceDir("user", tmp_path, USER_ID, "Workflows (user)")]
+    entries = await discover(dirs, node=None)
+    assert [(e.name, e.meta, e.language) for e in entries] == [("bad", None, "python")]
+
+
+async def test_customizations_python_marker(tmp_path: Path) -> None:
+    (tmp_path / "p.py").write_text(
+        "meta = {'phases': [{'title': 'Find'}], 'whenToUse': 'when', 'description': 'd'}\n",
+        encoding="utf-8",
+    )
+    dirs = [SourceDir("user", tmp_path, USER_ID, "Workflows (user)")]
+    containers = customizations(await discover(dirs, node=None), dirs, version="1")
+    child = containers[0]["children"][0]
+    assert child["_meta"][FLOW_META_KEY] == {
+        "kind": "workflow",
+        "phases": [{"title": "Find"}],
+        "source": "user",
+        "language": "python",
+    }
+    assert child["description"] == "when"

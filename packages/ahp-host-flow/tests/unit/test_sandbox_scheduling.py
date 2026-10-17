@@ -98,6 +98,20 @@ return 0
     assert dict(d.calls[1].opts) == {"label": "L"}
 
 
+async def test_sandbox_scheduling_phase_captured_at_issue(node_path: str) -> None:
+    d = FakeDispatcher()
+    source = (
+        "phase('A'); const p = [agent('a'), agent('b', {phase: 'X'})]; "
+        "phase('B'); p.push(agent('c')); await Promise.all(p); return 0"
+    )
+    await _run(source, node_path, d)
+    assert sorted((c.ordinal, c.prompt, c.phase) for c in d.calls) == [
+        (0, "a", "A"),
+        (1, "b", "X"),
+        (2, "c", "B"),
+    ]
+
+
 async def test_sandbox_scheduling_listeners(node_path: str) -> None:
     d = FakeDispatcher()
     starts: list[int] = []

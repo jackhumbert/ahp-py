@@ -180,6 +180,31 @@ def test_rejected(data: dict[str, Any], match: str, tmp_path: Path) -> None:
         parse_config(data, base=tmp_path)
 
 
+def test_python_sources_default(tmp_path: Path) -> None:
+    cfg = parse_config({"providers": _providers()}, base=tmp_path)
+    assert cfg.workflows.python_sources == ("user", "host")
+
+
+def test_python_sources_parsed(tmp_path: Path) -> None:
+    data = {"providers": _providers(), "workflows": {"python_sources": ["workspace", "host"]}}
+    cfg = parse_config(data, base=tmp_path)
+    assert cfg.workflows.python_sources == ("workspace", "host")
+
+
+@pytest.mark.parametrize(
+    ("value", "match"),
+    [
+        (["client"], "is not one of"),
+        (["user", "user"], "has duplicates"),
+        ("user", "must be an array of strings"),
+    ],
+)
+def test_python_sources_rejected(value: Any, match: str, tmp_path: Path) -> None:
+    data = {"providers": _providers(), "workflows": {"python_sources": value}}
+    with pytest.raises(ConfigError, match=match):
+        parse_config(data, base=tmp_path)
+
+
 def test_missing_file(tmp_path: Path) -> None:
     with pytest.raises(ConfigError, match="no config file"):
         load_config(tmp_path / "nope.toml")

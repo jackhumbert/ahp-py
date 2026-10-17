@@ -249,9 +249,10 @@ Object.defineProperty(dtfProto, 'formatToParts', {
       configurable: true,
       enumerable: false,
     });
-  // The run's counter, spent tokens and phase live in the host (hostState) and
-  // cross as primitives, so a child workflow's context shares them without
-  // holding any of the parent context's objects.
+  // The spent-token mirror lives in the host (hostState) and crosses as a
+  // primitive, so a child workflow's context shares it without holding any of
+  // the parent context's objects. The ordinal counter and the current phase live
+  // in the Python Scheduler.
   const spentTokens = () => hostState('spent', null);
   const budgetError = () =>
     new Error('budget exhausted: ' + spentTokens() + ' of ' + limits.budgetTotal + ' output tokens spent');
@@ -263,15 +264,11 @@ Object.defineProperty(dtfProto, 'formatToParts', {
     }
     opts = JSON.parse(JSON.stringify(opts));
     // First line of defence, from the mirror; Python re-checks as the authority.
-    // A refused call consumes no ordinal.
+    // A refused call consumes no ordinal; the host takes it and fills in the current phase.
     if (limits.budgetTotal !== null && spentTokens() >= limits.budgetTotal) throw budgetError();
-    const n = hostState('take', null);
-    if (n < 0) {
-      throw new Error('agent() limit reached: at most ' + limits.maxAgents + ' agent() calls per run');
-    }
-    const phase = typeof opts.phase === 'string' ? opts.phase : hostState('phase', null);
+    const phase = typeof opts.phase === 'string' ? opts.phase : null;
     const label = typeof opts.label === 'string' ? opts.label : null;
-    const reply = await call('agent', { ordinal: n, prompt, opts, phase, label });
+    const reply = await call('agent', { prompt, opts, phase, label });
     const s = reply.ok ? reply.result?.spent : reply.data?.spent;
     if (typeof s === 'number') hostState('spend', s);
     if (!reply.ok) throw new Error(reply.message);
@@ -320,8 +317,14 @@ Object.defineProperty(dtfProto, 'formatToParts', {
     if (typeof ref === 'string') wire = ref;
     else if (ref !== null && typeof ref === 'object' && typeof ref.scriptPath === 'string') wire = { scriptPath: ref.scriptPath };
     else throw new TypeError('workflow() needs a name or {scriptPath}');
-    const reply = await call('workflow', { ref: wire });
+    const req = { ref: wire };
+    const argsText = childArgs === undefined ? undefined : JSON.stringify(childArgs);
+    if (argsText !== undefined) req.args = JSON.parse(argsText);
+    const reply = await call('workflow', req);
     if (!reply.ok) throw new Error(reply.message);
+    if (typeof reply.result.spent === 'number') hostState('spend', reply.result.spent);
+    // The host ran a child of the other language; only its JSON value comes back.
+    if (Object.hasOwn(reply.result, 'value')) return reply.result.value ?? null;
     const argsJson = childArgs === undefined ? null : JSON.stringify(childArgs);
     // A child-realm promise of the child's result, or a string saying why it did not start.
     const started = hostStart(reply.result.source, reply.result.filename, argsJson);
@@ -334,9 +337,7 @@ Object.defineProperty(dtfProto, 'formatToParts', {
     hostNotify('log', JSON.stringify({ message: String(message) }));
   });
   define('phase', function phase(title) {
-    const t = String(title);
-    hostState('setPhase', t);
-    hostNotify('phase', JSON.stringify({ title: t }));
+    hostNotify('phase', JSON.stringify({ title: String(title) }));
   });
   define(
     'budget',
@@ -424,25 +425,18 @@ async function run(params) {
     budgetTotal: Number.isInteger(l.budgetTotal) ? l.budgetTotal : null,
     maxItems: Number.isInteger(l.maxItems) ? l.maxItems : 4096,
   };
-  const settings = { hasArgs, limits };
+  const settings = { hasArgs, limits, child: params.child === true };
   if (hasArgs) settings.args = params.args;
   // Host realm, shared by the run's contexts and held only in their install
   // closures. Every value in or out is a primitive.
-  const state = { ordinal: 0, spent: 0, phase: null };
+  const state = { spent: Number.isInteger(params.spent) && params.spent > 0 ? params.spent : 0 };
   const hostState = function hostState(op, value) {
     switch (op) {
-      case 'take':
-        return state.ordinal < limits.maxAgents ? state.ordinal++ : -1;
       case 'spent':
         return state.spent;
       case 'spend':
         if (typeof value === 'number' && value > state.spent) state.spent = value;
         return state.spent;
-      case 'phase':
-        return state.phase;
-      case 'setPhase':
-        state.phase = typeof value === 'string' ? value : null;
-        return state.phase;
       default:
         return null;
     }

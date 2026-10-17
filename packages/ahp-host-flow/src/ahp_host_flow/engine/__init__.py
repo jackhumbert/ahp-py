@@ -52,7 +52,7 @@ from ahp_host_flow.engine.registry import (
     WorkflowRefError,
     resolve_workflow,
 )
-from ahp_host_flow.engine.resume import JournalRun, Replay
+from ahp_host_flow.engine.resume import LIBRARY_FILENAME, JournalRun, Replay
 from ahp_host_flow.engine.scheduler import (
     AgentLimitError,
     BudgetExhaustedError,
@@ -67,6 +67,7 @@ __all__ = [
     "DEFAULT_MAX_CONCURRENCY",
     "JOURNAL_FILE",
     "JOURNAL_VERSION",
+    "LIBRARY_FILENAME",
     "MASK",
     "MAX_AGENTS_PER_RUN",
     "MAX_ITEMS_PER_CALL",

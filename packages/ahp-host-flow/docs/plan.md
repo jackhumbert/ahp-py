@@ -7,7 +7,7 @@ an AHP session, and each `agent()` call is a **child chat** of it, so any AHP
 client can watch and steer the whole run. Extensions to the format are opt-in,
 and a script written for Claude Code runs unchanged.
 
-Status: M0, M1, M2, M3 and M4a done, and most of M4b (typed progress, credential masking, worktrees, journal start records, the fan-out corpus run). The rest of M4b (from_config factories in ahp-host-claude and ahp-host-acp, the subagent prompt preamble, live watching of workflow dirs) is next. Milestones are in §8.
+Status: M0, M1, M2, M3, M4a and M5 done, and most of M4b (typed progress, credential masking, worktrees, journal start records, the fan-out corpus run). The rest of M4b (from_config factories in ahp-host-claude and ahp-host-acp, the subagent prompt preamble, live watching of workflow dirs) is next. Milestones are in §8.
 
 ## 1. Where it sits
 
@@ -142,7 +142,7 @@ small script per row of the table above.
 - **Scheduler:** concurrency semaphore, agent counter, abort signal, budget
   (summed from turn `usage`).
 - **Journal:** `<state_dir>/runs/<runId>/journal.jsonl`, one record per
-  `agent()` call: ordinal (assigned at issue time in the single-threaded JS),
+  `agent()` call: ordinal (assigned by the host, `Scheduler.issue`, when the request line arrives),
   key (sha256 of the canonical JSON of prompt, opts, phase and label), status
   (`ok`, `null`, `error`), result and usage. The header holds the script
   snapshot plus args and semantic options; each child workflow snapshot is a
@@ -156,13 +156,14 @@ small script per row of the table above.
 
 ### 4.3 Where workflows live
 
-A workflow is one `.js` file. A source is anywhere such files are found. Every
+A workflow is one `.js` file (or a `.py` file, §4.10). A source is anywhere such files are found. Every
 source is surfaced to clients as an ordinary customization container, and
 each workflow in it is a `prompt` child. So clients list and toggle workflows
 with the existing customization actions (global, workspace or session
 enablement), and each one shows as a slash command (`/fanout`) with
 `whenToUse` as its description. AHP has no workflow customization type; the
-prompt child's `_meta["ahp-py/flow"] = {kind, phases, source, shadowedBy?}` marks it. If
+prompt child's `_meta["ahp-py/flow"] = {kind, phases, source, language, shadowedBy?}` marks it
+(`language` is present, as `"python"`, only for a `.py` workflow). If
 clients want to render workflows differently, that becomes a `requests.md`
 item.
 
@@ -568,6 +569,8 @@ Open for M4 (structured turns):
 
 **M4b result (first part).** `ahp_protocol.ext.flow` holds the descriptor shapes (`runStarted`, `phaseStarted`, `phaseFinished`, `runFinished`, `stepStarted`, `stepFinished`, `awaitingInput`), the meta key `ahp-py/flow`, a JSON Schema shipped as package data and the pure `run_view` fold; `ahp-client` exposes it as `flow_view()` on a chat and a session. Placement: the system notifications carry the run and phase descriptors; a step's `stepStarted` rides the main chat's `agent` tool call, and the running call's content links the worker chat. The result's `_meta` carries the whole step descriptor (`stepStarted` plus `stepFinished`), because the reducer spreads the result onto the tool call. `awaitingInput` is set while the worker chat has an open confirmation or input request (`TurnTee.on_waiting`). Masking (§4.9, pre-publish layer): `engine/redact.py` has `Redactor` (builtin shapes plus `[redact] patterns`, replaced by `[redacted]`, with a `secret` group so `key=value` masks only the value) and a line-buffered `StreamMasker` for streamed text. The `TurnTee` masks what it forwards, the dispatcher masks results and errors, the provider masks `log()` lines, run errors and the final value, and the journal is masked through `RunOptions.redact`. The inner agent's view is never altered. Coverage: masked are the worker chat's text, reasoning, tool calls and results, structured calls (`MaskingSink` around the turn sink given to `StructuredTurn`), approval and input prompts (`TurnTee` masks the published copies), step results, log lines, the journal and the `agent()` return; values under secret-named keys are masked at any depth. Known gaps, left to the after-publishing layer (this section, M9): terminals, canvases and background work an inner session opens through `ScopedPublisher`, and a secret split across a tool-call boundary mid-stream; the builtin list is best effort (no `key=value` values under 8 characters, URL userinfo or `sk-` keys; use `[redact] patterns`). Text now reaches a worker chat a line at a time. `awaitingInput` is derived from the `TurnTee`'s confirmations and input requests, an approximation of `inputNeeded`. Worktrees: `isolation: 'worktree'` creates `<state_dir>/runs/<runId>/worktrees/<ordinal>` from the run's git repository, gives it to the inner session, removes it if unchanged, otherwise keeps it and logs its path; a non-repository fails the call (`null` plus a log line). Changesets per child stay M8. Journal start records: the scheduler writes a `started` record (ordinal, key, dispatch handle) before the agent record; the dispatcher reports its handle (provider name, worker chat URI) through a context variable set around task creation; resume ignores a start without a finish except to log it; `JOURNAL_VERSION` stays 1. Leftovers fixed: skip and abort tests assert closed inner sessions and no leaked tasks, worker A's overlay never reaches worker B, an overlay that arrives before the inner session is registered is applied once it is, customizations are re-published when a source directory changes between runs, `/workflow workflow` reaches a workflow named `workflow`, an invalid `effort` logs one line, and discovery skips symlinks and non-regular files. A fan-out corpus script runs on fakes and, opt-in, through the configured providers. Open: the rest of the M4b row (from_config factories, the subagent prompt preamble, live watching of workflow dirs); `run_view` orders phases by first appearance, so a phase that starts after a later one's steps keeps its first position.
 
+**M5 result.** The Python runner (`sandbox/pyrunner.py`) is standard library only and speaks the runner.mjs JSON-RPC on its own copies of stdin and stdout (UTF-8 with newline line ends, ASCII-only output), so a stray `print()` goes to stderr and cannot corrupt the stream. `meta` is read by `ast.literal_eval` without running the file; a non-literal `meta` is a `MetaError`. The verbs are awaitables issued at call time, so `agent()` order follows call order. Ordinals and the current phase are now assigned by the host when a request line arrives (`Scheduler.issue`), a protocol change: the `agent` request carries no ordinal. Across runners, arrival order decides. A cross-language child runs in a runner of its own, sharing the run's counter, phase, budget and caps; the settings `child`, `spent` and `args` and the `{value}` reply carry the state, and only JSON crosses. Trust: `.py` loads only from the host and user sources unless `[workflows] python_sources` includes `workspace`; the check is `RunOptions.python_dirs`, and the catalog lists a `.py` only from an allowed source, marked with a language in `_meta["ahp-py/flow"]`. The library API (`ahp_host_flow.run`, `FlowRun`) runs in-process on the same `Scheduler` and journal with a scriptless journal header, and no runner. Every `conformance/*.js` has a `.py` twin checked against the same sidecar; `determinism.json` has a `py_result`, the one documented difference, since Python cannot ban `time` or `random`. `flow run --config` serves a `.py` script from a temporary host directory. Open: the rest of M4b.
+
 ## 9. Risks
 
 - **Format drift:** Claude's workflow format is internal. Mitigation:
@@ -579,8 +582,10 @@ Open for M4 (structured turns):
 - **Weak structured output:** bounded retries, then `null` plus a `log()`.
 - **Approval floods:** with N parallel children there can be N prompts.
   Mitigation: per-profile policy, and never auto-approve beyond it.
-- **Ordinal determinism:** ordinals are taken at issue time in JS, not at
-  completion, but a later pipeline stage issues in completion order. Resume
+- **Ordinal determinism:** ordinals are taken by the host (`Scheduler.issue`)
+  when an `agent` request line arrives, in line order, not at completion, but a
+  later pipeline stage issues in completion order, and with two runners (a
+  cross-language child) arrival order decides. Resume
   matches by key, not ordinal, so this does not cost cache hits.
 - **Ahead of the spec:** `_meta` keys, an experimental capability and host
   hooks can diverge from what upstream later adopts. Mitigation: names are

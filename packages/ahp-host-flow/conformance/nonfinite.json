@@ -1,0 +1,4 @@
+{
+  "dispatcher": { "output_tokens": 10 },
+  "result": { "left": null, "nan": null, "nested": [null, 1.5] }
+}

@@ -12,9 +12,9 @@ from urllib.request import url2pathname
 
 from ahp_protocol.ext.flow import FLOW_META_KEY as FLOW_META_KEY
 
-from ahp_host_flow.config import SOURCES
+from ahp_host_flow.config import PYTHON_SOURCES_DEFAULT, SOURCES
 from ahp_host_flow.engine import WORKFLOW_NAME
-from ahp_host_flow.sandbox import Sandbox, SandboxError
+from ahp_host_flow.sandbox import Sandbox, SandboxError, pyrunner
 
 PLUGIN_ID: Final = "ahp-host-flow.host"
 USER_ID: Final = "ahp-host-flow.user"
@@ -69,6 +69,16 @@ def source_dirs(
     return dirs
 
 
+def python_dirs(dirs: Sequence[SourceDir], python_sources: Sequence[str]) -> tuple[Path, ...]:
+    """The directories `.py` workflows may load from: those of `dirs` whose source is trusted.
+
+    `dirs` holds only the sources `[workflows] sources` enables, so listing `workspace` in
+    `python_sources` grants nothing while it is excluded there, and for the workspace it
+    grants `.claude/workflows` only, never the working directory around it.
+    """
+    return tuple(d.path for d in dirs if d.source in python_sources and d.path.is_dir())
+
+
 @dataclass(frozen=True)
 class WorkflowEntry:
     name: str
@@ -77,15 +87,31 @@ class WorkflowEntry:
     container_id: str
     meta: Mapping[str, Any] | None
     shadowed_by: str | None
+    # 'js' or 'python'.
+    language: str = "js"
 
 
-async def discover(dirs: Sequence[SourceDir], *, node: str | None) -> list[WorkflowEntry]:
-    """Every workflow in `dirs`, in order; `meta` is parsed from the source, never run."""
+async def discover(
+    dirs: Sequence[SourceDir],
+    *,
+    node: str | None,
+    python_sources: Sequence[str] = PYTHON_SOURCES_DEFAULT,
+) -> list[WorkflowEntry]:
+    """Every workflow in `dirs`, in order; `meta` is parsed from the source, never run.
+
+    `.py` files count only in directories whose source is in `python_sources`, and a `.js` file
+    of the same name in the same directory wins (as in the Registry).
+    """
     found: list[tuple[SourceDir, Path, str]] = []
     for source_dir in dirs:
         if not source_dir.path.is_dir():
             continue
-        for path in sorted(source_dir.path.glob("*.js")):
+        candidates = list(source_dir.path.glob("*.js"))
+        if source_dir.source in python_sources:
+            candidates.extend(
+                p for p in source_dir.path.glob("*.py") if not p.with_suffix(".js").exists()
+            )
+        for path in sorted(candidates, key=lambda p: p.name):
             if not WORKFLOW_NAME.fullmatch(path.stem):
                 continue
             if path.is_symlink() or not path.is_file():
@@ -97,9 +123,17 @@ async def discover(dirs: Sequence[SourceDir], *, node: str | None) -> list[Workf
             found.append((source_dir, path, text))
 
     metas: dict[Path, Mapping[str, Any] | None] = {}
-    if node is not None and found:
+    for _, path, text in found:
+        if path.suffix != ".py":
+            continue
+        try:
+            metas[path] = pyrunner.read_meta(text, str(path))
+        except pyrunner.RpcError as exc:
+            _logger.warning("cannot read meta of %s: %s", path, exc)
+    js_found = [item for item in found if item[1].suffix == ".js"]
+    if node is not None and js_found:
         async with Sandbox(node) as sandbox:
-            for _, path, text in found:
+            for _, path, text in js_found:
                 try:
                     metas[path] = await sandbox.meta(text, filename=str(path))
                 except SandboxError as exc:
@@ -117,6 +151,7 @@ async def discover(dirs: Sequence[SourceDir], *, node: str | None) -> list[Workf
                 container_id=source_dir.container_id,
                 meta=metas.get(path),
                 shadowed_by=first_source.get(name),
+                language="python" if path.suffix == ".py" else "js",
             )
         )
         first_source.setdefault(name, source_dir.source)
@@ -154,6 +189,8 @@ def _child(entry: WorkflowEntry) -> dict[str, Any]:
     }
     if entry.shadowed_by is not None:
         flow["shadowedBy"] = entry.shadowed_by
+    if entry.language == "python":
+        flow["language"] = "python"
     return {
         "type": "prompt",
         "id": f"{entry.container_id}.{entry.name}",

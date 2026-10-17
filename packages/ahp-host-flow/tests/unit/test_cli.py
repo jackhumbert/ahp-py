@@ -270,3 +270,37 @@ def test_cli_config_bad_file(tmp_path: Path, capsys: pytest.CaptureFixture[str])
     code = main(["run", str(script), "--config", str(tmp_path / "missing.toml")])
     assert code == 1
     assert "no config file" in capsys.readouterr().err
+
+
+def test_cli_run_py_echo(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr("ahp_host_flow.cli.find_node", lambda _node=None: None)
+    script = _write(tmp_path, "async def main(args):\n    return await agent('hi')\n", "w.py")
+    assert main(["run", str(script)]) == 0
+    assert json.loads(capsys.readouterr().out) == "hi"
+
+
+def test_cli_resume_py(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr("ahp_host_flow.cli.find_node", lambda _node=None: None)
+    script = _write(tmp_path, "async def main(args):\n    return await agent('hi')\n", "w.py")
+    state = str(tmp_path / "state")
+    assert main(["run", str(script), "--state-dir", state, "--run-id", "r1"]) == 0
+    expected = capsys.readouterr().out
+    assert main(["run", "--state-dir", state, "--resume", "r1", "--run-id", "r2"]) == 0
+    assert json.loads(capsys.readouterr().out) == json.loads(expected)
+    js = _write(tmp_path, "return await agent('hi')", "w.js")
+    assert main(["run", str(js), "--state-dir", state, "--run-id", "r3"]) == 1
+
+
+def test_cli_config_runs_py(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    script = _write(tmp_path, "async def main(args):\n    return await agent('hi')\n", "w.py")
+    toml = _flow_toml(tmp_path)
+    assert main(["run", str(script), "--config", str(toml), "--root", str(tmp_path)]) == 0
+    assert json.loads(capsys.readouterr().out) == "You said: hi"
+    echo = _write(tmp_path, "async def main(args):\n    return args\n", "echo.py")
+    argv = ["run", str(echo), "--config", str(toml), "--root", str(tmp_path)]
+    assert main([*argv, "--args", '{"n": 1}']) == 0
+    assert json.loads(capsys.readouterr().out) == {"n": 1}

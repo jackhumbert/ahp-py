@@ -5,7 +5,7 @@ from __future__ import annotations
 import dataclasses
 from collections import deque
 from collections.abc import Callable, Sequence
-from typing import Any
+from typing import Any, Final
 
 from ahp_host_flow.engine.dispatcher import AgentCall
 from ahp_host_flow.engine.journal import (
@@ -21,6 +21,9 @@ from ahp_host_flow.engine.journal import (
 )
 from ahp_host_flow.engine.options import RunOptions
 from ahp_host_flow.engine.registry import ResolvedScript
+
+# The journal filename of a library run (`ahp_host_flow.run`), which has no script.
+LIBRARY_FILENAME: Final = "<library>"
 
 
 class Replay:
@@ -116,9 +119,14 @@ class JournalRun:
         has_args: bool,
         args: Any,
         on_log: Callable[[str], None] | None = None,
+        scriptless: bool = False,
     ) -> JournalRun:
         if options.state_dir is None:
             raise ValueError("journaling needs RunOptions.state_dir")
+        if scriptless:
+            if source is not None:
+                raise ValueError("a scriptless run has no source")
+            filename = LIBRARY_FILENAME
         replay: Replay | None = None
         inherited: dict[str, WorkflowSnapshot] = {}
         effective = options
@@ -126,7 +134,7 @@ class JournalRun:
             old = load_journal(options.state_dir, options.resume_from)
             if has_args:
                 raise ValueError("args come from the journal on resume")
-            if source is None:
+            if source is None and not scriptless:
                 if old.header.source is None:
                     raise JournalError(
                         f"run {options.resume_from!r} has no script snapshot; cannot resume it"
@@ -150,7 +158,7 @@ class JournalRun:
                     )
             replay = Replay(old.agents, on_log=on_log)
             inherited = dict(old.workflows)
-        elif source is None:
+        elif source is None and not scriptless:
             raise ValueError("a script source is needed unless resuming")
         run_id = options.run_id or new_run_id()
         writer = JournalWriter.create(
@@ -171,7 +179,7 @@ class JournalRun:
             run_id=run_id,
             writer=writer,
             replay=replay,
-            source=source,
+            source="" if source is None else source,
             filename=filename,
             has_args=has_args,
             args=args,

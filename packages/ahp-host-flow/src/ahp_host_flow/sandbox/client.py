@@ -6,30 +6,52 @@ import asyncio
 import collections
 import contextlib
 import json
+import sys
 from collections.abc import Callable, Mapping
+from dataclasses import dataclass, field
 from pathlib import Path
 from types import TracebackType
-from typing import Any, Final
+from typing import Any, Final, Literal
 
 from ahp_host_flow.engine import (
     MAX_ITEMS_PER_CALL,
     AbortSignal,
     AgentCall,
     AgentLimitError,
+    AgentRecord,
     Dispatcher,
     JournalRun,
     Registry,
+    ResolvedScript,
     RunOptions,
     Scheduler,
     SchedulerRefusal,
     WorkflowRefError,
+    load_journal,
     resolve_workflow,
 )
 from ahp_host_flow.sandbox import protocol
+from ahp_host_flow.sandbox.node import MIN_NODE_MAJOR, NodeNotFoundError
 
 RUNNER: Final = Path(__file__).with_name("runner.mjs")
 # Passed as `args` when the caller gives none; the script then sees `undefined`.
 NO_ARGS: Final = object()
+
+Language = Literal["js", "py"]
+
+
+def language_of(filename: str) -> Language:
+    """The runner a script needs, by file type: `.py` is Python, anything else JavaScript."""
+    return "py" if filename.lower().endswith(".py") else "js"
+
+
+def runner_command(language: Language, node: str | None, *, runner: Path = RUNNER) -> list[str]:
+    """The argv that starts a runner for `language`."""
+    if language == "py":
+        return [sys.executable, "-I", "-m", protocol.PYRUNNER_MODULE]
+    if node is None:
+        raise NodeNotFoundError()
+    return [node, str(runner)]
 
 
 class SandboxError(Exception):
@@ -62,6 +84,10 @@ class RunTimeoutError(SandboxError):
     """The run exceeded `RunOptions.timeout`; the Node process was killed."""
 
 
+class WorkflowRunError(SandboxError):
+    """A child workflow failed; the message is what `workflow()` throws in the parent."""
+
+
 class MetaError(SandboxError):
     """`meta` is not a pure literal."""
 
@@ -92,12 +118,78 @@ def _error_from(error: Mapping[str, Any], stderr: str) -> SandboxError:
     return SandboxError(message, code=code, stderr=stderr)
 
 
-class Sandbox:
-    """One Node subprocess running `runner.mjs`."""
+@dataclass
+class RunState:
+    """What every runner of one run shares: the scheduler, options and journal."""
 
-    def __init__(self, node: str, *, runner: Path = RUNNER) -> None:
+    scheduler: Scheduler
+    options: RunOptions
+    registry: Registry
+    journal: JournalRun | None
+    node: str | None
+    on_log: Callable[[str], None] | None
+    on_phase: Callable[[str], None] | None
+    # Child runners of the other language, alive while the run is.
+    children: set[Sandbox] = field(default_factory=set)
+
+    def kill_children(self, exc: SandboxError) -> None:
+        for child in list(self.children):
+            child._kill(exc)
+
+
+async def resolve_for_run(state: RunState, ref: object) -> ResolvedScript:
+    """Resolve a `workflow()` reference: the journal snapshot first, else the registry."""
+    resolved = state.journal.snapshot_for(ref) if state.journal else None
+    if resolved is None:
+        # WorkflowRefError propagates.
+        resolved = await asyncio.to_thread(
+            resolve_workflow,
+            ref,
+            registry=state.registry,
+            run_root=state.options.run_root,
+            python_dirs=state.options.python_dirs,
+        )
+    if state.journal:
+        state.journal.record_workflow(ref, resolved)
+    return resolved
+
+
+async def run_workflow_child(
+    state: RunState, resolved: ResolvedScript, args: object = NO_ARGS
+) -> Any:
+    """Run a child of the other language in a runner of its own, on the run's scheduler."""
+    lang = language_of(resolved.filename)
+    if lang == "js" and state.node is None:
+        raise WorkflowRunError(
+            f"workflow {resolved.filename}: no Node >= {MIN_NODE_MAJOR} found to run it"
+        )
+    child = Sandbox(state.node, language=lang)
+    state.children.add(child)
+    try:
+        await child.start()
+        return await child._run_child(state, resolved, args)
+    except ScriptError as exc:
+        # The child threw: the same message an in-process child's throw gives.
+        raise WorkflowRunError(str(exc)) from None
+    except WorkflowRunError:
+        raise
+    except SandboxError as exc:
+        # Syntax, meta, crash or killed.
+        raise WorkflowRunError(f"workflow {resolved.filename}: {exc}") from None
+    finally:
+        state.children.discard(child)
+        await child.aclose()
+
+
+class Sandbox:
+    """One runner subprocess: Node running `runner.mjs`, or the Python runner."""
+
+    def __init__(
+        self, node: str | None = None, *, runner: Path = RUNNER, language: Language = "js"
+    ) -> None:
         self._node = node
         self._runner = runner
+        self._language: Language = language
         self._proc: asyncio.subprocess.Process | None = None
         self._tasks: list[asyncio.Task[None]] = []
         self._handlers: set[asyncio.Task[None]] = set()
@@ -107,13 +199,10 @@ class Sandbox:
         self._write_lock = asyncio.Lock()
         self._dead: SandboxError | None = None
         self._run_lock = asyncio.Lock()
-        self._scheduler: Scheduler | None = None
-        self._on_log: Callable[[str], None] | None = None
-        self._on_phase: Callable[[str], None] | None = None
+        self._run: RunState | None = None
+        # A child connection serves a `workflow()` child of the run; its own `workflow()` fails.
+        self._child_connection = False
         self._agent_tasks: set[asyncio.Task[None]] = set()
-        self._options: RunOptions | None = None
-        self._registry: Registry | None = None
-        self._journal_run: JournalRun | None = None
 
     async def __aenter__(self) -> Sandbox:
         await self.start()
@@ -128,13 +217,16 @@ class Sandbox:
         await self.aclose()
 
     @property
+    def language(self) -> Language:
+        return self._language
+
+    @property
     def stderr_tail(self) -> str:
         return "\n".join(self._stderr)
 
     async def start(self) -> None:
         self._proc = await asyncio.create_subprocess_exec(
-            self._node,
-            str(self._runner),
+            *runner_command(self._language, self._node, runner=self._runner),
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
@@ -236,21 +328,50 @@ class Sandbox:
             if future is not None and not future.done():
                 future.set_result(msg)
         elif "id" in msg:
-            task = asyncio.create_task(self._on_request(msg))
+            # Synchronous, before the task starts: ordinals, phases and refusals follow line order.
+            issued = self._issue(msg) if method == "agent" else None
+            task = asyncio.create_task(self._on_request(msg, issued))
             self._handlers.add(task)
             task.add_done_callback(self._handlers.discard)
         else:
             self._on_notification(str(method), msg.get("params"))
 
-    async def _on_request(self, msg: Mapping[str, Any]) -> None:
+    def _issue(
+        self, msg: Mapping[str, Any]
+    ) -> tuple[AgentCall, AgentRecord | None] | Exception | None:
+        """Take the call's ordinal at the host; a refusal is returned, not raised."""
+        state = self._run
+        if state is None:
+            return None
+        scheduler = state.scheduler
+        try:
+            params = msg.get("params")
+            params = params if isinstance(params, Mapping) else {}
+            phase, label = params.get("phase"), params.get("label")
+            return scheduler.issue(
+                str(params["prompt"]),
+                dict(params.get("opts") or {}),
+                phase=phase if isinstance(phase, str) else None,
+                label=label if isinstance(label, str) else None,
+            )
+        except Exception as exc:
+            return exc
+
+    async def _on_request(
+        self,
+        msg: Mapping[str, Any],
+        issued: tuple[AgentCall, AgentRecord | None] | Exception | None = None,
+    ) -> None:
         method = msg.get("method")
         if method in ("agent", "workflow"):
-            handler = self._on_agent if method == "agent" else self._on_workflow
             task = asyncio.current_task()
             if task is not None:
                 self._agent_tasks.add(task)
             try:
-                await handler(msg)
+                if method == "agent":
+                    await self._on_agent(msg, issued)
+                else:
+                    await self._on_workflow(msg)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
@@ -280,23 +401,20 @@ class Sandbox:
             error["data"] = data
         await self._write({"jsonrpc": protocol.JSONRPC, "id": request_id, "error": error})
 
-    async def _on_agent(self, msg: Mapping[str, Any]) -> None:
-        scheduler = self._scheduler
-        if scheduler is None:
+    async def _on_agent(
+        self,
+        msg: Mapping[str, Any],
+        issued: tuple[AgentCall, AgentRecord | None] | Exception | None,
+    ) -> None:
+        state = self._run
+        if state is None or issued is None:
             await self._write_error(msg["id"], protocol.INTERNAL_ERROR, "no run is active")
             return
-        params = msg.get("params") or {}
-        phase, label = params.get("phase"), params.get("label")
-        call = AgentCall(
-            ordinal=int(params["ordinal"]),
-            prompt=str(params["prompt"]),
-            opts=dict(params.get("opts") or {}),
-            phase=phase if isinstance(phase, str) else None,
-            label=label if isinstance(label, str) else None,
-        )
+        scheduler = state.scheduler
         try:
-            # Synchronous, before any await: refusals happen in issue order.
-            cached = scheduler.admit(call)
+            if isinstance(issued, Exception):
+                raise issued
+            call, cached = issued
             value = await scheduler.run(call, cached)
         except SchedulerRefusal as exc:
             code = (
@@ -315,43 +433,42 @@ class Sandbox:
         )
 
     async def _on_workflow(self, msg: Mapping[str, Any]) -> None:
-        options = self._options
-        if self._scheduler is None or options is None:
+        state = self._run
+        if state is None:
             await self._write_error(msg["id"], protocol.INTERNAL_ERROR, "no run is active")
             return
+        if self._child_connection:
+            await self._write_error(msg["id"], protocol.WORKFLOW_ERROR, protocol.NEST_MESSAGE)
+            return
         params = msg.get("params") or {}
-        ref = params.get("ref")
-        jr = self._journal_run
-        # A resumed run reads children from the snapshot, never the filesystem.
-        resolved = jr.snapshot_for(ref) if jr else None
-        if resolved is None:
-            try:
-                resolved = await asyncio.to_thread(
-                    resolve_workflow,
-                    ref,
-                    registry=self._registry,
-                    run_root=options.run_root,
-                )
-            except WorkflowRefError as exc:
-                await self._write_error(msg["id"], protocol.WORKFLOW_ERROR, str(exc))
-                return
-        if jr:
-            jr.record_workflow(ref, resolved)
-        await self._write(
-            {
-                "jsonrpc": protocol.JSONRPC,
-                "id": msg["id"],
-                "result": {"source": resolved.source, "filename": resolved.filename},
-            }
-        )
+        result: dict[str, Any]
+        try:
+            # A resumed run reads children from the snapshot, never the filesystem.
+            resolved = await resolve_for_run(state, params.get("ref"))
+            if language_of(resolved.filename) == self._language:
+                result = {"source": resolved.source, "filename": resolved.filename}
+            else:
+                value = await run_workflow_child(state, resolved, params.get("args", NO_ARGS))
+                result = {"value": value}
+        except (WorkflowRefError, WorkflowRunError) as exc:
+            await self._write_error(msg["id"], protocol.WORKFLOW_ERROR, str(exc))
+            return
+        result["spent"] = state.scheduler.budget.spent
+        await self._write({"jsonrpc": protocol.JSONRPC, "id": msg["id"], "result": result})
 
     def _on_notification(self, method: str, params: Any) -> None:
         if not isinstance(params, Mapping):
             return
-        if method == "log" and self._on_log is not None:
-            self._on_log(str(params.get("message", "")))
-        elif method == "phase" and self._on_phase is not None:
-            self._on_phase(str(params.get("title", "")))
+        state = self._run
+        if state is None:
+            return
+        if method == "log" and state.on_log is not None:
+            state.on_log(str(params.get("message", "")))
+        elif method == "phase":
+            title = str(params.get("title", ""))
+            state.scheduler.set_phase(title)
+            if state.on_phase is not None:
+                state.on_phase(title)
 
     async def _write(self, msg: Mapping[str, Any]) -> None:
         if self._proc is None or self._proc.stdin is None:
@@ -396,6 +513,34 @@ class Sandbox:
         assert meta is None or isinstance(meta, dict)
         return meta
 
+    async def _run_child(self, state: RunState, resolved: ResolvedScript, args: object) -> Any:
+        """Run `resolved` as a child of `state`'s run; the parent's timeout governs."""
+        self._child_connection = True
+        self._run = state
+        try:
+            params: dict[str, Any] = {
+                "source": resolved.source,
+                "filename": resolved.filename,
+                "limits": {
+                    "maxAgents": state.options.max_agents,
+                    "budgetTotal": state.options.budget_total,
+                    "maxItems": MAX_ITEMS_PER_CALL,
+                },
+                "child": True,
+                "spent": state.scheduler.budget.spent,
+            }
+            if args is not NO_ARGS:
+                params["args"] = args
+            result = await self._request("run", params)
+            return result["value"]
+        finally:
+            self._run = None
+
+    def _check_language(self, filename: str) -> None:
+        if language_of(filename) != self._language:
+            kind = "Python" if self._language == "py" else "JavaScript"
+            raise SandboxError(f"{filename} is not a {kind} workflow")
+
     async def run(
         self,
         source: str | None,
@@ -419,6 +564,13 @@ class Sandbox:
         """
         async with self._run_lock:
             options = options or RunOptions()
+            # Before the journal opens, so a refused run leaves none behind.
+            if source is not None:
+                self._check_language(filename)
+            elif options.state_dir is not None and options.resume_from:
+                self._check_language(
+                    load_journal(options.state_dir, options.resume_from).header.filename
+                )
             jr: JournalRun | None = None
             if options.state_dir is not None:
                 jr = JournalRun.open(
@@ -434,6 +586,12 @@ class Sandbox:
             elif source is None:
                 raise ValueError("a script source is needed unless resuming")
             try:
+                self._check_language(filename)
+            except SandboxError:
+                if jr is not None:
+                    jr.close()
+                raise
+            try:
                 scheduler = Scheduler(
                     dispatcher,
                     options,
@@ -448,12 +606,16 @@ class Sandbox:
                 if jr is not None:
                     jr.close()
                 raise
-            self._scheduler = scheduler
-            self._options = options
-            self._journal_run = jr
-            self._registry = Registry(options.workflow_dirs)
-            self._on_log = on_log
-            self._on_phase = on_phase
+            state = RunState(
+                scheduler=scheduler,
+                options=options,
+                registry=Registry(options.workflow_dirs, python_dirs=options.python_dirs),
+                journal=jr,
+                node=self._node,
+                on_log=on_log,
+                on_phase=on_phase,
+            )
+            self._run = state
             try:
                 if jr is not None and on_run_start is not None:
                     on_run_start(jr.run_id)
@@ -478,20 +640,19 @@ class Sandbox:
                     )
                     scheduler.abort()
                     self._kill(error)
+                    state.kill_children(error)
                     raise error from None
                 return result["value"]
             except asyncio.CancelledError:
                 scheduler.abort()
-                self._kill(SandboxError("run cancelled", stderr=self.stderr_tail))
+                cancelled = SandboxError("run cancelled", stderr=self.stderr_tail)
+                self._kill(cancelled)
+                state.kill_children(cancelled)
                 raise
             finally:
                 scheduler.close()
-                self._scheduler = None
-                self._options = None
-                self._registry = None
-                self._journal_run = None
-                self._on_log = None
-                self._on_phase = None
+                state.kill_children(SandboxError("run ended", stderr=self.stderr_tail))
+                self._run = None
                 tasks = list(self._agent_tasks)
                 for task in tasks:
                     task.cancel()
@@ -501,9 +662,16 @@ class Sandbox:
 
 
 async def extract_meta(
-    source: str, *, node: str, filename: str = "workflow.js"
+    source: str, *, node: str | None, filename: str = "workflow.js"
 ) -> dict[str, Any] | None:
-    """Read `meta` from a script with a throwaway sandbox."""
+    """Read `meta` from a script: in-process for `.py`, else with a throwaway sandbox."""
+    if language_of(filename) == "py":
+        from ahp_host_flow.sandbox import pyrunner
+
+        try:
+            return pyrunner.read_meta(source, filename)
+        except pyrunner.RpcError as exc:
+            raise _error_from({"code": exc.code, "message": exc.message}, "") from None
     async with Sandbox(node) as sandbox:
         return await sandbox.meta(source, filename=filename)
 
@@ -511,7 +679,7 @@ async def extract_meta(
 async def run_script(
     source: str | None,
     *,
-    node: str,
+    node: str | None,
     dispatcher: Dispatcher,
     args: object = NO_ARGS,
     filename: str = "workflow.js",
@@ -523,8 +691,11 @@ async def run_script(
     on_agent_end: Callable[[AgentCall, Any], None] | None = None,
     on_run_start: Callable[[str], None] | None = None,
 ) -> Any:
-    """Run a script with a throwaway sandbox."""
-    async with Sandbox(node) as sandbox:
+    """Run a script with a throwaway sandbox; Node for `.js`, the Python runner for `.py`."""
+    name = filename
+    if source is None and options is not None and options.state_dir and options.resume_from:
+        name = load_journal(options.state_dir, options.resume_from).header.filename
+    async with Sandbox(node, language=language_of(name)) as sandbox:
         return await sandbox.run(
             source,
             dispatcher=dispatcher,

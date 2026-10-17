@@ -19,20 +19,36 @@ Python -> Node methods:
   budgetTotal: int | null, maxItems: int}} -> result {value: any}. If `args` is
   absent the script sees `args === undefined`; if `limits` is absent the runner
   uses 1000 / null / 4096. One run at a time per process: a second concurrent
-  `run` gets RUN_ACTIVE.
+  `run` gets RUN_ACTIVE. `run` also takes `child?: bool` (the run is a child:
+  its `workflow()` always throws NEST_MESSAGE) and `spent?: int` (the initial
+  budget mirror).
+
+A Python runner (`pyrunner`, standard library only) speaks this same protocol.
 
 Node -> Python methods, only while a `run` is active:
 
-- request `agent` {ordinal: int, prompt: str, opts: object, phase: str | null,
+- request `agent` {prompt: str, opts: object, phase: str | null,
   label: str | null} -> result {value: any, spent: int}, where `spent` is the
-  run's total output tokens after this call. A refused call gets error
+  run's total output tokens after this call. `phase` is the call's own override
+  (`opts.phase` when a string) or null. The host takes the ordinal (0-based, from
+  `Scheduler.issue`) and fills in the run's current phase when the line arrives, so
+  within one runner they follow issue order. A refused call gets error
   AGENT_LIMIT or BUDGET_EXHAUSTED with `data: {spent: int}`, which `agent()`
-  rethrows in the script with the error message.
-- request `workflow` {ref: str | {scriptPath: str}} -> result {source: str,
-  filename: str}. A reference that cannot be resolved gets error WORKFLOW_ERROR,
+  rethrows in the script with the error message; it takes no ordinal.
+- request `workflow` {ref: str | {scriptPath: str}, args?: any} -> result
+  {source: str, filename: str, spent?: int} (run the child here, in the same
+  language) or {value: any, spent?: int} (the host ran it). `args` is present
+  only when the call passed them (JSON). The runner mirrors `spent`, which only
+  ever increases. A reference that cannot be resolved gets error WORKFLOW_ERROR,
   whose message `workflow()` throws in the script.
+  A child of the other language (a `.py` child of a JS parent, or the reverse)
+  is run by the host, in a runner of its own started with `child: true` and the
+  run's current `spent`; it shares the host's Scheduler, so the agent counter,
+  phase, budget, caps and abort are the run's, and only `args` and the returned
+  value cross as JSON. The parent gets `{value, spent}`. That runner's own
+  `workflow()` is answered with WORKFLOW_ERROR NEST_MESSAGE.
 - notification `log` {message: str}
-- notification `phase` {title: str}
+- notification `phase` {title: str}; sets the run's current phase at the host.
 
 `parallel` and `pipeline` are context-only globals: plain promises in the
 script's realm that never cross the wire; only the `agent()` calls inside them do.
@@ -45,6 +61,12 @@ from __future__ import annotations
 from typing import Final
 
 JSONRPC: Final = "2.0"
+
+# Repeated from engine.options / runner.mjs, kept equal by tests.
+PYRUNNER_MODULE: Final = "ahp_host_flow.sandbox.pyrunner"
+DEFAULT_MAX_AGENTS: Final = 1000
+DEFAULT_MAX_ITEMS: Final = 4096
+NEST_MESSAGE: Final = "workflow() can only nest one level: a child workflow cannot call workflow()"
 
 SCRIPT_ERROR: Final = -32000  # the script threw
 META_ERROR: Final = -32001  # meta is not a pure literal

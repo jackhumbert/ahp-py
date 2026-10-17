@@ -10,15 +10,16 @@ from typing import Any, Protocol, runtime_checkable
 
 @dataclass(frozen=True)
 class AgentCall:
-    # 0-based, assigned in JS when agent() is called, not when it completes (plan §9).
+    # 0-based, assigned by the host Scheduler.issue when the request arrives (issue order
+    # within one runner), not when the call completes (plan §9).
     ordinal: int
     prompt: str
     # agent() opts verbatim, unknown keys included (plan §3 probe).
     opts: Mapping[str, Any] = field(default_factory=dict)
-    # opts.phase if a string, else the latest phase() title at issue time; set in JS
-    # at issue time so a progress listener can group calls (plan §3 phase row).
+    # opts.phase if a string, else the run's current phase when Scheduler.issue ran, so a
+    # progress listener can group calls (plan §3 phase row).
     phase: str | None = None
-    # opts.label if a string; set in JS at issue time (plan §3 phase row).
+    # opts.label if a string; passed on the request and kept at issue (plan §3 phase row).
     label: str | None = None
 
 

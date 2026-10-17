@@ -11,5 +11,10 @@
     "explicit": "1970-01-01T00:00:00.000Z",
     "formatted": "1/1/1970",
     "apis": ["undefined", "undefined", "undefined", "undefined"]
+  },
+  "py_result": {
+    "banned": { "time.time()": false, "random.random()": false, "datetime.now()": false },
+    "explicit": "1970-01-01T00:00:00.000Z",
+    "apis": ["undefined", "undefined", "undefined", "undefined"]
   }
 }

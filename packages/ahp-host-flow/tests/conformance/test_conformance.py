@@ -10,15 +10,33 @@ from typing import Any
 import pytest
 
 from ahp_host_flow.engine import MAX_AGENTS_PER_RUN, JournalError, RunOptions, load_journal
-from ahp_host_flow.sandbox import NO_ARGS, extract_meta, run_script
+from ahp_host_flow.sandbox import (
+    MIN_NODE_MAJOR,
+    NO_ARGS,
+    NODE_ENV,
+    extract_meta,
+    find_node,
+    run_script,
+)
 
 from ..fakes import FakeDispatcher  # noqa: TID252
 
-pytestmark = pytest.mark.node
-
 CONFORMANCE = Path(__file__).resolve().parents[2] / "conformance"
+# Python twins that call a JS child, so they need Node as well.
+PY_NEEDS_NODE = {"workflow"}
+
+
+def _param(path: Path) -> Any:
+    needs_node = path.suffix == ".js" or path.stem in PY_NEEDS_NODE
+    return pytest.param(
+        path,
+        id=f"{path.suffix[1:]}-{path.stem}",
+        marks=pytest.mark.node if needs_node else (),
+    )
+
+
 # Top level only: workflows/ holds children that the scripts call.
-SCRIPTS = sorted(CONFORMANCE.glob("*.js"))
+SCRIPTS = [_param(p) for suffix in (".js", ".py") for p in sorted(CONFORMANCE.glob(f"*{suffix}"))]
 
 ROWS = {
     "meta",
@@ -29,12 +47,29 @@ ROWS = {
     "phase_log_args",
     "budget",
     "budget_unset",
+    "nonfinite",
     "workflow",
     "determinism",
     "caps",
     "caps_concurrency",
     "resume",
 }
+
+
+def _node_for(script: Path) -> str | None:
+    """The Node path for a script that runs under Node (or calls into it); None otherwise."""
+    if script.suffix == ".py" and script.stem not in PY_NEEDS_NODE:
+        return None
+    path = find_node()
+    if path is None:
+        pytest.skip(f"no Node >= {MIN_NODE_MAJOR} (set {NODE_ENV} or put node on PATH)")
+    return path
+
+
+def _expected(script: Path, sidecar: dict[str, Any]) -> Any:
+    if script.suffix == ".py" and "py_result" in sidecar:
+        return sidecar["py_result"]
+    return sidecar["result"]
 
 
 def _options(
@@ -58,7 +93,7 @@ def _options(
 
 
 async def _check_resume(
-    node_path: str, script: Path, sidecar: dict[str, Any], tmp_path: Path
+    node: str | None, script: Path, sidecar: dict[str, Any], tmp_path: Path
 ) -> None:
     source = script.read_text(encoding="utf-8")
     spec = sidecar.get("options", {})
@@ -68,22 +103,23 @@ async def _check_resume(
     state = tmp_path / "state"
 
     # (1) Uninterrupted run.
+    expected = _expected(script, sidecar)
     value = await run_script(
         source,
-        node=node_path,
+        node=node,
         dispatcher=FakeDispatcher(**dispatcher_kwargs, hang=False),
         args=args,
         filename=str(script),
         options=_options(spec),
     )
-    assert value == sidecar["result"]
+    assert value == expected
 
     # (2) A run killed with calls in flight.
     killed = FakeDispatcher(**dispatcher_kwargs)
     task = asyncio.ensure_future(
         run_script(
             source,
-            node=node_path,
+            node=node,
             dispatcher=killed,
             args=args,
             filename=str(script),
@@ -114,14 +150,14 @@ async def _check_resume(
     logs: list[str] = []
     value = await run_script(
         None,
-        node=node_path,
+        node=node,
         dispatcher=resumed,
         args=args,
         filename=str(script),
         options=_options(spec, state_dir=state, run_id="second", resume_from="first"),
         on_log=logs.append,
     )
-    assert value == sidecar["result"]
+    assert value == expected
     if "unfinished" in resume:
         assert len(load_journal(state, "first").unfinished) == resume["unfinished"]
         assert sum("never finished" in line for line in logs) == resume["unfinished"]
@@ -130,13 +166,14 @@ async def _check_resume(
     assert sorted(journaled - {c.ordinal for c in resumed.calls}) == resume["cached"]
 
 
-@pytest.mark.parametrize("script", SCRIPTS, ids=lambda p: p.stem)
-async def test_conformance_script(node_path: str, script: Path, tmp_path: Path) -> None:
+@pytest.mark.parametrize("script", SCRIPTS)
+async def test_conformance_script(script: Path, tmp_path: Path) -> None:
+    node = _node_for(script)
     sidecar_path = script.with_suffix(".json")
     assert sidecar_path.is_file(), f"{script.name} has no {sidecar_path.name}"
     sidecar = json.loads(sidecar_path.read_text(encoding="utf-8"))
     if "resume" in sidecar:
-        await _check_resume(node_path, script, sidecar, tmp_path)
+        await _check_resume(node, script, sidecar, tmp_path)
         return
     source = script.read_text(encoding="utf-8")
     dispatcher = FakeDispatcher(**sidecar.get("dispatcher", {}))
@@ -145,7 +182,7 @@ async def test_conformance_script(node_path: str, script: Path, tmp_path: Path) 
     value = await asyncio.wait_for(
         run_script(
             source,
-            node=node_path,
+            node=node,
             dispatcher=dispatcher,
             args=sidecar.get("args", NO_ARGS),
             filename=str(script),
@@ -155,9 +192,9 @@ async def test_conformance_script(node_path: str, script: Path, tmp_path: Path) 
         ),
         120,
     )
-    assert value == sidecar["result"]
+    assert value == _expected(script, sidecar)
     if "meta" in sidecar:
-        assert await extract_meta(source, node=node_path) == sidecar["meta"]
+        assert await extract_meta(source, node=node, filename=str(script)) == sidecar["meta"]
     if "logs" in sidecar:
         assert logs == sidecar["logs"]
     if "phases" in sidecar:
@@ -170,6 +207,13 @@ async def test_conformance_script(node_path: str, script: Path, tmp_path: Path) 
 
 
 def test_conformance_rows_covered() -> None:
-    assert {p.stem for p in SCRIPTS} >= ROWS
-    for script in SCRIPTS:
-        assert script.with_suffix(".json").is_file(), script.name
+    js = {p.stem for p in CONFORMANCE.glob("*.js")}
+    py = {p.stem for p in CONFORMANCE.glob("*.py")}
+    assert js >= ROWS
+    assert js == py
+    sidecars = {}
+    for stem in js:
+        path = (CONFORMANCE / stem).with_suffix(".json")
+        assert path.is_file(), path.name
+        sidecars[stem] = json.loads(path.read_text(encoding="utf-8"))
+    assert {stem for stem, sc in sidecars.items() if "py_result" in sc} == {"determinism"}

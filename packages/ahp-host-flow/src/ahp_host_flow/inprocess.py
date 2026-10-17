@@ -8,7 +8,9 @@ non-asking `approval_mode` in flow.toml.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
+import tempfile
 from collections.abc import AsyncIterator, Callable, Mapping
 from pathlib import Path
 from typing import Any
@@ -19,8 +21,9 @@ from ahp_host.core import Host, LoopbackSingleUserPolicy
 from ahp_protocol.transport import memory_pair
 
 from ahp_host_flow.config import FlowConfig
+from ahp_host_flow.engine import WORKFLOW_NAME
 from ahp_host_flow.provider import FlowProvider
-from ahp_host_flow.sandbox import NO_ARGS
+from ahp_host_flow.sandbox import NO_ARGS, language_of
 
 _JSON_OPEN = "```json\n"
 _FENCE_CLOSE = "\n```"
@@ -92,8 +95,45 @@ async def run_in_process(
     args: object = NO_ARGS,
     root: Path,
     on_note: Callable[[str], None] | None = None,
+    filename: str = "script.js",
 ) -> Any:
-    """Run *source* as a fenced script in a session rooted at *root*; return its value."""
+    """Run *source* as a script in a session rooted at *root*; return its value.
+
+    JavaScript goes as a fenced message. A `.py` script is served from a temporary
+    host directory and started as `/host:<name>`: whoever runs `flow run` is the
+    operator, so the script is a trusted host workflow.
+    """
+    if language_of(filename) == "py":
+        stem = Path(filename).stem
+        name = stem if WORKFLOW_NAME.fullmatch(stem) else "script"
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / f"{name}.py").write_text(source, encoding="utf-8")
+            workflows = config.workflows
+            workflows = dataclasses.replace(
+                workflows,
+                dirs=(Path(tmp), *workflows.dirs),
+                sources=workflows.sources
+                if "host" in workflows.sources
+                else (*workflows.sources, "host"),
+                python_sources=workflows.python_sources
+                if "host" in workflows.python_sources
+                else (*workflows.python_sources, "host"),
+            )
+            text = f"/host:{name}"
+            if args is not NO_ARGS:
+                text += " " + json.dumps(args)
+            return await _run_message(
+                dataclasses.replace(config, workflows=workflows), text, root, on_note
+            )
+    text = "```js\n" + source + "\n```"
+    if args is not NO_ARGS:
+        text += "\n" + json.dumps(args)
+    return await _run_message(config, text, root, on_note)
+
+
+async def _run_message(
+    config: FlowConfig, text: str, root: Path, on_note: Callable[[str], None] | None
+) -> Any:
     host = Host(FlowProvider(config), LoopbackSingleUserPolicy())
     client_t, server_t = memory_pair()
     serving = asyncio.create_task(host.serve(server_t))
@@ -104,9 +144,6 @@ async def run_in_process(
                 provider="flow", working_directories=[root.resolve().as_uri()]
             ) as session,
         ):
-            text = "```js\n" + source + "\n```"
-            if args is not NO_ARGS:
-                text += "\n" + json.dumps(args)
             consume = asyncio.create_task(_consume(session.prompt(text), on_note))
             watcher = asyncio.create_task(_unanswerable(host, session.uri))
             try:

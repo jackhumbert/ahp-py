@@ -10,13 +10,14 @@ from pathlib import Path
 from typing import Any
 
 from ahp_host_flow.config import ConfigError, load_config
-from ahp_host_flow.engine import EchoDispatcher, JournalError, RunOptions
+from ahp_host_flow.engine import EchoDispatcher, JournalError, RunOptions, load_journal
 from ahp_host_flow.inprocess import FlowRunFailed, run_in_process
 from ahp_host_flow.sandbox import (
     NO_ARGS,
     NodeNotFoundError,
     SandboxError,
     find_node,
+    language_of,
     run_script,
 )
 
@@ -36,7 +37,10 @@ def _build_parser() -> argparse.ArgumentParser:
     run.add_argument(
         "path",
         nargs="?",
-        help="the script to run; optional with --resume, where it replaces the journal's snapshot",
+        help=(
+            "the .js or .py script to run; optional with --resume, "
+            "where it replaces the journal's snapshot"
+        ),
     )
     run.add_argument("--args", help="JSON passed to the script as `args`")
     run.add_argument("--node", help="Node binary (overrides AHP_FLOW_NODE and PATH)")
@@ -117,6 +121,7 @@ def _run_with_config(parser: argparse.ArgumentParser, args: argparse.Namespace) 
                 path.read_text(encoding="utf-8"),
                 args=script_args,
                 root=Path(args.root),
+                filename=path.name,
                 on_note=lambda note: _stderr(f"[flow] {note}"),
             )
         )
@@ -171,7 +176,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         filename = str(path)
 
     node = find_node(args.node)
-    if node is None:
+    script_name = args.path
+    if script_name is None:
+        try:
+            script_name = load_journal(Path(args.state_dir), args.resume).header.filename
+        except JournalError as exc:
+            _stderr(f"flow: {exc}")
+            return 1
+    if node is None and language_of(str(script_name)) == "js":
         _stderr(f"flow: {NodeNotFoundError()}")
         return 1
 

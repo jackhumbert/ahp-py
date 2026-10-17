@@ -42,6 +42,10 @@ class RunOptions:
     timeout: float | None = None
     workflow_dirs: tuple[Path, ...] = ()
     run_root: Path | None = None
+    # Directories `.py` workflows may load from, by name or {scriptPath}. None means a trusted
+    # caller (the CLI and the library) and allows any `.py`; every path that runs a workflow on
+    # behalf of someone else, the provider above all, must set it (a tuple, () for none).
+    python_dirs: tuple[Path, ...] | None = None
     # Journals go to <state_dir>/runs/<run_id>/journal.jsonl; None means no journal.
     state_dir: Path | None = None
     # Id of the new run; None means generated.
@@ -77,6 +81,11 @@ class RunOptions:
             raise ValueError("run_id and resume_from need state_dir")
         if self.run_id is not None and self.run_id == self.resume_from:
             raise ValueError("run_id must differ from resume_from")
+        if self.python_dirs is not None and not (
+            isinstance(self.python_dirs, tuple)
+            and all(isinstance(d, Path) for d in self.python_dirs)
+        ):
+            raise ValueError("python_dirs must be a tuple of paths or None")
         if self.redact is not None and not callable(self.redact):
             raise ValueError("redact must be callable")
 

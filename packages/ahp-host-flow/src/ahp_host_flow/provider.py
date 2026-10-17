@@ -49,6 +49,7 @@ from ahp_host_flow.sandbox import (
     SandboxError,
     ScriptError,
     find_node,
+    language_of,
     run_script,
 )
 
@@ -215,7 +216,9 @@ class FlowSession:
 
     async def describe(self) -> SessionDescription:
         dirs = self._dirs()
-        entries = await catalog.discover(dirs, node=self._node())
+        entries = await catalog.discover(
+            dirs, node=self._node(), python_sources=self.provider.config.workflows.python_sources
+        )
         self._published = catalog.customizations(entries, dirs, version=__version__)
         return SessionDescription(customizations=self._published)
 
@@ -228,7 +231,10 @@ class FlowSession:
             return
         dirs = self._dirs()
         node = self._node()
-        entries = await catalog.discover(dirs, node=node)
+        config = self.provider.config
+        entries = await catalog.discover(
+            dirs, node=node, python_sources=config.workflows.python_sources
+        )
         current = catalog.customizations(entries, dirs, version=__version__)
         if current != self._published and context.publisher is not None:
             await context.publisher.customizations_changed(current)
@@ -245,22 +251,26 @@ class FlowSession:
                 await sink.text_delta(unknown_text(ref, catalog.visible_names(entries)))
                 return
             source, filename = entry.path.read_text(encoding="utf-8"), str(entry.path)
-        if node is None:
+        if node is None and language_of(filename) == "js":
             await sink.turn_failed(str(NodeNotFoundError()), "flow.node")
             return
         if context.publisher is None:
             await sink.turn_failed("no session publisher", "flow.run")
             return
 
-        config = self.provider.config
         redactor = self.provider.redactor
         workspace = next(
             (p for d in context.working_directories if (p := catalog.directory_of(d))), None
         )
+        # Where workflow() may load a .py from: the allowed sources' workflow directories only
+        # (for the workspace, its `.claude/workflows`, not the whole working directory), and
+        # never a source that `[workflows] sources` leaves out. Always set on a provider run.
+        python_dirs = catalog.python_dirs(dirs, config.workflows.python_sources)
         try:
             options = RunOptions(
                 state_dir=config.state_dir,
                 workflow_dirs=tuple(d.path for d in dirs if d.path.is_dir()),
+                python_dirs=python_dirs,
                 run_root=workspace,
                 redact=redactor.mask_value,
             )

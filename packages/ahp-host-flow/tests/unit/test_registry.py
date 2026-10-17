@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from ahp_host_flow.engine import Registry, WorkflowRefError, resolve_workflow
+from ahp_host_flow.engine import Registry, RunOptions, WorkflowRefError, resolve_workflow
 
 
 def _write(path: Path, text: str = "x") -> Path:
@@ -94,3 +94,69 @@ def test_registry_bad_ref(ref: object) -> None:
     with pytest.raises(WorkflowRefError) as info:
         resolve_workflow(ref, registry=None, run_root=None)
     assert str(info.value) == "workflow() needs a name or {scriptPath}"
+
+
+def test_registry_finds_py(tmp_path: Path) -> None:
+    path = _write(tmp_path / "x.py", "py")
+    assert Registry([tmp_path]).find("x") == path
+    assert resolve_workflow("x", registry=Registry([tmp_path]), run_root=None).source == "py"
+
+
+def test_registry_js_wins_tie(tmp_path: Path) -> None:
+    _write(tmp_path / "x.py", "py")
+    js = _write(tmp_path / "x.js", "js")
+    assert Registry([tmp_path]).find("x") == js
+
+
+def test_registry_earlier_dir_wins_across_languages(tmp_path: Path) -> None:
+    py = _write(tmp_path / "d1" / "x.py")
+    _write(tmp_path / "d2" / "x.js")
+    assert Registry([tmp_path / "d1", tmp_path / "d2"]).find("x") == py
+
+
+def test_registry_python_dirs_filter(tmp_path: Path) -> None:
+    d1, d2 = tmp_path / "d1", tmp_path / "d2"
+    _write(d1 / "x.py")
+    js = _write(d2 / "x.js")
+    assert Registry([d1, d2], python_dirs=(d2,)).find("x") == js
+    only = Registry([d1], python_dirs=(d2,))
+    assert only.find("x") is None
+    with pytest.raises(WorkflowRefError) as info:
+        resolve_workflow("x", registry=only, run_root=None)
+    assert str(info.value) == "unknown workflow: 'x'"
+
+
+def test_registry_names_include_py(tmp_path: Path) -> None:
+    _write(tmp_path / "a.js")
+    _write(tmp_path / "b.py")
+    _write(tmp_path / "bad.name.py")
+    assert Registry([tmp_path]).names() == ["a", "b"]
+    assert Registry([tmp_path], python_dirs=()).names() == ["a"]
+
+
+def test_registry_script_path_py_refused(tmp_path: Path) -> None:
+    _write(tmp_path / "wf" / "x.py")
+    with pytest.raises(WorkflowRefError) as info:
+        resolve_workflow(
+            {"scriptPath": "wf/x.py"}, registry=None, run_root=tmp_path, python_dirs=()
+        )
+    assert str(info.value) == "Python workflows are not allowed from 'wf/x.py'"
+
+
+def test_registry_script_path_py_allowed_in_dir(tmp_path: Path) -> None:
+    _write(tmp_path / "wf" / "x.py", "py")
+    got = resolve_workflow(
+        {"scriptPath": "wf/x.py"},
+        registry=None,
+        run_root=tmp_path,
+        python_dirs=(tmp_path / "wf",),
+    )
+    assert got.source == "py"
+
+
+def test_run_options_python_dirs_validated(tmp_path: Path) -> None:
+    assert RunOptions().python_dirs is None
+    assert RunOptions(python_dirs=(tmp_path,)).python_dirs == (tmp_path,)
+    for bad in ([tmp_path], (str(tmp_path),)):
+        with pytest.raises(ValueError, match="python_dirs must be a tuple of paths or None"):
+            RunOptions(python_dirs=bad)  # type: ignore[arg-type]

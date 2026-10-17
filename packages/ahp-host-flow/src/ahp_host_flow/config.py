@@ -18,6 +18,8 @@ EFFORT_KEY: Final = "effort"
 APPROVAL_MODES: Final = ("default", "acceptEdits", "auto", "plan")
 EFFORT_LEVELS: Final = ("low", "medium", "high", "xhigh", "max")
 SOURCES: Final = ("workspace", "user", "host")
+# A .py workflow is arbitrary code on the host: only these sources supply one (plan §4.10).
+PYTHON_SOURCES_DEFAULT: Final = ("user", "host")
 DEFAULT_STATE_DIR: Final = Path("~/.local/state/ahp-host-flow")
 PROVIDER_NAME: Final = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]*")
 LOAD_SPEC: Final = re.compile(r"[A-Za-z_][\w.]*:[A-Za-z_][\w.]*")
@@ -59,6 +61,7 @@ class ProviderConfig:
 class WorkflowsConfig:
     dirs: tuple[Path, ...] = ()
     sources: tuple[str, ...] = SOURCES
+    python_sources: tuple[str, ...] = PYTHON_SOURCES_DEFAULT
 
 
 @dataclass(frozen=True)
@@ -178,7 +181,7 @@ def _parse_routing(raw: Any, providers: Mapping[str, ProviderConfig]) -> Routing
 
 def _parse_workflows(raw: Any, base: Path) -> WorkflowsConfig:
     table = _table(raw, "workflows")
-    _check_keys(table, ("dirs", "sources"), "workflows")
+    _check_keys(table, ("dirs", "sources", "python_sources"), "workflows")
     dirs = tuple(_path(d, base) for d in _str_list(table.get("dirs", []), "workflows.dirs"))
     sources = tuple(_str_list(table.get("sources", list(SOURCES)), "workflows.sources"))
     for source in sources:
@@ -186,7 +189,19 @@ def _parse_workflows(raw: Any, base: Path) -> WorkflowsConfig:
             raise ConfigError(f"workflows.sources: {source!r} is not one of {', '.join(SOURCES)}")
     if len(set(sources)) != len(sources):
         raise ConfigError("workflows.sources has duplicates")
-    return WorkflowsConfig(dirs, sources)
+    python_sources = tuple(
+        _str_list(
+            table.get("python_sources", list(PYTHON_SOURCES_DEFAULT)), "workflows.python_sources"
+        )
+    )
+    for source in python_sources:
+        if source not in SOURCES:
+            raise ConfigError(
+                f"workflows.python_sources: {source!r} is not one of {', '.join(SOURCES)}"
+            )
+    if len(set(python_sources)) != len(python_sources):
+        raise ConfigError("workflows.python_sources has duplicates")
+    return WorkflowsConfig(dirs, sources, python_sources)
 
 
 def _parse_redact(raw: Any) -> RedactConfig:

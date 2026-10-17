@@ -62,6 +62,8 @@ class Scheduler:
         self._slots = asyncio.Semaphore(self._concurrency)
         self._budget = Budget(options.budget_total)
         self._max_agents = options.max_agents
+        self._next_ordinal = 0
+        self._phase: str | None = None
         self._inflight: set[asyncio.Task[AgentResult]] = set()
         self._aborted = False
         self._on_log = on_log
@@ -85,6 +87,44 @@ class Scheduler:
     def concurrency(self) -> int:
         return self._concurrency
 
+    @property
+    def phase(self) -> str | None:
+        return self._phase
+
+    def set_phase(self, title: str | None) -> None:
+        self._phase = title
+
+    @property
+    def issued(self) -> int:
+        return self._next_ordinal
+
+    def issue(
+        self,
+        prompt: str,
+        opts: Mapping[str, Any],
+        *,
+        phase: str | None = None,
+        label: str | None = None,
+    ) -> tuple[AgentCall, AgentRecord | None]:
+        """Take the next ordinal and admit the call; sync, so ordinals, phases and refusals
+        follow issue order. phase None means the run's current phase. A refused call takes
+        no ordinal.
+        """
+        if self._next_ordinal >= self._max_agents:
+            raise AgentLimitError(
+                f"agent() limit reached: at most {self._max_agents} agent() calls per run"
+            )
+        call = AgentCall(
+            ordinal=self._next_ordinal,
+            prompt=prompt,
+            opts=dict(opts),
+            phase=phase if phase is not None else self._phase,
+            label=label,
+        )
+        cached = self.admit(call)
+        self._next_ordinal += 1
+        return call, cached
+
     def _log(self, line: str) -> None:
         if self._on_log is not None:
             self._on_log(line)
@@ -99,7 +139,7 @@ class Scheduler:
 
         Returns the journal record that serves the call on resume, else None.
         """
-        # Ordinals are assigned in JS at issue time, so this cap is deterministic (plan §9).
+        # Ordinals are assigned at issue time, so this cap is deterministic (plan §9).
         if call.ordinal >= self._max_agents:
             raise AgentLimitError(
                 f"agent() limit reached: at most {self._max_agents} agent() calls per run"

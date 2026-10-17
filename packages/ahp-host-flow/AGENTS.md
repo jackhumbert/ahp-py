@@ -16,7 +16,8 @@ is the design; milestones M0–M10 there say what exists and what's next.
   worker chats), `worktree` (git worktrees for `isolation: 'worktree'`),
   `provider` (`FlowProvider`/`FlowSession`), `inprocess` (an
   in-memory host for `flow run --config`) and `__main__` (the server). They may
-  import `ahp_host`; `engine/` and `sandbox/` may not.
+  import `ahp_host`; `engine/` and `sandbox/` may not. `library` (`run`, `FlowRun`) and `verbs`
+  are top-level modules too; `library` may not import `ahp_host`.
 - Inner providers come only from `load` by import path. Tests use
   `tests/flow_fakes.py` and `EchoProvider`, never a live model.
 - `_meta["ahp-py/flow"]` is both the customization marker on a workflow's
@@ -42,6 +43,25 @@ is the design; milestones M0–M10 there say what exists and what's next.
   (`docs/plan.md` §3). Change them only with a conformance test.
 - Tests needing Node carry the `node` marker and skip when no Node ≥ 20 is
   found (`AHP_FLOW_NODE`, else `PATH`). No test calls a live model.
+- `sandbox/pyrunner.py` and `verbs.py` are standard library only: they import
+  only `ahp_host_flow.sandbox.protocol` and each other, and must never import
+  `ahp_host`, `ahp_client`, `ahp_protocol`, the engine or third-party code. The
+  import-linter contract "the Python runner and verbs use the standard library
+  only" and `test_pyrunner_stdlib_only` enforce it.
+- `ahp_host_flow/__init__.py` and `sandbox/__init__.py` stay lazy (PEP 562), so
+  the runner loads nothing else.
+- The Python runner starts as `python -I -m ahp_host_flow.sandbox.pyrunner`, and `-I`
+  ignores `PYTHONPATH`: `ahp-host-flow` must be installed in that interpreter (an
+  editable install counts), not merely importable through `PYTHONPATH`.
+- `RunOptions.python_dirs=None` means a trusted caller (the CLI and library) and
+  allows any `.py`. Every provider path must set it, to the trusted sources'
+  workflow directories only (`catalog.python_dirs`: for the workspace that is
+  `.claude/workflows`, never the working directory, and nothing when `[workflows]
+  sources` excludes it).
+- Ordinals and the current phase are assigned by the host (`Scheduler.issue`)
+  when a request line arrives, never in a runner.
+- Every `.js` conformance script keeps a `.py` twin, checked against the same
+  sidecar.
 - Conventional commits, scope `ahp-host-flow`; `CHANGELOG.md` under
   `[Unreleased]`.
 

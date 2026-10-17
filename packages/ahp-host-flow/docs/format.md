@@ -1,7 +1,7 @@
 # Script format
 
 The semantics of Claude Code workflow scripts that `ahp-host-flow` copies, as
-implemented through milestone M2 (see [plan.md](plan.md) §3 and §8). Each
+implemented through milestone M5 (see [plan.md](plan.md) §3 and §8). Each
 section names the conformance script that checks it, under `conformance/`.
 
 A script is a strict-mode module body run in a fresh `node:vm` context. It may
@@ -9,7 +9,7 @@ use top-level `await` and `return`; its return value is the run result.
 
 ## meta
 
-Script: `conformance/meta.js`.
+Script: `conformance/meta.js`; Python twin: `conformance/meta.py`.
 
 `export const meta = {...}` must be a pure literal: `name`, `description`,
 optional `whenToUse`, and `phases`, a list of `{title, detail?, model?}`. It is
@@ -18,7 +18,7 @@ and inside `phases[]`, are accepted and ignored.
 
 ## agent
 
-Script: `conformance/agent.js`.
+Script: `conformance/agent.js`; Python twin: `conformance/agent.py`.
 
 `agent(prompt, opts)` returns the reply text. It returns `null` when the
 dispatcher skips the call or fails; a failure also writes a `log()` line.
@@ -31,11 +31,11 @@ When `opts.schema` is an object, a non-null result is validated against it
 the schema). A mismatch or an unusable schema makes `agent()` return `null` and
 logs `agent() #N failed: <reason>`; a non-object `opts.schema` is ignored.
 
-Script: `conformance/agent_schema.js`.
+Script: `conformance/agent_schema.js`; Python twin: `conformance/agent_schema.py`.
 
 ## parallel
 
-Script: `conformance/parallel.js`.
+Script: `conformance/parallel.js`; Python twin: `conformance/parallel.py`.
 
 `parallel(thunks)` calls every thunk at once and waits for all of them (a
 barrier). It never rejects. A thunk that throws, synchronously or by
@@ -44,7 +44,7 @@ more fails with `parallel() takes at most 4096 items, got N`.
 
 ## pipeline
 
-Script: `conformance/pipeline.js`.
+Script: `conformance/pipeline.js`; Python twin: `conformance/pipeline.py`.
 
 `pipeline(items, ...stages)` runs each item through the stages in order with
 no barrier between stages: an item moves on as soon as its previous stage
@@ -55,7 +55,7 @@ items come back unchanged. At most 4096 items per call; more fails with
 
 ## phase, log and args
 
-Script: `conformance/phase_log_args.js`.
+Script: `conformance/phase_log_args.js`; Python twin: `conformance/phase_log_args.py`.
 
 `phase(title)` sets the current phase; later `agent()` calls carry it.
 `opts.phase` overrides it for one call, and `opts.label` names the call.
@@ -64,7 +64,7 @@ verbatim (JSON, including `null`s).
 
 ## budget
 
-Scripts: `conformance/budget.js`, `conformance/budget_unset.js`.
+Scripts: `conformance/budget.js`, `conformance/budget_unset.js`; Python twins: `conformance/budget.py`, `conformance/budget_unset.py`.
 
 `budget` has `total`, `spent()` and `remaining()`. `spent()` is the sum of
 `output_tokens` reported in the usage of each dispatcher result. `total` comes
@@ -73,9 +73,15 @@ from the run options. When it is unset, `total` is `null` and `remaining()` is
 the host's total on each `agent()` reply. Once `spent >= total`, `agent()`
 throws `budget exhausted: S of T output tokens spent`.
 
+Script: `conformance/nonfinite.js`; Python twin: `conformance/nonfinite.py`.
+
+A value that crosses to the host (the return value, `agent()` opts, `workflow()`
+args) goes through JSON, so `Infinity`, `-Infinity` and `NaN` become `null`:
+returning `budget.remaining()` with no budget set gives `null`.
+
 ## workflow
 
-Script: `conformance/workflow.js`.
+Script: `conformance/workflow.js`; Python twin: `conformance/workflow.py`.
 
 `workflow(nameOrRef, args)` runs another script inline in the same run. The
 child shares the concurrency cap, the `agent()` counter, the budget and the
@@ -89,7 +95,7 @@ one level: a child workflow cannot call workflow()`.
 
 ## determinism
 
-Script: `conformance/determinism.js`.
+Script: `conformance/determinism.js`; Python twin: `conformance/determinism.py`.
 
 `Date.now()`, `Math.random()`, `new Date()` and `Date()` without arguments
 throw, as do `Intl.DateTimeFormat().format()` and `formatToParts()` without a
@@ -99,7 +105,7 @@ The sandbox enforces determinism; it is not a security boundary.
 
 ## caps
 
-Scripts: `conformance/caps.js`, `conformance/caps_concurrency.js`.
+Scripts: `conformance/caps.js`, `conformance/caps_concurrency.js`; Python twins: `conformance/caps.py`, `conformance/caps_concurrency.py`.
 
 At most min(16, CPUs - 2) agents run at once (at least 1; configurable). At
 most 1000 `agent()` calls per run; the next one throws `agent() limit reached:
@@ -108,7 +114,7 @@ at most N agent() calls per run`. At most 4096 items per `parallel()` or
 
 ## resume
 
-Script: `conformance/resume.js`.
+Script: `conformance/resume.js`; Python twin: `conformance/resume.py`.
 
 A run with a state dir writes `<state_dir>/runs/<runId>/journal.jsonl`. It is
 append-only, flushed per record, and a torn last line is ignored on read. Record
@@ -150,6 +156,33 @@ new run id that copies the reused records and, as soon as it opens, every
 child snapshot of the old run, including any it has not reached yet. So it can
 be resumed in turn without re-reading a file. A run with no script snapshot cannot be resumed without a script.
 
+## Python workflows (ahp-py extension)
+
+A `.py` workflow runs the same semantics in a `python -I` runner. Each
+conformance script has a `.py` twin (listed under each section above), checked
+against the same sidecar.
+
+| Surface | JavaScript | Python |
+|---|---|---|
+| meta | `export const meta` literal, read via acorn | top-level `meta = {...}`, read with `ast.literal_eval`, assigned once, a dict of JSON values, never executed |
+| entry | module body | `async def main(args)` |
+| agent | `opts` object | keyword arguments; returns an awaitable issued at call time; errors surface on await |
+| parallel | array of thunks | list of zero-argument callables, called at once in order; a plain return value is used as is |
+| pipeline | stages `(prev, item, index)` | the same, always three positional arguments; the first stage is called at once |
+| args | `undefined` when absent | `None` when absent or null |
+| budget.remaining() | `Infinity` | `math.inf` |
+| non-finite numbers | `JSON.stringify` turns `Infinity` and `NaN` into `null` | the same wherever a value crosses (the return value, `agent()` opts, `workflow()` args, a child's value), so `return {'left': budget.remaining()}` gives `{"left": null}`; `log()` and `phase()` print them as `Infinity`, `-Infinity`, `NaN` |
+| cancellation | an escaping rejection is the script's error | a `CancelledError` the script raises itself (it awaits a task it cancelled) is a script error, "the script was cancelled", in the run and in an in-process child; cancelling the run itself still cancels it |
+| errors | `Error`, `TypeError`, `RangeError` | `RuntimeError`, `TypeError`, `ValueError`, same messages |
+| determinism | `Date.now`, `Math.random` banned | nothing banned: Python cannot ban `time.time()` or `random`; resume matches calls by key, so a nondeterministic script costs cache hits, not wrong results (the determinism row's sidecar has a `py_result`) |
+| workflow() | a name resolves to `.js` or `.py`, JS wins a tie in one directory; a child in the other language runs in a runner of its own sharing counter, phase, budget, caps and abort; one level of nesting | the same |
+| trust | any source | `.py` only from the host and user sources unless `[workflows] python_sources` includes `workspace` (then only the workspace's `.claude/workflows` directories, and only while `[workflows] sources` includes it); never from a client; fenced message scripts are JS only |
+
+The runner is a separate `python -I` process, not a security boundary. `-I`
+ignores `PYTHONPATH`, so `ahp-host-flow` must be installed in that interpreter
+(an editable install counts).
+`print()` goes to stderr; stdout carries the protocol.
+
 ## Choices not yet checked against Claude Code
 
 - `pipeline`'s first stage gets `prev` equal to the item.
@@ -178,3 +211,6 @@ be resumed in turn without re-reading a file. A run with no script snapshot cann
 - Cached calls complete at once, so near the budget ceiling a resumed run's
   issue-time budget check can refuse a call the original run made.
 - A recorded null or error is replayed, not retried.
+- Ordinals and the current phase are assigned by the host when a request
+  arrives (issue order within one runner; across runners, arrival order), and
+  any refused call takes no ordinal.

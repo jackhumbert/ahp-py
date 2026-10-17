@@ -10,6 +10,10 @@ def test_format_doc_names_every_conformance_script() -> None:
     assert stems
     missing = [s for s in stems if f"conformance/{s}.js" not in text]
     assert not missing
+    twins = sorted(p.stem for p in (ROOT / "conformance").glob("*.py"))
+    assert twins
+    missing = [s for s in twins if f"conformance/{s}.py" not in text]
+    assert not missing
 
 
 def test_format_doc_plan_status() -> None:

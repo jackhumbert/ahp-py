@@ -72,5 +72,31 @@ include_external_packages = true
 [[tool.importlinter.contracts]]
 name = "the engine never imports the host"
 type = "forbidden"
-source_modules = ["ahp_host_flow.engine", "ahp_host_flow.sandbox"]
+source_modules = [
+  "ahp_host_flow.engine",
+  "ahp_host_flow.sandbox",
+  "ahp_host_flow.library",
+  "ahp_host_flow.verbs",
+]
 forbidden_modules = ["ahp_host"]
+
+[[tool.importlinter.contracts]]
+name = "the Python runner and verbs use the standard library only"
+type = "forbidden"
+source_modules = [
+  "ahp_host_flow.sandbox.pyrunner",
+  "ahp_host_flow.sandbox.protocol",
+  "ahp_host_flow.verbs",
+]
+forbidden_modules = [
+  "ahp_host",
+  "ahp_client",
+  "ahp_protocol",
+  "jsonschema",
+  "ahp_host_flow.engine",
+  "ahp_host_flow.sandbox.client",
+  "ahp_host_flow.sandbox.node",
+  "ahp_host_flow.config",
+  "ahp_host_flow.provider",
+  "ahp_host_flow.dispatch",
+]

@@ -4,6 +4,7 @@
 
 ### Security
 
+- `.py` workflows are arbitrary code on the host, so they load by default only from the host and user sources: `[workflows] python_sources` in flow.toml (default `["user", "host"]`) must include `"workspace"` for a project's `.claude/workflows/*.py`, and client-published plugins never supply one.
 - Credential masking before publishing (plan §4.9): a secret printed or returned by an inner agent is masked in the worker chat's text, reasoning, tool calls and results, structured calls (the `StructuredOutput` input and accepted result), approval and input prompts (`ToolConfirmation`, `InputRequest`), step results, `log()` lines, run errors, the `agent()` return and the journal (`[redact]` in `flow.toml`). Values under secret-named keys (`password`, `token`, `api_key`...) are masked at any depth. The inner agent's own view (prompts sent, replies, tool results and answers returned to it) is untouched. Known gaps: terminals, canvases and background work opened through `ScopedPublisher`, a secret split across a tool-call boundary mid-stream, and the best-effort builtin list (no `key=value` values under 8 characters, URL userinfo or `sk-` keys); the first two wait for the after-publishing layer (§4.9, M9).
 - `ScopedPublisher` contains an inner session: a `chat=` it passes is honoured only for its worker chat or a tool chat it opened itself. A foreign chat (the run's main chat, another worker) is never reached: config changes, external turns and changesets naming one are dropped, and canvases, terminals, background work and tool chats are redirected to the worker chat. `dropped` is a bounded deque (`dropped_counts` keeps totals by kind), so progress spam cannot grow it.
 
@@ -12,6 +13,10 @@
 - A config overlay that reaches a worker chat before its inner session is registered is applied once it is, instead of waiting for the next overlay.
 - Customizations are re-published when a workflow source directory changes between runs (re-scanned at each run start and on describe; no file watching).
 - Workflow discovery skips symlinks and non-regular files.
+- A `CancelledError` raised by a `.py` workflow's own code (it awaited a task it had cancelled) no longer hangs the run or cancels the parent: it is a script error, "the script was cancelled", for the run and for an in-process child. Cancelling the run itself (the host killing it) still cancels it.
+- The Python runner maps `Infinity`, `-Infinity` and `NaN` to `null` wherever a value crosses to the host (the return value, `agent()` opts, `workflow()` args, a child's value), as `JSON.stringify` does, instead of failing the run (`return {'left': budget.remaining()}` with no budget set); `log()` and `phase()` print them as JavaScript does.
+- The Python runner's `parallel()`/`pipeline()` argument errors read "needs an array of ..." like the JS runner, as the docs claim.
+- `Sandbox.run` checks the script's language before opening the journal, so a refused run leaves no journal behind.
 - `agent()` no longer hangs when the host cancels the worker turn before it starts: the call returns `null` (skipped) and its inner session is cancelled and closed.
 - A failure opening the worker chat, creating the inner session or running the turn now completes the main chat's `agent` tool call as failed instead of leaving it `running`.
 - `flow run --config` fails at the first confirmation or input an inner session asks for, naming the call and suggesting `approval_mode`, instead of hanging; it is never auto-approved.
@@ -19,8 +24,24 @@
 - `flow run --config` rejects `--budget 0` and `--timeout 0` like any other engine flag.
 - `python -m ahp_host_flow` refuses a non-loopback `--bind` without `--token-file`.
 
+### Changed
+
+- `agent()` ordinals and the current phase are assigned by the host (`Scheduler.issue`) when the request line arrives, not in the sandbox, so every runner of a run shares one counter and one phase; `phase()` only notifies. The `agent` request no longer carries `ordinal`, and its `phase` is the call's own override or null. A refused call (cap or budget) takes no ordinal.
+- The Python runner needs `ahp-host-flow` installed in its interpreter (it runs with `python -I`, which ignores `PYTHONPATH`); an editable install counts.
+- `import ahp_host_flow` and `import ahp_host_flow.sandbox` are lazy (PEP 562): the public names load on first use, so the Python runner starts without importing `ahp_host` or third-party packages.
+
 ### Added
 
+- Docs for M5: README (Python workflows, trust, determinism, the library API), AGENTS.md (the stdlib-only Python runner, lazy package imports, host-assigned ordinals), `docs/format.md` (Python notes per row) and `docs/plan.md` (status and the M5 result note).
+- `flow run` accepts `.py` scripts and needs no Node for them; with `--config` the script is served from a temporary host directory and started as `/host:<name>`.
+- The provider runs `.py` workflows from the catalog as slash commands, like `.js` ones; Node is needed only for JavaScript. Each run's `RunOptions.python_dirs` holds the allowed sources' workflow directories (for `workspace`, its `.claude/workflows`, not the working directory, and nothing while `[workflows] sources` excludes it), so `workflow()` cannot load an untrusted `.py` file. `RunOptions.python_dirs=None` means a trusted caller (CLI, library); provider paths must always set it.
+- The catalog lists `.py` workflows from the allowed sources only, with `meta` read in-process (no Node), marked `_meta["ahp-py/flow"].language = "python"`; a `.js` file wins over a `.py` file of the same name in one directory.
+- Library API: `async with ahp_host_flow.run(dispatcher, options) as r:` then `await r.agent(...)`, `r.parallel`, `r.pipeline`, `r.phase`, `r.log`, `r.budget` and `r.workflow`, in-process on the same `Scheduler` and journal with no runner process (`FlowRun`). A journaled library run has no script snapshot (filename `<library>`) and resumes by key.
+- Every conformance script has a `.py` twin (and `conformance/workflows/child.py`), checked against the same sidecar by the parametrised conformance test, the resume row included; `workflow.py` also covers a Python parent calling a JS child. Only `determinism.json` carries a `py_result`: Python cannot ban `time` or `random` (plan §4.10).
+- `workflow()` across languages: a JS parent can call a Python child and the reverse. A child in the other language runs in a runner of its own on the same scheduler, sharing the agent counter, phase, budget, caps and abort, with only JSON crossing; one level of nesting holds in both directions, the journal snapshots the child, and a timeout or cancel kills it. Protocol: `run` takes `child` and `spent`, the `workflow` request carries `args`, and its result is `{source, filename, spent}` (run it here) or `{value, spent}` (the host ran it).
+- `workflow(name)` resolves to `<name>.js` or `<name>.py`: the first directory with either wins, and `.js` wins a tie within one. `RunOptions.python_dirs` limits where `.py` workflows may load from, by name or `{scriptPath}`.
+- `.py` workflows run like `.js` ones: `Sandbox(language="py")`, and `run_script` picks Node or the Python runner by the script's file type (on resume, by the journal's filename); `extract_meta` reads a `.py` file's `meta` in-process. `run_script`'s `node` may be `None` for Python scripts.
+- Python runner `python -I -m ahp_host_flow.sandbox.pyrunner` (plan §4.10): standard library only, the same newline-delimited JSON-RPC as `runner.mjs` (ASCII-only lines on its own copies of stdin and stdout; a script's `print()` goes to stderr). It reads `meta` with `ast.literal_eval` without running the file and runs `async def main(args)` in a fresh namespace whose globals are the verbs, with the JS semantics and error messages. `ahp_host_flow.verbs` gives the same verbs typed for editors and type checkers and raises `OutsideRunnerError` outside a run. An import-linter contract keeps both stdlib-only.
 - Docs for M4b's first part: README (typed progress, masking, worktrees, start records, corpus test), AGENTS.md (`worktree`, the shared meta key, the redaction invariant) and `docs/plan.md` (status, `[redact]` in §5, the M4b result note).
 - Fan-out corpus script (`conformance/corpus/fanout.js`), run on fakes in the suite and, opt-in, through the configured providers (`AHP_FLOW_LIVE_CONFIG`).
 - `agent()` `isolation: 'worktree'`: the inner session runs in a git worktree under `<state_dir>/runs/<runId>/worktrees/<ordinal>`, removed afterwards when unchanged, kept and logged otherwise; outside a git repository the call returns `null` with a log line. An invalid `effort` option logs one line and is ignored.

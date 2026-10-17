@@ -95,6 +95,35 @@ def test_scheduler_agent_limit() -> None:
     assert str(info.value) == "agent() limit reached: at most 2 agent() calls per run"
 
 
+def test_scheduler_issue_ordinals_and_phase() -> None:
+    s = Scheduler(FakeDispatcher())
+    first, _ = s.issue("a", {})
+    s.set_phase("P")
+    second, _ = s.issue("b", {})
+    third, _ = s.issue("c", {}, phase="X")
+    assert [c.ordinal for c in (first, second, third)] == [0, 1, 2]
+    assert [c.phase for c in (first, second, third)] == [None, "P", "X"]
+    assert s.issued == 3
+
+
+def test_scheduler_issue_cap() -> None:
+    s = Scheduler(FakeDispatcher(), RunOptions(max_agents=2))
+    s.issue("a", {})
+    s.issue("b", {})
+    with pytest.raises(AgentLimitError) as info:
+        s.issue("c", {})
+    assert str(info.value) == "agent() limit reached: at most 2 agent() calls per run"
+    assert s.issued == 2
+
+
+def test_scheduler_issue_refusal_takes_no_ordinal() -> None:
+    s = Scheduler(FakeDispatcher(), RunOptions(budget_total=0))
+    with pytest.raises(BudgetExhaustedError) as info:
+        s.issue("a", {})
+    assert str(info.value) == "budget exhausted: 0 of 0 output tokens spent"
+    assert s.issued == 0
+
+
 async def test_scheduler_budget() -> None:
     s = Scheduler(FakeDispatcher(output_tokens=10), RunOptions(budget_total=15))
     s.admit(_call(0, "p0"))
