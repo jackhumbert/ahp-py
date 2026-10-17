@@ -9,6 +9,9 @@ const SCRIPT_ERROR = -32000;
 const META_ERROR = -32001;
 const SYNTAX_ERROR = -32002;
 const RUN_ACTIVE = -32003;
+const AGENT_LIMIT = -32004;
+const BUDGET_EXHAUSTED = -32005;
+const WORKFLOW_ERROR = -32006;
 const METHOD_NOT_FOUND = -32601;
 const INVALID_PARAMS = -32602;
 const INTERNAL_ERROR = -32603;
@@ -212,12 +215,33 @@ Object.defineProperty(Math, 'random', {
   configurable: true,
   enumerable: false,
 });
-(function install(hostCall, hostNotify, argsJson, hasArgs) {
-  const call = async (method, params) => {
-    const reply = JSON.parse(await hostCall(method, JSON.stringify(params)));
-    if (!reply.ok) throw new Error(reply.message);
-    return reply.value;
-  };
+const dtfProto = Intl.DateTimeFormat.prototype;
+const formatGetter = Object.getOwnPropertyDescriptor(dtfProto, 'format').get;
+Object.defineProperty(dtfProto, 'format', {
+  get() {
+    const bound = formatGetter.call(this);
+    return function format(date) {
+      if (date === undefined) banned('Intl.DateTimeFormat format() without a date');
+      return bound(date);
+    };
+  },
+  configurable: true,
+  enumerable: false,
+});
+const realFormatToParts = dtfProto.formatToParts;
+Object.defineProperty(dtfProto, 'formatToParts', {
+  value: function formatToParts(date) {
+    if (date === undefined) banned('Intl.DateTimeFormat formatToParts() without a date');
+    return realFormatToParts.call(this, date);
+  },
+  writable: true,
+  configurable: true,
+  enumerable: false,
+});
+(function install(hostCall, hostNotify, hostStart, hostState, settingsJson) {
+  const settings = JSON.parse(settingsJson);
+  const limits = settings.limits;
+  const call = async (method, params) => JSON.parse(await hostCall(method, JSON.stringify(params)));
   const define = (name, value) =>
     Object.defineProperty(globalThis, name, {
       value,
@@ -225,7 +249,12 @@ Object.defineProperty(Math, 'random', {
       configurable: true,
       enumerable: false,
     });
-  let ordinal = 0;
+  // The run's counter, spent tokens and phase live in the host (hostState) and
+  // cross as primitives, so a child workflow's context shares them without
+  // holding any of the parent context's objects.
+  const spentTokens = () => hostState('spent', null);
+  const budgetError = () =>
+    new Error('budget exhausted: ' + spentTokens() + ' of ' + limits.budgetTotal + ' output tokens spent');
   define('agent', async function agent(prompt, opts) {
     if (typeof prompt !== 'string') throw new TypeError('agent() needs a prompt string');
     if (opts === undefined || opts === null) opts = {};
@@ -233,16 +262,95 @@ Object.defineProperty(Math, 'random', {
       throw new TypeError('agent() opts must be an object');
     }
     opts = JSON.parse(JSON.stringify(opts));
-    const n = ordinal++;
-    return call('agent', { ordinal: n, prompt, opts });
+    // First line of defence, from the mirror; Python re-checks as the authority.
+    // A refused call consumes no ordinal.
+    if (limits.budgetTotal !== null && spentTokens() >= limits.budgetTotal) throw budgetError();
+    const n = hostState('take', null);
+    if (n < 0) {
+      throw new Error('agent() limit reached: at most ' + limits.maxAgents + ' agent() calls per run');
+    }
+    const phase = typeof opts.phase === 'string' ? opts.phase : hostState('phase', null);
+    const label = typeof opts.label === 'string' ? opts.label : null;
+    const reply = await call('agent', { ordinal: n, prompt, opts, phase, label });
+    const s = reply.ok ? reply.result?.spent : reply.data?.spent;
+    if (typeof s === 'number') hostState('spend', s);
+    if (!reply.ok) throw new Error(reply.message);
+    return reply.result?.value ?? null;
+  });
+  const tooMany = (fn, n) =>
+    new RangeError(fn + '() takes at most ' + limits.maxItems + ' items, got ' + n);
+  define('parallel', async function parallel(thunks) {
+    if (!Array.isArray(thunks)) throw new TypeError('parallel() needs an array of functions');
+    if (thunks.length > limits.maxItems) throw tooMany('parallel', thunks.length);
+    return Promise.all(
+      thunks.map(async (thunk) => {
+        try {
+          return await thunk();
+        } catch {
+          return null;
+        }
+      }),
+    );
+  });
+  define('pipeline', async function pipeline(items, ...stages) {
+    if (!Array.isArray(items)) throw new TypeError('pipeline() needs an array of items');
+    if (items.length > limits.maxItems) throw tooMany('pipeline', items.length);
+    for (const stage of stages) {
+      if (typeof stage !== 'function') throw new TypeError('pipeline() stages must be functions');
+    }
+    return Promise.all(
+      items.map(async (item, index) => {
+        let prev = item;
+        for (const stage of stages) {
+          try {
+            prev = await stage(prev, item, index);
+          } catch {
+            return null;
+          }
+        }
+        return prev;
+      }),
+    );
+  });
+  define('workflow', async function workflow(ref, childArgs) {
+    if (settings.child) {
+      throw new Error('workflow() can only nest one level: a child workflow cannot call workflow()');
+    }
+    let wire;
+    if (typeof ref === 'string') wire = ref;
+    else if (ref !== null && typeof ref === 'object' && typeof ref.scriptPath === 'string') wire = { scriptPath: ref.scriptPath };
+    else throw new TypeError('workflow() needs a name or {scriptPath}');
+    const reply = await call('workflow', { ref: wire });
+    if (!reply.ok) throw new Error(reply.message);
+    const argsJson = childArgs === undefined ? null : JSON.stringify(childArgs);
+    // A child-realm promise of the child's result, or a string saying why it did not start.
+    const started = hostStart(reply.result.source, reply.result.filename, argsJson);
+    if (typeof started === 'string') throw new Error(started);
+    const value = await started;
+    const json = JSON.stringify(value);
+    return json === undefined ? null : JSON.parse(json);
   });
   define('log', function log(message) {
     hostNotify('log', JSON.stringify({ message: String(message) }));
   });
   define('phase', function phase(title) {
-    hostNotify('phase', JSON.stringify({ title: String(title) }));
+    const t = String(title);
+    hostState('setPhase', t);
+    hostNotify('phase', JSON.stringify({ title: t }));
   });
-  define('args', hasArgs ? JSON.parse(argsJson) : undefined);
+  define(
+    'budget',
+    Object.freeze({
+      total: limits.budgetTotal,
+      spent: function spent() {
+        return spentTokens();
+      },
+      remaining: function remaining() {
+        return limits.budgetTotal === null ? Infinity : Math.max(0, limits.budgetTotal - spentTokens());
+      },
+    }),
+  );
+  define('args', settings.hasArgs ? settings.args : undefined);
 });
 }`;
 
@@ -256,12 +364,13 @@ function hostCall(method, paramsJson) {
   return new Promise((resolve) => {
     const id = nextId++;
     pending.set(id, (msg) => {
-      if (msg.error) {
-        resolve(JSON.stringify({ ok: false, message: String(msg.error.message) }));
-      } else {
-        const value = msg.result?.value;
-        resolve(JSON.stringify({ ok: true, value: value ?? null }));
-      }
+      resolve(
+        JSON.stringify(
+          msg.error
+            ? { ok: false, message: String(msg.error.message), data: msg.error.data ?? null }
+            : { ok: true, result: msg.result ?? null },
+        ),
+      );
     });
     send({ jsonrpc: '2.0', id, method, params: JSON.parse(paramsJson) });
   });
@@ -309,7 +418,62 @@ async function run(params) {
   const ctx = vm.createContext(Object.create(null));
   const install = vm.runInContext(PRELUDE, ctx);
   const hasArgs = Object.hasOwn(params, 'args');
-  install(hostCall, hostNotify, hasArgs ? JSON.stringify(params.args) : '', hasArgs);
+  const l = params.limits !== null && typeof params.limits === 'object' ? params.limits : {};
+  const limits = {
+    maxAgents: Number.isInteger(l.maxAgents) ? l.maxAgents : 1000,
+    budgetTotal: Number.isInteger(l.budgetTotal) ? l.budgetTotal : null,
+    maxItems: Number.isInteger(l.maxItems) ? l.maxItems : 4096,
+  };
+  const settings = { hasArgs, limits };
+  if (hasArgs) settings.args = params.args;
+  // Host realm, shared by the run's contexts and held only in their install
+  // closures. Every value in or out is a primitive.
+  const state = { ordinal: 0, spent: 0, phase: null };
+  const hostState = function hostState(op, value) {
+    switch (op) {
+      case 'take':
+        return state.ordinal < limits.maxAgents ? state.ordinal++ : -1;
+      case 'spent':
+        return state.spent;
+      case 'spend':
+        if (typeof value === 'number' && value > state.spent) state.spent = value;
+        return state.spent;
+      case 'phase':
+        return state.phase;
+      case 'setPhase':
+        state.phase = typeof value === 'string' ? value : null;
+        return state.phase;
+      default:
+        return null;
+    }
+  };
+  // Each child workflow runs in a context of its own, with its own copy of the
+  // hooks over the run's shared state. Its `workflow` always throws, so
+  // nesting stops at one level however the child reaches it, and no object
+  // crosses between contexts: the child's args go in, and its result comes
+  // back, as JSON strings. Returns the child-realm promise of the child's
+  // result, or a string (a primitive) saying why the child did not start.
+  const hostStart = function hostStart(source, filename, argsJson) {
+    if (typeof source !== 'string' || typeof filename !== 'string') return 'workflow: bad source';
+    let script;
+    let child;
+    try {
+      const { body } = analyse(source, filename);
+      script = new vm.Script("(async () => {'use strict';\n" + body + '\n})()', {
+        filename,
+        lineOffset: -1,
+      });
+      child = vm.createContext(Object.create(null));
+    } catch (err) {
+      return 'workflow ' + filename + ': ' + String(err && err.message ? err.message : err);
+    }
+    const childSettings = { hasArgs: argsJson !== null, limits, child: true };
+    if (argsJson !== null) childSettings.args = JSON.parse(argsJson);
+    const installChild = vm.runInContext(PRELUDE, child);
+    installChild(hostCall, hostNotify, hostStart, hostState, JSON.stringify(childSettings));
+    return script.runInContext(child);
+  };
+  install(hostCall, hostNotify, hostStart, hostState, JSON.stringify(settings));
   let script;
   try {
     script = new vm.Script("(async () => {'use strict';\n" + body + '\n})()', {

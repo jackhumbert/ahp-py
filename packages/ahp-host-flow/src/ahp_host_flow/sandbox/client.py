@@ -11,7 +11,19 @@ from pathlib import Path
 from types import TracebackType
 from typing import Any, Final
 
-from ahp_host_flow.engine import AgentCall, Dispatcher
+from ahp_host_flow.engine import (
+    MAX_ITEMS_PER_CALL,
+    AbortSignal,
+    AgentCall,
+    AgentLimitError,
+    Dispatcher,
+    Registry,
+    RunOptions,
+    Scheduler,
+    SchedulerRefusal,
+    WorkflowRefError,
+    resolve_workflow,
+)
 from ahp_host_flow.sandbox import protocol
 
 RUNNER: Final = Path(__file__).with_name("runner.mjs")
@@ -43,6 +55,10 @@ class ScriptError(SandboxError):
         super().__init__(message, code=code, stderr=stderr)
         self.js_name = js_name
         self.stack = stack
+
+
+class RunTimeoutError(SandboxError):
+    """The run exceeded `RunOptions.timeout`; the Node process was killed."""
 
 
 class MetaError(SandboxError):
@@ -90,10 +106,12 @@ class Sandbox:
         self._write_lock = asyncio.Lock()
         self._dead: SandboxError | None = None
         self._run_lock = asyncio.Lock()
-        self._dispatcher: Dispatcher | None = None
+        self._scheduler: Scheduler | None = None
         self._on_log: Callable[[str], None] | None = None
         self._on_phase: Callable[[str], None] | None = None
         self._agent_tasks: set[asyncio.Task[None]] = set()
+        self._options: RunOptions | None = None
+        self._registry: Registry | None = None
 
     async def __aenter__(self) -> Sandbox:
         await self.start()
@@ -150,6 +168,13 @@ class Sandbox:
         self._handlers.clear()
         self._fail_all(SandboxError(f"sandbox closed ({proc.returncode})"))
 
+    def _kill(self, exc: SandboxError) -> None:
+        """Fail every pending and later request with `exc`, then kill node."""
+        self._fail_all(exc)
+        if self._proc is not None:
+            with contextlib.suppress(ProcessLookupError):
+                self._proc.kill()
+
     def _fail_all(self, exc: SandboxError) -> None:
         if self._dead is None:
             self._dead = exc
@@ -173,6 +198,11 @@ class Sandbox:
                 self._dispatch(msg)
         except (ValueError, asyncio.LimitOverrunError) as exc:
             self._fail_all(SandboxError(f"bad message from node: {exc}", stderr=self.stderr_tail))
+            with contextlib.suppress(ProcessLookupError):
+                proc.kill()
+            return
+        except Exception as exc:
+            self._fail_all(SandboxError(f"sandbox reader failed: {exc!r}", stderr=self.stderr_tail))
             with contextlib.suppress(ProcessLookupError):
                 proc.kill()
             return
@@ -211,12 +241,23 @@ class Sandbox:
             self._on_notification(str(method), msg.get("params"))
 
     async def _on_request(self, msg: Mapping[str, Any]) -> None:
-        if msg.get("method") == "agent":
+        method = msg.get("method")
+        if method in ("agent", "workflow"):
+            handler = self._on_agent if method == "agent" else self._on_workflow
             task = asyncio.current_task()
             if task is not None:
                 self._agent_tasks.add(task)
             try:
-                await self._on_agent(msg)
+                await handler(msg)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                # A bug here (a raising listener, say) must not leave the
+                # script waiting on a reply that never comes.
+                with contextlib.suppress(Exception):
+                    await self._write_error(
+                        msg["id"], protocol.INTERNAL_ERROR, f"{method}() failed in the host: {exc}"
+                    )
             finally:
                 if task is not None:
                     self._agent_tasks.discard(task)
@@ -225,38 +266,74 @@ class Sandbox:
             msg["id"], protocol.METHOD_NOT_FOUND, f"method not found: {msg['method']}"
         )
 
-    async def _write_error(self, request_id: Any, code: int, message: str) -> None:
-        await self._write(
-            {
-                "jsonrpc": protocol.JSONRPC,
-                "id": request_id,
-                "error": {"code": code, "message": message},
-            }
-        )
+    async def _write_error(
+        self,
+        request_id: Any,
+        code: int,
+        message: str,
+        data: Mapping[str, Any] | None = None,
+    ) -> None:
+        error: dict[str, Any] = {"code": code, "message": message}
+        if data is not None:
+            error["data"] = data
+        await self._write({"jsonrpc": protocol.JSONRPC, "id": request_id, "error": error})
 
     async def _on_agent(self, msg: Mapping[str, Any]) -> None:
-        dispatcher = self._dispatcher
-        if dispatcher is None:
+        scheduler = self._scheduler
+        if scheduler is None:
             await self._write_error(msg["id"], protocol.INTERNAL_ERROR, "no run is active")
             return
         params = msg.get("params") or {}
-        ordinal = int(params["ordinal"])
+        phase, label = params.get("phase"), params.get("label")
         call = AgentCall(
-            ordinal=ordinal,
+            ordinal=int(params["ordinal"]),
             prompt=str(params["prompt"]),
             opts=dict(params.get("opts") or {}),
+            phase=phase if isinstance(phase, str) else None,
+            label=label if isinstance(label, str) else None,
         )
-        value: Any = None
         try:
-            result = await dispatcher.run_agent(call)
-            json.dumps(result.value, allow_nan=False)
-            value = result.value
-        except Exception as exc:
-            # M0's interim rule: agent() returns null on error (plan §3).
-            if self._on_log is not None:
-                self._on_log(f"agent() #{ordinal} failed: {exc}")
+            # Synchronous, before any await: refusals happen in issue order.
+            scheduler.admit(call)
+            value = await scheduler.run(call)
+        except SchedulerRefusal as exc:
+            code = (
+                protocol.AGENT_LIMIT
+                if isinstance(exc, AgentLimitError)
+                else protocol.BUDGET_EXHAUSTED
+            )
+            await self._write_error(msg["id"], code, str(exc), {"spent": scheduler.budget.spent})
+            return
         await self._write(
-            {"jsonrpc": protocol.JSONRPC, "id": msg["id"], "result": {"value": value}}
+            {
+                "jsonrpc": protocol.JSONRPC,
+                "id": msg["id"],
+                "result": {"value": value, "spent": scheduler.budget.spent},
+            }
+        )
+
+    async def _on_workflow(self, msg: Mapping[str, Any]) -> None:
+        options = self._options
+        if self._scheduler is None or options is None:
+            await self._write_error(msg["id"], protocol.INTERNAL_ERROR, "no run is active")
+            return
+        params = msg.get("params") or {}
+        try:
+            resolved = await asyncio.to_thread(
+                resolve_workflow,
+                params.get("ref"),
+                registry=self._registry,
+                run_root=options.run_root,
+            )
+        except WorkflowRefError as exc:
+            await self._write_error(msg["id"], protocol.WORKFLOW_ERROR, str(exc))
+            return
+        await self._write(
+            {
+                "jsonrpc": protocol.JSONRPC,
+                "id": msg["id"],
+                "result": {"source": resolved.source, "filename": resolved.filename},
+            }
         )
 
     def _on_notification(self, method: str, params: Any) -> None:
@@ -317,22 +394,62 @@ class Sandbox:
         dispatcher: Dispatcher,
         args: object = NO_ARGS,
         filename: str = "workflow.js",
+        options: RunOptions | None = None,
+        abort: AbortSignal | None = None,
         on_log: Callable[[str], None] | None = None,
         on_phase: Callable[[str], None] | None = None,
+        on_agent_start: Callable[[AgentCall], None] | None = None,
+        on_agent_end: Callable[[AgentCall, Any], None] | None = None,
     ) -> Any:
-        """Run a script; `agent()` calls go to `dispatcher`. Returns the script's value."""
+        """Run a script; `agent()` calls go through a Scheduler to `dispatcher`."""
         async with self._run_lock:
-            self._dispatcher = dispatcher
+            options = options or RunOptions()
+            scheduler = Scheduler(
+                dispatcher,
+                options,
+                abort=abort,
+                on_log=on_log,
+                on_agent_start=on_agent_start,
+                on_agent_end=on_agent_end,
+            )
+            self._scheduler = scheduler
+            self._options = options
+            self._registry = Registry(options.workflow_dirs)
             self._on_log = on_log
             self._on_phase = on_phase
             try:
-                params: dict[str, Any] = {"source": source, "filename": filename}
+                params: dict[str, Any] = {
+                    "source": source,
+                    "filename": filename,
+                    "limits": {
+                        "maxAgents": options.max_agents,
+                        "budgetTotal": options.budget_total,
+                        "maxItems": MAX_ITEMS_PER_CALL,
+                    },
+                }
                 if args is not NO_ARGS:
                     params["args"] = args
-                result = await self._request("run", params)
+                try:
+                    async with asyncio.timeout(options.timeout):
+                        result = await self._request("run", params)
+                except TimeoutError:
+                    # A busy loop blocks Node's event loop, so only a kill stops it.
+                    error = RunTimeoutError(
+                        f"run timed out after {options.timeout:g} s", stderr=self.stderr_tail
+                    )
+                    scheduler.abort()
+                    self._kill(error)
+                    raise error from None
                 return result["value"]
+            except asyncio.CancelledError:
+                scheduler.abort()
+                self._kill(SandboxError("run cancelled", stderr=self.stderr_tail))
+                raise
             finally:
-                self._dispatcher = None
+                scheduler.close()
+                self._scheduler = None
+                self._options = None
+                self._registry = None
                 self._on_log = None
                 self._on_phase = None
                 tasks = list(self._agent_tasks)
@@ -356,8 +473,12 @@ async def run_script(
     dispatcher: Dispatcher,
     args: object = NO_ARGS,
     filename: str = "workflow.js",
+    options: RunOptions | None = None,
+    abort: AbortSignal | None = None,
     on_log: Callable[[str], None] | None = None,
     on_phase: Callable[[str], None] | None = None,
+    on_agent_start: Callable[[AgentCall], None] | None = None,
+    on_agent_end: Callable[[AgentCall, Any], None] | None = None,
 ) -> Any:
     """Run a script with a throwaway sandbox."""
     async with Sandbox(node) as sandbox:
@@ -366,6 +487,10 @@ async def run_script(
             dispatcher=dispatcher,
             args=args,
             filename=filename,
+            options=options,
+            abort=abort,
             on_log=on_log,
             on_phase=on_phase,
+            on_agent_start=on_agent_start,
+            on_agent_end=on_agent_end,
         )

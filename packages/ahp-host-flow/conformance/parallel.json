@@ -1,0 +1,8 @@
+{
+  "result": {
+    "results": ["a", null, null, null, 42],
+    "order": ["sync", "a", "after"],
+    "rejected": "parallel() takes at most 4096 items, got 4097",
+    "empty": []
+  }
+}

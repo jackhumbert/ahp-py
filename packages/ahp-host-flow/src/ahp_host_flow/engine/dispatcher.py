@@ -14,13 +14,18 @@ class AgentCall:
     prompt: str
     # agent() opts verbatim, unknown keys included (plan §3 probe).
     opts: Mapping[str, Any] = field(default_factory=dict)
+    # opts.phase if a string, else the latest phase() title at issue time; set in JS
+    # at issue time so a progress listener can group calls (plan §3 phase row).
+    phase: str | None = None
+    # opts.label if a string; set in JS at issue time (plan §3 phase row).
+    label: str | None = None
 
 
 @dataclass(frozen=True)
 class AgentResult:
     # JSON value handed back to the script; None means agent() returns null.
     value: Any
-    # Token counts; summed into the budget in M1.
+    # Token counts; usage["output_tokens"] is summed into the budget.
     usage: Mapping[str, int] = field(default_factory=dict)
 
 

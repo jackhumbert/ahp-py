@@ -1,0 +1,13 @@
+{
+  "options": { "workflow_dirs": ["workflows"] },
+  "result": {
+    "byName": { "reply": "child name", "sawArgs": { "who": "name" } },
+    "byPath": { "reply": "child path", "sawArgs": { "who": "path" } },
+    "nested": "workflow() can only nest one level: a child workflow cannot call workflow()",
+    "unknown": "unknown workflow: 'no-such-workflow'",
+    "broken": true,
+    "after": "parent",
+    "args": "undefined"
+  },
+  "calls": [[0, "child name", null, null], [1, "child path", null, null], [2, "parent", null, null]]
+}

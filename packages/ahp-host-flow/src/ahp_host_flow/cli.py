@@ -8,7 +8,7 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
-from ahp_host_flow.engine import EchoDispatcher
+from ahp_host_flow.engine import EchoDispatcher, RunOptions
 from ahp_host_flow.sandbox import (
     NO_ARGS,
     NodeNotFoundError,
@@ -25,13 +25,25 @@ def _build_parser() -> argparse.ArgumentParser:
         "run",
         help="run a script and print its return value as JSON",
         description=(
-            "Run a workflow script. M0 runs every agent() call against an echo "
+            "Run a workflow script. agent() calls still go to an echo "
             "dispatcher that returns the prompt."
         ),
     )
     run.add_argument("path", help="the script to run")
     run.add_argument("--args", help="JSON passed to the script as `args`")
     run.add_argument("--node", help="Node binary (overrides AHP_FLOW_NODE and PATH)")
+    run.add_argument("--concurrency", type=int, help="most agent() calls in flight at once")
+    run.add_argument("--budget", type=int, help="output-token ceiling for the run")
+    run.add_argument("--timeout", type=float, help="wall-clock limit for the run, in seconds")
+    run.add_argument(
+        "--workflows",
+        action="append",
+        default=[],
+        help="directory searched by workflow(name); repeatable, searched in order",
+    )
+    run.add_argument(
+        "--root", default=".", help="base directory for workflow({scriptPath}) (default: .)"
+    )
     return parser
 
 
@@ -49,6 +61,17 @@ def main(argv: Sequence[str] | None = None) -> int:
             script_args = json.loads(args.args)
         except json.JSONDecodeError as exc:
             parser.error(f"--args is not valid JSON: {exc}")
+
+    try:
+        options = RunOptions(
+            concurrency=args.concurrency,
+            budget_total=args.budget,
+            timeout=args.timeout,
+            workflow_dirs=tuple(Path(d).resolve() for d in args.workflows),
+            run_root=Path(args.root).resolve(),
+        )
+    except ValueError as exc:
+        parser.error(str(exc))
 
     path = Path(args.path)
     if not path.is_file():
@@ -68,6 +91,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 node=node,
                 dispatcher=EchoDispatcher(),
                 args=script_args,
+                options=options,
                 filename=str(path),
                 on_log=lambda message: _stderr(f"[log] {message}"),
                 on_phase=lambda title: _stderr(f"[phase] {title}"),

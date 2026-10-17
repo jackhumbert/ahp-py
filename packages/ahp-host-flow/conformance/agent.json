@@ -1,0 +1,5 @@
+{
+  "result": { "text": "hello", "skipped": null, "failed": null },
+  "logs": ["agent() #2 failed: fake failure"],
+  "calls": [[0, "hello", null, "greet"], [1, "skip me", null, null], [2, "fail me", null, null]]
+}

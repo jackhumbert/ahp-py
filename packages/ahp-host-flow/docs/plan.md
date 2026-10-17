@@ -7,7 +7,7 @@ an AHP session, and each `agent()` call is a **child chat** of it, so any AHP
 client can watch and steer the whole run. Extensions to the format are opt-in,
 and a script written for Claude Code runs unchanged.
 
-Status: M0 done (Node sandbox, echo `flow run`, worker-chat spike). M1 is next. Milestones are in §8.
+Status: M0 and M1 done (Node sandbox, `flow run`, worker-chat spike; engine semantics on a fake dispatcher). M2 is next. Milestones are in §8.
 
 ## 1. Where it sits
 
@@ -310,11 +310,12 @@ M0 sandbox hardening, from review:
 - Python writes ASCII-only JSON, because Node's readline splits on raw U+2028/U+2029.
 - Tests cover each of these routes. `node:vm` is still not a security boundary: the sandbox enforces determinism and keeps honest scripts off Node APIs. It is not meant to contain a hostile script.
 
-Open for M1:
-- argless `Intl.DateTimeFormat().format()` and similar still read the clock;
-- there is no per-run timeout, so `while(true){}` hangs the run;
-- an unexpected exception in the stdout reader leaves requests pending;
-- node-marked tests skip silently when no Node is found, so CI must provide Node.
+**M1 result.** `parallel` and `pipeline` live in the sandbox prelude. The `Scheduler` (`engine/scheduler.py`) owns the concurrency semaphore (default min(16, CPUs−2), at least 1), the 1000-call cap, the output-token budget (mirrored into the script on each reply) and abort. `workflow()` runs the child in a `node:vm` context of its own, on the same `Scheduler`, with the agent counter, spent tokens and phase held in the host and shared as primitives. Its own `workflow` always throws, and nothing but JSON crosses between the contexts. (The first M1 build shared the parent's hooks into the child, and a value returned by `parallel` led back to the parent's `workflow`.) `Registry` is a plain ordered list of directories until M3's multi-source registry. `RunOptions.timeout` kills Node, argless `Intl` date formatting throws, and the stdout reader fails all pending requests on any exception. A host-side exception while handling an `agent()` or `workflow()` request is answered as an error rather than left pending. `conformance/` holds one script per covered §3 row, and `docs/format.md` pins the rules.
+
+Open for M2:
+- node-marked tests still skip silently when no Node is found, so CI must provide Node;
+- `Temporal` (absent in Node 24's vm context today) must be banned if a future Node exposes `Temporal.Now`;
+- the unchecked choices listed in `docs/format.md` need a probe against Claude Code.
 
 ## 9. Risks
 

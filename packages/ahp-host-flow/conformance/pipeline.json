@@ -1,0 +1,9 @@
+{
+  "result": {
+    "out": ["x12", null, "z12"],
+    "s1": [["s1", "x", "x", 0], ["s1", "y", "y", 1], ["s1", "z", "z", 2]],
+    "s2": [["s2", "x1", "x", 0], ["s2", "z1", "z", 2]],
+    "rejected": "pipeline() takes at most 4096 items, got 4097",
+    "passthrough": [1, 2]
+  }
+}

@@ -1,0 +1,7 @@
+{
+  "args": { "items": ["p", "q"], "nested": { "n": null } },
+  "result": { "args": { "items": ["p", "q"], "nested": { "n": null } }, "reduced": "p+q" },
+  "phases": ["Map", "Reduce"],
+  "logs": ["mapping 2 items"],
+  "calls": [[0, "p", "Map", "map p"], [1, "q", "Map", "map q"], [2, "p+q", "Custom", "reduce"]]
+}

@@ -1,0 +1,4 @@
+{
+  "dispatcher": { "output_tokens": 10 },
+  "result": [null, 10, true]
+}

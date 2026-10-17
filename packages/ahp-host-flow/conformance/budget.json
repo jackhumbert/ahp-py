@@ -1,0 +1,11 @@
+{
+  "options": { "budget_total": 25 },
+  "dispatcher": { "output_tokens": 10 },
+  "result": {
+    "before": [25, 0, 25],
+    "mid": [20, 5],
+    "after": [30, 0],
+    "results": ["a", "b", "c"],
+    "thrown": "budget exhausted: 30 of 25 output tokens spent"
+  }
+}

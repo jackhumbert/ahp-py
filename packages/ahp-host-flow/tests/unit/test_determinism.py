@@ -24,6 +24,23 @@ async def _run(source: str, node: str) -> Any:
         ("return Math.random()", "Math.random()"),
         ("return new Date()", "new Date()"),
         ("return Date()", "Date()"),
+        (
+            "return new Intl.DateTimeFormat().format()",
+            "Intl.DateTimeFormat format() without a date",
+        ),
+        ("return Intl.DateTimeFormat().format()", "Intl.DateTimeFormat format() without a date"),
+        (
+            "return new Intl.DateTimeFormat().format(undefined)",
+            "Intl.DateTimeFormat format() without a date",
+        ),
+        (
+            "const f = new Intl.DateTimeFormat().format; return f()",
+            "Intl.DateTimeFormat format() without a date",
+        ),
+        (
+            "return new Intl.DateTimeFormat().formatToParts()",
+            "Intl.DateTimeFormat formatToParts() without a date",
+        ),
     ],
 )
 async def test_determinism_banned_api_throws(node_path: str, source: str, api: str) -> None:
@@ -46,6 +63,16 @@ async def test_determinism_explicit_dates_work(node_path: str) -> None:
         True,
         2,
     ]
+
+
+async def test_determinism_explicit_intl_dates_work(node_path: str) -> None:
+    source = (
+        "const f = new Intl.DateTimeFormat('en-US', {timeZone: 'UTC'});"
+        " return [f.format(new Date(0)), f.formatToParts(0).length > 0,"
+        " [new Date(0)].map(f.format)[0],"
+        " new Date(0).toLocaleDateString('en-US', {timeZone: 'UTC'})]"
+    )
+    assert await _run(source, node_path) == ["1/1/1970", True, "1/1/1970", "1/1/1970"]
 
 
 async def test_determinism_catchable_in_script(node_path: str) -> None:

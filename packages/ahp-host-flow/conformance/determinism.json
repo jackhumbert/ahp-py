@@ -1,0 +1,15 @@
+{
+  "result": {
+    "banned": {
+      "Date.now()": true,
+      "Math.random()": true,
+      "new Date()": true,
+      "Date()": true,
+      "Intl format()": true,
+      "Intl formatToParts()": true
+    },
+    "explicit": "1970-01-01T00:00:00.000Z",
+    "formatted": "1/1/1970",
+    "apis": ["undefined", "undefined", "undefined", "undefined"]
+  }
+}

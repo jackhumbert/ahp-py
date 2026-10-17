@@ -7,7 +7,7 @@ from typing import Any
 
 import pytest
 
-from ahp_host_flow.engine import AgentCall, AgentResult, EchoDispatcher
+from ahp_host_flow.engine import AgentCall, AgentResult, EchoDispatcher, RunOptions
 from ahp_host_flow.sandbox import (
     MetaError,
     Sandbox,
@@ -74,7 +74,8 @@ async def test_script_run_ordinals_at_issue_time(node_path: str) -> None:
 
 async def test_script_run_calls_are_concurrent(node_path: str) -> None:
     source = "return await Promise.all([agent('a'), agent('b')])"
-    assert await _run(source, node_path, dispatcher=Gated()) == ["a", "b"]
+    result = await _run(source, node_path, dispatcher=Gated(), options=RunOptions(concurrency=2))
+    assert result == ["a", "b"]
 
 
 async def test_script_run_opts_verbatim(node_path: str) -> None:
