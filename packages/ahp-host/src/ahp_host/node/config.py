@@ -6,6 +6,8 @@
     log_file = "~/.local/state/ahp-node/node.log"   # rotated; default stderr
     # kept running beside the node by `ahp-node supervise` (optional)
     tunnel = ["ssh", "-N", "-R", "127.0.0.1:4402:127.0.0.1:4321", "ahp-tunnel@gateway.example"]
+    # how long a stop or restart waits for running turns to finish, in seconds (default 300)
+    drain_timeout = 300
 
     [roots]                       # named folders: file:///llm/..., file:///projects/...
     llm = 'G:\\llm'
@@ -43,6 +45,8 @@ from ahp_host.node.roots import Roots, parse_root_arg
 DEFAULT_STATE = Path.home() / ".local/state/ahp-node"
 DEFAULT_PORT = 4321
 DEFAULT_BIND = "127.0.0.1"
+#: Seconds a stop or restart lets running turns finish before cutting them off.
+DEFAULT_DRAIN_TIMEOUT = 300.0
 
 _KEYS = frozenset(
     {
@@ -55,6 +59,7 @@ _KEYS = frozenset(
         "log_file",
         "tunnel",
         "verbose",
+        "drain_timeout",
         "agents",
     }
 )
@@ -86,6 +91,10 @@ class NodeSettings:
     #: a gateway, say); empty for none.
     tunnel: tuple[str, ...] = ()
     verbose: bool = False
+    #: How long SIGTERM / `restart` waits for running turns before the node
+    #: closes anyway. A turn cut off at the deadline is resumable after the
+    #: restart (for agents that can resume), so this bounds downtime, not work.
+    drain_timeout: float = DEFAULT_DRAIN_TIMEOUT
 
 
 def _path(value: Any, key: str) -> Path:
@@ -187,6 +196,13 @@ def load(args: argparse.Namespace) -> NodeSettings:
     port = args.port if args.port is not None else data.get("port", DEFAULT_PORT)
     if not isinstance(port, int) or isinstance(port, bool):
         raise ConfigError("port must be a number")
+    drain_timeout = data.get("drain_timeout", DEFAULT_DRAIN_TIMEOUT)
+    if (
+        not isinstance(drain_timeout, int | float)
+        or isinstance(drain_timeout, bool)
+        or drain_timeout < 0
+    ):
+        raise ConfigError("drain_timeout must be a number of seconds, 0 or more")
     return NodeSettings(
         roots=roots,
         agents=_agents(data),
@@ -197,4 +213,5 @@ def load(args: argparse.Namespace) -> NodeSettings:
         log_file=log_file.expanduser() if log_file else None,
         tunnel=tuple(tunnel),
         verbose=bool(args.verbose or data.get("verbose", False)),
+        drain_timeout=float(drain_timeout),
     )

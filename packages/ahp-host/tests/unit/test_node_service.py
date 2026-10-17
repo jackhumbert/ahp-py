@@ -11,10 +11,13 @@ from pathlib import Path
 import pytest
 
 from ahp_host.node.service import (
+    RESTART_EXIT_CODE,
     Supervisor,
     install_linux,
     launchd_plist,
     node_command,
+    publish_drain_timeout,
+    published_drain_timeout,
     supervisor_log,
     systemd_path,
     systemd_unit,
@@ -246,3 +249,132 @@ def test_uninstall_linux_disables_removes_and_reloads(tmp_path: Path) -> None:
     ]
     assert not any(call[0] == "loginctl" for call in fake.calls)
     assert "no systemd user unit" in uninstall_linux("ahp-node", run=fake, unit_path=unit_path)
+
+
+def test_a_child_asking_for_a_restart_comes_back_at_once_with_failures_forgotten() -> None:
+    supervisor = Supervisor(
+        [("node", [sys.executable, "-c", f"raise SystemExit({RESTART_EXIT_CODE})"])], None
+    )
+    (child,) = supervisor.children
+    supervisor.poll_once(0.0)
+    assert child.process is not None
+    child.process.wait(timeout=10)
+    child.failures = 5
+    supervisor.poll_once(1.0)
+    assert child.history == [75]
+    assert child.failures == 0
+    assert child.next_start == 1.0  # no backoff
+    supervisor.poll_once(1.0)
+    assert child.process is not None  # started again on the same tick
+    child.process.wait(timeout=10)
+
+
+class _FakeProcess:
+    def __init__(self, exits_on: str | None) -> None:
+        self.exits_on = exits_on
+        self.events: list[str] = []
+        self.code: int | None = None
+
+    def poll(self) -> int | None:
+        return self.code
+
+    def terminate(self) -> None:
+        self.events.append("terminate")
+        if self.exits_on == "terminate":
+            self.code = 0
+
+    def kill(self) -> None:
+        self.events.append("kill")
+        self.code = -9
+
+
+def _supervising(
+    process: _FakeProcess, tmp_path: Path, *, windows: bool, timeout: float = 0.0
+) -> Supervisor:
+    supervisor = Supervisor([("node", ["unused"])], None, state_dir=tmp_path, drain_timeout=timeout)
+    supervisor._windows = windows
+    supervisor.children[0].process = process  # type: ignore[assignment]
+    return supervisor
+
+
+def test_stopping_on_posix_sends_sigterm_and_lets_the_node_drain(tmp_path: Path) -> None:
+    process = _FakeProcess(exits_on="terminate")
+    _supervising(process, tmp_path, windows=False)._stop_children(sleep=lambda _: None)
+    assert process.events == ["terminate"]  # no kill: it exited on its own
+
+
+def test_stopping_kills_a_node_that_outlasts_the_drain_wait(tmp_path: Path) -> None:
+    process = _FakeProcess(exits_on=None)
+    supervisor = _supervising(process, tmp_path, windows=False, timeout=-100.0)
+    supervisor._stop_children(sleep=lambda _: None)
+    assert process.events == ["terminate", "kill"]
+
+
+def test_stopping_on_windows_asks_by_file_first_and_terminates_last(tmp_path: Path) -> None:
+    process = _FakeProcess(exits_on=None)
+    supervisor = _supervising(process, tmp_path, windows=True, timeout=-100.0)
+    supervisor._stop_children(sleep=lambda _: None)
+    assert (tmp_path / "stop-request").exists()
+    assert process.events == ["kill"]  # never terminated before the wait ended
+
+
+def test_the_launchd_agent_waits_out_a_drain_before_killing(tmp_path: Path) -> None:
+    spec = plistlib.loads(launchd_plist(["x"], label="l", log=None, drain_timeout=120))
+    assert spec["ExitTimeOut"] == 150
+
+
+def test_the_systemd_unit_signals_only_the_supervisor_and_waits_for_the_drain() -> None:
+    unit = systemd_unit(
+        ["x"], home=Path("/home/u"), path="/usr/bin", description="d", drain_timeout=120
+    )
+    lines = _unit_lines(unit)
+    assert lines["KillMode"] == "mixed"
+    assert lines["TimeoutStopSec"] == "150"
+
+
+class _TwoChildren(_FakeProcess):
+    """A process that notes, in a shared log, what was done to it and when."""
+
+    def __init__(self, name: str, log: list[str], *, exits_on: str | None = "terminate") -> None:
+        super().__init__(exits_on)
+        self.name = name
+        self.log = log
+
+    def terminate(self) -> None:
+        self.log.append(f"{self.name}:terminate")
+        super().terminate()
+
+    def kill(self) -> None:
+        self.log.append(f"{self.name}:kill")
+        super().kill()
+
+
+def test_the_tunnel_outlives_the_nodes_drain(tmp_path: Path) -> None:
+    log: list[str] = []
+    node = _TwoChildren("node", log, exits_on=None)
+    tunnel = _TwoChildren("tunnel", log)
+    supervisor = Supervisor(
+        [("node", ["unused"]), ("tunnel", ["unused"])], None, state_dir=tmp_path, drain_timeout=0.0
+    )
+    supervisor._windows = False
+    supervisor.children[0].process = node  # type: ignore[assignment]
+    supervisor.children[1].process = tunnel  # type: ignore[assignment]
+
+    def sleep(_: float) -> None:
+        # The node finishes draining a moment after it was asked.
+        if "node:terminate" in log and node.code is None and "tunnel:terminate" not in log:
+            node.code = 0
+            log.append("node:exited")
+
+    supervisor._stop_children(sleep=sleep)
+    assert log == ["node:terminate", "node:exited", "tunnel:terminate"]
+
+
+def test_the_supervisor_waits_for_the_drain_the_node_says_it_is_running(tmp_path: Path) -> None:
+    supervisor = Supervisor([("node", ["unused"])], None, state_dir=tmp_path, drain_timeout=300.0)
+    assert supervisor._drain_wait() == 315.0  # nothing published: its own figure
+    publish_drain_timeout(tmp_path, 900.0)  # config raised, or a longer restart --timeout
+    assert published_drain_timeout(tmp_path) == 900.0
+    assert supervisor._drain_wait() == 915.0
+    (tmp_path / "drain-timeout").write_text("not json")
+    assert supervisor._drain_wait() == 315.0

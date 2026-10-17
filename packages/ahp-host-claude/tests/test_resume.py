@@ -105,3 +105,47 @@ def test_a_claude_ai_session_cannot_resume(tmp_path: Path) -> None:
         mirror_of="cse_1",
     )
     assert not isinstance(mirror, ResumesTurns)
+
+
+async def test_a_turn_cut_off_by_a_host_restart_resumes_in_a_new_session(tmp_path: Path) -> None:
+    """The Claude process died with the old host: the new session has only its resume state."""
+    first = Harness(
+        tmp_path,
+        [AssistantMessage([TextBlock("half")], model="m", uuid="h1"), _failed(529)],
+    )
+    old = await first.session()
+    await old.send_user_message(UserMessage(text="go"), RecordingSink(turn_id="t1"))
+    old.claude_session_id = "abc"
+    state = await first.provider.resume_state_of(old)
+
+    second = Harness(tmp_path, [AssistantMessage([TextBlock(" rest")], model="m"), _ok()])
+    fresh = await second.provider.resume_session(
+        AgentSessionContext(session_uri="s", chat_uri="c", provider_id="claude", resume_state=state)
+    )
+    assert isinstance(fresh, ResumesTurns)
+    resumed = RecordingSink(turn_id="t1")
+    await fresh.resume_turn("c", "t1", resumed)
+    # Claude Code is started on the stored conversation, and told to carry on.
+    assert second.clients[0].options.resume == "abc"
+    assert text_of(second.clients[0].prompts[0]) == RESUME_PROMPT
+    assert ("text", " rest") in resumed.events
+    # The restored mark is continued, not duplicated.
+    assert [m.turn for m in fresh.marks] == ["t1"]
+
+
+async def test_resuming_without_a_saved_mark_still_works(tmp_path: Path) -> None:
+    """A crash before the mark was saved: the turn simply gets a mark of its own."""
+    harness = Harness(tmp_path, [AssistantMessage([TextBlock("ok")], model="m"), _ok()])
+    fresh = await harness.provider.resume_session(
+        AgentSessionContext(
+            session_uri="s",
+            chat_uri="c",
+            provider_id="claude",
+            resume_state={"claudeSessionId": "abc"},
+        )
+    )
+    assert isinstance(fresh, ResumesTurns)
+    sink = RecordingSink(turn_id="t9")
+    await fresh.resume_turn("c", "t9", sink)
+    assert text_of(harness.clients[0].prompts[0]) == RESUME_PROMPT
+    assert [m.turn for m in fresh.marks] == ["t9"]

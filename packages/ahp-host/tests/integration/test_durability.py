@@ -235,6 +235,11 @@ class TestRestart:
                 "snapshot"
             ]["state"]
             assert transcript.get("activeTurn") is None
+            # Failed, not dropped: what the agent had said is still there, and
+            # the echo provider can resume sessions, so the error says so.
+            turn = transcript["turns"][-1]
+            assert (turn["id"], turn["state"]) == ("stuck", "error")
+            assert turn["responseParts"][-1]["resumable"] is True
         finally:
             await second.aclose()
 

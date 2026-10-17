@@ -25,12 +25,26 @@ as another account would not have:
   on (``loginctl enable-linger``) so the user manager -- and the node -- start
   at boot with no one logged in. The unit's ``PATH`` adds ``~/.local/bin``,
   where agent CLIs such as ``claude`` live; systemd's own is bare.
+
+Restarts are graceful: the node drains (lets running turns finish) on SIGTERM
+and on ``ahp-node restart``, which can take up to the config's `drain_timeout`.
+So the launchd agent's ``ExitTimeOut`` and the systemd unit's ``TimeoutStopSec``
+are that plus a margin, or the service manager would kill the node mid-drain.
+Those two are written into the service file at install time: after changing
+`drain_timeout`, run ``ahp-node install`` again so the service manager's limit
+follows. The supervisor's own wait does not need that -- it reads the figure the
+node publishes in its state directory when it starts and when a restart
+overrides it.
+A Windows Scheduled Task has no such setting: ``schtasks /End`` is a hard kill,
+so stopping the task cuts turns off (they resume on the next start, as after a
+crash). Use ``ahp-node restart`` for a graceful one.
 """
 
 from __future__ import annotations
 
 import contextlib
 import getpass
+import json
 import os
 import plistlib
 import signal
@@ -47,6 +61,59 @@ from xml.sax.saxutils import escape
 DEFAULT_TASK_NAME = "ahp-node"
 DEFAULT_LAUNCHD_LABEL = "io.ahp.node"
 DEFAULT_SYSTEMD_UNIT = "ahp-node"
+
+#: A node that exits with this code is asking to be started again right now
+#: (`ahp-node restart`): the supervisor skips the backoff and forgets failures.
+RESTART_EXIT_CODE = 75
+#: What a stop waits, beyond the node's drain timeout, for it to close its
+#: sessions and exit before the supervisor kills it.
+_STOP_MARGIN = 15.0
+#: What a service manager gets on top of the drain timeout before it kills us:
+#: our own `_STOP_MARGIN` plus time for the supervisor itself to wind down.
+SERVICE_STOP_MARGIN = 30
+_DEFAULT_DRAIN_TIMEOUT = 300.0
+#: What the other children (the tunnel) get to exit once the node is gone.
+_CHILD_STOP_GRACE = 5.0
+
+#: Files in the node's state directory shared between the node and its
+#: supervisor. `stop-request` is the supervisor's way to ask a console-less
+#: Windows node to drain (see `ahp_host.node.runner`, which also reads
+#: `restart-request`); `drain-timeout` is the node telling the supervisor how
+#: long the drain it is running may take.
+STOP_REQUEST = "stop-request"
+DRAIN_TIMEOUT_FILE = "drain-timeout"
+
+
+def publish_drain_timeout(state_dir: Path, timeout: float) -> None:
+    """Record, for the supervisor, how long the node may take to drain.
+
+    The supervisor is started once and its wait is fixed at `drain_timeout` as
+    of then -- but the node re-reads its config every time it restarts (an
+    `ahp-node restart` is how a config change is picked up), and a restart can
+    carry its own `--timeout`. Without this the supervisor would SIGKILL a node
+    that is still inside the drain it was told to run, and a kill lands before
+    the node can record which turns it cut off, so they would count as crashed
+    and not be resumed. Best effort: a node that cannot write it just leaves the
+    supervisor with its own figure.
+    """
+    with contextlib.suppress(OSError):
+        state_dir.mkdir(parents=True, exist_ok=True)
+        (state_dir / DRAIN_TIMEOUT_FILE).write_text(json.dumps({"timeout": timeout}), "utf-8")
+
+
+def published_drain_timeout(state_dir: Path | None) -> float | None:
+    """The node's published drain timeout; None when absent or unreadable."""
+    if state_dir is None:
+        return None
+    try:
+        data = json.loads((state_dir / DRAIN_TIMEOUT_FILE).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    value = data.get("timeout") if isinstance(data, dict) else None
+    if isinstance(value, bool) or not isinstance(value, int | float) or value < 0:
+        return None
+    return float(value)
+
 
 #: Windows: start a console program (ssh.exe) with no console window.
 _CREATE_NO_WINDOW = 0x08000000
@@ -102,10 +169,22 @@ class _Child:
 class Supervisor:
     """Start each command, and start it again whenever it exits."""
 
-    def __init__(self, children: Sequence[tuple[str, list[str]]], log: Path | None) -> None:
+    def __init__(
+        self,
+        children: Sequence[tuple[str, list[str]]],
+        log: Path | None,
+        *,
+        state_dir: Path | None = None,
+        drain_timeout: float = _DEFAULT_DRAIN_TIMEOUT,
+    ) -> None:
         self.children = [_Child(name, list(command)) for name, command in children]
         self.log_path = log
+        #: The node's state directory: where a Windows stop leaves its request file.
+        self.state_dir = state_dir
+        self.drain_timeout = drain_timeout
         self._stopping = False
+        #: Windows has no graceful signal to send a console-less child.
+        self._windows = os.name == "nt"
 
     def _log(self, message: str) -> None:
         line = f"{time.strftime('%Y-%m-%d %H:%M:%S')} supervisor: {message}\n"
@@ -162,6 +241,13 @@ class Supervisor:
                 continue
             ran = now - child.started
             child.history.append(code)
+            child.process = None
+            if code == RESTART_EXIT_CODE:
+                # Asked for, not a failure: straight back up, backoff forgotten.
+                child.failures = 0
+                child.next_start = now
+                self._log(f"{child.name}: exited with {code} (restart requested); restarting")
+                continue
             child.failures = 1 if ran >= _HEALTHY_SECONDS else child.failures + 1
             child.process = None
             child.next_start = now + child.backoff()
@@ -185,15 +271,76 @@ class Supervisor:
                 time.sleep(interval)
         except KeyboardInterrupt:
             pass
-        for child in self.children:
-            if child.process is not None and child.process.poll() is None:
-                child.process.terminate()
-                try:
-                    child.process.wait(timeout=10)
-                except subprocess.TimeoutExpired:
-                    child.process.kill()
+        self._stop_children()
         self._log("stopped")
         return 0
+
+    def _request_stop_by_file(self) -> bool:
+        if self.state_dir is None:
+            return False
+        try:
+            self.state_dir.mkdir(parents=True, exist_ok=True)
+            (self.state_dir / STOP_REQUEST).write_text("{}", encoding="utf-8")
+        except OSError as exc:
+            self._log(f"could not write stop-request ({exc})")
+            return False
+        return True
+
+    def _drain_wait(self) -> float:
+        """How long a stopping node gets before it is killed.
+
+        The node's own published figure when there is one -- it is the one that
+        knows the config it started with and any `--timeout` a restart carried
+        -- else the one this supervisor was started with.
+        """
+        published = published_drain_timeout(self.state_dir)
+        return (self.drain_timeout if published is None else published) + _STOP_MARGIN
+
+    @staticmethod
+    def _wait_for_exit(
+        children: Sequence[_Child], seconds: float, sleep: Callable[[float], None]
+    ) -> None:
+        deadline = time.monotonic() + seconds
+        while time.monotonic() < deadline:
+            if all(c.process is None or c.process.poll() is not None for c in children):
+                return
+            sleep(0.2)
+
+    def _kill_stragglers(self, children: Sequence[_Child], why: str) -> None:
+        for child in children:
+            if child.process is not None and child.process.poll() is None:
+                self._log(f"{child.name}: still running {why}; terminating")
+                child.process.kill()  # on Windows this is TerminateProcess, as terminate()
+
+    def _stop_children(self, sleep: Callable[[float], None] = time.sleep) -> None:
+        """Stop the node first and let it drain, then everything else.
+
+        The node is the one that needs time: POSIX sends SIGTERM, which it
+        answers by draining; Windows has no signal for that, so it is asked
+        through a `stop-request` file in its state directory and only
+        terminated (a hard kill there) once the wait is up. The other children
+        -- the tunnel remote clients reach the node through -- are left alone
+        until the node has exited (or been killed): the host keeps serving
+        connections while it drains, which a tunnel stopped at the start of the
+        drain would make untrue for every tunnelled client.
+        """
+        live = [c for c in self.children if c.process is not None and c.process.poll() is None]
+        if not live:
+            return
+        nodes = [c for c in live if c.name == "node"]
+        others = [c for c in live if c.name != "node"]
+        for child in nodes:
+            assert child.process is not None
+            if self._windows and self._request_stop_by_file():
+                continue
+            child.process.terminate()
+        self._wait_for_exit(nodes, self._drain_wait(), sleep)
+        self._kill_stragglers(nodes, "after the drain wait")
+        for child in others:
+            assert child.process is not None
+            child.process.terminate()
+        self._wait_for_exit(others, _CHILD_STOP_GRACE, sleep)
+        self._kill_stragglers(others, "after being asked to stop")
 
 
 def supervisor_log(log_file: Path | None) -> Path | None:
@@ -298,13 +445,21 @@ def uninstall_windows(name: str) -> str:
 # ─── install: macOS ─────────────────────────────────────────────────────
 
 
-def launchd_plist(command: Sequence[str], *, label: str, log: Path | None) -> bytes:
+def launchd_plist(
+    command: Sequence[str],
+    *,
+    label: str,
+    log: Path | None,
+    drain_timeout: float = _DEFAULT_DRAIN_TIMEOUT,
+) -> bytes:
     spec: dict[str, object] = {
         "Label": label,
         "ProgramArguments": list(command),
         "RunAtLoad": True,
         "KeepAlive": True,
         "ThrottleInterval": 10,
+        # launchd's default is 20s before SIGKILL; the node may be draining.
+        "ExitTimeOut": int(drain_timeout) + SERVICE_STOP_MARGIN,
         "WorkingDirectory": str(Path.home()),
     }
     if log is not None:
@@ -317,12 +472,17 @@ def _plist_path(label: str) -> Path:
     return Path.home() / "Library" / "LaunchAgents" / f"{label}.plist"
 
 
-def install_macos(command: Sequence[str], label: str, log: Path | None) -> str:
+def install_macos(
+    command: Sequence[str],
+    label: str,
+    log: Path | None,
+    drain_timeout: float = _DEFAULT_DRAIN_TIMEOUT,
+) -> str:
     path = _plist_path(label)
     path.parent.mkdir(parents=True, exist_ok=True)
     domain = f"gui/{os.getuid()}"
     subprocess.run(["launchctl", "bootout", f"{domain}/{label}"], capture_output=True, check=False)
-    path.write_bytes(launchd_plist(command, label=label, log=log))
+    path.write_bytes(launchd_plist(command, label=label, log=log, drain_timeout=drain_timeout))
     subprocess.run(["launchctl", "bootstrap", domain, str(path)], check=True)
     return f"launchd agent {label!r} installed at {path} and started"
 
@@ -362,9 +522,17 @@ def systemd_path(home: Path, inherited: str | None = None) -> str:
     return ":".join(parts)
 
 
-def systemd_unit(command: Sequence[str], *, home: Path, path: str, description: str) -> str:
+def systemd_unit(
+    command: Sequence[str],
+    *,
+    home: Path,
+    path: str,
+    description: str,
+    drain_timeout: float = _DEFAULT_DRAIN_TIMEOUT,
+) -> str:
     """A systemd user unit: start `command` with the user's manager, keep it up."""
     exec_start = " ".join(_systemd_quote(argument) for argument in command)
+    stop_timeout = int(drain_timeout) + SERVICE_STOP_MARGIN
     return f"""[Unit]
 Description={description}
 Wants=network-online.target
@@ -377,6 +545,11 @@ WorkingDirectory={str(home).replace("%", "%%")}
 Environment={_systemd_quote("PATH=" + path, exec_word=False)}
 Restart=always
 RestartSec=10
+# SIGTERM goes to the supervisor alone, which passes it to the node to drain;
+# the default (control-group) would hit every claude child at once and cut the
+# turns off. Whatever is left after the timeout is killed.
+KillMode=mixed
+TimeoutStopSec={stop_timeout}
 
 [Install]
 WantedBy=default.target
@@ -425,6 +598,7 @@ def install_linux(
     run: Run = _run,
     unit_path: Path | None = None,
     user: str | None = None,
+    drain_timeout: float = _DEFAULT_DRAIN_TIMEOUT,
 ) -> str:
     name = name.removesuffix(".service")
     path = unit_path or _systemd_unit_path(name)
@@ -434,6 +608,7 @@ def install_linux(
         home=home,
         path=systemd_path(home, os.environ.get("PATH")),
         description="ahp-node: this machine's agents, served over AHP.",
+        drain_timeout=drain_timeout,
     )
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(unit, encoding="utf-8")
@@ -460,12 +635,17 @@ __all__ = [
     "DEFAULT_LAUNCHD_LABEL",
     "DEFAULT_SYSTEMD_UNIT",
     "DEFAULT_TASK_NAME",
+    "DRAIN_TIMEOUT_FILE",
+    "RESTART_EXIT_CODE",
+    "STOP_REQUEST",
     "Supervisor",
     "install_linux",
     "install_macos",
     "install_windows",
     "launchd_plist",
     "node_command",
+    "publish_drain_timeout",
+    "published_drain_timeout",
     "python_for_service",
     "supervisor_log",
     "systemd_path",

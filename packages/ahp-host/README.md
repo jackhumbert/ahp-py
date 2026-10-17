@@ -387,6 +387,60 @@ first, where agent CLIs usually live. `ahp-node uninstall` removes it.
 ahp-node install --config ~/.config/ahp/node.toml
 ```
 
+**Restarts drain first.** A stop or restart does not cut running turns off at
+once. The node stops *starting* work and keeps serving its clients while the
+turns already running finish, for up to `drain_timeout` seconds (a top-level
+setting in the node's TOML config; default `300`). Only then does it close its
+agents.
+What happens to each kind of work:
+
+- **A running turn** finishes normally if it ends within the timeout. A turn
+  still running at the deadline is cut off, and its chat is recorded as
+  interrupted by the restart.
+- **A new turn from a client** is not refused. The host rejects the client's
+  optimistic action and publishes the message back as a queued pending message,
+  so the user sees it waiting. It does not start until the restarted node runs it.
+- **A queued message** is not started while the node drains, and is started
+  after the restart once its chat is idle.
+- **A cut-off turn, after the restart,** is restored as a failed turn. When the
+  agent can resume turns (the Claude provider can), the error is resumable, and
+  the chat is resumed automatically, once, because the restart is what stopped
+  it. An agent that cannot resume turns leaves a failed turn that is not
+  resumed. A turn lost to a crash, which the drain never got to see, is resumable
+  but is *not* resumed on its own; a client resumes it with `chat/turnResume`.
+- **An automation run** cut off at the deadline is marked failed on the next
+  start; its turn is not resumed, since no run would be attached to it.
+- **A scheduled automation** is paused during the drain: nothing new is started,
+  and no cursor moves, so a run that came due is still due after the restart.
+
+Three ways to ask a running node to restart or stop:
+
+```bash
+ahp-node restart --config ~/.config/ahp/node.toml --timeout 120
+```
+
+`ahp-node restart` writes a `restart-request` file in the node's state
+directory; the node notices it within about a second, drains, and exits with
+code `75`, which the supervisor reads as "start me again now". `--timeout`
+overrides `drain_timeout` for this one restart. The same request can be made by
+sending `SIGHUP` on POSIX. A `stop-request` file, or `SIGTERM` / `SIGINT`, drains
+and exits `0` instead, so the supervisor stops rather than restarts. On Windows
+a stop from the supervisor is written as a `stop-request` file first, then the
+node is killed if it has not exited within the drain wait.
+
+Service managers are given enough time to let a drain finish. The launchd agent
+gets `ExitTimeOut`, and the systemd unit gets `TimeoutStopSec` and
+`KillMode=mixed`, which sends `SIGTERM` to the supervisor alone so the `claude`
+children are not hit directly. Both are `drain_timeout` plus 30 seconds.
+These limits are written into the service file at install time, so run
+`ahp-node install` again after changing `drain_timeout`. (The supervisor's own
+wait follows the node's current setting without that.)
+
+**Stopping the Windows Scheduled Task is a hard kill.** Task Scheduler has no
+graceful stop, so ending the task cuts running turns off. They resume on the
+next start, as after a crash, but are not resumed automatically. Use
+`ahp-node restart` for a graceful restart on Windows.
+
 ### Not implemented
 
 **No command answers `MethodNotFound`.** That used to be how this host declined

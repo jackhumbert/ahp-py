@@ -112,6 +112,11 @@ class StoredSession:
     #: serving, which is two records of the same fact with nothing keeping them
     #: in step. Ownership belongs with the session it describes.
     metadata: Mapping[str, Any] | None = None
+    #: Chats whose turn a deliberate restart cut off -- `Host.drain` waited for
+    #: it, ran out of time, and `aclose()` cancelled it. Told apart from a turn
+    #: lost to a crash, which is also found mid-flight on restore but was not
+    #: the host's decision: only these are carried on automatically.
+    interrupted_by_restart: Sequence[str] = ()
 
     def to_json(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
@@ -129,6 +134,8 @@ class StoredSession:
             payload["resumeState"] = dict(self.resume_state)
         if self.metadata is not None:
             payload["metadata"] = dict(self.metadata)
+        if self.interrupted_by_restart:
+            payload["interruptedByRestart"] = list(self.interrupted_by_restart)
         return payload
 
     @classmethod
@@ -165,6 +172,10 @@ class StoredSession:
         if metadata is not None and not isinstance(metadata, Mapping):
             raise ValueError("metadata must be an object or absent")
 
+        interrupted = payload.get("interruptedByRestart", [])
+        if not isinstance(interrupted, list) or not all(isinstance(c, str) for c in interrupted):
+            raise ValueError("interruptedByRestart must be a list of strings or absent")
+
         return cls(
             uri=_required_string(payload, "uri"),
             provider=_required_string(payload, "provider"),
@@ -173,6 +184,7 @@ class StoredSession:
             title=title,
             resume_state=dict(resume_state) if resume_state is not None else None,
             metadata=dict(metadata) if metadata is not None else None,
+            interrupted_by_restart=tuple(interrupted),
         )
 
 

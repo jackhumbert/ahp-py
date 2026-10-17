@@ -10,6 +10,50 @@ versions each release speaks.
 
 ## [Unreleased]
 
+### Added — graceful restarts for `ahp-node`
+
+- **Restarts drain.** SIGTERM / SIGINT and `ahp-node restart` no longer cut
+  running turns off at once. The node stops starting work, keeps serving its
+  clients, and waits up to the new `drain_timeout` setting (seconds, default
+  `300`) for running turns and automation runs to finish before it closes its
+  agents. `Host.begin_drain()`, the `Host.draining` property and
+  `async Host.drain(timeout)` are the library surface; `drain` returns the chats
+  still running at the deadline.
+- **`ahp-node restart [--timeout S]`** asks a running node to restart once its
+  turns finish: it writes a `restart-request` file in the state directory, which
+  the node polls for. The node exits with code `75`, and the supervisor restarts
+  it at once. A `stop-request` file, SIGTERM or SIGINT stops it instead, exit `0`.
+  SIGHUP requests a restart on POSIX.
+- **Turns and queued messages during a drain.** A client's new `chat/turnStarted`
+  is not answered with an error: the host rejects the client's optimistic action
+  and publishes the message back as a host-originated, queued
+  `chat/pendingMessageSet`. Queued messages are not started while draining, and
+  run after the restart.
+- **Interrupted turns resume.** A turn cut off at the drain deadline is restored
+  as a failed turn with a resumable error when the agent supports resuming, and
+  its chat is resumed once, automatically. A turn lost to a crash is resumable
+  but not resumed automatically. `StoredSession.interrupted_by_restart` records
+  the cut-off chats.
+- **Supervisor and service files.** A child exiting with `75` is restarted with
+  no backoff. Stopping the supervisor gives the node `drain_timeout` plus 15
+  seconds before a kill. The launchd agent gets `ExitTimeOut`, and the systemd
+  unit gets `TimeoutStopSec` and `KillMode=mixed`, both `drain_timeout` plus
+  30 seconds. A Windows Scheduled Task stop is still a hard kill.
+- **Second stop, and a stop during a restart.** A second SIGTERM / SIGINT while a
+  stop drains cuts the wait short (running turns are still recorded for
+  resuming). A stop that arrives while a restart drains makes the exit a stop
+  (`0`), after the drain.
+- **Stopping the supervisor** stops the node first and the tunnel only after the
+  node has exited, so tunnelled clients stay connected for the whole drain. The
+  node publishes the drain timeout it is running in `<state_dir>/drain-timeout`,
+  which the supervisor waits for, so a raised `drain_timeout` or a longer
+  `restart --timeout` is not cut off by a stale wait. The launchd and systemd
+  limits are written at install time: run `ahp-node install` again after
+  changing `drain_timeout`.
+- Messages queued during a drain are written to the store at close, and an
+  automation run cut off at the deadline is failed by the next start rather than
+  having its turn resumed with no run attached.
+
 ### Changed — AHP 1.1.0 (upstream `main`, unreleased)
 
 - **The pending-message drain reads the 1.1.0 shared list.** Every steering
