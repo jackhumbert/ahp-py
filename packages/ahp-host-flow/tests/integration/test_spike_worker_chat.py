@@ -74,8 +74,11 @@ class ScopedPublisher:
     async def title_changed(self, title: str) -> None:
         self.dropped.append("title_changed")
 
-    async def config_changed(self, values: Mapping[str, Any]) -> None:
-        self.dropped.append("config_changed")
+    async def config_changed(self, values: Mapping[str, Any], *, chat: str | None = None) -> None:
+        # AHP 1.1.0 gives chats their own config overlay, so a change the inner
+        # session reports lands on its worker chat; the run's own config is
+        # never touched.
+        await self.outer.config_changed(values, chat=chat if chat is not None else self.chat)
 
     async def background_work_set(self, work: BackgroundWork, *, chat: str | None = None) -> None:
         await self.outer.background_work_set(work, chat=chat if chat is not None else self.chat)
