@@ -12,4 +12,4 @@ def test_format_doc_names_every_conformance_script() -> None:
 
 
 def test_format_doc_plan_status() -> None:
-    assert "M1 done" in (ROOT / "docs" / "plan.md").read_text(encoding="utf-8")
+    assert "M2 done" in (ROOT / "docs" / "plan.md").read_text(encoding="utf-8")

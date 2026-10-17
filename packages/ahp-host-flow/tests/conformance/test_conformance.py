@@ -9,7 +9,7 @@ from typing import Any
 
 import pytest
 
-from ahp_host_flow.engine import MAX_AGENTS_PER_RUN, RunOptions
+from ahp_host_flow.engine import MAX_AGENTS_PER_RUN, JournalError, RunOptions, load_journal
 from ahp_host_flow.sandbox import NO_ARGS, extract_meta, run_script
 
 from ..fakes import FakeDispatcher  # noqa: TID252
@@ -32,11 +32,21 @@ ROWS = {
     "determinism",
     "caps",
     "caps_concurrency",
+    "resume",
 }
 
 
-def _options(spec: dict[str, Any]) -> RunOptions:
+def _options(
+    spec: dict[str, Any],
+    *,
+    state_dir: Path | None = None,
+    run_id: str | None = None,
+    resume_from: str | None = None,
+) -> RunOptions:
     return RunOptions(
+        state_dir=state_dir,
+        run_id=run_id,
+        resume_from=resume_from,
         concurrency=spec.get("concurrency"),
         max_agents=spec.get("max_agents", MAX_AGENTS_PER_RUN),
         budget_total=spec.get("budget_total"),
@@ -46,11 +56,82 @@ def _options(spec: dict[str, Any]) -> RunOptions:
     )
 
 
+async def _check_resume(
+    node_path: str, script: Path, sidecar: dict[str, Any], tmp_path: Path
+) -> None:
+    source = script.read_text(encoding="utf-8")
+    spec = sidecar.get("options", {})
+    resume = sidecar["resume"]
+    dispatcher_kwargs = sidecar.get("dispatcher", {})
+    args = sidecar.get("args", NO_ARGS)
+    state = tmp_path / "state"
+
+    # (1) Uninterrupted run.
+    value = await run_script(
+        source,
+        node=node_path,
+        dispatcher=FakeDispatcher(**dispatcher_kwargs, hang=False),
+        args=args,
+        filename=str(script),
+        options=_options(spec),
+    )
+    assert value == sidecar["result"]
+
+    # (2) A run killed with calls in flight.
+    killed = FakeDispatcher(**dispatcher_kwargs)
+    task = asyncio.ensure_future(
+        run_script(
+            source,
+            node=node_path,
+            dispatcher=killed,
+            args=args,
+            filename=str(script),
+            options=_options(spec, state_dir=state, run_id="first"),
+        )
+    )
+    try:
+        await asyncio.wait_for(
+            asyncio.gather(*(killed.wait_started(p) for p in resume["kill_when_started"])), 30
+        )
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + 10
+        recorded = 0
+        while recorded < resume["kill_after_records"] and loop.time() < deadline:
+            try:
+                recorded = len(load_journal(state, "first").agents)
+            except JournalError:
+                recorded = 0  # the journal is not there yet
+            await asyncio.sleep(0.01)
+        assert recorded >= resume["kill_after_records"]
+    finally:
+        task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    # (3) Resume it from its journal.
+    resumed = FakeDispatcher(**dispatcher_kwargs, hang=False)
+    value = await run_script(
+        None,
+        node=node_path,
+        dispatcher=resumed,
+        args=args,
+        filename=str(script),
+        options=_options(spec, state_dir=state, run_id="second", resume_from="first"),
+    )
+    assert value == sidecar["result"]
+    assert sorted(c.prompt for c in resumed.calls) == resume["live"]
+    journaled = {r.ordinal for r in load_journal(state, "second").agents}
+    assert sorted(journaled - {c.ordinal for c in resumed.calls}) == resume["cached"]
+
+
 @pytest.mark.parametrize("script", SCRIPTS, ids=lambda p: p.stem)
-async def test_conformance_script(node_path: str, script: Path) -> None:
+async def test_conformance_script(node_path: str, script: Path, tmp_path: Path) -> None:
     sidecar_path = script.with_suffix(".json")
     assert sidecar_path.is_file(), f"{script.name} has no {sidecar_path.name}"
     sidecar = json.loads(sidecar_path.read_text(encoding="utf-8"))
+    if "resume" in sidecar:
+        await _check_resume(node_path, script, sidecar, tmp_path)
+        return
     source = script.read_text(encoding="utf-8")
     dispatcher = FakeDispatcher(**sidecar.get("dispatcher", {}))
     logs: list[str] = []

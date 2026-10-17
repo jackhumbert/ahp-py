@@ -4,6 +4,13 @@
 
 ### Added
 
+- `docs/plan.md` §8 records the M2 result.
+- `conformance/resume.js`: a run killed with calls in flight resumes with identical results, its completed calls served from the journal and only the rest dispatched; `docs/format.md` pins the resume rules.
+- `flow run --state-dir DIR --run-id ID --resume RUN_ID`: journal a run, name it, or resume one (the script path is optional with `--resume`); the run id is printed to stderr as `[run] <id>`.
+- `Sandbox.run`/`run_script` write a journal when `RunOptions.state_dir` is set, accept `source=None` to resume from the journal's snapshot, and report the run id through `on_run_start` before the script starts.
+- Resume (`engine/resume.py`): `RunOptions.resume_from` serves `agent()` calls from an earlier run's journal by key: the n-th call with a key gets the n-th record with it, re-stamped with the new ordinal, so later pipeline stages that issue in completion order still replay. The first call with no match logs where the cache ended and runs that call and every later one live. A resumed run takes the script, args, call cap and budget from the old journal (an edited script may be passed instead), resolves child workflows from its snapshots, and writes a new journal under a new run id that copies what it reused and every inherited child snapshot. A journal whose header cannot be written leaves no run directory behind.
+- Engine journal (`engine/journal.py`): `<state_dir>/runs/<runId>/journal.jsonl`, append-only and flushed per record. A run header holds the script snapshot, args and the options that affect semantics; each child workflow's source is recorded when first resolved; each completed `agent()` call is recorded with its ordinal, key (sha256 of the canonical JSON of prompt, opts, phase and label), status (`ok`, `null` or `error`), value and output tokens. A torn final line is ignored on read.
+- `RunOptions.state_dir`, `run_id` and `resume_from`: where a run's journal goes, the new run's id, and the run to resume from.
 - Package skeleton and plan (`docs/plan.md`).
 - Node discovery for the script sandbox: `AHP_FLOW_NODE`, else `node` on `PATH`; Node >= 20.
 - acorn 8.19.0 (MIT), vendored under `sandbox/vendor/` to read `meta` without running a script.

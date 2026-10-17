@@ -3,19 +3,30 @@
 Not a test module. The prompt picks the behaviour: `hang` never returns,
 `wait-for:<prompt>` waits until another call with that prompt has started,
 `cancel` cancels its own turn, `fail` raises, `skip` returns null; anything
-else echoes the prompt.
+else echoes the prompt. `delays` adds a sleep for an exact prompt, after `hold`,
+and `hang=False` makes "hang" prompts echo like any other.
 """
 
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Mapping
 
 from ahp_host_flow.engine import OUTPUT_TOKENS, AgentCall, AgentResult
 
 
 class FakeDispatcher:
-    def __init__(self, *, hold: float = 0.0, output_tokens: int = 0) -> None:
+    def __init__(
+        self,
+        *,
+        hold: float = 0.0,
+        output_tokens: int = 0,
+        delays: Mapping[str, float] | None = None,
+        hang: bool = True,
+    ) -> None:
         self._hold = hold
+        self._delays = dict(delays or {})
+        self._hang = hang
         self._output_tokens = output_tokens
         self.calls: list[AgentCall] = []
         self.in_flight = 0
@@ -39,12 +50,14 @@ class FakeDispatcher:
         usage = {OUTPUT_TOKENS: self._output_tokens} if self._output_tokens else {}
         try:
             prompt = call.prompt
-            if prompt.startswith("hang"):
+            if self._hang and prompt.startswith("hang"):
                 await asyncio.Event().wait()
             if prompt.startswith("wait-for:"):
                 await self.wait_started(prompt[len("wait-for:") :])
             if self._hold > 0:
                 await asyncio.sleep(self._hold)
+            if (delay := self._delays.get(prompt)) is not None:
+                await asyncio.sleep(delay)
             if prompt.startswith("cancel"):
                 raise asyncio.CancelledError
             if prompt.startswith("fail"):

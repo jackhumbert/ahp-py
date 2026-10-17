@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from ahp_host_flow.cli import main
+from ahp_host_flow.engine import load_journal
 
 HELLO = """\
 export const meta = { name: 'hello', description: 'one echo agent call' }
@@ -138,4 +139,82 @@ def test_cli_run_bad_concurrency(tmp_path: Path) -> None:
     script = _write(tmp_path, "return 1")
     with pytest.raises(SystemExit) as info:
         main(["run", str(script), "--concurrency", "0"])
+    assert info.value.code == 2
+
+
+@pytest.mark.node
+def test_cli_run_state_dir_prints_run_id(
+    node_path: str, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    script = _write(tmp_path, HELLO, "hello.js")
+    state = tmp_path / "state"
+    argv = ["run", str(script), "--args", '{"who": "world"}', "--state-dir", str(state)]
+    assert main([*argv, "--run-id", "r1", "--node", node_path]) == 0
+    assert "[run] r1" in capsys.readouterr().err
+    assert (state / "runs" / "r1" / "journal.jsonl").is_file()
+
+
+@pytest.mark.node
+def test_cli_resume(node_path: str, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    script = _write(tmp_path, HELLO, "hello.js")
+    state = str(tmp_path / "state")
+    first = ["run", str(script), "--args", '{"who": "world"}', "--state-dir", state]
+    assert main([*first, "--run-id", "r1", "--node", node_path]) == 0
+    expected = capsys.readouterr().out
+
+    resume = ["run", "--state-dir", state, "--resume", "r1", "--run-id", "r2", "--node", node_path]
+    assert main(resume) == 0
+    captured = capsys.readouterr()
+    assert json.loads(captured.out) == json.loads(expected)
+    assert "[run] r2" in captured.err
+    agents = load_journal(Path(state), "r2").agents
+    assert len(agents) == 1
+    assert agents[0].status == "ok"
+
+
+@pytest.mark.node
+def test_cli_resume_edited_script(
+    node_path: str, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    script = _write(tmp_path, HELLO, "hello.js")
+    state = str(tmp_path / "state")
+    first = ["run", str(script), "--args", '{"who": "world"}', "--state-dir", state]
+    assert main([*first, "--run-id", "r1", "--node", node_path]) == 0
+    capsys.readouterr()
+
+    edited = _write(tmp_path, HELLO.replace("hello ${", "hi ${"), "edited.js")
+    resume = ["run", str(edited), "--state-dir", state, "--resume", "r1", "--node", node_path]
+    assert main(resume) == 0
+    captured = capsys.readouterr()
+    assert json.loads(captured.out) == {"reply": "hi world"}
+    assert "[log] resume: cache ended at agent() #0" in captured.err
+
+
+@pytest.mark.node
+def test_cli_resume_unknown_run(
+    node_path: str, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    state = tmp_path / "state"
+    state.mkdir()
+    code = main(["run", "--state-dir", str(state), "--resume", "nope", "--node", node_path])
+    assert code == 1
+    assert "flow: no journal for run 'nope'" in capsys.readouterr().err
+
+
+def test_cli_run_needs_path_or_resume() -> None:
+    with pytest.raises(SystemExit) as info:
+        main(["run"])
+    assert info.value.code == 2
+
+
+def test_cli_resume_rejects_args(tmp_path: Path) -> None:
+    argv = ["run", "--resume", "r1", "--state-dir", str(tmp_path), "--args", "{}"]
+    with pytest.raises(SystemExit) as info:
+        main(argv)
+    assert info.value.code == 2
+
+
+def test_cli_resume_needs_state_dir() -> None:
+    with pytest.raises(SystemExit) as info:
+        main(["run", "--resume", "r1"])
     assert info.value.code == 2

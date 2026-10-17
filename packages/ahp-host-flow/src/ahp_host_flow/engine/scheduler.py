@@ -5,12 +5,16 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import Callable
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from ahp_host_flow.engine.abort import AbortSignal
-from ahp_host_flow.engine.budget import Budget
+from ahp_host_flow.engine.budget import OUTPUT_TOKENS, Budget
 from ahp_host_flow.engine.dispatcher import AgentCall, AgentResult, Dispatcher
+from ahp_host_flow.engine.journal import AgentRecord, JournalStatus, JournalWriter, call_key
 from ahp_host_flow.engine.options import RunOptions
+
+if TYPE_CHECKING:
+    from ahp_host_flow.engine.resume import Replay
 
 
 class SchedulerRefusal(Exception):  # noqa: N818
@@ -35,6 +39,8 @@ class Scheduler:
         on_log: Callable[[str], None] | None = None,
         on_agent_start: Callable[[AgentCall], None] | None = None,
         on_agent_end: Callable[[AgentCall, Any], None] | None = None,
+        journal: JournalWriter | None = None,
+        replay: Replay | None = None,
     ) -> None:
         options = options if options is not None else RunOptions()
         self._dispatcher = dispatcher
@@ -47,6 +53,8 @@ class Scheduler:
         self._on_log = on_log
         self._on_agent_start = on_agent_start
         self._on_agent_end = on_agent_end
+        self._journal = journal
+        self._replay = replay
         self._unsubscribe: Callable[[], None] | None = None
         if abort is not None:
             self._unsubscribe = abort.subscribe(self.abort)
@@ -72,18 +80,35 @@ class Scheduler:
             spent, total = self._budget.spent, self._budget.total
             raise BudgetExhaustedError(f"budget exhausted: {spent} of {total} output tokens spent")
 
-    def admit(self, call: AgentCall) -> None:
-        """Refuse a call past a hard cap; sync, so checks happen in issue order."""
+    def admit(self, call: AgentCall) -> AgentRecord | None:
+        """Refuse a call past a hard cap; sync, so checks happen in issue order.
+
+        Returns the journal record that serves the call on resume, else None.
+        """
         # Ordinals are assigned in JS at issue time, so this cap is deterministic (plan §9).
         if call.ordinal >= self._max_agents:
             raise AgentLimitError(
                 f"agent() limit reached: at most {self._max_agents} agent() calls per run"
             )
+        if self._replay is not None:
+            rec = self._replay.lookup(call)
+            if rec is not None:
+                # The record proves the original run admitted it; no budget re-check.
+                return rec
         self._check_budget()
+        return None
 
-    async def run(self, call: AgentCall) -> Any:
+    async def run(self, call: AgentCall, cached: AgentRecord | None = None) -> Any:
         """Dispatch one call under the cap; the JSON value for agent(), None for null."""
         n = call.ordinal
+        if cached is not None:
+            if self._aborted:
+                self._log(f"agent() #{n} aborted")
+                return None
+            self._budget.add({OUTPUT_TOKENS: cached.output_tokens})
+            if self._journal is not None:
+                self._journal.append_agent(cached)
+            return cached.value if cached.status == "ok" else None
         if self._aborted:
             self._log(f"agent() #{n} aborted")
             return None
@@ -116,22 +141,36 @@ class Scheduler:
                 task.cancel()
             await asyncio.gather(task, return_exceptions=True)
             self._inflight.discard(task)
+        key = call_key(call)
         if task.cancelled():
             # A dispatcher that cancels its own turn is a skip (plan §4.4).
             self._log(f"agent() #{n} {'aborted' if self._aborted else 'skipped'}")
+            # An aborted call did not complete; resume reruns it.
+            if not self._aborted:
+                self._record(AgentRecord(n, key, "null", None, 0))
             return None
         exc = task.exception()
         if exc is not None:
             self._log(f"agent() #{n} failed: {exc}")
+            self._record(AgentRecord(n, key, "error", None, 0, error=str(exc)))
             return None
         result = task.result()
-        self._budget.add(result.usage)
+        added = self._budget.add(result.usage)
         try:
             json.dumps(result.value, allow_nan=False)
         except (TypeError, ValueError) as err:
             self._log(f"agent() #{n} failed: result is not JSON: {err}")
+            self._record(
+                AgentRecord(n, key, "error", None, added, error=f"result is not JSON: {err}")
+            )
             return None
+        status: JournalStatus = "null" if result.value is None else "ok"
+        self._record(AgentRecord(n, key, status, result.value, added))
         return result.value
+
+    def _record(self, record: AgentRecord) -> None:
+        if self._journal is not None:
+            self._journal.append_agent(record)
 
     def abort(self) -> None:
         """Cancel every in-flight dispatch; later calls resolve null. Idempotent."""

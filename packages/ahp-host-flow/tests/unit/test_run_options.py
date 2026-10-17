@@ -1,6 +1,7 @@
 """Run options and the concurrency default."""
 
 import os
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -36,6 +37,9 @@ def test_run_options_defaults() -> None:
     assert options.timeout is None
     assert options.workflow_dirs == ()
     assert options.run_root is None
+    assert options.state_dir is None
+    assert options.run_id is None
+    assert options.resume_from is None
     assert RunOptions(concurrency=5).resolved_concurrency() == 5
 
 
@@ -51,11 +55,24 @@ def test_run_options_defaults() -> None:
         ({"timeout": -1.0}, "timeout"),
         ({"timeout": float("inf")}, "timeout"),
         ({"timeout": float("nan")}, "timeout"),
+        ({"run_id": "../x", "state_dir": Path("s")}, "run_id"),
+        ({"run_id": "", "state_dir": Path("s")}, "run_id"),
+        ({"run_id": "a" * 65, "state_dir": Path("s")}, "run_id"),
+        ({"resume_from": "-x", "state_dir": Path("s")}, "resume_from"),
+        ({"run_id": "r1"}, "state_dir"),
+        ({"resume_from": "r1"}, "state_dir"),
+        ({"run_id": "r1", "resume_from": "r1", "state_dir": Path("s")}, "differ"),
     ],
 )
 def test_run_options_rejects(kwargs: dict[str, Any], field: str) -> None:
     with pytest.raises(ValueError, match=field):
         RunOptions(**kwargs)
+
+
+def test_run_options_accepts_run_ids() -> None:
+    options = RunOptions(state_dir=Path("s"), run_id="a" * 64, resume_from="r_1-x")
+    assert options.run_id == "a" * 64
+    assert options.resume_from == "r_1-x"
 
 
 def test_run_options_constants() -> None:

@@ -1,0 +1,10 @@
+{
+  "options": {"concurrency": 4},
+  "result": {"plan": "plan", "x": "x", "y": "y", "built": ["hang build p", "hang build q"]},
+  "resume": {
+    "kill_when_started": ["hang build p", "hang build q"],
+    "kill_after_records": 3,
+    "cached": [0, 1, 2],
+    "live": ["hang build p", "hang build q"]
+  }
+}

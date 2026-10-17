@@ -17,6 +17,7 @@ from ahp_host_flow.engine import (
     AgentCall,
     AgentLimitError,
     Dispatcher,
+    JournalRun,
     Registry,
     RunOptions,
     Scheduler,
@@ -112,6 +113,7 @@ class Sandbox:
         self._agent_tasks: set[asyncio.Task[None]] = set()
         self._options: RunOptions | None = None
         self._registry: Registry | None = None
+        self._journal_run: JournalRun | None = None
 
     async def __aenter__(self) -> Sandbox:
         await self.start()
@@ -294,8 +296,8 @@ class Sandbox:
         )
         try:
             # Synchronous, before any await: refusals happen in issue order.
-            scheduler.admit(call)
-            value = await scheduler.run(call)
+            cached = scheduler.admit(call)
+            value = await scheduler.run(call, cached)
         except SchedulerRefusal as exc:
             code = (
                 protocol.AGENT_LIMIT
@@ -318,16 +320,23 @@ class Sandbox:
             await self._write_error(msg["id"], protocol.INTERNAL_ERROR, "no run is active")
             return
         params = msg.get("params") or {}
-        try:
-            resolved = await asyncio.to_thread(
-                resolve_workflow,
-                params.get("ref"),
-                registry=self._registry,
-                run_root=options.run_root,
-            )
-        except WorkflowRefError as exc:
-            await self._write_error(msg["id"], protocol.WORKFLOW_ERROR, str(exc))
-            return
+        ref = params.get("ref")
+        jr = self._journal_run
+        # A resumed run reads children from the snapshot, never the filesystem.
+        resolved = jr.snapshot_for(ref) if jr else None
+        if resolved is None:
+            try:
+                resolved = await asyncio.to_thread(
+                    resolve_workflow,
+                    ref,
+                    registry=self._registry,
+                    run_root=options.run_root,
+                )
+            except WorkflowRefError as exc:
+                await self._write_error(msg["id"], protocol.WORKFLOW_ERROR, str(exc))
+                return
+        if jr:
+            jr.record_workflow(ref, resolved)
         await self._write(
             {
                 "jsonrpc": protocol.JSONRPC,
@@ -389,7 +398,7 @@ class Sandbox:
 
     async def run(
         self,
-        source: str,
+        source: str | None,
         *,
         dispatcher: Dispatcher,
         args: object = NO_ARGS,
@@ -400,24 +409,54 @@ class Sandbox:
         on_phase: Callable[[str], None] | None = None,
         on_agent_start: Callable[[AgentCall], None] | None = None,
         on_agent_end: Callable[[AgentCall, Any], None] | None = None,
+        on_run_start: Callable[[str], None] | None = None,
     ) -> Any:
-        """Run a script; `agent()` calls go through a Scheduler to `dispatcher`."""
+        """Run a script; `agent()` calls go through a Scheduler to `dispatcher`.
+
+        With `options.state_dir` the run is journaled; `source=None` resumes
+        `options.resume_from` from its snapshot. `on_run_start` gets the run id
+        before the script starts.
+        """
         async with self._run_lock:
             options = options or RunOptions()
-            scheduler = Scheduler(
-                dispatcher,
-                options,
-                abort=abort,
-                on_log=on_log,
-                on_agent_start=on_agent_start,
-                on_agent_end=on_agent_end,
-            )
+            jr: JournalRun | None = None
+            if options.state_dir is not None:
+                jr = JournalRun.open(
+                    options,
+                    source=source,
+                    filename=filename,
+                    has_args=args is not NO_ARGS,
+                    args=None if args is NO_ARGS else args,
+                    on_log=on_log,
+                )
+                source, filename, options = jr.source, jr.filename, jr.options
+                args = jr.args if jr.has_args else NO_ARGS
+            elif source is None:
+                raise ValueError("a script source is needed unless resuming")
+            try:
+                scheduler = Scheduler(
+                    dispatcher,
+                    options,
+                    abort=abort,
+                    on_log=on_log,
+                    on_agent_start=on_agent_start,
+                    on_agent_end=on_agent_end,
+                    journal=jr.writer if jr else None,
+                    replay=jr.replay if jr else None,
+                )
+            except BaseException:
+                if jr is not None:
+                    jr.close()
+                raise
             self._scheduler = scheduler
             self._options = options
+            self._journal_run = jr
             self._registry = Registry(options.workflow_dirs)
             self._on_log = on_log
             self._on_phase = on_phase
             try:
+                if jr is not None and on_run_start is not None:
+                    on_run_start(jr.run_id)
                 params: dict[str, Any] = {
                     "source": source,
                     "filename": filename,
@@ -450,12 +489,15 @@ class Sandbox:
                 self._scheduler = None
                 self._options = None
                 self._registry = None
+                self._journal_run = None
                 self._on_log = None
                 self._on_phase = None
                 tasks = list(self._agent_tasks)
                 for task in tasks:
                     task.cancel()
                 await asyncio.gather(*tasks, return_exceptions=True)
+                if jr is not None:
+                    jr.close()
 
 
 async def extract_meta(
@@ -467,7 +509,7 @@ async def extract_meta(
 
 
 async def run_script(
-    source: str,
+    source: str | None,
     *,
     node: str,
     dispatcher: Dispatcher,
@@ -479,6 +521,7 @@ async def run_script(
     on_phase: Callable[[str], None] | None = None,
     on_agent_start: Callable[[AgentCall], None] | None = None,
     on_agent_end: Callable[[AgentCall, Any], None] | None = None,
+    on_run_start: Callable[[str], None] | None = None,
 ) -> Any:
     """Run a script with a throwaway sandbox."""
     async with Sandbox(node) as sandbox:
@@ -493,4 +536,5 @@ async def run_script(
             on_phase=on_phase,
             on_agent_start=on_agent_start,
             on_agent_end=on_agent_end,
+            on_run_start=on_run_start,
         )

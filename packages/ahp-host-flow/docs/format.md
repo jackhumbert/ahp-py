@@ -1,9 +1,8 @@
 # Script format
 
 The semantics of Claude Code workflow scripts that `ahp-host-flow` copies, as
-implemented through milestone M1 (see [plan.md](plan.md) §3 and §8). Each
+implemented through milestone M2 (see [plan.md](plan.md) §3 and §8). Each
 section names the conformance script that checks it, under `conformance/`.
-Resume is not covered here; it arrives in M2.
 
 A script is a strict-mode module body run in a fresh `node:vm` context. It may
 use top-level `await` and `return`; its return value is the run result.
@@ -100,6 +99,43 @@ most 1000 `agent()` calls per run; the next one throws `agent() limit reached:
 at most N agent() calls per run`. At most 4096 items per `parallel()` or
 `pipeline()` call.
 
+## resume
+
+Script: `conformance/resume.js`.
+
+A run with a state dir writes `<state_dir>/runs/<runId>/journal.jsonl`. It is
+append-only, flushed per record, and a torn last line is ignored on read. Record
+kinds: a run header (script snapshot, filename, args, the call cap and budget);
+one workflow snapshot per ref, written when the ref is first resolved; and one
+agent record per completed call (ordinal, key, status `ok`, `null` or `error`,
+value and output tokens). The key is the sha256 of the canonical JSON (sorted
+keys, no whitespace) of `{prompt, opts, phase, label}`.
+
+Resume serves `agent()` calls from the journal by content: the n-th call
+issued with a given key gets the n-th record with that key, whatever its
+ordinal, and the record is re-stamped with the new call's ordinal. Matching by
+key rather than ordinal matters because ordinals are deterministic only for
+calls issued synchronously. A later pipeline stage issues in completion order,
+and cached calls complete at once, so on resume those calls arrive in a
+different order. The first call with no unconsumed record of its key (a changed
+prompt or opts, or a call the old run never made) makes that call and every
+call issued after it live, and logs `resume: cache ended at agent() #N (no
+cached call matches); K calls replayed, this call and later ones run live`.
+This keeps Claude Code's longest-unchanged-prefix rule for calls whose order is
+deterministic. Calls with identical keys are interchangeable, since they are
+the same request. Cached calls count toward the 1000-call cap and
+add their recorded output tokens to `budget.spent()`, but take no concurrency
+slot, never reach the dispatcher or progress listeners, and log nothing. A
+recorded null or error replays as null. Calls in flight when a run is killed are
+not recorded and rerun.
+
+The resumed run uses the old run's args, call cap and budget, and runs the
+journal's script snapshot unless an edited script is given. Child workflows
+resolve from the snapshots, not the filesystem. It writes a new journal under a
+new run id that copies the reused records and, as soon as it opens, every
+child snapshot of the old run, including any it has not reached yet. So it can
+be resumed in turn without re-reading a file. A run with no script snapshot cannot be resumed without a script.
+
 ## Choices not yet checked against Claude Code
 
 - `pipeline`'s first stage gets `prev` equal to the item.
@@ -119,4 +155,12 @@ at most N agent() calls per run`. At most 4096 items per `parallel()` or
 - Abort makes in-flight and later `agent()` calls return `null` while the
   script runs on to its end, bounded by the timeout. Cancelling the run task
   kills Node.
-- Resume is M2.
+- Ordinals are deterministic only for calls issued synchronously (`parallel`
+  thunks, a pipeline's first stage, sequential awaits). A call in a later
+  pipeline stage, or one issued after awaiting a call that runs concurrently
+  with others, is numbered in completion order. Resume matches by key, so this
+  changes only the ordinals in the new journal, not what is cached. Whether
+  Claude Code's resume matches by order or by content is unchecked.
+- Cached calls complete at once, so near the budget ceiling a resumed run's
+  issue-time budget check can refuse a call the original run made.
+- A recorded null or error is replayed, not retried.

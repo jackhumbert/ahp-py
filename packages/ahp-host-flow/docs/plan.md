@@ -7,7 +7,7 @@ an AHP session, and each `agent()` call is a **child chat** of it, so any AHP
 client can watch and steer the whole run. Extensions to the format are opt-in,
 and a script written for Claude Code runs unchanged.
 
-Status: M0 and M1 done (Node sandbox, `flow run`, worker-chat spike; engine semantics on a fake dispatcher). M2 is next. Milestones are in §8.
+Status: M0, M1 and M2 done (Node sandbox, `flow run`, worker-chat spike; engine semantics on a fake dispatcher; journal and resume). M3 (structured turns) is next. Milestones are in §8.
 
 ## 1. Where it sits
 
@@ -143,8 +143,10 @@ small script per row of the table above.
   (summed from turn `usage`).
 - **Journal:** `<state_dir>/runs/<runId>/journal.jsonl`, one record per
   `agent()` call: ordinal (assigned at issue time in the single-threaded JS),
-  `sha256(prompt + canonical opts)`, result and usage. Resume serves the
-  matching prefix and runs the rest live.
+  key (sha256 of the canonical JSON of prompt, opts, phase and label), status
+  (`ok`, `null`, `error`), result and usage. The header holds the script
+  snapshot plus args and semantic options; each child workflow snapshot is a
+  record of its own. Resume serves the matching prefix and runs the rest live.
 - **Registry:** resolves workflow names across several sources (§4.3) and
   snapshots each run's script.
 - **`Dispatcher` interface:** `run_agent(call) -> AgentResult` streaming
@@ -235,12 +237,12 @@ ahp-py moved to AHP 1.1.0 while M1 was in progress. Nothing breaks, but four
   session host every call as a chat (`HostsChats` plus per-chat config), with
   one agent process per run instead of one per call. But a chat can only
   narrow its session's working directories, and `isolation: 'worktree'` needs
-  a new one. So M3 keeps a session per call, and sharing is a later
+  a new one. So M4 keeps a session per call, and sharing is a later
   optimisation for calls with the same working directory.
 - **Steering.** 1.1.0 unifies steering and queued messages in one list with a
   per-entry kind. A child chat is read-only by default. If its profile makes
   it interactive, a steering message there is forwarded to the inner session
-  (`SteersTurns`), which lets a person nudge one agent mid-turn (M5). The run's
+  (`SteersTurns`), which lets a person nudge one agent mid-turn (M7). The run's
   main chat queues nothing while a run is active.
 - **Titles and vendors.** `createChat`/`open_tool_chat` take a title, so a
   child chat is titled by `label` (or the prompt's first line).
@@ -459,18 +461,20 @@ A live GLM smoke test is opt-in, behind a marker.
 | M0 | Package skeleton. Sandbox + RPC + echo `agent()`. Meta parse; banned APIs throw. **Spike:** an inner provider session's sink bridged into an `open_tool_chat` worker chat | `flow run` of a 3-line script prints the result; the spike shows EchoProvider's turn in a child chat |
 | M1 | Engine semantics on a fake dispatcher: null rules, caps, phase/log, budget, `workflow()` | one conformance script per row of §3 passes |
 | M2 | Journal + resume | kill mid-run, resume: identical results, and live calls start only at the first edited call |
-| M3 | `ahp-host-flow` + in-process Claude: workspace/user/host workflow sources as customizations, child chats titled by `label`, model/effort, per-chat approval mode and effort (`ReconfiguresChats`, §4.5), StructuredOutput client tool, worktrees, skip/abort, approval relay, models advertised with `vendor` | fan-out and triage corpus scripts pass against Claude; a run is watched and controlled from VS Code or iOS |
-| M4 | In-process ACP (opencode/GLM): MCP StructuredOutput, text fallback, routing | a script routes its Review phase to GLM and gets a schema-valid result |
-| M5 | Full corpus unmodified; client-published workflows (+ automation capture); restart resume (`ResumableAgentProvider`); per-child changesets; steering a child chat (§4.5); automations | the plan/build/review corpus script lands a change; a cron automation runs a workflow |
-| M6 | `ClientDispatcher` remote + gateway (one remote chat per call, `create_chat(title=)`); the `SessionOrigin` request upstream | one call runs on a gateway node and is mirrored into its child chat |
-| M7 | Extensions (§6) + shim | `ask()` round-trips to a phone; a dual-target script runs in both runtimes |
+| M3 | **Structured turns** (§4.6), across packages: the `_meta` output schema, `ReturnsStructuredOutput`, host validation and the text fallback in `ahp-host`; `ahp-host-claude`; general client-tool support over MCP in `ahp-host-acp`; `output_schema` and `.structured` in `ahp-client`; the `requests.md` entry | a client asks Claude and an ACP agent (a fake in tests, GLM as an opt-in smoke test) for a schema and gets a validated result; a mismatch is retried, then fails with a structured-output code |
+| M4 | **The provider, in-process:** workspace/user/host workflow sources as customizations; child chats titled by `label`; model/effort; per-chat approval mode and effort (`ReconfiguresChats`, §4.5); `schema` as a structured turn; worktrees; skip/abort; approval relay; models advertised with `vendor`; Claude and opencode/GLM through routing; journal start records; **typed progress** (§4.7: the descriptors, `ahp_protocol.ext.flow`, `flow_view()`); credential **masking** before publishing (§4.9) | fan-out and triage corpus scripts pass against Claude; a Review phase routed to GLM returns a schema-valid result; a run is watched and controlled from VS Code or iOS, and `flow_view()` folds it from the transcript |
+| M5 | **Durability** (§4.8): `ResumesInterruptedTurns` and stored `inputNeeded` (re-bound or withdrawn with a notice) in `ahp-host`; the provider relaunches a run from its journal under the same turn; gates journaled | killing the host mid-run, the run continues where it stopped; an open approval is answered after the restart, or withdrawn with a notice |
+| M6 | **Fleet** (§2): fleet tools for `flow` sessions in `ahp-gateway`, bound to the run's principal; the `flow` agent type for `ahp-node`; fleet dispatch with thin child chats; reattach after restart; the direct remote `ClientDispatcher` (`create_chat(title=)`); the delegation-origin request | a run on one node starts calls on two others, each visible from every surface; restarting the flow host reattaches to calls still running |
+| M7 | **Full corpus and operations:** the four corpus workflows unmodified; client-published workflows (+ automation capture); per-child changesets; steering a child chat (§4.5); automations | the plan/build/review corpus script lands a change; a cron automation runs a workflow |
+| M8 | **Redaction after publishing** (§4.9): `Host.redact`, the experimental capability, the stored session and audit; `flow redact`; the `requests.md` entry | a redacted part disappears from live opted-in clients, from snapshots, from the store and from the run's journal; the audit records the fact without the content |
+| M9 | **Extensions** (§6) + shim | `ask()` round-trips to a phone; a dual-target script runs in both runtimes |
 
 **M0 spike result.** `tests/integration/test_spike_worker_chat.py` showed:
 
 1. An inner `EchoProvider` session runs its turn through `ProviderChat.run_turn` on a worker chat from `publisher.open_tool_chat`. The worker turn's message has origin `agent`, the chat's origin is `{kind: "tool", chat, toolCallId}`, and the spawning tool call's result carries the `subagent` link (written by the test's own outer session, so this shows the wire shape, not provider behaviour). So the in-process design of §2 holds and the mirror design is not needed.
 2. `run_turn` returns when the turn starts, so the dispatcher waits on its own completion signal. A text tee on the inner sink yields `agent()`'s return text.
-3. The inner context's publisher is scoped by a wrapper. By design, chat-scoped calls (background work, changesets, canvases, terminals, nested tool chats) default to the worker chat. Only `background_work_set` and one dropped session-wide call are asserted, and EchoProvider never calls its publisher, so M3 must test each scoped method with a provider that uses it. Session-wide calls (title, customizations, MCP state, activity, progress) are dropped, so an inner session cannot rename or reconfigure the run. Since AHP 1.1.0 gave chats their own config overlay, `config_changed` is routed to the worker chat (`chat=`), not dropped.
-4. Cancelling a worker cancels only the `run` callback (ahp-host's own tool-chat tests), so in M3 the dispatcher must cancel the inner session itself on `CancelledError`.
+3. The inner context's publisher is scoped by a wrapper. By design, chat-scoped calls (background work, changesets, canvases, terminals, nested tool chats) default to the worker chat. Only `background_work_set` and one dropped session-wide call are asserted, and EchoProvider never calls its publisher, so M4 must test each scoped method with a provider that uses it. Session-wide calls (title, customizations, MCP state, activity, progress) are dropped, so an inner session cannot rename or reconfigure the run. Since AHP 1.1.0 gave chats their own config overlay, `config_changed` is routed to the worker chat (`chat=`), not dropped.
+4. Cancelling a worker cancels only the `run` callback (ahp-host's own tool-chat tests), so in M4 the dispatcher must cancel the inner session itself on `CancelledError`.
 5. `ScopedPublisher` and the tee live in the test for now, and M3 moves them into the provider.
 
 M0 sandbox decisions: scripts run in strict mode, matching acorn's module parse; `agent()` ordinals are 0-based and taken at issue time; in M0 a dispatcher error makes `agent()` return null, with a `log()` line, until M1 pins the full null rules; parallel, pipeline, budget and workflow arrive in M1.
@@ -481,12 +485,14 @@ M0 sandbox hardening, from review:
 - Python writes ASCII-only JSON, because Node's readline splits on raw U+2028/U+2029.
 - Tests cover each of these routes. `node:vm` is still not a security boundary: the sandbox enforces determinism and keeps honest scripts off Node APIs. It is not meant to contain a hostile script.
 
-**M1 result.** `parallel` and `pipeline` live in the sandbox prelude. The `Scheduler` (`engine/scheduler.py`) owns the concurrency semaphore (default min(16, CPUs−2), at least 1), the 1000-call cap, the output-token budget (mirrored into the script on each reply) and abort. `workflow()` runs the child in a `node:vm` context of its own, on the same `Scheduler`, with the agent counter, spent tokens and phase held in the host and shared as primitives. Its own `workflow` always throws, and nothing but JSON crosses between the contexts. (The first M1 build shared the parent's hooks into the child, and a value returned by `parallel` led back to the parent's `workflow`.) `Registry` is a plain ordered list of directories until M3's multi-source registry. `RunOptions.timeout` kills Node, argless `Intl` date formatting throws, and the stdout reader fails all pending requests on any exception. A host-side exception while handling an `agent()` or `workflow()` request is answered as an error rather than left pending. `conformance/` holds one script per covered §3 row, and `docs/format.md` pins the rules.
+**M1 result.** `parallel` and `pipeline` live in the sandbox prelude. The `Scheduler` (`engine/scheduler.py`) owns the concurrency semaphore (default min(16, CPUs−2), at least 1), the 1000-call cap, the output-token budget (mirrored into the script on each reply) and abort. `workflow()` runs the child in a `node:vm` context of its own, on the same `Scheduler`, with the agent counter, spent tokens and phase held in the host and shared as primitives. Its own `workflow` always throws, and nothing but JSON crosses between the contexts. (The first M1 build shared the parent's hooks into the child, and a value returned by `parallel` led back to the parent's `workflow`.) `Registry` is a plain ordered list of directories until M4's multi-source registry. `RunOptions.timeout` kills Node, argless `Intl` date formatting throws, and the stdout reader fails all pending requests on any exception. A host-side exception while handling an `agent()` or `workflow()` request is answered as an error rather than left pending. `conformance/` holds one script per covered §3 row, and `docs/format.md` pins the rules.
 
-Open for M2:
+**M2 result.** `engine/journal.py` writes `<state_dir>/runs/<runId>/journal.jsonl` (a header with the script snapshot, args, call cap and budget; workflow snapshots when first resolved; one record per completed call), flushed per record, with a torn last line ignored. `engine/resume.py` serves calls by key (the n-th call with a key gets the n-th record with it, re-stamped with the new ordinal) until the first call with no match, then runs that call and every later one live, and logs where the cache ended. A resumed run gets a new run id and a journal that copies the reused records and, when it opens, every inherited child snapshot. (The first M2 build matched by ordinal in issue order, so a later pipeline stage, numbered in completion order, missed the cache on resume. A journal opened before any record was written leaked its file on a bad header.) `flow run` takes `--state-dir`, `--run-id` and `--resume`. Tests show identical (ordinal, key) sequences under varied latencies for synchronously issued calls, a kill mid-run resumes with only the in-flight calls dispatched, and an edited prompt makes that call and later ones live. `conformance/resume.js` covers the §3 resume row.
+
+Open for M4:
 - node-marked tests still skip silently when no Node is found, so CI must provide Node;
 - `Temporal` (absent in Node 24's vm context today) must be banned if a future Node exposes `Temporal.Now`;
-- the unchecked choices listed in `docs/format.md` need a probe against Claude Code.
+- the unchecked choices listed in `docs/format.md` need a probe against Claude Code;
 
 ## 9. Risks
 
@@ -500,7 +506,8 @@ Open for M2:
 - **Approval floods:** with N parallel children there can be N prompts.
   Mitigation: per-profile policy, and never auto-approve beyond it.
 - **Ordinal determinism:** ordinals are taken at issue time in JS, not at
-  completion.
+  completion, but a later pipeline stage issues in completion order. Resume
+  matches by key, not ordinal, so this does not cost cache hits.
 - **Ahead of the spec:** `_meta` keys, an experimental capability and host
   hooks can diverge from what upstream later adopts. Mitigation: names are
   namespaced (`ahp-py/...`), each has a §10 request, and moving to the
