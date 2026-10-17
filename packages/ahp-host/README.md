@@ -196,7 +196,11 @@ longer wipes a client's plugins or the user's on/off switches: the host merges
 the replacement. A tool result can **be a diff** (`TurnSink.file_edit`, `fileEdit` content); a
 turn can carry a **system notification**; and a failed turn can be **resumed**
 (`chat/turnResume`) by an agent that is `ResumesTurns`, accepted only when the
-spec's preconditions hold.
+spec's preconditions hold. A **structured turn** (an ahp-py extension) returns a
+value matching a JSON Schema the client puts in
+`Message._meta["ahp-py/outputSchema"]`; the host validates and retries it, and a
+turn with no valid result fails with `errorType` `ahp-py/structuredOutput` (see
+the "Structured turns" section of the provider guide).
 
 **One agent session serves every chat**, so every message names its chat
 (`UserMessage.chat_uri`), and an agent that keeps a conversation per chat can

@@ -83,6 +83,7 @@ scripts/regenerate_js_semantics.sh      # needs Node + a checkout of upstream
 | `src/ahp_protocol/channels.py` | `ROOT_URI`, `classify`, `reducer_for_state` | stdlib |
 | `src/ahp_protocol/versions.py` | `parse_version`, `is_compatible`, `negotiate` | stdlib |
 | `src/ahp_protocol/errors.py` | `AhpError`, `to_json`/`from_json`, spec codes | `types` |
+| `src/ahp_protocol/ext/` | ahp-py extensions ahead of the spec (`_meta` keys, host-internal tool names) | stdlib only |
 | `src/ahp_protocol/transport/` | the `Transport` protocol + in-memory pair | `types` |
 | `src/ahp_protocol/conformance/` | fixture loaders over the vendored corpora | `types`, `reducers` |
 | `vendor/upstream/` | pinned fixtures, schemas and TS sources of truth, **committed** | — |

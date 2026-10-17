@@ -33,6 +33,7 @@ from typing import Any, Final, Protocol
 
 from ahp_host.core import AhpError
 from ahp_host.provider.base import (
+    HOST_CLIENT_ID,
     AgentInfo,
     AgentInfoChanged,
     AgentSessionContext,
@@ -44,6 +45,7 @@ from ahp_host.provider.base import (
     ConfigResolution,
     ConfigValue,
     ForkedFrom,
+    HostTool,
     IdentifiesTurn,
     ModelInfo,
     ResolvesInput,
@@ -94,7 +96,7 @@ from ahp_host_claude.claude_ai import (
     this_machine,
     uri_of,
 )
-from ahp_host_claude.client_tools import ClientTool, is_client_tool
+from ahp_host_claude.client_tools import ClientTool, is_client_tool, is_host_tool
 from ahp_host_claude.config import DEFAULT_STATE
 from ahp_host_claude.effort import CONFIG_KEY as EFFORT_KEY
 from ahp_host_claude.effort import DEFAULT as EFFORT_DEFAULT
@@ -573,6 +575,10 @@ class ClaudeSession:
         self._client_tools = client_tools.offered(creator)
         #: The tools the running Claude client was started with.
         self._started_tools: tuple[ClientTool, ...] = ()
+        #: The tools the host offers for the turn in hand (`StructuredOutput`),
+        #: and what the running Claude client was started with.
+        self._host_tools: tuple[HostTool, ...] = ()
+        self._started_host_tools: tuple[HostTool, ...] = ()
         #: Claude's id for each client tool call about to run, in order, keyed
         #: by tool: the MCP handler is not told it, and the hook before it is.
         self._client_calls: dict[str, list[tuple[str, dict[str, Any]]]] = {}
@@ -733,12 +739,20 @@ class ClaudeSession:
         if not tools:
             options = {"tools": list(self._chat_tools), "strict_mcp_config": True}
             prompt["append"] = CHAT_PROMPT
+        servers: dict[str, Any] = {}
         if self._client_tools:
             # Tools that run in a client, not here: offered with or without a
             # folder, since they touch nothing on this machine.
-            options["mcp_servers"] = {
-                client_tools.SERVER: client_tools.server(self._client_tools, self._run_client_tool)
-            }
+            servers[client_tools.SERVER] = client_tools.server(
+                self._client_tools, self._run_client_tool
+            )
+        if self._host_tools:
+            # The same for the host's own, for this turn (`StructuredOutput`).
+            servers[client_tools.HOST_SERVER] = client_tools.host_server(
+                self._host_tools, self._run_host_tool
+            )
+        if servers:
+            options["mcp_servers"] = servers
         if _FORWARDS_SUBAGENT_TEXT:
             # A subagent's own prose, not just its tool calls, so its worker
             # chat reads as a conversation.
@@ -896,6 +910,7 @@ class ClaudeSession:
             # Pinned: the conversation lives under this folder from now on.
             self.directory = Path(str(options.cwd))
             self._started_tools = self._client_tools if self.mirror_of is None else ()
+            self._started_host_tools = self._host_tools if self.mirror_of is None else ()
             self._started_agent = self._agent
             self._started_denied = self._denied_skills()
             client = self._client_factory(options)
@@ -1188,7 +1203,7 @@ class ClaudeSession:
             cwd=cwd,
             disabled=self.disabled,
             workspace=self._workspace_uri(),
-            hidden_servers=(client_tools.SERVER,),
+            hidden_servers=(client_tools.SERVER, client_tools.HOST_SERVER),
         )
 
     async def _refresh_mcp(self) -> None:
@@ -1332,9 +1347,10 @@ class ClaudeSession:
 
     async def _pre_tool_use(self, hook_input: Any, tool_use_id: str | None, context: Any) -> Any:
         name = str(hook_input.get("tool_name", ""))
-        if is_client_tool(name):
+        if is_client_tool(name) or is_host_tool(name):
             # Security-relevant: allowed without this host's approval. The
-            # client that runs it owns that decision (`client_tools.py`).
+            # client that runs a client tool owns that decision, and a host
+            # tool runs in the host and touches nothing here (`client_tools.py`).
             call_id = tool_use_id or hook_input.get("tool_use_id")
             tool_input = hook_input.get("tool_input")
             if isinstance(call_id, str):
@@ -1406,9 +1422,9 @@ class ClaudeSession:
         if not self._lock.locked() and self._turn is None:
             await self._restart_client()
 
-    def _claimed_call(self, tool: ClientTool, arguments: dict[str, Any]) -> str | None:
-        """Claude's id for this call, recorded by the hook just before it."""
-        queue = self._client_calls.get(f"mcp__{client_tools.SERVER}__{tool.name}") or []
+    def _claimed_call(self, name: str, arguments: dict[str, Any]) -> str | None:
+        """Claude's id for this call to the tool *name*, recorded by the hook just before it."""
+        queue = self._client_calls.get(name) or []
         for index, (_, tool_input) in enumerate(queue):
             if tool_input == arguments:
                 return queue.pop(index)[0]
@@ -1416,7 +1432,8 @@ class ClaudeSession:
 
     async def _run_client_tool(self, tool: ClientTool, arguments: dict[str, Any]) -> dict[str, Any]:
         """Have the client run one of its tools, as a call of this turn."""
-        call_id = self._claimed_call(tool, arguments) or f"client-{uuid.uuid4()}"
+        claude_name = f"mcp__{client_tools.SERVER}__{tool.name}"
+        call_id = self._claimed_call(claude_name, arguments) or f"client-{uuid.uuid4()}"
         sink = self._sink
         if sink is None:
             return client_tools.error("No turn is running to ask the client in.")
@@ -1437,10 +1454,38 @@ class ClaudeSession:
             return client_tools.error(str(exc))
         return client_tools.mcp_result(result)
 
+    def offers_host_tools(self) -> bool:
+        """`ReturnsStructuredOutput`: a mirror's Claude Code runs elsewhere and
+        cannot be given tools, so the host falls back to text there."""
+        return self.mirror_of is None
+
+    async def _run_host_tool(self, tool: HostTool, arguments: dict[str, Any]) -> dict[str, Any]:
+        """Hand one of this turn's host tools to the host, as a call of the turn."""
+        claude_name = f"mcp__{client_tools.HOST_SERVER}__{tool.name}"
+        call_id = self._claimed_call(claude_name, arguments) or f"host-{uuid.uuid4()}"
+        sink = self._sink
+        if sink is None:
+            return client_tools.error("No turn is running.")
+        if not any(t.name == tool.name for t in self._host_tools):
+            return client_tools.error(f"{tool.title} is not offered in this turn.")
+        try:
+            result = await sink.run_client_tool(
+                ClientToolCall(
+                    call_id=call_id,
+                    name=tool.name,
+                    client_id=HOST_CLIENT_ID,
+                    tool_input=arguments,
+                    display_name=tool.title,
+                )
+            )
+        except LookupError as exc:
+            return client_tools.error(str(exc))
+        return client_tools.mcp_result(result)
+
     async def _announce(self, call_id: str, name: str, tool_input: Mapping[str, Any]) -> None:
         if call_id in self._announced or self._sink is None:
             return
-        if is_client_tool(name):
+        if is_client_tool(name) or is_host_tool(name):
             return  # the client's call: `run_client_tool` announces it, as the client's
         self._announced.add(call_id)
         self._inputs[call_id] = (name, dict(tool_input))
@@ -1719,6 +1764,15 @@ class ClaudeSession:
                 self._pick_agent(message)
                 if self._client is not None and self._agent != self._started_agent:
                     self._restart_pending = True
+                self._host_tools = tuple(message.host_tools)
+                if self._client is not None and any(
+                    t not in self._started_host_tools for t in self._host_tools
+                ):
+                    # Claude Code fixes its tools at start-up: a turn needing a
+                    # tool or schema it was not started with restarts it on the
+                    # same conversation, as a changed set of client tools does.
+                    # One needing nothing new restarts nothing.
+                    self._restart_pending = True
             client = await self._client_for(sink)
             if client is None:
                 return
@@ -1726,6 +1780,15 @@ class ClaudeSession:
             turn.attached.set()
             self._begin(turn)
             try:
+                if message.continues_turn:
+                    # A follow-up inside the turn: the same place in the
+                    # transcript (as `_resume`), no recap, rewind note or seed.
+                    mark = next(
+                        (m for m in reversed(self.marks) if m.turn == _turn_id_of(sink)), None
+                    )
+                    content = prompt_content(message.text, message.raw, self._roots, ())
+                    await self._query(client, turn, sink, content, resuming=mark)
+                    return
                 if self._recap:
                     recap, self._recap = self._recap, None
                     await sink.text_delta(recap)

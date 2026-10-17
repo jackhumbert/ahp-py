@@ -29,7 +29,10 @@ server's AGENTS.md requires ("Adding a provider adapter").
   permission mode Claude Code reports at init is put back to the session's; a
   chat's own approval mode (AHP 1.1.0) moves only that chat's gate, and a
   mode Claude Code moves itself stays in the chat that set one
-  (`LocalClaudeSession.chat_config_changed`, `_follow_mode`).
+  (`LocalClaudeSession.chat_config_changed`, `_follow_mode`); host tools
+  (`mcp__host__...`, the per-turn `StructuredOutput`) pass the approval gate
+  like client tools, since they run in the host and touch nothing on this
+  machine (`ClaudeSession._pre_tool_use`, `client_tools.is_host_tool`).
 - SDK behaviour not documented by the SDK was read from the CLI it bundles
   (`claude_agent_sdk/_bundled/claude`): `strings` it and search for the
   control request or message schema (`subtype:R("...")`).

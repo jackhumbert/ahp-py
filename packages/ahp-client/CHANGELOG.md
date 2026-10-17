@@ -18,6 +18,10 @@ Every release states the protocol versions it speaks.
 
 ### Added
 
+- Structured turns, an ahp-py extension: `prompt(..., output_schema=...)` sets
+  `Message._meta`, `TurnCompleted.structured` carries the host-validated result
+  (None for an ordinary turn), and `actions.turn_started(meta=...)` writes
+  `Message._meta`.
 - `move_chat(chat, destination)` wraps `moveChat`, new in AHP 1.0.0. It is not
   gated on `movable` locally; the host validates it.
 - **Offers AHP 1.0.0** first: `1.0.0, 0.9.0, 0.8.0, 0.7.0, 0.6.0`, from

@@ -40,6 +40,18 @@ its reply is not shown.
 
 Sessions are resumable: each chat's ACP session id is the resume state,
 restored with `session/resume` (or `session/load`) when the agent offers it.
+
+Client tools: the tools a session's clients publish (and the host's own
+per-turn tools) reach the agent as one MCP server, `ahp_client`, which is the
+stdio relay of :mod:`ahp_host_acp.client_tools`. Each call goes through
+`TurnSink.run_client_tool`, so it runs in the client; its row is the one that
+call publishes, and the agent's own row for it is dropped. Calls to these tools
+are let through without asking (:func:`ahp_host_acp.permissions.relayed_answer`).
+ACP has no request to change a live session's `mcpServers`, so the server is
+fixed when the session is opened and only its tool *list* is dynamic: the relay
+answers every `tools/list` from the current state and sends
+`notifications/tools/list_changed` when it moves. An agent that caches its
+tools and ignores `list_changed` keeps the set it first listed.
 """
 
 from __future__ import annotations
@@ -61,6 +73,7 @@ from ahp_host.provider.base import (
     AgentInfoChanged,
     AgentSessionContext,
     ChatContext,
+    ClientToolCall,
     CompletionItem,
     CompletionRequest,
     ConfigRequest,
@@ -73,11 +86,12 @@ from ahp_host.provider.base import (
     UserMessage,
 )
 
+from ahp_host_acp import client_tools, jsonrpc, permissions, prompts
 from ahp_host_acp import commands as slash
-from ahp_host_acp import jsonrpc, permissions, prompts
 from ahp_host_acp import plan as plans
 from ahp_host_acp.catalogue import Catalogue
 from ahp_host_acp.changes import Diff, SessionEdits, diffs_of
+from ahp_host_acp.client_tools import RelayTool
 from ahp_host_acp.jsonrpc import (
     AcpConnection,
     AcpError,
@@ -179,6 +193,12 @@ class _Chat:
         self.quiet = False
         self.calls: dict[str, ToolCall] = {}
         self.announced: set[str] = set()
+        #: The host's own tools for the turn running now (`StructuredOutput`),
+        #: offered through the relay beside the session's client tools.
+        self.host_tools: tuple[RelayTool, ...] = ()
+        #: ACP call ids that are relayed tool calls: `run_client_tool` shows
+        #: those, so the agent's own row for one would be a duplicate.
+        self.relayed: set[str] = set()
         #: The last diffs each running call showed: its final update may
         #: replace them with a plain result.
         self.diffs: dict[str, list[Diff]] = {}
@@ -276,6 +296,13 @@ class AcpSession:
         self._capabilities: Mapping[str, Any] = {}
         self._catalogue = catalogue if catalogue is not None else Catalogue()
         self._on_agent_changed = on_agent_changed or _nothing
+        creator = (
+            [{"clientId": context.active_client_id, "tools": list(context.client_tools)}]
+            if context.active_client_id is not None
+            else []
+        )
+        self._client_tools = client_tools.offered(creator)
+        self._bridge = client_tools.ToolBridge(self._relay_tools, self._relay_call)
 
         # -- session config ----------------------------------------------------
         #: The session's config values, for the properties its schema has --
@@ -364,6 +391,7 @@ class AcpSession:
                 await self._drop_connection()
             cwd = self.working_directory()
             self.directory = cwd
+            await self._bridge.start()
             conn = await self._connect(
                 self._spec.command,
                 cwd=cwd,
@@ -423,12 +451,23 @@ class AcpSession:
         servers = (server.to_acp(self._capabilities) for server in self._spec.mcp_servers)
         return [server for server in servers if server is not None]
 
-    def _base(self) -> dict[str, Any]:
-        return {"cwd": str(self.directory), "mcpServers": self._mcp_servers()}
+    def _base(self, chat: _Chat | None) -> dict[str, Any]:
+        """The parameters every session request shares.
+
+        The relay is last, after the configured servers. A request with no
+        chat (a fork for another session) has none: that session's own
+        process gives its chat one when it reopens the fork.
+        """
+        servers = self._mcp_servers()
+        if chat is not None:
+            relay = self._bridge.server(chat.uri).to_acp(self._capabilities)
+            if relay is not None:
+                servers.append(relay)
+        return {"cwd": str(self.directory), "mcpServers": servers}
 
     async def _open(self, conn: AcpConnection, chat: _Chat) -> None:
         """Open *chat*'s session in this process: reattach it, or start one."""
-        base = self._base()
+        base = self._base(chat)
         self._opening = chat
         try:
             if chat.acp_session_id is not None:
@@ -501,6 +540,43 @@ class AcpSession:
 
     async def aclose(self) -> None:
         await self._drop_connection()
+        await self._bridge.aclose()
+
+    # -- client tools ------------------------------------------------------------
+
+    def _relay_tools(self, key: str) -> tuple[RelayTool, ...]:
+        """The tools the relay for chat *key* offers now."""
+        chat = self._chats.get(key)
+        return client_tools.merged(chat.host_tools if chat else (), self._client_tools)
+
+    async def _relay_call(
+        self, key: str, tool: RelayTool, arguments: dict[str, Any]
+    ) -> dict[str, Any]:
+        """One relayed call: the client (or the host) runs it, in the chat's turn."""
+        chat = self._chats.get(key)
+        sink = chat.sink if chat else None
+        if sink is None:
+            return client_tools.error("No turn is running to ask the client in.")
+        try:
+            result = await sink.run_client_tool(
+                ClientToolCall(
+                    call_id=f"relay-{uuid.uuid4().hex}",
+                    name=tool.published,
+                    client_id=tool.client_id,
+                    tool_input=arguments,
+                    display_name=tool.title,
+                )
+            )
+        except LookupError as exc:
+            return client_tools.error(str(exc))
+        return client_tools.mcp_result(result)
+
+    async def active_clients_changed(self, clients: Sequence[Mapping[str, Any]]) -> None:
+        """`FollowsActiveClients`: the tools on offer are the clients' as they now are."""
+        offered = client_tools.offered(clients)
+        if offered != self._client_tools:
+            self._client_tools = offered
+            self._bridge.tools_changed()
 
     def _live(self, chat: _Chat) -> AcpConnection | None:
         """The connection *chat*'s session is open on, if it is open now."""
@@ -617,7 +693,9 @@ class AcpSession:
                 self._session_capability("resume") or self._capabilities.get("loadSession")
             ):
                 raise AhpError(PERMISSION_DENIED, "this agent cannot reopen a forked session")
-            base = self._base() if cwd is None else {**self._base(), "cwd": str(cwd)}
+            base = self._base(into)
+            if cwd is not None:
+                base["cwd"] = str(cwd)
             async with self._open_lock:
                 # Without a chat here, an update for the fork's id is dropped.
                 self._opening = into
@@ -937,9 +1015,23 @@ class AcpSession:
             # After the row: the host clears the activity when a call completes.
             await publisher.activity_changed(working)
 
+    def _is_relayed(self, chat: _Chat, update: Mapping[str, Any]) -> bool:
+        """Whether the agent's tool call is one of the relay's tools.
+
+        The title, the kind and the raw input all have to fit (see
+        `client_tools.looks_relayed`): only then is the call let through
+        without asking, so a disguised local call is asked about as usual.
+        """
+        return client_tools.looks_relayed(update, self._relay_tools(chat.uri))
+
     async def _on_tool_call(self, chat: _Chat, update: Mapping[str, Any], sink: TurnSink) -> None:
         call_id = update.get("toolCallId")
         if not isinstance(call_id, str) or not call_id:
+            return
+        if call_id in chat.relayed:
+            return
+        if self._is_relayed(chat, update):
+            chat.relayed.add(call_id)  # `run_client_tool` publishes this call's row
             return
         call = chat.calls.setdefault(call_id, ToolCall(call_id))
         before = call.progress_line()
@@ -1034,6 +1126,11 @@ class AcpSession:
         if not isinstance(call_id, str) or not call_id:
             return permissions.CANCELLED
         offered = permissions.acp_options(params.get("options"))
+        if self._is_relayed(chat, update) and (answer := permissions.relayed_answer(offered)):
+            # A client's (or the host's) own tool: its owner decides, and
+            # `run_client_tool` shows the call. See `permissions.relayed_answer`.
+            chat.relayed.add(call_id)
+            return answer
         call = chat.calls.setdefault(call_id, ToolCall(call_id))
         call.merge(update)
         self._note_diffs(chat, call)
@@ -1079,12 +1176,26 @@ class AcpSession:
             chat.calls.clear()
             chat.announced.clear()
             chat.diffs.clear()
-            if chat.turns is not None:
+            chat.relayed.clear()
+            # A follow-up inside one AHP turn is not a turn: the fork rule
+            # compares turn counts with what the chat shows.
+            if chat.turns is not None and not message.continues_turn:
                 chat.turns += 1
+            tools = client_tools.host_relay_tools(message.host_tools)
+            if tools != chat.host_tools:
+                chat.host_tools = tools
+                self._bridge.tools_changed(chat.uri)
             try:
                 await self._run_turn(conn, chat, message, sink)
             finally:
                 chat.sink = None
+                if chat.host_tools:
+                    chat.host_tools = ()
+                    self._bridge.tools_changed(chat.uri)
+
+    def offers_host_tools(self) -> bool:
+        """`ReturnsStructuredOutput`: every session has the relay (ACP requires stdio MCP)."""
+        return True
 
     async def _settle(self, chat: _Chat) -> None:
         inflight, chat.inflight = chat.inflight, None

@@ -54,6 +54,50 @@ versions each release speaks.
   automation run cut off at the deadline is failed by the next start rather than
   having its turn resumed with no run attached.
 
+### Added — structured turns (ahp-py extension ahead of the spec)
+
+- `HostTool` (`provider.base`): a tool the host offers the agent for one turn.
+- `HOST_CLIENT_ID` (`"ahp-py/host"`): the `ClientToolCall.client_id` for a host
+  tool call, which the host's sink answers itself and never publishes to a
+  client.
+- `ReturnsStructuredOutput`: a provider protocol (`offers_host_tools()`) for an
+  agent session that can expose per-turn host tools to its agent.
+- `UserMessage.host_tools` and `UserMessage.continues_turn`.
+- `core/structured.py`: the pure checks (schema lookup in
+  `_meta['ahp-py/outputSchema']`, validator, error summary, last-JSON-block
+  parser) and the prompt texts.
+- `jsonschema>=4.18` is now a runtime dependency (it validates
+  structured-turn results); `types-jsonschema` joins the `dev` extra. The
+  floor matters: before 4.18 jsonschema fetched remote `$ref`s while
+  validating, and the schema comes from any connected client. Validation also
+  runs on an empty `referencing.Registry`, so nothing is retrieved.
+- An output schema may only reference itself (`#...`): an external `$ref` fails
+  the turn with the structured-output code before the agent runs, and a local
+  `$ref` that does not resolve fails it rather than escaping as a jsonschema
+  error.
+- When the agent never calls `StructuredOutput` (an ACP agent that cached its
+  tool list before the tool existed, say), the host asks once more for the
+  result as JSON in the reply before failing the turn.
+- Structured turns in the turn machinery: a message carrying
+  `_meta['ahp-py/outputSchema']` makes a structured turn. The host offers the
+  provider's agent the host tool `StructuredOutput` (for a
+  `ReturnsStructuredOutput` session), intercepts its calls in
+  `ActionTurnSink.run_client_tool` (client id `HOST_CLIENT_ID`; they never
+  reach a client), validates the arguments with jsonschema, and publishes the
+  accepted value as the call's `structuredContent`. Up to 3 invalid calls per
+  turn, then up to 2 follow-up messages inside the same turn if the agent never
+  called it. A provider without the capability gets a text fallback: the
+  schema is appended to the prompt and the reply's last JSON block is parsed
+  and validated, with the same follow-ups. A turn with no valid result ends as
+  `turn_failed` with `errorType` `ahp-py/structuredOutput`. `ActionTurnSink`
+  gains `host_tools` and `on_text`; `StructuredTurn` lives in
+  `core/structured.py`.
+- Docs: a "Structured turns" section in the provider guide (executed by the
+  guide tests), a README paragraph, and `docs/requests.md` entry 10, the
+  upstream request for `Message.outputSchema` and a structured turn result.
+- `EchoProvider(structured=True)`: answers a structured turn with its message
+  text as the result (plain Echo takes the fallback path).
+
 ### Changed — AHP 1.1.0 (upstream `main`, unreleased)
 
 - **The pending-message drain reads the 1.1.0 shared list.** Every steering

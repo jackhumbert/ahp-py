@@ -22,12 +22,15 @@ from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Final
 
+from ahp_protocol.ext.structured import STRUCTURED_OUTPUT_ERROR_TYPE
 from ahp_protocol.types import IS_CLIENT_DISPATCHABLE
 
 from ahp_host.core.changesets import ContentStore, file_edit
 from ahp_host.core.pending import PendingRequest, PendingRequests, RequestOutcome
 from ahp_host.core.sequencer import Sequencer
+from ahp_host.core.structured import StructuredOutputFailed, StructuredTurn, output_schema
 from ahp_host.provider.base import (
+    HOST_CLIENT_ID,
     AgentSession,
     AttachedChat,
     AuthChallenge,
@@ -217,6 +220,12 @@ class ActionTurnSink:
         #: `chat/toolCallReady`, and what was published about each of them. See
         #: `_ensure_runnable`.
         self._streaming: dict[str, _StreamingCall] = {}
+        #: Handlers for this turn's host tools, by name. A call a provider makes
+        #: with ``HOST_CLIENT_ID`` is answered here and goes no further.
+        self.host_tools: dict[str, Callable[[ClientToolCall], Awaitable[ToolResult]]] = {}
+        #: Called with every ``text_delta`` text before it is published; the
+        #: structured-output fallback reads the reply through it.
+        self.on_text: Callable[[str], None] | None = None
 
     @property
     def turn_id(self) -> str:
@@ -310,6 +319,8 @@ class ActionTurnSink:
         return self._markdown_part_id
 
     async def text_delta(self, text: str) -> None:
+        if self.on_text is not None:
+            self.on_text(text)
         part_id = await self._ensure_markdown_part()
         await self._sequencer.publish(
             self._channel,
@@ -1026,6 +1037,13 @@ class ActionTurnSink:
         responsible: "the identified client is responsible for executing the
         tool and dispatching `chat/toolCallComplete` with the result."
         """
+        if call.client_id == HOST_CLIENT_ID:
+            # A host tool (StructuredOutput): answered here, never parked, never
+            # mirrored as inputNeeded and never given a client contributor.
+            handler = self.host_tools.get(call.name)
+            if handler is None:
+                raise LookupError(f"{call.name!r} is not a host tool of this turn")
+            return await handler(call)
         if not self._is_active_client(call.client_id):
             # Refused rather than parked. A request addressed to a client that
             # is not in the session can never be answered, and a provider that
@@ -1422,20 +1440,26 @@ class TurnRunner:
 
         raw = started.get("message")
         message: Mapping[str, Any] = raw if isinstance(raw, Mapping) else {}
-        await self._drive(
-            turn_id,
-            sink,
-            lambda: agent_session.send_user_message(
-                user_message(
-                    message,
-                    # Which chat. One agent session serves every chat of the
-                    # session, and nothing told it which one a message was for.
-                    chat_uri=self._channel,
-                    attached=attached_chats(self._sequencer, message),
-                ),
-                sink,
-            ),
-        )
+
+        async def go() -> None:
+            base = user_message(
+                message,
+                # Which chat. One agent session serves every chat of the
+                # session, and nothing told it which one a message was for.
+                chat_uri=self._channel,
+                attached=attached_chats(self._sequencer, message),
+            )
+            # Inside `_drive`, so a bad `_meta` value fails the turn with the
+            # structured error type rather than escaping.
+            schema = output_schema(message)
+            if schema is None:
+                await agent_session.send_user_message(base, sink)
+                return
+            await StructuredTurn(schema).run(
+                agent_session, base, sink, is_active=lambda: self._is_active(turn_id)
+            )
+
+        await self._drive(turn_id, sink, go)
 
     async def resume(self, agent_session: AgentSession | None, turn_id: str) -> None:
         """Continue a failed turn the reducer has just reopened (`chat/turnResume`).
@@ -1444,7 +1468,8 @@ class TurnRunner:
         the provider adds lands after the error part, and the turn completes,
         fails or is cancelled like any other. `duration` measures this
         resumption -- the host's own work on it -- not the time the turn sat
-        failed in between.
+        failed in between. A resumed turn is never structured: the schema rode
+        on the original message and is not offered again.
         """
         sink = self._sink(agent_session, turn_id)
         if not isinstance(agent_session, ResumesTurns):
@@ -1469,11 +1494,16 @@ class TurnRunner:
             await call()
         except Exception as exc:
             if self._is_active(turn_id):
-                await sink.turn_failed(
-                    f"{type(exc).__name__}: {exc}",
-                    "agent.turn",
-                    _elapsed_ms(started_at),
-                )
+                if isinstance(exc, StructuredOutputFailed):
+                    await sink.turn_failed(
+                        str(exc), STRUCTURED_OUTPUT_ERROR_TYPE, _elapsed_ms(started_at)
+                    )
+                else:
+                    await sink.turn_failed(
+                        f"{type(exc).__name__}: {exc}",
+                        "agent.turn",
+                        _elapsed_ms(started_at),
+                    )
             return
         finally:
             # ADR 0005: the turn is the scope. However this turn ended -- return,

@@ -2,6 +2,25 @@
 
 ## [Unreleased]
 
+### Added — structured turns
+
+- **`ClaudeSession` is a `ReturnsStructuredOutput`.** A turn whose message
+  carries `host_tools` (the host's `StructuredOutput`, for a message with an
+  output schema) gets them from a second in-process MCP server, `host`
+  (`mcp__host__<name>`). Each call goes to the host through
+  `TurnSink.run_client_tool` with `HOST_CLIENT_ID`, which validates it and
+  answers; a refusal comes back as a tool error so Claude retries.
+- Claude Code fixes its tools at start-up, so a turn needing a tool or schema
+  it was not started with restarts it on the same conversation, as a changed
+  set of client tools does. A turn needing nothing new restarts nothing.
+- A structured follow-up (`continues_turn`) continues the turn's place in the
+  transcript and records no second turn mark.
+- A claude.ai mirror cannot be given tools (`offers_host_tools()` is False);
+  the host uses its text fallback there.
+- **Security-relevant:** the approval gate lets calls to host tools through
+  without asking, like client tools: they run in the host and touch nothing on
+  this machine. Tested in `tests/test_structured_claude.py`.
+
 ### Added — per-chat approvals and effort (AHP 1.1.0)
 
 - **The approval mode and effort can be set for one chat**

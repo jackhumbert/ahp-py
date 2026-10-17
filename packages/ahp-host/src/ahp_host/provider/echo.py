@@ -9,10 +9,21 @@ adapter author reads.
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import json
+import uuid
 from collections.abc import Mapping, Sequence
 from typing import Any, Final
 
+from ahp_protocol.ext.structured import (
+    OUTPUT_SCHEMA_META_KEY,
+    STRUCTURED_OUTPUT_TOOL,
+    needs_wrapping,
+    wrap,
+)
+
 from ahp_host.provider.base import (
+    HOST_CLIENT_ID,
     AgentInfo,
     AgentSession,
     AgentSessionContext,
@@ -133,8 +144,10 @@ class EchoSession:
         confirm_tools: bool = False,
         client_tools: bool = False,
         workspace: DemoWorkspace | None = None,
+        structured: bool = False,
     ) -> None:
         self.context = context
+        self._structured = structured
         self._delay = delay
         self._customizations = customizations
         self._elicit = elicit
@@ -191,10 +204,47 @@ class EchoSession:
             customizations=demo_customizations(), server_tools=demo_server_tools()
         )
 
+    def offers_host_tools(self) -> bool:
+        """`ReturnsStructuredOutput`: only with ``structured=True``, so plain
+        Echo takes the host's prompt-and-parse fallback."""
+        return self._structured
+
+    async def _return_structured(self, message: UserMessage, sink: TurnSink) -> None:
+        """Pose as an agent that answers a structured turn with the message text."""
+        raw = message.raw.get("text")
+        raw_text = raw if isinstance(raw, str) else message.text
+        meta = message.raw.get("_meta")
+        schema = meta.get(OUTPUT_SCHEMA_META_KEY) if isinstance(meta, Mapping) else None
+        arguments: Any
+        try:
+            parsed = json.loads(raw_text)
+            if isinstance(schema, Mapping) and (
+                needs_wrapping(schema) or isinstance(parsed, Mapping)
+            ):
+                arguments = wrap(parsed, schema)
+            else:
+                arguments = {"text": raw_text}
+        except (ValueError, TypeError):
+            arguments = {"text": raw_text}
+        with contextlib.suppress(LookupError):
+            await sink.run_client_tool(
+                ClientToolCall(
+                    call_id=f"echo-structured-{uuid.uuid4().hex[:12]}",
+                    name=STRUCTURED_OUTPUT_TOOL,
+                    client_id=HOST_CLIENT_ID,
+                    tool_input=arguments,
+                    display_name="Structured output",
+                )
+            )
+
     async def send_user_message(self, message: UserMessage, sink: TurnSink) -> None:
         self._cancelled = False
         self._turn_running = True
         try:
+            if self._structured and any(
+                tool.name == STRUCTURED_OUTPUT_TOOL for tool in message.host_tools
+            ):
+                await self._return_structured(message, sink)
             await self._reply(message, sink)
             # Anything steered in while replying is answered in the same turn.
             while self.steered and not self._cancelled:
@@ -424,7 +474,9 @@ class EchoProvider:
         workspace: DemoWorkspace | None = None,
         capabilities: Mapping[str, Any] | None = None,
         completion_trigger_characters: Sequence[str] = (),
+        structured: bool = False,
     ) -> None:
+        self._structured = structured
         self._configurable = configurable
         #: `DeclaresCompletionTriggers`. Empty by default, so a host that
         #: names none advertises none -- the demo passes ``("#",)``, which is
@@ -582,4 +634,5 @@ class EchoProvider:
             confirm_tools=self._confirm_tools,
             client_tools=self._client_tools,
             workspace=self._workspace,
+            structured=self._structured,
         )

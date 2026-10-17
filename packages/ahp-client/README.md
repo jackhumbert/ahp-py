@@ -64,6 +64,20 @@ result = await session.prompt("Summarise README.md", approvals="reads")
 print(result.text)
 ```
 
+### Structured results
+
+A turn can ask for a result that conforms to a JSON Schema. This is an ahp-py
+extension ahead of the spec: the schema rides in `Message._meta`, and a stock
+host ignores it, so the turn then completes with `.structured is None`.
+
+```python
+result = await session.prompt(
+    "How many files changed?",
+    output_schema={"type": "object", "properties": {"count": {"type": "integer"}}},
+)
+print(result.structured)  # {"count": 3}, already validated by the host
+```
+
 ### Terminals
 
 A terminal is the one channel whose state is *contested*: the claim decides who

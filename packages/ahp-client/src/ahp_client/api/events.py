@@ -477,6 +477,10 @@ class Reconnected(_Base):
 class TurnCompleted(_Base):
     #: Authoritative text, read from the mirror rather than accumulated.
     text: str = ""
+    #: The validated result of a structured turn (ahp-py extension), decoded
+    #: from the turn's StructuredOutput tool call; None for an ordinary turn or
+    #: when no valid result exists.
+    structured: Any = None
 
 
 @dataclass(frozen=True, slots=True)

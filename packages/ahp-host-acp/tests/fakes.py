@@ -45,6 +45,16 @@ class RecordingSink:
         self.past_tense: dict[str, str | None] = {}
         self.outputs: dict[str, list[Mapping[str, Any]]] = {}
         self.usage_meta: list[Mapping[str, Any] | None] = []
+        #: The client tool calls the adapter asked this sink to run, and what
+        #: each is answered with (an exception instance is raised instead).
+        self.client_calls: list[ClientToolCall] = []
+        self.client_result: ToolResult | Exception = ToolResult(
+            value={
+                "success": True,
+                "pastTenseMessage": "ran",
+                "content": [{"type": "text", "text": "pong"}],
+            }
+        )
 
     async def text_delta(self, text: str) -> None:
         self.events.append(("text", text))
@@ -153,7 +163,10 @@ class RecordingSink:
         raise AssertionError("not used")
 
     async def run_client_tool(self, call: ClientToolCall) -> ToolResult:
-        raise AssertionError("not used")
+        self.client_calls.append(call)
+        if isinstance(self.client_result, Exception):
+            raise self.client_result
+        return self.client_result
 
 
 class RecordingPublisher:

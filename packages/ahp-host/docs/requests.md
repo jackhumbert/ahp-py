@@ -298,6 +298,26 @@ connection is a policy decision; a bound with a documented behaviour on
 overflow is probably the answer. Filed so the choice is deliberate rather than
 implicit, ideally with the limit stated in `docs/guide/deploying.md`.
 
+## 10. Structured turns have no wire shape (upstream)
+
+A client often wants a turn's answer as data, not prose. ahp-py supports that
+today with conventions of its own: the client puts a JSON Schema in
+`Message._meta["ahp-py/outputSchema"]`; the host offers the agent a host-internal
+`StructuredOutput` tool whose input schema is that schema; the completed call
+carries the validated value as `structuredContent`. A non-object schema is
+wrapped under a `value` property, because `structuredContent` and MCP tool
+arguments are objects. A turn with no valid result fails with
+`ErrorInfo.errorType` `ahp-py/structuredOutput`.
+
+**Request: a `Message.outputSchema` field, and a structured result on a
+completed turn** (for example `chat/turnComplete.result`, or a typed response
+part), plus a standard `errorType` for "no valid structured result".
+
+Why upstream: without it every client has to learn a private `_meta` key and a
+tool-name convention, and a different host cannot honour the request at all. The
+current shape is a stopgap that stays wire-compatible, since a stock client
+ignores `_meta` and shows an ordinary tool call.
+
 ## Still deliberately not requested
 
 The list above holds, and one addition:

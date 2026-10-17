@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -12,4 +13,11 @@ def test_format_doc_names_every_conformance_script() -> None:
 
 
 def test_format_doc_plan_status() -> None:
-    assert "M2 done" in (ROOT / "docs" / "plan.md").read_text(encoding="utf-8")
+    # The status line names what is done and what is next; it must exist and
+    # name a next milestone that the milestone table lists.
+    text = (ROOT / "docs" / "plan.md").read_text(encoding="utf-8")
+    status = re.search(r"^Status: (.*)$", text, re.MULTILINE)
+    assert status is not None
+    nxt = re.search(r"\b(M\d+)\b[^.]*\bis next\b", status.group(1))
+    assert nxt is not None
+    assert f"| {nxt.group(1)} |" in text

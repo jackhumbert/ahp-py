@@ -4,6 +4,39 @@
 
 ### Added
 
+- `ReturnsStructuredOutput`: every ACP session offers the host's per-turn tools,
+  so a turn that asks for a structured result gets a `StructuredOutput` tool in
+  the relay's list for that turn only (the list is refreshed when the turn
+  starts and ends). The call is run by the host, so it is let through like a
+  client tool. A follow-up message inside one AHP turn (`continues_turn`) does
+  not count as a turn for the fork rule.
+- An opt-in live smoke test (`tests/test_live_structured.py`), skipped unless
+  `AHP_ACP_LIVE_AGENT` names an ACP agent command.
+- Client tools for ACP agents: a session's client tools (kept current as
+  clients come and go, `FollowsActiveClients`) and the host's per-turn tools
+  are given to the agent as an `ahp_client` MCP server, served by the stdio
+  relay and run through `TurnSink.run_client_tool`. The server is fixed when a
+  chat's ACP session is opened (ACP cannot change it later); only its tool
+  list is dynamic, so an agent that caches tools and ignores
+  `tools/list_changed` sees the set it first listed.
+- **Security-relevant:** a call to one of these tools is allowed once without
+  asking the user (`permissions.relayed_answer`: the agent's *allow once*,
+  never *always*), because the client that runs the tool decides. The agent's
+  own row for such a call is dropped; the client's replaces it. A permission
+  request counts as such a call only when its title names a relay tool
+  exactly, its kind is absent or `other`, and its raw input (if any) is an
+  object using only the properties the tool's schema declares
+  (`client_tools.looks_relayed`); values are left for the tool's owner to
+  refuse. A title alone is not enough,
+  because the model often writes a call's title: a shell command titled after
+  a relay tool is asked about like any other call.
+- A stdio MCP relay (`python -m ahp_host_acp.relay`) and the loopback
+  `ToolBridge` behind it, so any ACP agent can be given a session's client
+  tools (and the host's per-turn tools) as an MCP server; the relay
+  authenticates with a per-session random token passed in the server entry's
+  environment. The relay's stdin and stdout are UTF-8 with "\n" line ends
+  whatever the locale, as MCP's stdio transport requires (on Windows the
+  defaults are the locale code page and "\r\n").
 - Message attachments in the prompt, per the agent's `promptCapabilities`:
   served files embedded (`resource`, small text files) or linked
   (`resource_link` to the real path), web links, selections named in a text

@@ -27,7 +27,7 @@ classifiers = [
   "Topic :: Software Development :: Libraries",
   "Typing :: Typed",
 ]
-# One runtime dependency, and it is the other half of this project -- plus,
+# Runtime dependencies: the other half of this project -- plus,
 # on Windows only, the IANA time-zone database. Automation schedules are
 # evaluated in a named zone (`AutomationSchedule.timeZone`), `zoneinfo` reads
 # the operating system's database, and Windows does not have one.
@@ -38,7 +38,12 @@ classifiers = [
 # The pin is TIGHT on purpose: the spec lands breaking changes in MINOR bumps
 # and the protocol package's MINOR moves with the vendored tag, so a loose pin
 # would let a spec break arrive as a patch upgrade.
-dependencies = ["ahp-protocol~=0.1.0", "tzdata; sys_platform == 'win32'"]
+#
+# `jsonschema` is a runtime dependency since structured turns: the host
+# validates a StructuredOutput call's arguments against the schema the client
+# sent. It also still checks our wire output against the upstream JSON Schemas
+# in the tests.
+dependencies = ["ahp-protocol~=0.1.0", "jsonschema>=4.18", "tzdata; sys_platform == 'win32'"]
 
 [project.optional-dependencies]
 ws = ["websockets>=13"]
@@ -49,10 +54,8 @@ dev = [
   "mypy>=1.11",
   "ruff>=0.6",
   "import-linter>=2",
-  # The upstream JSON Schemas -- which now arrive with the protocol package --
-  # are the only mechanical check that what we PUT ON THE WIRE matches what the
-  # spec declares. Dev-only: `jsonschema` is not a runtime dependency.
-  "jsonschema>=4",
+  # Stubs for `jsonschema`, which is a runtime dependency (structured turns).
+  "types-jsonschema",
 ]
 
 [project.scripts]
@@ -106,6 +109,8 @@ ignore = [
 [tool.ruff.lint.per-file-ignores]
 # TransportClosed signals end-of-stream, not a fault; the Error suffix would mislead.
 "src/ahp_host/transport/base.py" = ["N818"]
+# The name is the M3 design's; "Failed" reads as the outcome, not a fault class.
+"src/ahp_host/core/structured.py" = ["N818"]
 "tests/**" = ["RUF059"]
 
 [tool.importlinter]

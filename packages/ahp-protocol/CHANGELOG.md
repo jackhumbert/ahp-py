@@ -8,6 +8,17 @@ the spec revision it targets.
 
 ## [Unreleased]
 
+### Added — ahp-py extension: structured turns
+
+- **`ahp_protocol.ext.structured`**, a dependency-free module shared by host
+  and client: `OUTPUT_SCHEMA_META_KEY` (`ahp-py/outputSchema`),
+  `STRUCTURED_OUTPUT_TOOL` (`StructuredOutput`),
+  `STRUCTURED_OUTPUT_TOOL_META_KEY`, `STRUCTURED_OUTPUT_ERROR_TYPE` (an
+  `ErrorInfo.errorType`, not a JSON-RPC code), `WRAPPED_KEY`, and the wrap rule
+  (`needs_wrapping`, `tool_input_schema`, `wrap`, `unwrap`) that puts non-object
+  schemas under `{"value": ...}`. An extension ahead of the spec that a stock
+  peer ignores. A new import-linter contract keeps `ahp_protocol.ext` free of I/O.
+
 ### Changed — the spec pin moves to upstream `main` @ `1ef06429` (1.1.0, unreleased)
 
 - **The pinned upstream revision is a commit on `main`, not a tag:**

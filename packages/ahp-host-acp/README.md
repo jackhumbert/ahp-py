@@ -214,6 +214,20 @@ ollama.com with `OLLAMA_API_KEY`.
 Unknown settings are an error, so a typo cannot silently fall back to a
 default.
 
+## Client tools
+
+Tools a client publishes on its session (`activeClient.tools`) reach the agent
+as an MCP server named `ahp_client`, added last to the session's `mcpServers`.
+It is a small stdio relay (`python -m ahp_host_acp.relay`) the agent launches,
+which talks back to this host over a loopback socket authenticated with a
+per-chat random token; each call is run by the client through the host, and
+shows as the client's own tool call. ACP has no request to change a live
+session's `mcpServers`, so the server is fixed when the chat's session is
+opened and only its tool list moves: the relay answers every `tools/list` from
+the current state and sends `notifications/tools/list_changed` when it
+changes. An agent that caches its tools and ignores `list_changed` keeps the
+set it first listed.
+
 ## Security
 
 **The folder a session starts in does not confine the agent** (any agent:
@@ -235,6 +249,16 @@ and picking it widens the agent's policy in the agent's own state, where this
 host can neither see nor undo it. Nothing here ever picks it for the user: a
 plain approval (a client that shows no options) is *allow once*, and if the
 agent offers no such option the call is not allowed at all.
+
+**Calls to a client's tools are allowed once, without asking.** A tool a
+client offers (see Client tools) runs in that client, under its own
+permissions, and not on this machine, so its owner decides whether it runs;
+asking the user here as well would ask twice. The agent's *allow once* option
+is picked for such a call, never *always*; if the agent offers no *allow once*,
+the user is asked as for any call. A call counts as one of these when its title
+names a relayed tool. An agent could title another call to match, but an ACP
+agent already decides which calls it asks about, so this grants it nothing it
+could not take by not asking.
 
 **Clients can change the agent's own settings.** Every config option and mode
 the agent reports is a session setting a client may change, and some loosen

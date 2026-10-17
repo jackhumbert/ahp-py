@@ -4,6 +4,7 @@
 
 ### Added
 
+- `docs/plan.md` §8 records the M3 result (structured turns live in the host and providers; this package uses them from M4).
 - `docs/plan.md` §8 records the M2 result.
 - `conformance/resume.js`: a run killed with calls in flight resumes with identical results, its completed calls served from the journal and only the rest dispatched; `docs/format.md` pins the resume rules.
 - `flow run --state-dir DIR --run-id ID --resume RUN_ID`: journal a run, name it, or resume one (the script path is optional with `--resume`); the run id is printed to stderr as `[run] <id>`.

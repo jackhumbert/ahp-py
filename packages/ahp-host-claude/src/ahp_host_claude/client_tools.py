@@ -10,6 +10,10 @@ Approval belongs to the client. For client-provided tools "the server
 typically sets `confirmed` to `'not-needed'`" (`ChatToolCallReadyAction`), and
 the host does exactly that: whoever runs the tool decides what it may do, so
 this host's own approval gate lets these calls through (`is_client_tool`).
+
+Host tools (the per-turn `StructuredOutput`) ride a second server,
+`mcp__host__<name>`, and pass the gate like client tools: they run in the host
+and touch nothing on this machine (`is_host_tool`).
 """
 
 from __future__ import annotations
@@ -20,12 +24,15 @@ from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Final
 
-from ahp_host.provider.base import ToolResult
+from ahp_host.provider.base import HostTool, ToolResult
 from claude_agent_sdk import McpSdkServerConfig, SdkMcpTool, create_sdk_mcp_server
 
 #: The MCP server's name, and so the middle of every tool name Claude sees.
 SERVER: Final = "client"
 _PREFIX: Final = f"mcp__{SERVER}__"
+#: The same for the tools the host itself offers for one turn.
+HOST_SERVER: Final = "host"
+_HOST_PREFIX: Final = f"mcp__{HOST_SERVER}__"
 #: What Claude accepts as a tool name, less the prefix it will carry.
 _UNSAFE: Final = re.compile(r"[^A-Za-z0-9_-]")
 _MAX_NAME: Final = 64 - len(_PREFIX)
@@ -48,6 +55,11 @@ class ClientTool:
 def is_client_tool(tool_name: str) -> bool:
     """Whether Claude's name for a tool is one of these."""
     return tool_name.startswith(_PREFIX)
+
+
+def is_host_tool(tool_name: str) -> bool:
+    """Whether Claude's name for a tool is one the host offers for the turn."""
+    return tool_name.startswith(_HOST_PREFIX)
 
 
 def offered(clients: Sequence[Mapping[str, Any]]) -> tuple[ClientTool, ...]:
@@ -115,6 +127,32 @@ def server(tools: Sequence[ClientTool], run: Runner) -> McpSdkServerConfig:
                 name=tool.name,
                 description=tool.description or tool.title,
                 input_schema=dict(tool.input_schema),
+                handler=handler(tool),
+            )
+            for tool in tools
+        ],
+    )
+
+
+HostRunner = Callable[[HostTool, dict[str, Any]], Awaitable[dict[str, Any]]]
+
+
+def host_server(tools: Sequence[HostTool], run: HostRunner) -> McpSdkServerConfig:
+    """The MCP server of this turn's host tools; `run` executes each call."""
+
+    def handler(tool: HostTool) -> Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]:
+        async def call(arguments: dict[str, Any]) -> dict[str, Any]:
+            return await run(tool, arguments)
+
+        return call
+
+    return create_sdk_mcp_server(
+        HOST_SERVER,
+        tools=[
+            SdkMcpTool(
+                name=tool.name,
+                description=tool.description or tool.title,
+                input_schema=_schema(tool.input_schema),
                 handler=handler(tool),
             )
             for tool in tools

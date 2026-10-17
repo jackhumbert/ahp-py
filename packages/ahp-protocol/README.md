@@ -72,6 +72,7 @@ peers would inherit.
 | `errors.py` | `AhpError`, `to_json`/`from_json`, the spec's codes |
 | `transport/` | the `Transport` protocol and an in-process pair |
 | `conformance/` | fixture loaders over the vendored corpora |
+| `ext/` | ahp-py extensions ahead of the spec, see below |
 
 ```python
 from ahp_protocol import REDUCERS, reducer_for_state
@@ -124,6 +125,14 @@ Bind the reducer when you register the channel. Where you cannot,
 `reducer_for_state()` reads the shape instead, and is verified against all 327
 fixtures: every one classifies to the reducer it declares, with no
 unclassifiable case.
+
+### An extension a stock peer ignores
+
+`ahp_protocol.ext.structured` holds the shared constants and the wrap rule of
+ahp-py's structured turns: a client names a JSON Schema in a namespaced
+`_meta` key and gets the validated value back on the completed turn. It is an
+ahp-py extension ahead of the spec, carried in `_meta` and a host-internal tool,
+so a stock peer ignores it.
 
 ## Conformance
 

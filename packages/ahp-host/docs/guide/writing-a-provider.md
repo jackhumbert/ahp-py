@@ -492,6 +492,66 @@ error — and rejects it, with a reason, otherwise. Without `ResumesTurns`,
 `resumable=True` is dropped (and logged), so no client is offered a resume
 nothing would answer.
 
+## Structured turns
+
+A client can ask for a result that matches a JSON Schema by putting it in
+`Message._meta["ahp-py/outputSchema"]`. This is an ahp-py extension ahead of the
+spec; the constants live in `ahp_protocol.ext.structured`. The host does the
+rest: it validates the result with jsonschema, retries, falls back when your
+agent cannot take part, and fails the turn with `errorType`
+`ahp-py/structuredOutput` when no valid result arrives. A client that ignores
+`_meta` simply gets an ordinary turn.
+
+A provider whose agent can be given per-turn tools opts in with
+`ReturnsStructuredOutput.offers_host_tools()`. Then:
+
+- `UserMessage.host_tools` lists the tools to expose to the agent for this turn
+  (`StructuredOutput`, whose input schema is the client's).
+- Each call goes through `sink.run_client_tool` with
+  `client_id=HOST_CLIENT_ID`. The host answers it itself; it never reaches a
+  client. Do not announce the call yourself, and let it past your approval
+  gate as you would a client tool.
+- A declined `ToolResult` (the value did not match the schema) goes back to the
+  agent as a tool error, so it can try again.
+- `UserMessage.continues_turn` marks a follow-up message inside the same turn,
+  sent when the agent finished without calling the tool. **This is an
+  obligation, not a hint:** a provider must deliver such a message into the
+  turn that is still open, without starting a new turn, ending this one, or
+  counting it as another turn. The host sends at most two, plus one more asking
+  for the result as JSON in the reply if the tool was never called (an agent
+  can cache its tool list from before the tool existed).
+- A schema may only reference itself (`#...`). An external `$ref` is refused
+  before the agent runs, and nothing is ever fetched while validating.
+
+```python
+from ahp_host.provider.base import HOST_CLIENT_ID, ClientToolCall, ReturnsStructuredOutput
+
+
+class StructuredShout(ShoutSession):
+    def offers_host_tools(self) -> bool:
+        return True
+
+    async def send_user_message(self, message: UserMessage, sink: TurnSink) -> None:
+        for tool in message.host_tools:
+            await sink.run_client_tool(
+                ClientToolCall(
+                    call_id="call-1",
+                    name=tool.name,
+                    client_id=HOST_CLIENT_ID,
+                    tool_input={"answer": 42},
+                    display_name=tool.title,
+                )
+            )
+        await super().send_user_message(message, sink)
+
+
+assert isinstance(StructuredShout.__new__(StructuredShout), ReturnsStructuredOutput)
+```
+
+Without the capability the host appends the schema to the prompt text, parses
+the last JSON block of the reply, and validates it, with up to two follow-up
+messages ("reply with only JSON matching the schema") in the same chat.
+
 ## What the root channel says about your agent
 
 `AgentInfo` is read when the host builds the root channel. Three things to know:

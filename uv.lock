@@ -108,6 +108,7 @@ name = "ahp-host"
 source = { editable = "packages/ahp-host" }
 dependencies = [
     { name = "ahp-protocol" },
+    { name = "jsonschema" },
     { name = "tzdata", marker = "sys_platform == 'win32'" },
 ]
 
@@ -115,10 +116,10 @@ dependencies = [
 dev = [
     { name = "anyio" },
     { name = "import-linter" },
-    { name = "jsonschema" },
     { name = "mypy" },
     { name = "pytest" },
     { name = "ruff" },
+    { name = "types-jsonschema" },
     { name = "websockets" },
 ]
 ws = [
@@ -130,10 +131,11 @@ requires-dist = [
     { name = "ahp-protocol", editable = "packages/ahp-protocol" },
     { name = "anyio", marker = "extra == 'dev'", specifier = ">=4" },
     { name = "import-linter", marker = "extra == 'dev'", specifier = ">=2" },
-    { name = "jsonschema", marker = "extra == 'dev'", specifier = ">=4" },
+    { name = "jsonschema", specifier = ">=4.18" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.11" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.6" },
+    { name = "types-jsonschema", marker = "extra == 'dev'" },
     { name = "tzdata", marker = "sys_platform == 'win32'" },
     { name = "websockets", marker = "extra == 'dev'", specifier = ">=13" },
     { name = "websockets", marker = "extra == 'ws'", specifier = ">=13" },

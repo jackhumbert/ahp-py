@@ -68,6 +68,7 @@ def turn_started(
     attachments: Sequence[Mapping[str, Any]] | None = None,
     queued_message_id: str | None = None,
     started_at: str | None = None,
+    meta: Mapping[str, Any] | None = None,
 ) -> JsonObject:
     """`chat/turnStarted`; required `[type, turnId, startedAt, message]`, and
     `Message` requires `[text, origin]`.
@@ -86,6 +87,9 @@ def turn_started(
     unreachable without a named parameter because these constructors
     deliberately take no `**extra`.
 
+    *meta* is `Message._meta`, which carries extensions such as ahp-py's output
+    schema; absent, no `_meta` key is written.
+
     `startedAt` is ours to stamp. The reducer copies it into
     `ActiveTurn.startedAt` verbatim, so omitting it stores `null` on every peer
     for the life of the transcript -- and the host republishes our action rather
@@ -101,6 +105,8 @@ def turn_started(
         )
     if attachments is not None:
         message["attachments"] = [dict(attachment) for attachment in attachments]
+    if meta is not None:
+        message["_meta"] = dict(meta)
     action: JsonObject = {
         "type": "chat/turnStarted",
         "turnId": _identifier("turnId", turn_id),

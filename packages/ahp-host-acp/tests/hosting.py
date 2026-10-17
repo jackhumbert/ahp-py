@@ -96,9 +96,9 @@ async def connect(host: Host) -> tuple[Wire, asyncio.Task[None]]:
     return wire, serving
 
 
-async def open_session(wire: Wire, uri: str, provider: str) -> str:
-    """A ready session; returns its default chat."""
-    response = await wire.request("createSession", {"channel": uri, "provider": provider})
+async def open_session(wire: Wire, uri: str, provider: str, **params: Any) -> str:
+    """A ready session; returns its default chat. *params* join `createSession`'s."""
+    response = await wire.request("createSession", {"channel": uri, "provider": provider, **params})
     assert "error" not in response, response
     assert await wire.until(lambda: state(wire.host, uri).get("lifecycle") == "ready")
     await wire.request("subscribe", {"channel": uri})
@@ -107,15 +107,20 @@ async def open_session(wire: Wire, uri: str, provider: str) -> str:
     return str(chat)
 
 
-async def run_turn(wire: Wire, chat: str, turn_id: str, text: str) -> dict[str, Any]:
+async def run_turn(
+    wire: Wire, chat: str, turn_id: str, text: str, *, meta: Mapping[str, Any] | None = None
+) -> dict[str, Any]:
     """Drive one turn on *chat* to its end; returns the finished turn."""
+    message: dict[str, Any] = {"text": text, "origin": {"kind": "user"}}
+    if meta is not None:
+        message["_meta"] = dict(meta)
     await wire.dispatch(
         chat,
         {
             "type": "chat/turnStarted",
             "turnId": turn_id,
             "startedAt": "1970-01-01T00:00:01.000Z",
-            "message": {"text": text, "origin": {"kind": "user"}},
+            "message": message,
         },
     )
 
@@ -127,6 +132,43 @@ async def run_turn(wire: Wire, chat: str, turn_id: str, text: str) -> dict[str, 
     turn = finished()
     assert turn is not None
     return turn
+
+
+def answer_client_tools(wire: Wire, chat: str, text: str) -> asyncio.Task[None]:
+    """Answer each tool call the host hands client `c1`, once, with *text*.
+
+    Cancel the returned task when the test is done.
+    """
+
+    async def loop() -> None:
+        answered: set[tuple[str, str]] = set()
+        while True:
+            for frame in list(wire.frames):
+                action = (frame.get("params") or {}).get("action") or {}
+                if action.get("type") != "chat/toolCallReady":
+                    continue
+                if action.get("contributor") != {"kind": "client", "clientId": "c1"}:
+                    continue
+                key = (str(action.get("turnId")), str(action.get("toolCallId")))
+                if key in answered:
+                    continue
+                answered.add(key)
+                await wire.dispatch(
+                    chat,
+                    {
+                        "type": "chat/toolCallComplete",
+                        "turnId": key[0],
+                        "toolCallId": key[1],
+                        "result": {
+                            "success": True,
+                            "pastTenseMessage": "ran",
+                            "content": [{"type": "text", "text": text}],
+                        },
+                    },
+                )
+            await asyncio.sleep(0.01)
+
+    return asyncio.create_task(loop())
 
 
 def found(value: Any, wanted: Callable[[Mapping[str, Any]], bool]) -> list[Mapping[str, Any]]:

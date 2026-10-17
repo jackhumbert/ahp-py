@@ -18,6 +18,23 @@ The prompt text picks the behaviour:
 - ``create``       create `new.txt`
 - ``badedit``      a diff on `notes.txt` whose call fails, writing nothing
 - ``askedit``      an edit to `notes.txt` that asks permission first, with its diff
+- ``mcp tools``    list the tools the ``ahp_client`` MCP server (the relay the host
+                   gave this session) offers, and how many ``tools/list_changed``
+                   it has sent: ``{"tools": [...], "changed": N}``
+- ``mcp call N J`` call the relay's tool ``N`` with the JSON arguments ``J``, titled
+                   ``ahp_client_N``, asking permission first (all of
+                   PERMISSION_OPTIONS); reply ``{"chose": id, "result": ...}``
+- ``mcp callalways N J``  the same, offering only *always* and *no*
+- ``mcp disguise K J``  ask permission for a call titled ``ahp_client_ping`` with kind
+                   ``K`` (``none`` for no kind) and raw input ``J``, as a model
+                   titling a local call after a relayed tool would; never calls
+                   the relay; reply ``{"chose": id}``
+- ``structured J``  J is a JSON array of argument objects. List the relay's tools; if
+                   ``StructuredOutput`` is not among them, reply "no StructuredOutput
+                   tool". Otherwise call it once per object (a call titled
+                   ``ahp_client_StructuredOutput``, id ``so_N``, asking permission
+                   first), stopping at the first result that is not an error; reply
+                   "submitted N" for the N calls made
 
 Each session keeps its history (the prompts it was sent, ``whoami`` aside),
 which ``whoami`` reports, so tests can tell sessions -- and forks -- apart.
@@ -35,14 +52,22 @@ context in prompts; ``FAKE_ACP_STORE`` names a file that keeps session
 histories across processes (as an agent that stores its sessions does);
 ``FAKE_ACP_LOG`` names a file each received method is appended to.
 
-The scenario is the prompt's first text block; the rest is context.
+The scenario is the prompt's first text block; the rest is context. The ``mcp``
+scenarios match on its first line only, so instructions a host appends to a
+prompt do not break them.
+
+Every session's ``mcpServers`` (from session/new, resume, load and fork) are
+kept, and the ``mcp`` scenarios start the ``ahp_client`` server from them as
+a real subprocess and speak MCP's newline-delimited JSON-RPC to it.
 """
 
 from __future__ import annotations
 
+import atexit
 import json
 import os
 import queue
+import subprocess
 import sys
 import threading
 import uuid
@@ -59,6 +84,9 @@ state: dict[str, Any] = {
     "yolo": False,
     "next_id": 1000,
     "histories": {},
+    "mcp": {},
+    "mcp_calls": 0,
+    "clients": {},
 }
 OPTIONS = os.environ.get("FAKE_ACP_CONFIG_OPTIONS") == "1"
 MODES = os.environ.get("FAKE_ACP_MODES") == "1"
@@ -193,6 +221,159 @@ def finish(session_id: str, call_id: str, status: str = "completed") -> None:
     )
 
 
+#: The relay's server name; must match ahp_host_acp.client_tools.SERVER.
+RELAY_NAME = "ahp_client"
+
+
+class McpClient:
+    """A stdio MCP client for one of the servers a session was given."""
+
+    def __init__(self, server: dict[str, Any]) -> None:
+        env = {**os.environ, **{e["name"]: e["value"] for e in server.get("env", [])}}
+        self.process = subprocess.Popen(
+            [server["command"], *server.get("args", [])],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            env=env,
+            text=True,
+            encoding="utf-8",
+        )
+        atexit.register(self.process.terminate)
+        self.changed = 0
+        self.next_id = 0
+        self.request(
+            "initialize",
+            {
+                "protocolVersion": "2025-06-18",
+                "capabilities": {},
+                "clientInfo": {"name": "fake-agent", "version": "0"},
+            },
+        )
+        self.write({"jsonrpc": "2.0", "method": "notifications/initialized"})
+
+    def write(self, message: dict[str, Any]) -> None:
+        assert self.process.stdin is not None
+        self.process.stdin.write(json.dumps(message) + "\n")
+        self.process.stdin.flush()
+
+    def request(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
+        self.next_id += 1
+        request_id = self.next_id
+        self.write({"jsonrpc": "2.0", "id": request_id, "method": method, "params": params})
+        assert self.process.stdout is not None
+        while line := self.process.stdout.readline():
+            message = json.loads(line)
+            if message.get("method") == "notifications/tools/list_changed":
+                self.changed += 1
+            elif message.get("id") == request_id:
+                result: dict[str, Any] = message.get("result", message.get("error", {}))
+                return result
+        sys.exit(0)
+
+
+def mcp_client(session_id: str) -> McpClient:
+    """The session's relay client, started on first use."""
+    clients: dict[str, McpClient] = state["clients"]
+    if session_id not in clients:
+        servers = state["mcp"].get(session_id, [])
+        clients[session_id] = McpClient(next(s for s in servers if s["name"] == RELAY_NAME))
+    return clients[session_id]
+
+
+def mcp_scenario(session_id: str, line: str) -> dict[str, Any] | None:
+    """The ``mcp ...`` scenarios; None if *line* is not one."""
+    parts = line.split(None, 3)
+    if parts[:1] != ["mcp"]:
+        return None
+    if parts[:2] == ["mcp", "tools"]:
+        client = mcp_client(session_id)
+        names = [t["name"] for t in client.request("tools/list", {}).get("tools", [])]
+        text(session_id, json.dumps({"tools": sorted(names), "changed": client.changed}))
+        return {"stopReason": "end_turn"}
+    if len(parts) >= 3 and parts[1] == "disguise":
+        state["mcp_calls"] += 1
+        call: dict[str, Any] = {
+            "toolCallId": f"mcp_{state['mcp_calls']}",
+            "title": f"{RELAY_NAME}_ping",
+            "status": "pending",
+            "rawInput": json.loads(parts[3]) if len(parts) > 3 else {},
+        }
+        if parts[2] != "none":
+            call["kind"] = parts[2]
+        update(session_id, {"sessionUpdate": "tool_call", **call})
+        reply = ask(
+            "session/request_permission",
+            {"sessionId": session_id, "toolCall": call, "options": PERMISSION_OPTIONS},
+        )
+        finish(session_id, call["toolCallId"], "failed")
+        text(session_id, json.dumps({"chose": chosen(reply)}))
+        return {"stopReason": "end_turn"}
+    if len(parts) < 3 or parts[1] not in ("call", "callalways"):
+        return None
+    name = parts[2]
+    args = json.loads(parts[3]) if len(parts) > 3 else {}
+    state["mcp_calls"] += 1
+    call_id = f"mcp_{state['mcp_calls']}"
+    call = {
+        "toolCallId": call_id,
+        "title": f"{RELAY_NAME}_{name}",
+        "kind": "other",
+        "status": "pending",
+        "rawInput": args,
+    }
+    update(session_id, {"sessionUpdate": "tool_call", **call})
+    options = (
+        PERMISSION_OPTIONS if parts[1] == "call" else [PERMISSION_OPTIONS[0], PERMISSION_OPTIONS[2]]
+    )
+    reply = ask(
+        "session/request_permission",
+        {"sessionId": session_id, "toolCall": call, "options": options},
+    )
+    picked = chosen(reply)
+    if picked in ("once", "always"):
+        result = mcp_client(session_id).request("tools/call", {"name": name, "arguments": args})
+        finish(session_id, call_id)
+        text(session_id, json.dumps({"chose": picked, "result": result}))
+    else:
+        finish(session_id, call_id, "failed")
+        text(session_id, json.dumps({"chose": picked}))
+    return {"stopReason": "end_turn"}
+
+
+def structured_scenario(session_id: str, line: str) -> dict[str, Any] | None:
+    """The ``structured <json array>`` scenario; None if *line* is not one."""
+    head, _, rest = line.partition(" ")
+    if head != "structured":
+        return None
+    client = mcp_client(session_id)
+    names = [t["name"] for t in client.request("tools/list", {}).get("tools", [])]
+    if "StructuredOutput" not in names:
+        text(session_id, "no StructuredOutput tool")
+        return {"stopReason": "end_turn"}
+    count = 0
+    for args in json.loads(rest):
+        count += 1
+        call_id = f"so_{count}"
+        call = {
+            "toolCallId": call_id,
+            "title": f"{RELAY_NAME}_StructuredOutput",
+            "kind": "other",
+            "status": "pending",
+            "rawInput": args,
+        }
+        update(session_id, {"sessionUpdate": "tool_call", **call})
+        ask(
+            "session/request_permission",
+            {"sessionId": session_id, "toolCall": call, "options": PERMISSION_OPTIONS},
+        )
+        result = client.request("tools/call", {"name": "StructuredOutput", "arguments": args})
+        finish(session_id, call_id)
+        if not result.get("isError"):
+            break
+    text(session_id, f"submitted {count}")
+    return {"stopReason": "end_turn"}
+
+
 PERMISSION_OPTIONS = [
     {"optionId": "always", "name": "Always", "kind": "allow_always"},
     {"optionId": "once", "name": "Once", "kind": "allow_once"},
@@ -232,6 +413,10 @@ def prompt(session_id: str, words: str) -> dict[str, Any]:
         state["histories"].setdefault(session_id, []).append(words)
         store()
     cwd = Path(state["cwd"] or ".")
+    if (answer := mcp_scenario(session_id, words.split("\n", 1)[0])) is not None:
+        return answer
+    if (answer := structured_scenario(session_id, words.split("\n", 1)[0])) is not None:
+        return answer
     if words.startswith("/model "):
         state["model"] = words.split()[1]
         text(session_id, f"Model set to {state['model']}")
@@ -481,6 +666,7 @@ def main() -> None:
                 store(load=True)
                 state["histories"].setdefault(session_id, [])
             state["session"] = session_id
+            state["mcp"][session_id] = params.get("mcpServers", [])
             result = {"sessionId": session_id} if method in ("session/new", "session/fork") else {}
             if (config_options() and method == "session/new") or OPTIONS:
                 result["configOptions"] = config_options()

@@ -132,3 +132,9 @@ name = "reducers perform no I/O"
 type = "forbidden"
 source_modules = ["ahp_protocol.reducers"]
 forbidden_modules = ["asyncio", "socket", "pathlib", "json", "os", "websockets"]
+
+[[tool.importlinter.contracts]]
+name = "ext is dependency-free and does no I/O"
+type = "forbidden"
+source_modules = ["ahp_protocol.ext"]
+forbidden_modules = ["asyncio", "socket", "pathlib", "json", "os", "websockets"]

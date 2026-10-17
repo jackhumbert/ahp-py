@@ -17,6 +17,9 @@ offered no such option, `cancelled` -- never an *always* the user did not
 choose, since that would widen (or fix) the agent's policy in its own state,
 where this host can neither see nor undo it.
 
+The one exception is a call to a tool the client offered through the MCP relay
+(`relayed_answer`): its owner decides, so it is allowed once without asking.
+
 What does not reach the agent: a denial's reason (`reasonMessage`) and a
 suggestion of what to do instead (`userSuggestion`). ACP's outcome has a field
 for the option and none for either -- only `_meta`, which "implementations
@@ -97,3 +100,24 @@ def answer(
         if option["kind"] == wanted:
             return {"outcome": {"outcome": "selected", "optionId": option["optionId"]}}
     return CANCELLED
+
+
+def relayed_answer(offered: Sequence[Mapping[str, Any]]) -> dict[str, Any] | None:
+    """The answer that lets one call to a relayed tool through, else None.
+
+    **A security decision.** A tool the client offered (or the host's own
+    per-turn tool) runs in that client or in the host, not on this machine, so
+    its owner decides whether it runs, as `ahp-host-claude` does. Asking the
+    user as well would only ask twice. The agent's first *allow once* option is
+    picked; never *allow always*, which would widen the agent's own stored
+    policy. Without an *allow once* option the user is asked, as for any call.
+
+    The harness decides which calls it asks about, but the *model* often
+    chooses a call's title, so a title is not proof. `provider._is_relayed`
+    therefore also requires an MCP-shaped kind and a raw input shaped like the
+    tool's (`client_tools.looks_relayed`) before this is used.
+    """
+    for option in offered:
+        if option["kind"] == "allow_once":
+            return {"outcome": {"outcome": "selected", "optionId": option["optionId"]}}
+    return None

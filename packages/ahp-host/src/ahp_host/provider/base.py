@@ -15,13 +15,14 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Final, Protocol, runtime_checkable
 
 from ahp_protocol.reducers.clock import now_iso
 
 from ahp_host.provider.changes import FileChange
 
 __all__ = [
+    "HOST_CLIENT_ID",
     "AgentInfo",
     "AgentInfoChanged",
     "AgentProvider",
@@ -52,6 +53,7 @@ __all__ = [
     "FollowsWorkingDirectories",
     "ForkedFrom",
     "HandlesCustomizations",
+    "HostTool",
     "HostsChats",
     "IdentifiesTurn",
     "InputOutcome",
@@ -66,6 +68,7 @@ __all__ = [
     "ResolvesInput",
     "ResumableAgentProvider",
     "ResumesTurns",
+    "ReturnsStructuredOutput",
     "SessionDescription",
     "SessionDirectory",
     "SessionPublisher",
@@ -77,6 +80,10 @@ __all__ = [
     "UpdatesAgentInfo",
     "UserMessage",
 ]
+
+#: The `ClientToolCall.client_id` a provider uses for a :class:`HostTool` call.
+#: The host's sink answers such a call itself and never publishes it to a client.
+HOST_CLIENT_ID: Final = "ahp-py/host"
 
 
 @dataclass(frozen=True)
@@ -229,6 +236,19 @@ class ModelSelection:
 
 
 @dataclass(frozen=True)
+class HostTool:
+    """A tool the host offers the agent for one turn (e.g. StructuredOutput).
+
+    Unhashable by design (the schema is a dict); compare with ``==``.
+    """
+
+    name: str
+    title: str
+    description: str
+    input_schema: Mapping[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
 class UserMessage:
     """One user turn request, in provider terms."""
 
@@ -260,6 +280,14 @@ class UserMessage:
     #: transcript is here, bounded by the attachment's `endTurn`, which the
     #: host pins when the client left it out. In attachment order.
     attached_chats: Sequence[AttachedChat] = ()
+    #: Tools the host offers for this turn only. Set only for a
+    #: :class:`ReturnsStructuredOutput` session whose ``offers_host_tools()`` is
+    #: True.
+    host_tools: Sequence[HostTool] = ()
+    #: The host sends this message inside a turn already started -- a
+    #: structured-output follow-up. The provider adds to the same turn and must
+    #: not count or mark a new one.
+    continues_turn: bool = False
 
 
 @dataclass(frozen=True)
@@ -472,6 +500,34 @@ class ToolResult:
     @property
     def accepted(self) -> bool:
         return self.response == "accept"
+
+
+@runtime_checkable
+class ReturnsStructuredOutput(Protocol):
+    """An agent session that can expose per-turn host tools to its agent.
+
+    The host uses it to ask for a structured result (an ahp-py extension, see
+    ``ahp_protocol.ext.structured``). When ``offers_host_tools()`` is True, for
+    a message with ``host_tools`` the provider:
+
+    * exposes each tool to its agent for that turn (name, description,
+      input_schema);
+    * routes each call through ``sink.run_client_tool(ClientToolCall(
+      call_id=<agent's id or a fresh one>, name=tool.name,
+      client_id=HOST_CLIENT_ID, tool_input=<arguments mapping>,
+      display_name=tool.title))``;
+    * does NOT announce the call itself -- the host publishes it;
+    * lets it past its approval gate (it runs in the host and touches nothing);
+    * returns a not-accepted :class:`ToolResult` to the agent as a tool error
+      carrying ``reason``, and treats a ``LookupError`` from ``run_client_tool``
+      as a tool error.
+
+    A method rather than a marker so a session can decline per instance (a
+    Claude mirror cannot add tools). A provider without this protocol gets the
+    host's prompt-and-parse fallback.
+    """
+
+    def offers_host_tools(self) -> bool: ...
 
 
 @dataclass(frozen=True)

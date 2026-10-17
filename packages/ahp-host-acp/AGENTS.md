@@ -24,6 +24,27 @@ server's AGENTS.md requires ("Adding a provider adapter"). It is the ACP
   the user picked; a plain approve or deny is *once*, and nothing broader is
   ever picked for the user. Changing it is a security decision: say so in the
   commit, and test it.
+- `client_tools.py` and `relay.py` give the agent a session's client tools (and
+  the host's per-turn tools) as an MCP server, `ahp_client`. `relay.py` is a
+  stdio server the agent launches (`sys.executable -m ahp_host_acp.relay`;
+  standard library only, it imports nothing from this package); it connects
+  back over a loopback socket to `ToolBridge`, which answers with the tool list
+  and runs each call through `TurnSink.run_client_tool`. The socket is open to
+  any local process, so a connection must open with the per-chat random token,
+  passed in the server entry's environment and never in argv. ACP cannot change
+  a live session's `mcpServers`: the entry is fixed at `session/new`, `resume`,
+  `load` and `fork`, and only its tool *list* is dynamic (`tools/list` answers
+  from current state, `list_changed` when it moves). An agent that caches its
+  tools sees the set it first listed; keep that documented.
+- **Security decision:** `permissions.relayed_answer` lets a call to a relayed
+  tool through (the agent's first *allow once*, never *always*) instead of
+  asking, because the client or host that runs the tool decides, as
+  `ahp-host-claude` does. A call is relayed when `client_tools.looks_relayed` says so. Changing this is a security decision: say
+  so in the commit, and test it (`tests/test_client_tools_acp.py`). A title
+  is not proof, since the model often writes it: a call is relayed only when
+  `client_tools.looks_relayed` agrees -- the exact title, a kind that is absent
+  or `other`, and a raw input shaped like the tool's (only its declared
+  properties). Never loosen that to the title alone.
 - One agent process per AHP session, one ACP session per AHP chat
   (`provider._Chat`). Per-turn and per-conversation state lives on the chat;
   the session config, title and changeset are the session's. A fork is made

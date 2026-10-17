@@ -7,7 +7,7 @@ an AHP session, and each `agent()` call is a **child chat** of it, so any AHP
 client can watch and steer the whole run. Extensions to the format are opt-in,
 and a script written for Claude Code runs unchanged.
 
-Status: M0, M1 and M2 done (Node sandbox, `flow run`, worker-chat spike; engine semantics on a fake dispatcher; journal and resume). M3 (structured turns) is next. Milestones are in §8.
+Status: M0, M1, M2 and M3 done (Node sandbox, `flow run`, worker-chat spike; engine semantics on a fake dispatcher; journal and resume; structured turns across ahp-protocol, ahp-host, ahp-host-claude, ahp-host-acp and ahp-client). M4 (the provider, in-process) is next. Milestones are in §8.
 
 ## 1. Where it sits
 
@@ -268,8 +268,8 @@ host and the providers, not in ahp-host-flow.
     client tools (`client_tools.py`);
   - `ahp-host-acp` gains **client-tool support** in general. A session's client
     tools reach the ACP agent as an MCP server that `ahp-host-acp` serves: a
-    small stdio relay the agent launches (every ACP agent takes stdio MCP), or
-    a loopback HTTP endpoint when the agent advertises HTTP MCP. Each call goes
+    small stdio relay the agent launches (every ACP agent takes stdio MCP, so
+    only the relay was built; a loopback HTTP endpoint is not needed). Each call goes
     through `TurnSink.run_client_tool`, as Claude's do, and, as in
     `ahp-host-claude`, a client tool passes the approval gate because the
     client offered it. Structured output is then one host-internal tool on the
@@ -380,10 +380,12 @@ are an ahp-py extension: Claude Code runs only JS.
   ```python
   meta = {"name": "review", "description": "...", "phases": [{"title": "Find"}]}
 
+
   async def main(args):
       phase("Find")
-      found = await parallel([lambda f=f: agent(f"review {f}", schema=FINDINGS)
-                              for f in args["files"]])
+      found = await parallel(
+          [lambda f=f: agent(f"review {f}", schema=FINDINGS) for f in args["files"]]
+      )
       return [x for x in found if x]
   ```
 
@@ -546,6 +548,18 @@ Open for M4:
 - node-marked tests still skip silently when no Node is found, so CI must provide Node;
 - `Temporal` (absent in Node 24's vm context today) must be banned if a future Node exposes `Temporal.Now`;
 - the unchecked choices listed in `docs/format.md` need a probe against Claude Code;
+
+**M3 result.** Structured turns landed across five packages.
+- `ahp_protocol.ext.structured` holds the `_meta` key (`ahp-py/outputSchema`), the `StructuredOutput` tool name and the `ahp-py/structuredOutput` errorType (an `ErrorInfo.errorType` string, not a JSON-RPC code). A schema whose `type` is not `object` is wrapped under `value`, because MCP arguments and `structuredContent` are objects.
+- `ahp-host` `core/structured.py` validates with `jsonschema`, allows at most 3 invalid calls, and sends up to 2 follow-ups inside the same AHP turn with `UserMessage.continues_turn`. The text fallback appends the schema to the prompt and parses the reply's last JSON block. `ReturnsStructuredOutput.offers_host_tools` marks a capable provider. Host tools are intercepted by `HOST_CLIENT_ID` in `run_client_tool` and are never shown to a client as client-executed.
+- `ahp-host-claude` adds a second in-process MCP server, `host`. Claude Code fixes its tools at start-up, so a turn needing a schema the process was not started with restarts it on the same conversation. Mirrors use the fallback.
+- `ahp-host-acp` supports client tools in general through a stdio relay launched with `sys.executable -m ahp_host_acp.relay`, which connects back over a loopback socket with a per-chat token in the server's env. The server is fixed at `session/new`, because ACP cannot change a live session's `mcpServers`; the tool list is dynamic with `tools/list_changed`, and an agent that ignores it keeps its first list. Relayed calls are allowed once without asking, a security decision, and the agent's own row for a relayed call is suppressed by title.
+- `ahp-client` has `prompt(..., output_schema=)` and `TurnCompleted.structured`.
+- `ahp-host` `docs/requests.md` carries the upstream request. An opt-in live test is enabled by `AHP_ACP_LIVE_AGENT`.
+
+Open for M4 (structured turns):
+- the engine re-validates `agent()` results (§4.4);
+- §9's "bounded retries, then null plus a log()" maps a structured-output failure to `null`.
 
 ## 9. Risks
 

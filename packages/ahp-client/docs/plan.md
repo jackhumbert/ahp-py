@@ -680,6 +680,8 @@ result = await session.prompt("Summarise README.md", approvals="reads")
 print(result.text)
 ```
 
+`prompt(..., output_schema=...)` and `TurnCompleted.structured` are an ahp-py extension (the schema rides in `Message._meta`; the host validates, the client only decodes), and a stock host ignores them.
+
 `TurnStream` is **both awaitable and async-iterable** — one object, two idioms,
 one code path (`__await__` delegates to a `_drain()` that iterates `self`).
 

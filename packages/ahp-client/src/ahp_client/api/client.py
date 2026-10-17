@@ -30,6 +30,12 @@ from types import TracebackType
 from typing import Any, Self
 
 from ahp_protocol.channels import ROOT_URI
+from ahp_protocol.ext.structured import (
+    OUTPUT_SCHEMA_META_KEY,
+    STRUCTURED_OUTPUT_TOOL,
+    STRUCTURED_OUTPUT_TOOL_META_KEY,
+    unwrap,
+)
 from ahp_protocol.transport import Transport
 from ahp_protocol.types import JsonObject
 
@@ -768,6 +774,12 @@ class Session:
         return Changeset(self._client, self, uri, template=template)
 
     def prompt(self, text: str, **kwargs: Any) -> TurnStream:
+        """Start a turn. Keywords are :class:`TurnStream`'s.
+
+        ``output_schema`` (an ahp-py extension) is a JSON Schema the host
+        should make the agent's result conform to; the validated value comes
+        back as ``TurnCompleted.structured``. A stock host ignores it.
+        """
         return _LazyTurnStream(self, text, kwargs)  # type: ignore[return-value]
 
     async def watch(self, *, from_start: bool = True) -> ChatWatch:
@@ -1180,6 +1192,12 @@ class Chat:
         return [t for t in raw if isinstance(t, dict)] if isinstance(raw, list) else []
 
     def prompt(self, text: str, **kwargs: Any) -> TurnStream:
+        """Start a turn. Keywords are :class:`TurnStream`'s.
+
+        ``output_schema`` (an ahp-py extension) is a JSON Schema the host
+        should make the agent's result conform to; the validated value comes
+        back as ``TurnCompleted.structured``. A stock host ignores it.
+        """
         return TurnStream(self._client, self, text, **kwargs)
 
     def watch(self, *, from_start: bool = True) -> ChatWatch:
@@ -1471,10 +1489,12 @@ class TurnStream:
         idle_timeout: float | None = 300.0,
         approval_timeout: float = 300.0,
         model: str | Mapping[str, Any] | None = None,
+        output_schema: Mapping[str, Any] | None = None,
     ) -> None:
         self._client = client
         self._chat = chat
         self._text = text
+        self._output_schema = output_schema
         self._policy = resolve_policy(approvals)
         self._turn_id = turn_id or str(uuid.uuid4())
         self._idle_timeout = idle_timeout
@@ -1562,7 +1582,16 @@ class TurnStream:
         started = asyncio.get_running_loop().time()
         self._client.protocol.dispatch(
             self._chat.uri,
-            actions.turn_started(self._turn_id, text=self._text, model=self._model),
+            actions.turn_started(
+                self._turn_id,
+                text=self._text,
+                model=self._model,
+                meta=(
+                    None
+                    if self._output_schema is None
+                    else {OUTPUT_SCHEMA_META_KEY: dict(self._output_schema)}
+                ),
+            ),
         )
         # Recorded on our own clock so a later `Chat.cancel()` has a duration it
         # is allowed to report for this turn.
@@ -1740,7 +1769,56 @@ class TurnStream:
         The accumulated deltas are not authoritative: hosts fold a turn's
         opening characters into the subscribe snapshot instead of emitting them.
         """
-        return TurnCompleted(event.envelope, self.text())
+        return TurnCompleted(event.envelope, self.text(), self.structured())
+
+    def structured(self) -> Any:
+        """The turn's validated structured result, or None.
+
+        Read from confirmed state exactly as :meth:`text` is. The host has
+        already validated it against the schema; this only decodes the
+        StructuredOutput tool call's ``structuredContent`` (unwrapping a
+        non-object schema's wrapper). None without a schema or a valid result.
+        """
+        state = self._client.mirror.confirmed(self._chat.uri)
+        if not isinstance(state, Mapping):
+            return None
+        turns = state.get("turns")
+        candidates: list[Any] = list(reversed(turns)) if isinstance(turns, list) else []
+        active = state.get("activeTurn")
+        if isinstance(active, Mapping):
+            candidates.append(active)
+        for turn in candidates:
+            if not isinstance(turn, Mapping) or turn.get("id") != self._turn_id:
+                continue
+            message = turn.get("message")
+            meta = message.get("_meta") if isinstance(message, Mapping) else None
+            schema = meta.get(OUTPUT_SCHEMA_META_KEY) if isinstance(meta, Mapping) else None
+            if not isinstance(schema, Mapping):
+                schema = self._output_schema
+            if schema is None:
+                return None
+            parts = turn.get("responseParts")
+            if not isinstance(parts, list):
+                return None
+            for part in reversed(parts):
+                if not isinstance(part, Mapping) or part.get("kind") != "toolCall":
+                    continue
+                call = part.get("toolCall")
+                if not isinstance(call, Mapping):
+                    continue
+                call_meta = call.get("_meta")
+                content = call.get("structuredContent")
+                if (
+                    call.get("toolName") == STRUCTURED_OUTPUT_TOOL
+                    and call.get("status") == "completed"
+                    and call.get("success") is True
+                    and isinstance(call_meta, Mapping)
+                    and call_meta.get(STRUCTURED_OUTPUT_TOOL_META_KEY) is True
+                    and isinstance(content, Mapping)
+                ):
+                    return unwrap(content, schema)
+            return None
+        return None
 
     def text(self) -> str:
         """The turn's text, concatenated from its markdown response parts.
