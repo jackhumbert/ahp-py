@@ -9,7 +9,7 @@ than sleeping.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
 from ahp_host import ROOT_URI, Host
@@ -96,9 +96,21 @@ async def connect(host: Host) -> tuple[Wire, asyncio.Task[None]]:
     return wire, serving
 
 
-async def open_session(wire: Wire, uri: str, provider: str) -> str:
+async def open_session(
+    wire: Wire,
+    uri: str,
+    provider: str,
+    *,
+    working_directories: Sequence[str] | None = None,
+    config: Mapping[str, Any] | None = None,
+) -> str:
     """A ready session; returns its default chat."""
-    response = await wire.request("createSession", {"channel": uri, "provider": provider})
+    params: dict[str, Any] = {"channel": uri, "provider": provider}
+    if working_directories is not None:
+        params["workingDirectories"] = list(working_directories)
+    if config is not None:
+        params["config"] = dict(config)
+    response = await wire.request("createSession", params)
     assert "error" not in response, response
     assert await wire.until(lambda: state(wire.host, uri).get("lifecycle") == "ready")
     await wire.request("subscribe", {"channel": uri})
@@ -107,8 +119,8 @@ async def open_session(wire: Wire, uri: str, provider: str) -> str:
     return str(chat)
 
 
-async def run_turn(wire: Wire, chat: str, turn_id: str, text: str) -> dict[str, Any]:
-    """Drive one turn on *chat* to its end; returns the finished turn."""
+async def start_turn(wire: Wire, chat: str, turn_id: str, text: str) -> None:
+    """Start a turn on *chat* without waiting for it."""
     await wire.dispatch(
         chat,
         {
@@ -119,6 +131,10 @@ async def run_turn(wire: Wire, chat: str, turn_id: str, text: str) -> dict[str, 
         },
     )
 
+
+async def wait_turn(wire: Wire, chat: str, turn_id: str) -> dict[str, Any]:
+    """Wait for turn *turn_id* on *chat* to end; returns the finished turn."""
+
     def finished() -> dict[str, Any] | None:
         turns = state(wire.host, chat).get("turns", [])
         return next((t for t in turns if t.get("id") == turn_id), None)
@@ -127,6 +143,33 @@ async def run_turn(wire: Wire, chat: str, turn_id: str, text: str) -> dict[str, 
     turn = finished()
     assert turn is not None
     return turn
+
+
+async def run_turn(wire: Wire, chat: str, turn_id: str, text: str) -> dict[str, Any]:
+    """Drive one turn on *chat* to its end; returns the finished turn."""
+    await start_turn(wire, chat, turn_id, text)
+    return await wait_turn(wire, chat, turn_id)
+
+
+async def cancel_turn(wire: Wire, chat: str, turn_id: str) -> None:
+    await wire.dispatch(chat, {"type": "chat/turnCancelled", "turnId": turn_id})
+
+
+def worker_chats(host: Host, session: str) -> list[dict[str, Any]]:
+    """The session's worker chats (those a tool call opened)."""
+    return [
+        dict(chat)
+        for chat in state(host, session).get("chats", [])
+        if (chat.get("origin") or {}).get("kind") == "tool"
+    ]
+
+
+def notifications(turn: Mapping[str, Any]) -> list[str]:
+    """The text of every system notification in *turn*."""
+    return [
+        str(part.get("content", ""))
+        for part in found(turn, lambda m: m.get("kind") == "systemNotification")
+    ]
 
 
 def found(value: Any, wanted: Callable[[Mapping[str, Any]], bool]) -> list[Mapping[str, Any]]:

@@ -23,6 +23,7 @@ SCRIPTS = sorted(CONFORMANCE.glob("*.js"))
 ROWS = {
     "meta",
     "agent",
+    "agent_schema",
     "parallel",
     "pipeline",
     "phase_log_args",

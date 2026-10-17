@@ -1226,11 +1226,17 @@ class _ProviderChat:
     def resource(self) -> str:
         return self._resource
 
-    async def run_turn(self, text: str, run: Callable[[TurnSink], Awaitable[None]]) -> bool:
+    async def run_turn(
+        self,
+        text: str,
+        run: Callable[[TurnSink], Awaitable[None]],
+        *,
+        on_end: Callable[[], object] | None = None,
+    ) -> bool:
         if self._resource not in self._session.chat_uris:
             return False
         return await self._host._run_external_turn(
-            self._session, self._resource, text, run, "agent"
+            self._session, self._resource, text, run, "agent", on_end=on_end
         )
 
 
@@ -1327,6 +1333,14 @@ class _Directory:
             for uri, session in self._host._sessions.items()
             if session.provider_id == self._provider_id
         ]
+
+
+def _call_on_end(on_end: Callable[[], object]) -> None:
+    """Run a provider's `run_turn(on_end=...)`; a done-callback must not raise."""
+    try:
+        on_end()
+    except Exception:
+        _log.exception("a run_turn on_end callback raised")
 
 
 class _ExternalTurn:
@@ -3764,12 +3778,15 @@ class Host:
         text: str,
         run: Callable[[TurnSink], Awaitable[None]],
         kind: str,
+        *,
+        on_end: Callable[[], object] | None = None,
     ) -> bool:
         """Start a turn no client asked for, on *channel*, run by *run*.
 
         `kind` is the turn message's `MessageOrigin.kind`: ``user`` for a
         message typed elsewhere, ``agent`` for the prompt a parent agent gave
-        a worker chat.
+        a worker chat. *on_end* runs when the turn's task finishes, however it
+        finishes (see `ProviderChat.run_turn`).
         """
         state = self.sequencer.state_of(channel)
         if not isinstance(state, Mapping) or state.get("activeTurn") is not None:
@@ -3787,6 +3804,12 @@ class Host:
         # same reason: there is no client dispatch to have published it.
         await self.sequencer.publish(channel, started)
         await self._start_turn(session, channel, started, _ExternalTurn(run))
+        task = session.turns.get(channel)
+        if on_end is not None:
+            if task is None:
+                _call_on_end(on_end)
+            else:
+                task.add_done_callback(lambda _task: _call_on_end(on_end))
         return True
 
     async def _open_tool_chat(

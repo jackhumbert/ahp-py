@@ -2,13 +2,16 @@
 
 import argparse
 import asyncio
+import dataclasses
 import json
 import sys
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
+from ahp_host_flow.config import ConfigError, load_config
 from ahp_host_flow.engine import EchoDispatcher, JournalError, RunOptions
+from ahp_host_flow.inprocess import FlowRunFailed, run_in_process
 from ahp_host_flow.sandbox import (
     NO_ARGS,
     NodeNotFoundError,
@@ -56,6 +59,14 @@ def _build_parser() -> argparse.ArgumentParser:
         metavar="RUN_ID",
         help="resume an earlier run from its journal: unchanged agent() calls are served from it",
     )
+    run.add_argument(
+        "--config",
+        metavar="PATH",
+        help=(
+            "a flow.toml: run the script through its providers on an in-process host "
+            "(concurrency, budget, timeout, workflows and state come from it)"
+        ),
+    )
     return parser
 
 
@@ -63,9 +74,65 @@ def _stderr(line: str) -> None:
     print(line, file=sys.stderr)
 
 
+_CONFIG_EXCLUSIVE = (
+    ("--concurrency", "concurrency"),
+    ("--budget", "budget"),
+    ("--timeout", "timeout"),
+    ("--workflows", "workflows"),
+    ("--state-dir", "state_dir"),
+    ("--run-id", "run_id"),
+    ("--resume", "resume"),
+)
+
+
+def _run_with_config(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
+    for flag, dest in _CONFIG_EXCLUSIVE:
+        value = getattr(args, dest)
+        # `--budget 0` and `--timeout 0` are values; `--workflows` is a list that is empty unset.
+        if value or (value is not None and not isinstance(value, list)):
+            parser.error(f"{flag} cannot be combined with --config")
+    if args.path is None:
+        parser.error("a script path is needed with --config")
+    script_args: Any = NO_ARGS
+    if args.args is not None:
+        try:
+            script_args = json.loads(args.args)
+        except json.JSONDecodeError as exc:
+            parser.error(f"--args is not valid JSON: {exc}")
+    path = Path(args.path)
+    if not path.is_file():
+        _stderr(f"flow: no such file: {path}")
+        return 2
+    try:
+        config = load_config(Path(args.config))
+    except ConfigError as exc:
+        _stderr(f"flow: {exc}")
+        return 1
+    if args.node is not None:
+        config = dataclasses.replace(config, node=args.node)
+    try:
+        value = asyncio.run(
+            run_in_process(
+                config,
+                path.read_text(encoding="utf-8"),
+                args=script_args,
+                root=Path(args.root),
+                on_note=lambda note: _stderr(f"[flow] {note}"),
+            )
+        )
+    except FlowRunFailed as exc:
+        _stderr(f"flow: {exc}")
+        return 1
+    print(json.dumps(value, indent=2))
+    return 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
+
+    if args.config is not None:
+        return _run_with_config(parser, args)
 
     if args.path is None and args.resume is None:
         parser.error("a script path is needed unless --resume is given")

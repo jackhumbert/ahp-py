@@ -2,8 +2,32 @@
 
 ## [Unreleased]
 
+### Security
+
+- `ScopedPublisher` contains an inner session: a `chat=` it passes is honoured only for its worker chat or a tool chat it opened itself. A foreign chat (the run's main chat, another worker) is never reached: config changes, external turns and changesets naming one are dropped, and canvases, terminals, background work and tool chats are redirected to the worker chat. `dropped` is a bounded deque (`dropped_counts` keeps totals by kind), so progress spam cannot grow it.
+
+### Fixed
+
+- `agent()` no longer hangs when the host cancels the worker turn before it starts: the call returns `null` (skipped) and its inner session is cancelled and closed.
+- A failure opening the worker chat, creating the inner session or running the turn now completes the main chat's `agent` tool call as failed instead of leaving it `running`.
+- `flow run --config` fails at the first confirmation or input an inner session asks for, naming the call and suggesting `approval_mode`, instead of hanging; it is never auto-approved.
+- Inner providers are now really loaded on first use. A provider that fails to load fails only the calls routed to it (`null` plus a log line) and is left out of the model list, instead of stopping startup.
+- `flow run --config` rejects `--budget 0` and `--timeout 0` like any other engine flag.
+- `python -m ahp_host_flow` refuses a non-loopback `--bind` without `--token-file`.
+
 ### Added
 
+- `docs/plan.md` §8 splits M4 into M4a (this) and M4b and records the M4a result; README documents the provider and flow.toml.
+- An opt-in live smoke test (`AHP_FLOW_LIVE_CONFIG=<flow.toml>`) runs a two-call script against the providers it configures.
+- `python -m ahp_host_flow --config flow.toml` serves the provider over WebSocket (loopback, port 4323); `flow run --config flow.toml` runs a script through `ProviderDispatcher` on an in-process host.
+- `FlowProvider`/`FlowSession`: a run is a session; workflows from workspace, user and host sources are customizations; a run's `log()`/`phase()` are system notifications, its result the final ```json message, its journal under `state_dir`; cancelling the main turn aborts the run; `permissionMode` and `effort` are `chatMutable`, and a worker chat's overlay is forwarded to its inner session; models from every configured provider are advertised with their vendor.
+- `ProviderDispatcher`: each `agent()` call routes to a configured provider, opens a worker chat titled by `label` (or the prompt's first line), runs an inner session with a chat-scoped publisher, the model alias resolved and approval mode and effort in its config; `opts.schema` makes it a structured turn; cancelling the worker chat skips the call (null); the main chat shows the call with a subagent link; usage feeds the budget.
+- A run starts from `/<workflow> [json args]`, `/workflow <name> [json args]` or a message starting with a fenced ```js script; anything else gets a short help reply.
+- Workflow discovery: workspace (`.claude/workflows` in each working directory), user (`~/.claude/workflows`) and host (`[workflows] dirs`) sources, first match wins, `source:name` to choose; published as customization containers whose `prompt` children carry `_meta["ahp-py/flow"]` (kind, phases, source, shadowedBy), with `meta` read by parsing, never by running.
+- `ahp_host_flow.bridge`: `ScopedPublisher` (an inner session's publisher scoped to its worker chat; session-wide calls are dropped, config changes land on the worker chat) and `TurnTee`, promoted from the M0 spike.
+- Inner providers load lazily from `load = "module:attr"`: called with no arguments, with a `config` table as keyword arguments, or with `config=Path` for a config path.
+- `ahp_host_flow.config`: `flow.toml` (state_dir, node, `[providers.<name>]` with `load`, `config`, `models`, `approval_mode`, `effort`; `[routing]` default and first-match rules on model alias, phase and label glob; `[workflows]` dirs and sources); unknown keys are errors.
+- `agent()` re-validates a result against `opts.schema` (an object): a mismatch, an invalid schema or a reference outside it returns `null` with a `log()` line (`conformance/agent_schema.js`); `jsonschema` is now a direct dependency.
 - `docs/plan.md` §8 records the M3 result (structured turns live in the host and providers; this package uses them from M4).
 - `docs/plan.md` §8 records the M2 result.
 - `conformance/resume.js`: a run killed with calls in flight resumes with identical results, its completed calls served from the journal and only the rest dispatched; `docs/format.md` pins the resume rules.

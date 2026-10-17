@@ -23,6 +23,7 @@ classifiers = [
 dependencies = [
   "ahp-host[ws]~=0.1.0",
   "ahp-client",
+  "jsonschema>=4.18",
 ]
 
 [project.scripts]
@@ -35,6 +36,7 @@ dev = [
   "mypy>=1.11",
   "ruff>=0.6",
   "import-linter>=2",
+  "types-jsonschema",
 ]
 
 [tool.hatch.version]

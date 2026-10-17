@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from typing import TYPE_CHECKING, Any
 
 from ahp_host_flow.engine.abort import AbortSignal
@@ -12,6 +12,7 @@ from ahp_host_flow.engine.budget import OUTPUT_TOKENS, Budget
 from ahp_host_flow.engine.dispatcher import AgentCall, AgentResult, Dispatcher
 from ahp_host_flow.engine.journal import AgentRecord, JournalStatus, JournalWriter, call_key
 from ahp_host_flow.engine.options import RunOptions
+from ahp_host_flow.engine.schema import schema_error
 
 if TYPE_CHECKING:
     from ahp_host_flow.engine.resume import Replay
@@ -164,6 +165,13 @@ class Scheduler:
                 AgentRecord(n, key, "error", None, added, error=f"result is not JSON: {err}")
             )
             return None
+        schema = call.opts.get("schema")
+        if isinstance(schema, Mapping) and result.value is not None:
+            error = schema_error(schema, result.value)
+            if error is not None:
+                self._log(f"agent() #{n} failed: {error}")
+                self._record(AgentRecord(n, key, "error", None, added, error=error))
+                return None
         status: JournalStatus = "null" if result.value is None else "ok"
         self._record(AgentRecord(n, key, status, result.value, added))
         return result.value

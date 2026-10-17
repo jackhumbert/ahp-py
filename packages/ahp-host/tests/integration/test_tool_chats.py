@@ -140,3 +140,64 @@ async def test_an_unknown_parent_is_refused(host: Host) -> None:
     _, publisher = await _session(host, client, "echo:/tc-4")
     with pytest.raises(AhpError):
         await publisher.open_tool_chat("x", tool_call_id="c", chat="ahp-chat:/nope")
+
+
+async def test_on_end_reports_a_worker_turn_that_ends(host: Host) -> None:
+    client = await _client(host)
+    _, publisher = await _session(host, client, "echo:/tc-end-1")
+    chat = await publisher.open_tool_chat("Worker", tool_call_id="call-1")
+    ended = asyncio.Event()
+
+    async def run(sink: TurnSink) -> None:
+        await sink.text_delta("done")
+
+    assert await chat.run_turn("go", run, on_end=ended.set)
+    await asyncio.wait_for(ended.wait(), 5)
+
+
+async def test_on_end_reports_a_turn_cancelled_before_run_starts(host: Host) -> None:
+    # `run` never starts, so only `on_end` can say the turn is over: without it a
+    # provider waiting on its own callback would wait forever.
+    client = await _client(host)
+    _, publisher = await _session(host, client, "echo:/tc-end-2")
+    chat = await publisher.open_tool_chat("Worker", tool_call_id="call-1")
+    session = host._sessions["echo:/tc-end-2"]
+    real_start = host._start_turn
+
+    async def start_then_cancel(*args: object, **kwargs: object) -> None:
+        await real_start(*args, **kwargs)  # type: ignore[arg-type]
+        session.turns[chat.resource].cancel()
+
+    host._start_turn = start_then_cancel  # type: ignore[method-assign]
+    ran: list[bool] = []
+    ended = asyncio.Event()
+
+    async def run(sink: TurnSink) -> None:
+        ran.append(True)
+
+    assert await chat.run_turn("go", run, on_end=ended.set)
+    await asyncio.wait_for(ended.wait(), 5)
+    assert ran == []
+
+
+async def test_on_end_that_raises_is_contained(host: Host) -> None:
+    client = await _client(host)
+    _, publisher = await _session(host, client, "echo:/tc-end-3")
+    chat = await publisher.open_tool_chat("Worker", tool_call_id="call-1")
+    called = asyncio.Event()
+
+    def boom() -> None:
+        called.set()
+        raise RuntimeError("provider bug")
+
+    async def run(sink: TurnSink) -> None:
+        await sink.text_delta("done")
+
+    assert await chat.run_turn("go", run, on_end=boom)
+    await asyncio.wait_for(called.wait(), 5)
+
+    async def again(sink: TurnSink) -> None:
+        await sink.text_delta("still fine")
+
+    await client.collect(seconds=0.1)
+    assert await chat.run_turn("again", again)

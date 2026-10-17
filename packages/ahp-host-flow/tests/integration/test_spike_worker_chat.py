@@ -1,15 +1,14 @@
 """Spike: an inner session's turn runs inside a worker chat of an outer session.
 
 Proves plan section 2 (in-process dispatch) and the "Sink bridging" risk of
-section 9 over a real in-memory `Host`. The bridge classes live here, not in
-`src`; M3 promotes them.
+section 9 over a real in-memory `Host`. The bridge classes now live in
+`ahp_host_flow.bridge`.
 """
 
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable, Mapping, Sequence
-from typing import Any, cast
+from typing import cast
 
 from ahp_host import (
     AgentInfo,
@@ -22,135 +21,14 @@ from ahp_host import (
 from ahp_host.provider.base import (
     AgentSession,
     BackgroundWork,
-    Canvas,
-    ProviderChat,
-    ProviderTerminal,
-    SessionPublisher,
 )
 from ahp_host.provider.echo import EchoProvider
+
+from ahp_host_flow.bridge import ScopedPublisher, TurnTee
 
 from ..hosting import connect, found, open_session, run_turn, shut, state, text_of  # noqa: TID252
 
 SESSION = "flow-spike:/run-1"
-
-
-class ScopedPublisher:
-    """An outer `SessionPublisher` for an inner session whose world is one worker chat."""
-
-    def __init__(self, outer: SessionPublisher, chat: str) -> None:
-        self.outer = outer
-        self.chat = chat
-        #: Session-wide calls the inner session made; an inner session must not
-        #: rename or reconfigure the run, so they stop here.
-        self.dropped: list[str] = []
-
-    async def customizations_changed(
-        self,
-        customizations: Sequence[Mapping[str, Any]],
-        server_tools: Sequence[Mapping[str, Any]] | None = None,
-    ) -> None:
-        self.dropped.append("customizations_changed")
-
-    async def activity_changed(self, activity: str | None) -> None:
-        self.dropped.append("activity_changed")
-
-    async def changes_published(
-        self, changeset: Any, changes: Sequence[Any], *, chat: str | None = None
-    ) -> str:
-        return await self.outer.changes_published(
-            changeset, changes, chat=chat if chat is not None else self.chat
-        )
-
-    async def mcp_server_changed(
-        self, customization_id: str, state: Mapping[str, Any], channel: str | None = None
-    ) -> None:
-        self.dropped.append("mcp_server_changed")
-
-    async def progress(
-        self, progress: float, total: float | None = None, message: str | None = None
-    ) -> None:
-        self.dropped.append("progress")
-
-    async def title_changed(self, title: str) -> None:
-        self.dropped.append("title_changed")
-
-    async def config_changed(self, values: Mapping[str, Any], *, chat: str | None = None) -> None:
-        # AHP 1.1.0 gives chats their own config overlay, so a change the inner
-        # session reports lands on its worker chat; the run's own config is
-        # never touched.
-        await self.outer.config_changed(values, chat=chat if chat is not None else self.chat)
-
-    async def background_work_set(self, work: BackgroundWork, *, chat: str | None = None) -> None:
-        await self.outer.background_work_set(work, chat=chat if chat is not None else self.chat)
-
-    async def background_work_removed(self, work_id: str, *, chat: str | None = None) -> None:
-        await self.outer.background_work_removed(
-            work_id, chat=chat if chat is not None else self.chat
-        )
-
-    async def canvas_set(self, canvas: Canvas, *, chat: str | None = None) -> str:
-        return await self.outer.canvas_set(canvas, chat=chat if chat is not None else self.chat)
-
-    async def canvas_removed(self, instance_id: str, *, chat: str | None = None) -> None:
-        await self.outer.canvas_removed(instance_id, chat=chat if chat is not None else self.chat)
-
-    async def open_terminal(
-        self,
-        title: str,
-        *,
-        chat: str | None = None,
-        cwd: str | None = None,
-        turn_id: str | None = None,
-        tool_call_id: str | None = None,
-    ) -> ProviderTerminal:
-        return await self.outer.open_terminal(
-            title,
-            chat=chat if chat is not None else self.chat,
-            cwd=cwd,
-            turn_id=turn_id,
-            tool_call_id=tool_call_id,
-        )
-
-    async def open_tool_chat(
-        self,
-        title: str,
-        *,
-        tool_call_id: str,
-        chat: str | None = None,
-        interactivity: str = "read-only",
-    ) -> ProviderChat:
-        return await self.outer.open_tool_chat(
-            title,
-            tool_call_id=tool_call_id,
-            chat=chat if chat is not None else self.chat,
-            interactivity=interactivity,
-        )
-
-    async def external_turn(
-        self,
-        text: str,
-        run: Callable[[TurnSink], Awaitable[None]],
-        *,
-        chat: str | None = None,
-    ) -> bool:
-        return await self.outer.external_turn(
-            text, run, chat=chat if chat is not None else self.chat
-        )
-
-
-class TextTee:
-    """Records every `text_delta` it forwards: how the dispatcher gets agent()'s text."""
-
-    def __init__(self, sink: TurnSink) -> None:
-        self.sink = sink
-        self.text: list[str] = []
-
-    async def text_delta(self, text: str) -> None:
-        self.text.append(text)
-        await self.sink.text_delta(text)
-
-    def __getattr__(self, name: str) -> Any:
-        return getattr(self.sink, name)
 
 
 class SpikeSession:
@@ -181,11 +59,11 @@ class SpikeSession:
             )
         )
         done = asyncio.Event()
-        tee: TextTee | None = None
+        tee: TurnTee | None = None
 
         async def run(inner_sink: TurnSink) -> None:
             nonlocal tee
-            tee = TextTee(inner_sink)
+            tee = TurnTee(inner_sink)
             try:
                 await inner.send_user_message(
                     UserMessage(text=message.text, chat_uri=worker.resource),
@@ -295,6 +173,6 @@ async def test_spike_worker_chat_publisher_is_scoped() -> None:
 
         await scoped.title_changed("hijacked")
         assert state(host, SESSION).get("title") != "hijacked"
-        assert scoped.dropped == ["title_changed"]
+        assert list(scoped.dropped) == ["title_changed"]
     finally:
         await shut(host, wire, serving)

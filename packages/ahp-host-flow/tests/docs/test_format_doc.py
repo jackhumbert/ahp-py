@@ -18,6 +18,6 @@ def test_format_doc_plan_status() -> None:
     text = (ROOT / "docs" / "plan.md").read_text(encoding="utf-8")
     status = re.search(r"^Status: (.*)$", text, re.MULTILINE)
     assert status is not None
-    nxt = re.search(r"\b(M\d+)\b[^.]*\bis next\b", status.group(1))
+    nxt = re.search(r"\b(M\d+[a-z]?)\b[^.]*\bis next\b", status.group(1))
     assert nxt is not None
     assert f"| {nxt.group(1)} |" in text

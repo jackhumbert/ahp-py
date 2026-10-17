@@ -218,3 +218,55 @@ def test_cli_resume_needs_state_dir() -> None:
     with pytest.raises(SystemExit) as info:
         main(["run", "--resume", "r1"])
     assert info.value.code == 2
+
+
+def _flow_toml(tmp_path: Path, node: str | None = None) -> Path:
+    toml = tmp_path / "flow.toml"
+    node_line = f"node = {json.dumps(node)}\n" if node else ""
+    toml.write_text(
+        f"""\
+state_dir = {json.dumps(str(tmp_path / "state"))}
+{node_line}
+[providers.echo]
+load = "ahp_host.provider.echo:EchoProvider"
+
+[workflows]
+sources = ["workspace"]
+""",
+        encoding="utf-8",
+    )
+    return toml
+
+
+@pytest.mark.node
+def test_cli_config_runs_script(
+    node_path: str, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    script = _write(tmp_path, "return await agent('hi')\n")
+    toml = _flow_toml(tmp_path, node_path)
+    code = main(["run", str(script), "--config", str(toml), "--root", str(tmp_path)])
+    assert code == 0
+    assert json.loads(capsys.readouterr().out) == "You said: hi"
+
+
+def test_cli_config_rejects_budget(tmp_path: Path) -> None:
+    script = _write(tmp_path, "return 1\n")
+    toml = _flow_toml(tmp_path)
+    with pytest.raises(SystemExit):
+        main(["run", str(script), "--config", str(toml), "--budget", "5"])
+
+
+@pytest.mark.parametrize("flag", ["--budget", "--timeout", "--concurrency"])
+def test_cli_config_rejects_zero_valued_flags(tmp_path: Path, flag: str) -> None:
+    script = _write(tmp_path, "return 1\n")
+    toml = _flow_toml(tmp_path)
+    with pytest.raises(SystemExit) as info:
+        main(["run", str(script), "--config", str(toml), flag, "0"])
+    assert info.value.code == 2
+
+
+def test_cli_config_bad_file(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    script = _write(tmp_path, "return 1\n")
+    code = main(["run", str(script), "--config", str(tmp_path / "missing.toml")])
+    assert code == 1
+    assert "no config file" in capsys.readouterr().err

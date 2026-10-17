@@ -871,7 +871,13 @@ class ProviderChat(Protocol):
         """The chat's channel URI."""
         ...
 
-    async def run_turn(self, text: str, run: Callable[[TurnSink], Awaitable[None]]) -> bool:
+    async def run_turn(
+        self,
+        text: str,
+        run: Callable[[TurnSink], Awaitable[None]],
+        *,
+        on_end: Callable[[], object] | None = None,
+    ) -> bool:
         """Start a turn on the chat, as `external_turn` does on the default chat.
 
         *text* is the worker's prompt, published with origin `agent`; *run*
@@ -879,6 +885,11 @@ class ProviderChat(Protocol):
         turn is already running there or the chat is gone. Cancelling it -- a
         client stopping the worker -- cancels only *run*: the session's agent
         is not interrupted, so stop the worker yourself on `CancelledError`.
+
+        This returns once the turn has started, not when it ends. *on_end* is
+        called once when the turn is over, however it ends -- including a turn
+        cancelled before *run* ever started, which *run* itself cannot see. An
+        exception it raises is logged and swallowed.
         """
         ...
 

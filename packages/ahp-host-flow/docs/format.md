@@ -26,6 +26,13 @@ Ordinals are 0-based and taken when the call is issued. `opts` reach the
 dispatcher verbatim (JSON-cloned), and the dispatcher also gets `label` and
 `phase` as fields of the call. Unknown opts keys are passed on, not rejected.
 
+When `opts.schema` is an object, a non-null result is validated against it
+(JSON Schema, draft from `$schema`, 2020-12 when absent; references only inside
+the schema). A mismatch or an unusable schema makes `agent()` return `null` and
+logs `agent() #N failed: <reason>`; a non-object `opts.schema` is ignored.
+
+Script: `conformance/agent_schema.js`.
+
 ## parallel
 
 Script: `conformance/parallel.js`.

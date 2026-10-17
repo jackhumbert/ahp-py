@@ -43,6 +43,7 @@ from ahp_host_flow.engine.scheduler import (
     Scheduler,
     SchedulerRefusal,
 )
+from ahp_host_flow.engine.schema import schema_error
 
 __all__ = [
     "CPU_RESERVE",
@@ -85,4 +86,5 @@ __all__ = [
     "new_run_id",
     "resolve_workflow",
     "run_dir",
+    "schema_error",
 ]

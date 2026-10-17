@@ -7,7 +7,7 @@ an AHP session, and each `agent()` call is a **child chat** of it, so any AHP
 client can watch and steer the whole run. Extensions to the format are opt-in,
 and a script written for Claude Code runs unchanged.
 
-Status: M0, M1, M2 and M3 done (Node sandbox, `flow run`, worker-chat spike; engine semantics on a fake dispatcher; journal and resume; structured turns across ahp-protocol, ahp-host, ahp-host-claude, ahp-host-acp and ahp-client). M4 (the provider, in-process) is next. Milestones are in §8.
+Status: M0, M1, M2, M3 and M4a done (Node sandbox, `flow run`, worker-chat spike; engine semantics on a fake dispatcher; journal and resume; structured turns across ahp-protocol, ahp-host, ahp-host-claude, ahp-host-acp and ahp-client; the provider core: flow.toml, routing, workflow sources as customizations, worker chats, structured agent() calls, skip/abort, approvals and per-chat config). M4b (typed progress, masking, worktrees, journal start records, live corpus runs) is next. Milestones are in §8.
 
 ## 1. Where it sits
 
@@ -162,7 +162,7 @@ each workflow in it is a `prompt` child. So clients list and toggle workflows
 with the existing customization actions (global, workspace or session
 enablement), and each one shows as a slash command (`/fanout`) with
 `whenToUse` as its description. AHP has no workflow customization type; the
-prompt child's `_meta.ahpFlow = {kind: "workflow", phases}` marks it. If
+prompt child's `_meta["ahp-py/flow"] = {kind, phases, source, shadowedBy?}` marks it. If
 clients want to render workflows differently, that becomes a `requests.md`
 item.
 
@@ -175,7 +175,7 @@ item.
 
 - **Name resolution, first match wins:** client → workspace → user → host. A
   name can be qualified (`/host:fanout`, `/workspace:fanout`) to choose
-  explicitly. A shadowed name is still listed, marked `_meta.ahpFlow.shadowedBy`.
+  explicitly. A shadowed name is still listed, marked `_meta["ahp-py/flow"].shadowedBy`.
   `workflow("name")` inside a script resolves the same way, from the calling
   run's session. `workflow({scriptPath})` is a path in the session's working
   directories, or a URI.
@@ -456,6 +456,8 @@ rules = [ { model = "glm", provider = "glm" },
           { phase = "Review", provider = "glm" } ]   # first match wins
 ```
 
+In M4a, `load` is called as a factory: with no arguments, with the `config` table as keyword arguments, or with `config=Path(...)` when `config` is a string. `via`, `url` and `[redact]` are M4b/M7 keys and are rejected as unknown until then.
+
 Routing lives in config, so a script needs no changes to send a phase to GLM.
 A script can also pin one call with `opts.x.provider`.
 
@@ -516,7 +518,8 @@ A live GLM smoke test is opt-in, behind a marker.
 | M1 | Engine semantics on a fake dispatcher: null rules, caps, phase/log, budget, `workflow()` | one conformance script per row of §3 passes |
 | M2 | Journal + resume | kill mid-run, resume: identical results, and live calls start only at the first edited call |
 | M3 | **Structured turns** (§4.6), across packages: the `_meta` output schema, `ReturnsStructuredOutput`, host validation and the text fallback in `ahp-host`; `ahp-host-claude`; general client-tool support over MCP in `ahp-host-acp`; `output_schema` and `.structured` in `ahp-client`; the `requests.md` entry | a client asks Claude and an ACP agent (a fake in tests, GLM as an opt-in smoke test) for a schema and gets a validated result; a mismatch is retried, then fails with a structured-output code |
-| M4 | **The provider, in-process:** workspace/user/host workflow sources as customizations; child chats titled by `label`; model/effort; per-chat approval mode and effort (`ReconfiguresChats`, §4.5); `schema` as a structured turn; worktrees; skip/abort; approval relay; models advertised with `vendor`; Claude and opencode/GLM through routing; journal start records; **typed progress** (§4.7: the descriptors, `ahp_protocol.ext.flow`, `flow_view()`); credential **masking** before publishing (§4.9) | fan-out and triage corpus scripts pass against Claude; a Review phase routed to GLM returns a schema-valid result; a run is watched and controlled from VS Code or iOS, and `flow_view()` folds it from the transcript |
+| M4a | **The provider core:** config, routing, lazy provider loading, workspace/user/host sources as customizations, slash/fenced run start, `ProviderDispatcher` worker chats titled by label, model/effort/approval mode, per-chat approval mode and effort via `ReconfiguresChats`, schema as a structured turn with engine re-validation, skip/abort, approval relay, models with vendor, `python -m ahp_host_flow`, `flow run --config` | the in-memory host tests over EchoProvider and scripted fakes pass |
+| M4b | **Typed progress** (§4.7) with `ahp_protocol.ext.flow` and `flow_view()`, credential masking (§4.9), `isolation: 'worktree'`, journal start records, a `from_config`-style factory in ahp-host-claude and ahp-host-acp so flow.toml can load them directly, the subagent prompt preamble (§4.4), live watching of workflow dirs (§4.3), live corpus runs | fan-out and triage corpus scripts pass against Claude; a Review phase routed to GLM returns a schema-valid result; a run is watched and controlled from VS Code or iOS, and `flow_view()` folds it from the transcript |
 | M5 | **Python workflows** (§4.10): `.py` workflow files run by a Python runner process on the same JSON-RPC protocol as `runner.mjs`; `meta` read with `ast.literal_eval`; the verbs as a Python module; the `flow.run(...)` library API; source trust rules; `workflow()` across JS and Python; a `.py` twin of each conformance script | every conformance sidecar passes for its JS and Python twins; a `.py` workflow shows as a slash command next to the JS ones and runs, resumes and dispatches like them |
 | M6 | **Durability** (§4.8): `ResumesInterruptedTurns` and stored `inputNeeded` (re-bound or withdrawn with a notice) in `ahp-host`; the provider relaunches a run from its journal under the same turn; gates journaled | killing the host mid-run, the run continues where it stopped; an open approval is answered after the restart, or withdrawn with a notice |
 | M7 | **Fleet** (§2): fleet tools for `flow` sessions in `ahp-gateway`, bound to the run's principal; the `flow` agent type for `ahp-node`; fleet dispatch with thin child chats; reattach after restart; the direct remote `ClientDispatcher` (`create_chat(title=)`); the delegation-origin request | a run on one node starts calls on two others, each visible from every surface; restarting the flow host reattaches to calls still running |
@@ -560,6 +563,8 @@ Open for M4:
 Open for M4 (structured turns):
 - the engine re-validates `agent()` results (§4.4);
 - §9's "bounded retries, then null plus a log()" maps a structured-output failure to `null`.
+
+**M4a result.** The top-level modules: `config` parses flow.toml (unknown keys are errors); `routing` picks a provider per call (first matching rule on model alias, phase or label glob, else the default); `loading` imports inner providers by `load` path and calls them as factories; `bridge` holds `ScopedPublisher` and `TurnTee`; `catalog` finds workflows in the workspace, user and host sources and publishes them as customizations; `commands` parses the message that starts a run; `dispatch` is `ProviderDispatcher`; `provider` is `FlowProvider`/`FlowSession`; `inprocess` is the in-memory host behind `flow run --config`; `__main__` serves it over WebSocket (loopback, port 4323). A run is one turn on a chat of the flow session. Worker turns run through `ProviderChat.run_turn` with a `TurnTee`. Structured calls reuse `StructuredTurn` on the worker turn's `ActionTurnSink` (`run_turn`'s message carries no `_meta`), and the engine re-validates the result. Skip is a self-cancelled dispatch; abort is the main task cancelled. The host does not call the session's `cancel` while worker turns run, so `CancelsChats` and task cancellation carry it. Inner sessions get `permissionMode` and `effort` (Claude's names) in their config. Review fixes: `ScopedPublisher` honours a `chat=` only for its worker chat or tool chats it opened (anything else is dropped or redirected), a worker turn cancelled before it starts is a skip (through `run_turn(on_end=)`, added to `ahp-host` for this: the review fix first found the host task by inspecting task frames, which was replaced before commit), every `agent()` failure completes the main chat's tool call, `flow run --config` fails at the first unanswerable confirmation, and providers load on first use. Open for M4b: the items in the M4b row; main-chat model selection only applies when the routed provider lists that model; workflow dirs are re-read at each run rather than watched.
 
 ## 9. Risks
 

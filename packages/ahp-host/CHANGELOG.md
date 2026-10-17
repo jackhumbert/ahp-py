@@ -54,6 +54,14 @@ versions each release speaks.
   automation run cut off at the deadline is failed by the next start rather than
   having its turn resumed with no run attached.
 
+### Added
+
+- `ProviderChat.run_turn(..., on_end=)`: called once when the worker turn is
+  over, however it ends. `run_turn` returns as soon as the turn starts, and a
+  turn cancelled before its callback runs never enters it, so without this a
+  provider waiting on its own callback could wait forever. An `on_end` that
+  raises is logged and contained.
+
 ### Added — structured turns (ahp-py extension ahead of the spec)
 
 - `HostTool` (`provider.base`): a tool the host offers the agent for one turn.

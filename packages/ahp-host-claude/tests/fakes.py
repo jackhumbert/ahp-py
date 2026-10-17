@@ -349,7 +349,13 @@ class FakeChat:
         #: The chat it was opened under (None: the default chat).
         self.parent: str | None = None
 
-    async def run_turn(self, text: str, run: Callable[[Any], Awaitable[None]]) -> bool:
+    async def run_turn(
+        self,
+        text: str,
+        run: Callable[[Any], Awaitable[None]],
+        *,
+        on_end: Callable[[], object] | None = None,
+    ) -> bool:
         if any(not task.done() for task in self.tasks):
             return False
         sink = RecordingSink()
@@ -359,7 +365,10 @@ class FakeChat:
         async def turn() -> None:
             await run(sink)
 
-        self.tasks.append(asyncio.create_task(turn()))
+        task = asyncio.create_task(turn())
+        if on_end is not None:
+            task.add_done_callback(lambda _task: on_end())
+        self.tasks.append(task)
         return True
 
 

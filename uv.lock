@@ -206,6 +206,7 @@ source = { editable = "packages/ahp-host-flow" }
 dependencies = [
     { name = "ahp-client" },
     { name = "ahp-host", extra = ["ws"] },
+    { name = "jsonschema" },
 ]
 
 [package.dev-dependencies]
@@ -215,12 +216,14 @@ dev = [
     { name = "pytest" },
     { name = "pytest-asyncio" },
     { name = "ruff" },
+    { name = "types-jsonschema" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "ahp-client", editable = "packages/ahp-client" },
     { name = "ahp-host", extras = ["ws"], editable = "packages/ahp-host" },
+    { name = "jsonschema", specifier = ">=4.18" },
 ]
 
 [package.metadata.requires-dev]
@@ -230,6 +233,7 @@ dev = [
     { name = "pytest", specifier = ">=8" },
     { name = "pytest-asyncio", specifier = ">=0.24" },
     { name = "ruff", specifier = ">=0.6" },
+    { name = "types-jsonschema" },
 ]
 
 [[package]]

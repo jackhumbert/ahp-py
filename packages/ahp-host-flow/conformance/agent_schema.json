@@ -1,0 +1,4 @@
+{
+  "result": { "ok": "fine", "bad": null, "ignored": "no schema object" },
+  "logs": ["agent() #1 failed: result does not match opts.schema: (root): 'not an object' is not of type 'object'"]
+}
