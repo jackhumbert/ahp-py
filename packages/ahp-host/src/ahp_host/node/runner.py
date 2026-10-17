@@ -42,13 +42,16 @@ from ahp_host.node.config import ConfigError, NodeSettings, load
 from ahp_host.node.roots import NamedRootsResourceProvider, Roots
 from ahp_host.node.service import (
     DEFAULT_LAUNCHD_LABEL,
+    DEFAULT_SYSTEMD_UNIT,
     DEFAULT_TASK_NAME,
     Supervisor,
+    install_linux,
     install_macos,
     install_windows,
     node_command,
     python_for_service,
     supervisor_log,
+    uninstall_linux,
     uninstall_macos,
     uninstall_windows,
 )
@@ -78,7 +81,8 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         prog="ahp-node",
         description="run: serve the agents (the default). supervise: run it, restarting it "
         "(and the config's tunnel) when it exits. install / uninstall: start the supervisor "
-        "at login (a Scheduled Task on Windows, a launchd agent on macOS).",
+        "at login (a Scheduled Task on Windows, a launchd agent on macOS), or at boot "
+        "(a systemd user unit with lingering on Linux).",
     )
     parser.add_argument("command", nargs="?", choices=COMMANDS, default="run")
     parser.add_argument("--config", type=Path, help="the node's TOML settings")
@@ -86,7 +90,8 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--name",
         help=f"install/uninstall: the Scheduled Task name (default {DEFAULT_TASK_NAME}) "
-        f"or launchd label (default {DEFAULT_LAUNCHD_LABEL})",
+        f", launchd label (default {DEFAULT_LAUNCHD_LABEL}) "
+        f"or systemd unit (default {DEFAULT_SYSTEMD_UNIT})",
     )
     parser.add_argument(
         "--root",
@@ -271,7 +276,9 @@ def _install(config: Path, settings: NodeSettings, name: str | None) -> str:
         return install_macos(
             command, name or DEFAULT_LAUNCHD_LABEL, supervisor_log(settings.log_file)
         )
-    raise SystemExit("ahp-node install: Windows and macOS only (use a systemd unit)")
+    if sys.platform.startswith("linux"):
+        return install_linux(command, name or DEFAULT_SYSTEMD_UNIT)
+    raise SystemExit(f"ahp-node install: not supported on {sys.platform}")
 
 
 def _uninstall(name: str | None) -> str:
@@ -279,7 +286,9 @@ def _uninstall(name: str | None) -> str:
         return uninstall_windows(name or DEFAULT_TASK_NAME)
     if sys.platform == "darwin":
         return uninstall_macos(name or DEFAULT_LAUNCHD_LABEL)
-    raise SystemExit("ahp-node uninstall: Windows and macOS only")
+    if sys.platform.startswith("linux"):
+        return uninstall_linux(name or DEFAULT_SYSTEMD_UNIT)
+    raise SystemExit(f"ahp-node uninstall: not supported on {sys.platform}")
 
 
 __all__ = ["AGENTS_GROUP", "NodeContext", "create_agents", "main", "resources_for", "run"]

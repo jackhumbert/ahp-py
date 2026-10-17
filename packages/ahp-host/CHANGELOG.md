@@ -39,6 +39,19 @@ versions each release speaks.
   host never advertises `tcpConnections`. A `subscribe` offering
   `flowControl` gets ordinary delivery.
 
+### Added
+
+- **`ahp-node install` / `uninstall` on Linux.** `install` writes a systemd
+  user unit (`~/.config/systemd/user/<name>.service`, default `ahp-node`)
+  running the same `supervise` command as the other platforms, with
+  `Restart=always`, `RestartSec=10`, `After=`/`Wants=network-online.target`
+  and a `PATH` that starts with `~/.local/bin` (systemd's own has no user
+  folders, so `claude` and friends were not found). It turns on lingering
+  so the node runs from boot without a login — saying plainly, with the
+  `sudo` command, when that needs root — then reloads, enables and restarts
+  the unit. `uninstall` disables and removes it and leaves lingering alone.
+  The unit text is `service.systemd_unit()`, testable like `launchd_plist()`.
+
 ### Changed
 
 - `SessionPublisher.external_turn` takes `chat=`, so a provider running a

@@ -20,18 +20,24 @@ as another account would not have:
   the supervisor does the restarting.
 * macOS: a launchd agent (``~/Library/LaunchAgents/<label>.plist``) with
   ``KeepAlive``.
+* Linux: a systemd *user* unit (``~/.config/systemd/user/<name>.service``)
+  with ``Restart=always``, enabled for ``default.target``. Lingering is turned
+  on (``loginctl enable-linger``) so the user manager -- and the node -- start
+  at boot with no one logged in. The unit's ``PATH`` adds ``~/.local/bin``,
+  where agent CLIs such as ``claude`` live; systemd's own is bare.
 """
 
 from __future__ import annotations
 
 import contextlib
+import getpass
 import os
 import plistlib
 import signal
 import subprocess
 import sys
 import time
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from subprocess import list2cmdline
@@ -40,6 +46,7 @@ from xml.sax.saxutils import escape
 
 DEFAULT_TASK_NAME = "ahp-node"
 DEFAULT_LAUNCHD_LABEL = "io.ahp.node"
+DEFAULT_SYSTEMD_UNIT = "ahp-node"
 
 #: Windows: start a console program (ssh.exe) with no console window.
 _CREATE_NO_WINDOW = 0x08000000
@@ -331,17 +338,140 @@ def uninstall_macos(label: str) -> str:
     return f"launchd agent {label!r} removed"
 
 
+# ─── install: Linux ─────────────────────────────────────────────────────
+
+
+def _systemd_quote(argument: str, *, exec_word: bool = True) -> str:
+    """A unit-file value, quoted when it needs to be. `%` is a specifier
+    everywhere; `$` is expanded only in `ExecStart=`."""
+    escaped = argument.replace("%", "%%")
+    if exec_word:
+        escaped = escaped.replace("$", "$$")
+    if escaped and not any(c in escaped for c in " \t\"'\\;"):
+        return escaped
+    return '"' + escaped.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def systemd_path(home: Path, inherited: str | None = None) -> str:
+    """The unit's PATH: the user's bin folders, then `inherited` (or a stock one)."""
+    stock = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+    parts = [str(home / ".local" / "bin"), str(home / "bin")]
+    for part in (inherited or stock).split(":"):
+        if part and part not in parts:
+            parts.append(part)
+    return ":".join(parts)
+
+
+def systemd_unit(command: Sequence[str], *, home: Path, path: str, description: str) -> str:
+    """A systemd user unit: start `command` with the user's manager, keep it up."""
+    exec_start = " ".join(_systemd_quote(argument) for argument in command)
+    return f"""[Unit]
+Description={description}
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart={exec_start}
+WorkingDirectory={str(home).replace("%", "%%")}
+Environment={_systemd_quote("PATH=" + path, exec_word=False)}
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=default.target
+"""
+
+
+def _systemd_unit_path(name: str) -> Path:
+    config = os.environ.get("XDG_CONFIG_HOME") or str(Path.home() / ".config")
+    return Path(config) / "systemd" / "user" / f"{name}.service"
+
+
+#: Runs a command; replaced in tests (there is no systemd on a dev Mac).
+Run = Callable[[list[str]], "subprocess.CompletedProcess[str]"]
+
+
+def _run(command: list[str]) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(command, capture_output=True, text=True, check=False)
+
+
+def _enable_linger(run: Run, user: str) -> str:
+    """Turn lingering on, or say plainly why it is not on."""
+    show = run(["loginctl", "show-user", user, "--property=Linger", "--value"])
+    if show.returncode == 0 and show.stdout.strip() == "yes":
+        return "lingering already on"
+    enabled = run(["loginctl", "enable-linger", user])
+    if enabled.returncode == 0:
+        return "lingering turned on (starts at boot)"
+    reason = (enabled.stderr or enabled.stdout).strip() or f"exit {enabled.returncode}"
+    return (
+        f"WARNING: could not turn on lingering ({reason}); the node will only run while "
+        f"{user} is logged in. Run: sudo loginctl enable-linger {user}"
+    )
+
+
+def _systemctl(run: Run, *args: str) -> None:
+    result = run(["systemctl", "--user", *args])
+    if result.returncode != 0:
+        reason = (result.stderr or result.stdout).strip() or f"exit {result.returncode}"
+        raise SystemExit(f"systemctl --user {' '.join(args)} failed: {reason}")
+
+
+def install_linux(
+    command: Sequence[str],
+    name: str,
+    *,
+    run: Run = _run,
+    unit_path: Path | None = None,
+    user: str | None = None,
+) -> str:
+    name = name.removesuffix(".service")
+    path = unit_path or _systemd_unit_path(name)
+    home = Path.home()
+    unit = systemd_unit(
+        command,
+        home=home,
+        path=systemd_path(home, os.environ.get("PATH")),
+        description="ahp-node: this machine's agents, served over AHP.",
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(unit, encoding="utf-8")
+    linger = _enable_linger(run, user or getpass.getuser())
+    _systemctl(run, "daemon-reload")
+    _systemctl(run, "enable", f"{name}.service")
+    # restart, not start: a unit already running keeps the old command otherwise.
+    _systemctl(run, "restart", f"{name}.service")
+    return f"systemd user unit {name!r} installed at {path} and started; {linger}"
+
+
+def uninstall_linux(name: str, *, run: Run = _run, unit_path: Path | None = None) -> str:
+    name = name.removesuffix(".service")
+    path = unit_path or _systemd_unit_path(name)
+    run(["systemctl", "--user", "disable", "--now", f"{name}.service"])
+    if not path.exists():
+        return f"no systemd user unit {name!r} to remove"
+    path.unlink()
+    run(["systemctl", "--user", "daemon-reload"])
+    return f"systemd user unit {name!r} removed"
+
+
 __all__ = [
     "DEFAULT_LAUNCHD_LABEL",
+    "DEFAULT_SYSTEMD_UNIT",
     "DEFAULT_TASK_NAME",
     "Supervisor",
+    "install_linux",
     "install_macos",
     "install_windows",
     "launchd_plist",
     "node_command",
     "python_for_service",
     "supervisor_log",
+    "systemd_path",
+    "systemd_unit",
     "task_xml",
+    "uninstall_linux",
     "uninstall_macos",
     "uninstall_windows",
 ]

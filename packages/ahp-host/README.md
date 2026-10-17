@@ -375,6 +375,18 @@ here will find it. The host reads it back and publishes the children, which is
 what makes a plugin's skills, prompts and instructions render rather than
 appearing as an empty container.
 
+**`ahp-node` keeps itself running.** `ahp-node supervise` restarts the node,
+and the config's `tunnel` command, whenever they exit; `ahp-node install`
+registers that supervisor as the current user — a Scheduled Task at logon on
+Windows, a launchd agent on macOS, and on Linux a systemd user unit
+(`~/.config/systemd/user/ahp-node.service`) with lingering turned on, so it
+starts at boot with no one logged in. The unit's `PATH` puts `~/.local/bin`
+first, where agent CLIs usually live. `ahp-node uninstall` removes it.
+
+```bash
+ahp-node install --config ~/.config/ahp/node.toml
+```
+
 ### Not implemented
 
 **No command answers `MethodNotFound`.** That used to be how this host declined
