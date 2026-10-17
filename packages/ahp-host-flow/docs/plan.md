@@ -14,7 +14,11 @@ Status: M0 and M1 done (Node sandbox, `flow run`, worker-chat spike; engine sema
 AHP has no workflow primitive and no structured-output turns. `requests.md`
 calls agent-to-agent coordination something that "belongs to whatever
 orchestrates the agents, not to the protocol". So ahp-host-flow is an orchestrator
-built from AHP parts. The protocol does not change.
+built from AHP parts. It needs four things the protocol lacks: structured turns
+(§4.6), typed progress (§4.7), durable runs and approvals across a restart
+(§4.8), and redaction (§4.9). Each is built in ahp-py first, inside the
+protocol's extension points (`_meta`, client tools, provider capabilities), so
+stock clients still work, and each is written up as an upstream request (§10).
 
 ```
  AHP clients (VS Code, iOS, ahp-client, `flow` CLI)
@@ -24,9 +28,11 @@ built from AHP parts. The protocol does not change.
              one AgentSession per run                                │
              ├ main chat: the run (phases, log, result)              │
              ├ child chat per agent() call  (ChatOrigin kind "tool") │
-             │    └ driven by an inner provider session (in-process) │
-             │      ClaudeProvider │ AcpProvider (opencode, …)       │
-             └ or mirrored from a remote session (ahp-client) ───────┼──▶ other hosts / ahp-gateway nodes
+             │    ├ in-process: an inner provider session drives it  │
+             │    │  ClaudeProvider │ AcpProvider (opencode, …)      │
+             │    └ fleet: links to a session the gateway started ───┼──▶ a session on any node
+             │      on a node, via the gateway's fleet tools (§2)    │    (listed in every surface)
+             └ remote: mirrored from a host it dials (ahp-client) ───┼──▶ another host
                                                                      │
  engine (ahp_host_flow.engine) ◀─ JSON-RPC ─▶ Node sandbox ───────────┘
 ```
@@ -41,7 +47,7 @@ pointing back to it. Clients render it as a "spawned by tool" child, and
 
 That concept is scoped to chats within **one session**. There is no
 session-to-session parent: `SessionOrigin` has only the `automation` kind. This
-gives two ways to dispatch:
+gives three ways to dispatch, chosen per call by routing (§5):
 
 - **In-process (primary).** `ahp-host-flow` hosts the inner providers itself.
   For each `agent()` call it opens a worker chat
@@ -50,12 +56,33 @@ gives two ways to dispatch:
   inner session's sink. The child chat is then the real transcript, not a copy,
   and approvals, questions and file edits raised in it reach any client. No
   stray top-level sessions appear anywhere.
-- **Remote (secondary).** For agents on another machine (a gateway node), the
-  engine drives a remote session through `ahp-client` and mirrors its events
-  into the worker chat. The remote session does show in that node's catalog.
-  Proposal for `requests.md`: a `SessionOrigin` kind for delegated sessions
-  (`{kind: "delegation", session, chat, toolCallId}`), so the remote session
-  can point back. This is not needed for v1.
+- **Fleet (behind a gateway).** Each `agent()` call becomes an ordinary
+  session on a node, so every surface connected to the gateway (VS Code, a web
+  client, the CLI) lists it and can open the same transcript. The mechanism is
+  the gateway orchestrator's (`ahp-gateway` plan §10), reused rather than
+  rebuilt:
+  - the run session lives on a node that runs `ahp-host-flow` as an agent type
+    (`ahp_host.agents` entry point `flow`), so it appears in the gateway's
+    merged agent list like any other agent;
+  - the gateway joins each `flow` session as an active client offering **fleet
+    tools**, as it already does for orchestrator sessions. The tools are
+    `start_session` (node, agent, folder, model, config, prompt, output
+    schema, title), `wait_for_sessions`, `read_session` (final text, structured
+    result, usage) and `stop_session`;
+  - the engine calls them through the main turn's `run_client_tool`, not
+    through a model, so the dispatch stays deterministic;
+  - the gateway starts each session **as the principal who started the run**,
+    over its own supervised per-(principal, node) links. The registry's
+    admission and `child_config` apply, and `max_running` bounds the run
+    alongside the engine's concurrency cap. Nodes need no fleet credentials;
+  - the child chat in the run is thin: status, the result, usage and a link to
+    the node session, which holds the full transcript and its approvals. A
+    `SessionOrigin` kind for delegated sessions
+    (`{kind: "delegation", session, chat, toolCallId}`, §10) would let the node
+    session point back to the run.
+- **Remote (direct).** Without a gateway, the engine dials another host with
+  `ahp-client` and mirrors the remote session's events into the worker chat.
+  The remote session shows in that host's catalog.
 
 The main chat shows each `agent()` call as a tool call. Its label is the
 `label` option and it is grouped by `phase`. The call's result is the
@@ -185,19 +212,9 @@ The prompt gets a short preamble equivalent to Claude Code's subagent
 framing: "your final message is the return value; return raw data". This
 matters most for non-Claude agents.
 
-**Structured output.** AHP turns carry no output schema, so there are three
-tiers:
-1. **Client tool.** The engine offers `StructuredOutput` with the schema as its
-   input schema. Arguments are validated with `jsonschema`, and a mismatch is
-   returned as a tool error so the agent retries. `ahp-host-claude` already
-   serves client tools (`client_tools.py`).
-2. **MCP.** `ahp-host-acp` has no client-tool path but does pass MCP servers
-   through. The engine serves `StructuredOutput` on a loopback HTTP MCP
-   endpoint and adds it to the inner session's `mcp_servers`. If the agent
-   only takes stdio, a tiny stdio shim forwards to that endpoint.
-3. **Text.** The schema goes in the prompt and the engine parses the last JSON
-   block. A bounded number of "fix your JSON" follow-ups are sent in the same
-   chat.
+**Structured output.** `opts.schema` becomes the turn's output schema, a
+structured turn (§4.6), whichever way the call is dispatched. The engine
+validates the result again before `agent()` returns it.
 
 ### 4.5 Per-chat config, steering and titles (AHP 1.1.0)
 
@@ -232,6 +249,121 @@ ahp-py moved to AHP 1.1.0 while M1 was in progress. Nothing breaks, but four
   Claude and GLM. On the remote side, `ahp-client`'s `create_chat(title=)`
   serves M6.
 
+### 4.6 Structured turns
+
+A turn whose result is checked against a JSON Schema, rather than prose to
+parse. It is useful to any client, not only to workflows, so it lives in the
+host and the providers, not in ahp-host-flow.
+
+- **Asking.** A message carries its schema in
+  `Message._meta["ahp-py/outputSchema"]`, an extension point stock hosts
+  ignore. `ahp-client` gets `prompt(..., output_schema=...)`, and the gateway
+  passes `_meta` through untouched.
+- **Producing it.** A provider capability, `ReturnsStructuredOutput`, takes
+  the schema with the message:
+  - `ahp-host-claude` gives Claude a `StructuredOutput` tool whose input schema
+    is the schema, through the in-process MCP server it already uses for
+    client tools (`client_tools.py`);
+  - `ahp-host-acp` gains **client-tool support** in general. A session's client
+    tools reach the ACP agent as an MCP server that `ahp-host-acp` serves: a
+    small stdio relay the agent launches (every ACP agent takes stdio MCP), or
+    a loopback HTTP endpoint when the agent advertises HTTP MCP. Each call goes
+    through `TurnSink.run_client_tool`, as Claude's do, and, as in
+    `ahp-host-claude`, a client tool passes the approval gate because the
+    client offered it. Structured output is then one host-internal tool on the
+    same path. Any other client's tools reach ACP agents too.
+- **Checking it.** The host validates the tool's arguments with `jsonschema`.
+  A mismatch goes back to the agent as a tool error, so it retries, a bounded
+  number of times. A provider without the capability gets the schema in the
+  prompt, and the host parses and validates the final message's last JSON
+  block.
+- **The result.** It is the turn's `StructuredOutput` tool call, whose result
+  carries `structuredContent`, so it sits in the transcript every client
+  already renders. `ahp-client`'s `TurnCompleted` exposes it as
+  `.structured`. A turn that never produces a valid result ends as an error
+  with a structured-output code.
+- **Upstream:** `Message.outputSchema` and a structured result on the turn
+  (§10).
+
+### 4.7 Typed progress
+
+Every surface should render a run the same way, so progress needs a shape,
+not prose. The spec already types two parts of it: waiting for input
+(`SessionState.inputNeeded`, which names the chat and request) and running
+work (`BackgroundWork`). It has nothing for phases or steps. Until it does:
+
+- **One descriptor, in `_meta`.** `ahp-host-flow` puts
+  `_meta["ahp-py/flow"]` on the parts it already publishes on the main chat. A
+  system notification carries `runStarted`, `phaseStarted`, `phaseFinished` or
+  `runFinished`. Each step's tool call carries `stepStarted` (ordinal, label,
+  phase, child chat or node session, model) and, on its result,
+  `stepFinished` (status `ok` | `null` | `error` | `skipped`, structured
+  result, usage). While a step's chat has an entry in `inputNeeded`, the step
+  also carries `awaitingInput`. Every part still reads coherently as text, as
+  the spec requires, so stock clients lose nothing.
+- **One fold, shared.** The descriptor's JSON Schema and a pure fold from the
+  transcript to a `RunView` (phases → steps → status, result, usage) live in
+  `ahp_protocol.ext.flow`, which has no dependencies. The schema is also
+  exported as a JSON file for non-Python surfaces. `ahp-client` exposes
+  `session.flow_view()`. Every surface folds the same parts the same way.
+- **Upstream:** typed run, phase and step state on a chat, with actions for
+  each transition (§10).
+
+### 4.8 Durable runs and approvals
+
+Today a session restored after a host restart brings back a turn that was
+running only as transcript, so a run would silently stop. A run must instead
+continue where it stopped, and approvals that were open must still be
+answerable.
+
+- **The journal is the run's memory.** It holds the script snapshots, a record
+  when each call **starts** (with its dispatch handle: the node session's URI
+  for fleet calls) and when it finishes, and every gate (`ask`, `approve`)
+  with its state.
+- **Restart.** `ahp-host-flow` is a `ResumableAgentProvider`. On restore, a run
+  whose main turn was active is relaunched from its journal, under the same
+  turn, not left as transcript:
+  - finished calls replay from the cache;
+  - started fleet calls are **reattached**, since the node session kept
+    running, so the run waits on it again;
+  - in-process calls that were cut off run again live, with a `log()` line;
+  - open gates are raised again with their original ids.
+
+  This needs an `ahp-host` hook that offers a resumable provider the
+  interrupted turn instead of closing it: `ResumesInterruptedTurns`.
+- **Open approvals in general (`ahp-host`).** `StoredSession` keeps the
+  session's `inputNeeded` entries. On restore, a provider that can still answer
+  one (it implements the hook above) re-binds it. Otherwise it is withdrawn
+  with a system notification saying why, rather than vanishing. That way no
+  surface has to persist approvals on its own. An approval raised in a fleet
+  call's node session lives on that node and survives the flow host's restart
+  regardless.
+- **Upstream:** whether a host must restore interrupted turns and open input
+  requests, and how a client learns which ones it did (§10).
+
+### 4.9 Redaction
+
+Once a run is shared, a transcript can carry a secret that a tool printed. AHP
+cannot remove or replace part of a channel's history. So there are two layers:
+
+- **Before publishing (no protocol change).** A profile's `redact` rules
+  (regexes, plus known credential shapes) mask matches in everything that
+  passes through ahp-host-flow on its way out: the child chats' text and tool
+  output (in the sink bridge), step results, and the journal. The original
+  never leaves the process. This is on by default for credential shapes.
+- **After publishing (protocol change).** An `ahp-host` API,
+  `Host.redact(channel, turn_id, part_id, reason)`, replaces a part with a
+  redaction marker in the state and in the stored session, and records the
+  fact (never the content) in the audit log. A client that advertises an
+  experimental capability gets the change live. Other clients get it on their
+  next snapshot, because unknown actions must not reach a stock client. The
+  agent's own context is not redacted, only the shared view; the docs must say
+  so plainly. `flow redact <runId> <ordinal>` applies it to a run, including
+  its journal.
+- **Upstream:** a `chat/partRedacted` action (and a message variant) with
+  reducer semantics, so every client applies it the same way (§10). Until
+  that is agreed, the live layer stays behind its capability.
+
 ## 5. Routing and the first ACP target
 
 The first ACP target is **opencode on Ollama Cloud's GLM 5.3 Flash**
@@ -244,19 +376,23 @@ documents. Config is per user, with an optional per-project overlay under
 state_dir = "~/.local/state/ahp-host-flow"
 node = "node"                                  # or an absolute path
 
-[providers.claude]
+[providers.claude]                             # in-process
 load = "ahp_host_claude:ClaudeProvider"
 models = { haiku = "claude-haiku-4-5-20251001", sonnet = "claude-sonnet-5-5", opus = "claude-opus-5-5" }
-structured = "client-tool"
 
-[providers.glm]
+[providers.glm]                                # in-process
 load = "ahp_host_acp:AcpProvider"
 config = "~/.config/ahp/opencode.toml"         # command = ["opencode", "acp"], OPENCODE_CONFIG, …
 models = { glm = "ollama/glm-5.3-flash:cloud" }
-structured = "mcp"
 
-[providers.remote-mac]                          # ClientDispatcher
-url = "wss://gateway.example.com"; node = "my-mac-mini"; provider = "claude"
+[providers.build-box]                          # fleet: a session on a node, via the gateway's fleet tools
+via = "fleet"; node = "build-box"; agent = "claude"
+
+[providers.remote-mac]                         # remote: a host dialled directly (ClientDispatcher)
+url = "wss://my-mac-mini.example.com"; agent = "claude"
+
+[redact]
+patterns = ['(?i)api[_-]?key\s*[:=]\s*\S+']   # plus built-in credential shapes
 
 [routing]
 default = "claude"
@@ -303,10 +439,12 @@ Why not the existing packages:
   node.
 
 Why one package, not two: a separate engine distribution only pays off once
-something besides this provider uses the engine. The likely candidate is the
-gateway's orchestrator running workflows. Until then, an `import-linter`
-contract (engine must not import `ahp_host`) keeps the split a move rather
-than a rewrite.
+something besides this provider uses the engine. Fleet dispatch does not need
+one: the gateway only offers fleet tools to the run session, as it does for
+the orchestrator, and never runs the engine. If the gateway ever hosts runs
+itself, the engine moves into its own `ahp-flow` distribution. Until then, an
+`import-linter` contract (engine must not import `ahp_host`) keeps the split a
+move rather than a rewrite.
 
 The package follows the house layout: `AGENTS.md`, `CHANGELOG.md`,
 `LICENSE`, `README.md` and `docs/`; mypy strict; `lint-imports` contracts;
@@ -363,3 +501,28 @@ Open for M2:
   Mitigation: per-profile policy, and never auto-approve beyond it.
 - **Ordinal determinism:** ordinals are taken at issue time in JS, not at
   completion.
+- **Ahead of the spec:** `_meta` keys, an experimental capability and host
+  hooks can diverge from what upstream later adopts. Mitigation: names are
+  namespaced (`ahp-py/...`), each has a §10 request, and moving to the
+  upstream shape is a planned step, not a surprise.
+- **Fleet identity:** fleet calls run as the principal who started the run.
+  The gateway must record that principal with the run session and never let
+  one principal's run drive another's sessions. This is the orchestrator's
+  rule, extended to flow sessions.
+
+## 10. Upstream requests
+
+Written into the owning package's `docs/requests.md` as each lands, and raised
+upstream:
+
+1. **Structured turns:** `Message.outputSchema`, and a structured result on a
+   completed turn (§4.6).
+2. **Typed progress:** run, phase and step state on a chat, with actions for
+   each transition, so every client renders a run the same way (§4.7).
+3. **Restart semantics:** whether a host restores a turn that was running and
+   the open input requests, and how a client learns what was restored (§4.8).
+4. **Redaction:** `chat/partRedacted` (and a message variant), with reducer
+   semantics and the rule that only the shared view is redacted (§4.9).
+5. **Delegated sessions:** a `SessionOrigin` kind,
+   `{kind: "delegation", session, chat, toolCallId}`, so a session started on
+   another host's behalf can point back to the chat that started it (§2).
