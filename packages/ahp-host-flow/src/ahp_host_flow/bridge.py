@@ -2,18 +2,26 @@
 
 from __future__ import annotations
 
+import dataclasses
+import inspect
 from collections import Counter, deque
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from typing import Any, Final
 
 from ahp_host import TurnSink
 from ahp_host.provider.base import (
     BackgroundWork,
     Canvas,
+    InputOutcome,
+    InputRequest,
     ProviderChat,
     ProviderTerminal,
     SessionPublisher,
+    ToolConfirmation,
+    ToolConfirmationOutcome,
 )
+
+from ahp_host_flow.engine import Redactor
 
 #: Most drop records kept: an inner session reporting progress in a loop must
 #: not grow memory without bound.
@@ -158,24 +166,225 @@ class ScopedPublisher:
         return await self.outer.external_turn(text, run, chat=target)
 
 
-class TurnTee:
-    """Wraps a `TurnSink`: records the text and usage `agent()` needs, forwards the rest."""
+def _like(original: Sequence[Any], items: Iterable[Any]) -> Any:
+    """*items* as the kind of sequence *original* is, so an unchanged copy compares equal."""
+    return tuple(items) if isinstance(original, tuple) else list(items)
 
-    def __init__(self, sink: TurnSink) -> None:
+
+class MaskingSink:
+    """Wraps a real `ActionTurnSink` handed to `StructuredTurn`: masks what it publishes.
+
+    The structured turn publishes the `StructuredOutput` call's input and its accepted result
+    (`structuredContent`) itself, on the sink it is given. Validation still runs on the unmasked
+    arguments in the turn, and the tool result handed back to the agent is untouched; only the
+    published copies are masked. *before* runs ahead of each publish (the tee's line buffer).
+    """
+
+    def __init__(
+        self,
+        sink: Any,
+        redactor: Redactor,
+        before: Callable[[], Awaitable[None]] | None = None,
+    ) -> None:
+        self._sink = sink
+        self._redactor = redactor
+        self._before = before
+
+    @property
+    def on_text(self) -> Callable[[str], None] | None:
+        return self._sink.on_text  # type: ignore[no-any-return]
+
+    @on_text.setter
+    def on_text(self, value: Callable[[str], None] | None) -> None:
+        self._sink.on_text = value
+
+    async def _flush(self) -> None:
+        if self._before is not None:
+            await self._before()
+
+    def _str(self, value: str | None) -> str | None:
+        return self._redactor.mask(value) if value is not None else None
+
+    async def tool_call_started(
+        self,
+        call_id: str,
+        name: str,
+        tool_input: Any = None,
+        *,
+        display_name: str | None = None,
+        intention: str | None = None,
+        meta: Mapping[str, Any] | None = None,
+    ) -> None:
+        await self._flush()
+        await self._sink.tool_call_started(
+            call_id,
+            name,
+            self._redactor.mask_value(tool_input),
+            display_name=self._str(display_name),
+            intention=self._str(intention),
+            meta=meta,
+        )
+
+    async def tool_call_completed(
+        self,
+        call_id: str,
+        result: Any = None,
+        *,
+        success: bool = True,
+        past_tense_message: str | None = None,
+    ) -> None:
+        await self._flush()
+        await self._sink.tool_call_completed(
+            call_id,
+            self._redactor.mask_value(result),
+            success=success,
+            past_tense_message=self._str(past_tense_message),
+        )
+
+    async def system_notification(
+        self, text: str, *, markdown: bool = False, meta: Mapping[str, Any] | None = None
+    ) -> None:
+        await self._flush()
+        await self._sink.system_notification(self._str(text) or "", markdown=markdown, meta=meta)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._sink, name)
+
+
+class TurnTee:
+    """Wraps a `TurnSink`: records the text and usage `agent()` needs, forwards the rest.
+
+    With an enabled *redactor* everything forwarded to the sink is masked (text a
+    line at a time, so a secret split across deltas is still caught) while `text`
+    and `reply` keep the raw text for the engine to mask itself. Nothing handed
+    back to the inner session changes. *on_waiting* hears `True` when the first
+    confirmation or input request opens and `False` when the last one closes.
+    """
+
+    def __init__(
+        self,
+        sink: TurnSink,
+        *,
+        redactor: Redactor | None = None,
+        on_waiting: Callable[[bool], Awaitable[None]] | None = None,
+    ) -> None:
         self.sink = sink
         self.text: list[str] = []
         self.input_tokens: int = 0
         self.output_tokens: int = 0
         self.failed: bool = False
         self.failure: str | None = None
+        self._redactor = redactor if redactor is not None and redactor.enabled else None
+        self._text_stream = self._redactor.stream() if self._redactor else None
+        self._reasoning_stream = self._redactor.stream() if self._redactor else None
+        self._on_waiting = on_waiting
+        self._open = 0
 
     @property
     def reply(self) -> str:
         return "".join(self.text)
 
+    def _mask(self, value: Any) -> Any:
+        return self._redactor.mask_value(value) if self._redactor else value
+
+    def _mask_str(self, value: str | None) -> str | None:
+        return self._redactor.mask(value) if self._redactor and value is not None else value
+
+    async def flush(self) -> None:
+        """Forward what the line buffers still hold (a no-op with masking off)."""
+        if self._text_stream is not None and (out := self._text_stream.flush()):
+            await self.sink.text_delta(out)
+        if self._reasoning_stream is not None and (out := self._reasoning_stream.flush()):
+            await self.sink.reasoning_delta(out)
+
     async def text_delta(self, text: str) -> None:
         self.text.append(text)
-        await self.sink.text_delta(text)
+        if self._text_stream is None:
+            await self.sink.text_delta(text)
+            return
+        if self._reasoning_stream is not None and (out := self._reasoning_stream.flush()):
+            await self.sink.reasoning_delta(out)
+        if out := self._text_stream.feed(text):
+            await self.sink.text_delta(out)
+
+    async def reasoning_delta(self, text: str) -> None:
+        if self._reasoning_stream is None or self._text_stream is None:
+            await self.sink.reasoning_delta(text)
+            return
+        if out := self._text_stream.flush():
+            await self.sink.text_delta(out)
+        if out := self._reasoning_stream.feed(text):
+            await self.sink.reasoning_delta(out)
+
+    async def tool_call_started(
+        self,
+        call_id: str,
+        name: str,
+        tool_input: Any = None,
+        *,
+        display_name: str | None = None,
+        intention: str | None = None,
+        meta: Mapping[str, Any] | None = None,
+    ) -> None:
+        await self.flush()
+        await self.sink.tool_call_started(
+            call_id,
+            name,
+            self._mask(tool_input),
+            display_name=self._mask_str(display_name),
+            intention=self._mask_str(intention),
+            meta=meta,
+        )
+
+    async def tool_call_delta(
+        self,
+        call_id: str,
+        content: str | None = None,
+        *,
+        invocation_message: str | None = None,
+        meta: Mapping[str, Any] | None = None,
+    ) -> None:
+        await self.flush()
+        await self.sink.tool_call_delta(
+            call_id,
+            self._mask_str(content),
+            invocation_message=self._mask_str(invocation_message),
+            meta=meta,
+        )
+
+    async def tool_call_output(
+        self,
+        call_id: str,
+        content: Sequence[Mapping[str, Any]],
+        *,
+        meta: Mapping[str, Any] | None = None,
+    ) -> None:
+        await self.flush()
+        await self.sink.tool_call_output(call_id, self._mask(content), meta=meta)
+
+    async def tool_call_completed(
+        self,
+        call_id: str,
+        result: Any = None,
+        *,
+        success: bool = True,
+        past_tense_message: str | None = None,
+    ) -> None:
+        await self.flush()
+        await self.sink.tool_call_completed(
+            call_id,
+            self._mask(result),
+            success=success,
+            past_tense_message=self._mask_str(past_tense_message),
+        )
+
+    async def system_notification(
+        self, text: str, *, markdown: bool = False, meta: Mapping[str, Any] | None = None
+    ) -> None:
+        await self.flush()
+        await self.sink.system_notification(
+            self._mask_str(text) or "", markdown=markdown, meta=meta
+        )
 
     async def usage(
         self,
@@ -186,6 +395,7 @@ class TurnTee:
         model: str | None = None,
         meta: Mapping[str, Any] | None = None,
     ) -> None:
+        await self.flush()
         if input_tokens is not None:
             self.input_tokens += input_tokens
         if output_tokens is not None:
@@ -206,9 +416,104 @@ class TurnTee:
         *,
         resumable: bool = False,
     ) -> None:
+        await self.flush()
         self.failed = True
-        self.failure = message
-        await self.sink.turn_failed(message, error_type, duration_ms, resumable=resumable)
+        self.failure = self._mask_str(message)
+        await self.sink.turn_failed(
+            self.failure or "", error_type, duration_ms, resumable=resumable
+        )
+
+    async def _waiting(self, delta: int) -> None:
+        self._open += delta
+        if self._on_waiting is not None and self._open == (1 if delta > 0 else 0):
+            await self._on_waiting(delta > 0)
+
+    def _masked_bytes(self, data: bytes | None) -> bytes | None:
+        if data is None or self._redactor is None:
+            return data
+        try:
+            text = data.decode("utf-8")
+        except UnicodeDecodeError:
+            return data
+        masked = self._redactor.mask(text)
+        return data if masked == text else masked.encode("utf-8")
+
+    def _masked_confirmation(self, call: ToolConfirmation) -> ToolConfirmation:
+        """The copy of *call* that is published; the agent's own object is untouched."""
+        if self._redactor is None:
+            return call
+        masked = dataclasses.replace(
+            call,
+            invocation_message=self._mask_str(call.invocation_message) or "",
+            display_name=self._mask_str(call.display_name),
+            tool_input=self._mask(call.tool_input),
+            confirmation_title=self._mask_str(call.confirmation_title),
+            options=_like(
+                call.options,
+                (dataclasses.replace(o, label=self._mask_str(o.label) or "") for o in call.options),
+            ),
+            edits=_like(
+                call.edits,
+                (
+                    dataclasses.replace(
+                        e,
+                        uri=self._mask_str(e.uri) or "",
+                        before=self._masked_bytes(e.before),
+                        after=self._masked_bytes(e.after),
+                        renamed_to=self._mask_str(e.renamed_to),
+                    )
+                    for e in call.edits
+                ),
+            ),
+        )
+        return call if masked == call else masked
+
+    def _masked_request(self, request: InputRequest) -> InputRequest:
+        """The copy of *request* that is published; the agent's own object is untouched."""
+        if self._redactor is None:
+            return request
+        masked = dataclasses.replace(
+            request,
+            message=self._mask_str(request.message),
+            url=self._mask_str(request.url),
+            questions=_like(
+                request.questions,
+                (
+                    dataclasses.replace(
+                        q,
+                        message=self._mask_str(q.message) or "",
+                        options=_like(q.options, self._mask(list(q.options))),
+                        extra=self._mask(dict(q.extra)),
+                    )
+                    for q in request.questions
+                ),
+            ),
+        )
+        return request if masked == request else masked
+
+    async def request_input(self, request: InputRequest) -> InputOutcome:
+        await self.flush()
+        await self._waiting(1)
+        try:
+            return await self.sink.request_input(self._masked_request(request))
+        finally:
+            await self._waiting(-1)
+
+    async def confirm_tool_call(self, call: ToolConfirmation) -> ToolConfirmationOutcome:
+        await self.flush()
+        await self._waiting(1)
+        try:
+            return await self.sink.confirm_tool_call(self._masked_confirmation(call))
+        finally:
+            await self._waiting(-1)
 
     def __getattr__(self, name: str) -> Any:
-        return getattr(self.sink, name)
+        attr = getattr(self.sink, name)
+        if not inspect.iscoroutinefunction(attr):
+            return attr
+
+        async def forward(*args: Any, **kwargs: Any) -> Any:
+            await self.flush()
+            return await attr(*args, **kwargs)
+
+        return forward

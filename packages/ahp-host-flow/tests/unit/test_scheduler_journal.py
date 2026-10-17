@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -15,6 +16,7 @@ from ahp_host_flow.engine import (
     AgentRecord,
     AgentResult,
     BudgetExhaustedError,
+    DispatchHandle,
     JournalWriter,
     Replay,
     RunHeader,
@@ -22,6 +24,7 @@ from ahp_host_flow.engine import (
     Scheduler,
     call_key,
     load_journal,
+    report_dispatch,
 )
 
 from ..fakes import FakeDispatcher  # noqa: TID252
@@ -154,3 +157,75 @@ async def test_scheduler_journal_aborted_cached_not_journaled(
     assert await _wait(s.run(call, cached)) is None
     assert logs == ["agent() #0 aborted"]
     assert _agents(tmp_path) == ()
+
+
+def _raw_records(tmp_path: Path) -> list[dict[str, Any]]:
+    path = tmp_path / "runs" / "r1" / "journal.jsonl"
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()][1:]
+
+
+async def test_scheduler_start_record_precedes_finished(
+    tmp_path: Path, writer: JournalWriter
+) -> None:
+    s = Scheduler(FakeDispatcher(), journal=writer)
+    for n, prompt in enumerate(["a", "b"]):
+        await _run(s, _call(n, prompt))
+    recs = _raw_records(tmp_path)
+    assert [(r["type"], r["ordinal"]) for r in recs] == [
+        ("started", 0),
+        ("agent", 0),
+        ("started", 1),
+        ("agent", 1),
+    ]
+    assert all(r["handle"] is None for r in recs if r["type"] == "started")
+    assert recs[0]["key"] == call_key(_call(0, "a"))
+
+
+class _ReportingDispatcher:
+    reports_dispatch = True
+
+    def __init__(self, *, report: bool, fail: bool = False) -> None:
+        self._report = report
+        self._fail = fail
+
+    async def run_agent(self, call: AgentCall) -> AgentResult:
+        if self._report:
+            report_dispatch(DispatchHandle("p", "chat:/w"))
+            report_dispatch(DispatchHandle("q", "chat:/other"))
+        if self._fail:
+            raise RuntimeError("boom")
+        return AgentResult(value="v")
+
+
+async def test_scheduler_start_record_reported_handle(
+    tmp_path: Path, writer: JournalWriter
+) -> None:
+    s = Scheduler(_ReportingDispatcher(report=True), journal=writer)
+    await _run(s, _call(0, "a"))
+    recs = _raw_records(tmp_path)
+    assert [r["type"] for r in recs] == ["started", "agent"]
+    assert recs[0]["handle"] == {"provider": "p", "chat": "chat:/w"}
+
+
+async def test_scheduler_start_record_without_report(tmp_path: Path, writer: JournalWriter) -> None:
+    s = Scheduler(_ReportingDispatcher(report=False, fail=True), journal=writer)
+    await _run(s, _call(0, "a"))
+    recs = _raw_records(tmp_path)
+    assert [r["type"] for r in recs] == ["started", "agent"]
+    assert recs[0]["handle"] is None
+    assert recs[1]["status"] == "error"
+
+
+async def test_scheduler_start_record_abort_leaves_it_unfinished(
+    tmp_path: Path, writer: JournalWriter
+) -> None:
+    d = FakeDispatcher()
+    s = Scheduler(d, journal=writer)
+    call = _call(0, "hang")
+    task = asyncio.create_task(s.run(call, s.admit(call)))
+    await _wait(d.wait_started("hang"))
+    s.abort()
+    assert await _wait(task) is None
+    loaded = load_journal(tmp_path, "r1")
+    assert loaded.agents == ()
+    assert [u.ordinal for u in loaded.unfinished] == [0]

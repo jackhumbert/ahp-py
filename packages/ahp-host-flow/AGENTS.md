@@ -1,7 +1,7 @@
 # Agent guide
 
 An `ahp-host` provider that runs Claude Code workflow scripts. `docs/plan.md`
-is the design; milestones M0–M7 there say what exists and what's next.
+is the design; milestones M0–M10 there say what exists and what's next.
 
 - `engine/` and `sandbox/` never import `ahp_host` (an import-linter
   contract), so the engine can move into its own distribution later. They
@@ -13,13 +13,28 @@ is the design; milestones M0–M7 there say what exists and what's next.
   `loading` (inner providers by import path), `bridge` (`ScopedPublisher`,
   `TurnTee`), `catalog` (workflow sources as customizations), `commands`
   (parsing the message that starts a run), `dispatch` (`ProviderDispatcher`,
-  worker chats), `provider` (`FlowProvider`/`FlowSession`), `inprocess` (an
+  worker chats), `worktree` (git worktrees for `isolation: 'worktree'`),
+  `provider` (`FlowProvider`/`FlowSession`), `inprocess` (an
   in-memory host for `flow run --config`) and `__main__` (the server). They may
   import `ahp_host`; `engine/` and `sandbox/` may not.
 - Inner providers come only from `load` by import path. Tests use
   `tests/flow_fakes.py` and `EchoProvider`, never a live model.
-- `_meta["ahp-py/flow"]` is the namespaced customization marker on a workflow's
-  `prompt` child.
+- `_meta["ahp-py/flow"]` is both the customization marker on a workflow's
+  `prompt` child and the typed-progress descriptor on notifications and `agent`
+  tool calls. The descriptor shapes are owned by `ahp_protocol.ext.flow`; build
+  them with its helpers and never redefine them here.
+- What a worker prints or returns is masked by the `Redactor`
+  (`engine/redact.py`) before ahp-host-flow publishes or stores it, and nothing
+  changes what the inner agent is sent or gets back. Covered: worker chat text,
+  reasoning and tool calls (`TurnTee`), structured calls (`MaskingSink`, handed
+  to `StructuredTurn`), approval and input prompts, step results, log lines,
+  the journal and the `agent()` return. Not covered, and documented as known
+  gaps (README, plan §4.9 / M9): terminals, canvases and background work an
+  inner session opens through `ScopedPublisher`, a secret split across a
+  tool-call boundary, and anything the best-effort builtin list misses. New
+  output paths must mask too.
+- `awaitingInput` is derived from the `TurnTee`'s confirmations and input
+  requests, an approximation of the session's `inputNeeded`.
 - `agent()` results are re-validated against `opts.schema` in the engine
   (`conformance/agent_schema.js`), whatever the provider claims.
 - Hosting tests use `tests/hosting.py` over `memory_pair`.

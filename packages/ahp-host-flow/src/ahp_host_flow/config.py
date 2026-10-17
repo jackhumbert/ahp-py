@@ -9,6 +9,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Final
 
+from ahp_host_flow.engine.redact import Redactor
+
 # The names VS Code recognises; copied from ahp-host-claude, which a provider package cannot be
 # imported sideways for.
 APPROVAL_KEY: Final = "permissionMode"
@@ -60,6 +62,13 @@ class WorkflowsConfig:
 
 
 @dataclass(frozen=True)
+class RedactConfig:
+    # Extra regexes, applied after the builtin credential shapes.
+    patterns: tuple[str, ...] = ()
+    builtin: bool = True
+
+
+@dataclass(frozen=True)
 class FlowConfig:
     # In TOML order.
     providers: Mapping[str, ProviderConfig]
@@ -67,6 +76,7 @@ class FlowConfig:
     state_dir: Path
     node: str | None = None
     workflows: WorkflowsConfig = WorkflowsConfig()
+    redact: RedactConfig = RedactConfig()
 
 
 def _table(value: Any, where: str) -> Mapping[str, Any]:
@@ -179,9 +189,32 @@ def _parse_workflows(raw: Any, base: Path) -> WorkflowsConfig:
     return WorkflowsConfig(dirs, sources)
 
 
+def _parse_redact(raw: Any) -> RedactConfig:
+    table = _table(raw, "redact")
+    _check_keys(table, ("patterns", "builtin"), "redact")
+    patterns = tuple(_str_list(table.get("patterns", []), "redact.patterns"))
+    for i, pattern in enumerate(patterns):
+        try:
+            compiled = re.compile(pattern)
+        except re.error as exc:
+            raise ConfigError(f"redact.patterns[{i}]: {exc}") from exc
+        if compiled.search("") is not None:
+            raise ConfigError(f"redact.patterns[{i}] matches the empty string")
+    builtin = table.get("builtin", True)
+    if not isinstance(builtin, bool):
+        raise ConfigError("redact.builtin must be true or false")
+    return RedactConfig(patterns, builtin)
+
+
+def make_redactor(redact: RedactConfig) -> Redactor:
+    return Redactor(redact.patterns, builtin=redact.builtin)
+
+
 def parse_config(data: Mapping[str, Any], *, base: Path) -> FlowConfig:
     """Validate `data` (a parsed flow.toml); relative paths resolve against `base`."""
-    _check_keys(data, ("state_dir", "node", "providers", "routing", "workflows"), "flow.toml")
+    _check_keys(
+        data, ("state_dir", "node", "providers", "routing", "workflows", "redact"), "flow.toml"
+    )
     state_dir_raw = _str(data, "state_dir", "flow.toml")
     state_dir = (
         DEFAULT_STATE_DIR.expanduser() if state_dir_raw is None else _path(state_dir_raw, base)
@@ -193,7 +226,8 @@ def parse_config(data: Mapping[str, Any], *, base: Path) -> FlowConfig:
     providers = {name: _parse_provider(name, raw, base) for name, raw in raw_providers.items()}
     routing = _parse_routing(data.get("routing", {}), providers)
     workflows = _parse_workflows(data.get("workflows", {}), base)
-    return FlowConfig(providers, routing, state_dir, node, workflows)
+    redact = _parse_redact(data.get("redact", {}))
+    return FlowConfig(providers, routing, state_dir, node, workflows, redact)
 
 
 def load_config(path: Path) -> FlowConfig:

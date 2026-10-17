@@ -139,6 +139,15 @@ class JournalRun:
                 max_agents=old.header.max_agents,
                 budget_total=old.header.budget_total,
             )
+            if on_log is not None:
+                for rec in old.unfinished:
+                    if rec.provider is not None:
+                        where = f"started on {rec.provider} ({rec.chat or '-'})"
+                    else:
+                        where = "started"
+                    on_log(
+                        f"resume: agent() #{rec.ordinal} {where} but never finished; not replayed"
+                    )
             replay = Replay(old.agents, on_log=on_log)
             inherited = dict(old.workflows)
         elif source is None:
@@ -156,6 +165,7 @@ class JournalRun:
                 effective.budget_total,
                 resumed_from=options.resume_from,
             ),
+            mask=effective.redact,
         )
         run = cls(
             run_id=run_id,

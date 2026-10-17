@@ -4,10 +4,14 @@
 
 ### Security
 
+- Credential masking before publishing (plan §4.9): a secret printed or returned by an inner agent is masked in the worker chat's text, reasoning, tool calls and results, structured calls (the `StructuredOutput` input and accepted result), approval and input prompts (`ToolConfirmation`, `InputRequest`), step results, `log()` lines, run errors, the `agent()` return and the journal (`[redact]` in `flow.toml`). Values under secret-named keys (`password`, `token`, `api_key`...) are masked at any depth. The inner agent's own view (prompts sent, replies, tool results and answers returned to it) is untouched. Known gaps: terminals, canvases and background work opened through `ScopedPublisher`, a secret split across a tool-call boundary mid-stream, and the best-effort builtin list (no `key=value` values under 8 characters, URL userinfo or `sk-` keys); the first two wait for the after-publishing layer (§4.9, M9).
 - `ScopedPublisher` contains an inner session: a `chat=` it passes is honoured only for its worker chat or a tool chat it opened itself. A foreign chat (the run's main chat, another worker) is never reached: config changes, external turns and changesets naming one are dropped, and canvases, terminals, background work and tool chats are redirected to the worker chat. `dropped` is a bounded deque (`dropped_counts` keeps totals by kind), so progress spam cannot grow it.
 
 ### Fixed
 
+- A config overlay that reaches a worker chat before its inner session is registered is applied once it is, instead of waiting for the next overlay.
+- Customizations are re-published when a workflow source directory changes between runs (re-scanned at each run start and on describe; no file watching).
+- Workflow discovery skips symlinks and non-regular files.
 - `agent()` no longer hangs when the host cancels the worker turn before it starts: the call returns `null` (skipped) and its inner session is cancelled and closed.
 - A failure opening the worker chat, creating the inner session or running the turn now completes the main chat's `agent` tool call as failed instead of leaving it `running`.
 - `flow run --config` fails at the first confirmation or input an inner session asks for, naming the call and suggesting `approval_mode`, instead of hanging; it is never auto-approved.
@@ -17,6 +21,14 @@
 
 ### Added
 
+- Docs for M4b's first part: README (typed progress, masking, worktrees, start records, corpus test), AGENTS.md (`worktree`, the shared meta key, the redaction invariant) and `docs/plan.md` (status, `[redact]` in §5, the M4b result note).
+- Fan-out corpus script (`conformance/corpus/fanout.js`), run on fakes in the suite and, opt-in, through the configured providers (`AHP_FLOW_LIVE_CONFIG`).
+- `agent()` `isolation: 'worktree'`: the inner session runs in a git worktree under `<state_dir>/runs/<runId>/worktrees/<ordinal>`, removed afterwards when unchanged, kept and logged otherwise; outside a git repository the call returns `null` with a log line. An invalid `effort` option logs one line and is ignored.
+- Typed progress on the main chat (plan §4.7), built with `ahp_protocol.ext.flow` under `_meta["ahp-py/flow"]`: system notifications `Run <id>` (`runStarted`), `Phase: <title>` (`phaseStarted`), `Phase finished: <title>` (`phaseFinished`) and `Workflow finished` / `Workflow failed: <error>` (`runFinished` ok/error); each `agent` tool call carries `stepStarted` (ordinal, label, phase, worker chat, model, provider), a subagent link and `awaitingInput` while its worker chat has an open confirmation or input request, and `stepFinished` (ok, null, error or skipped, the result, usage) on its result. `log()` stays a plain notification. Stock clients render the same text; `catalog.FLOW_META_KEY` is now imported from the protocol package.
+- `ahp_host_flow.worktree`: git worktree helper for `isolation: 'worktree'` (`create_worktree`, `has_changes`, `release_worktree`, `worktree_path` under `<state_dir>/runs/<runId>/worktrees/<ordinal>`); an unchanged worktree is removed, one with uncommitted or committed changes is kept.
+- Journal start records: a `started` record (ordinal, key, dispatch handle with provider name and worker chat URI) precedes each live call's agent record; `ProviderDispatcher` reports its handle through `report_dispatch`. Resume logs `resume: agent() #N started on <provider> (<chat>) but never finished; not replayed` for calls in flight when the old run was killed. `JOURNAL_VERSION` stays 1.
+- `TurnTee` masks what it forwards to a worker chat when given a `Redactor` (text and reasoning a line at a time, tool input, output and results, notifications, failures, and the published copies of confirmations and input requests) and reports awaiting input through `on_waiting` while a confirmation or input request is open (`awaitingInput` is derived from this, an approximation of `inputNeeded`); `reply` stays raw and nothing handed back to the inner session changes. `MaskingSink` wraps the turn sink handed to ahp-host's `StructuredTurn`, so its `StructuredOutput` call and result are masked while validation runs on the raw value.
+- `[redact]` in `flow.toml` (`patterns`, and `builtin = true` by default for AWS keys, GitHub/GitLab/Slack tokens, PEM private keys, bearer tokens and `key=value` secrets); `Redactor`/`StreamMasker` in the engine; journal values and errors are masked through `RunOptions.redact`.
 - `docs/plan.md` §8 splits M4 into M4a (this) and M4b and records the M4a result; README documents the provider and flow.toml.
 - An opt-in live smoke test (`AHP_FLOW_LIVE_CONFIG=<flow.toml>`) runs a two-call script against the providers it configures.
 - `python -m ahp_host_flow --config flow.toml` serves the provider over WebSocket (loopback, port 4323); `flow run --config flow.toml` runs a script through `ProviderDispatcher` on an in-process host.

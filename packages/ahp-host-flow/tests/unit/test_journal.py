@@ -13,8 +13,11 @@ from ahp_host_flow.engine import (
     AgentCall,
     AgentRecord,
     JournalError,
+    JournalRun,
     JournalWriter,
     RunHeader,
+    RunOptions,
+    StartRecord,
     WorkflowSnapshot,
     call_key,
     canonical_json,
@@ -128,3 +131,74 @@ def test_journal_append_after_close_is_noop(tmp_path: Path) -> None:
     w.append_agent(AgentRecord(0, "k", "ok", 1))
     w.close()
     assert w.path.read_bytes() == before
+
+
+def _write_lines(tmp_path: Path, run_id: str, *records: dict[str, object]) -> None:
+    w = JournalWriter.create(tmp_path, _header(run_id))
+    w.close()
+    path = run_dir(tmp_path, run_id) / "journal.jsonl"
+    with path.open("a", encoding="utf-8", newline="\n") as f:
+        for rec in records:
+            f.write(json.dumps(rec) + "\n")
+
+
+def test_journal_start_record_round_trip(tmp_path: Path) -> None:
+    w = JournalWriter.create(tmp_path, _header())
+    w.append_started(StartRecord(0, "k0", "echo", "chat:/w0"))
+    w.append_started(StartRecord(1, "k1"))
+    w.append_started(StartRecord(2, "k2"))
+    w.append_agent(AgentRecord(0, "k0", "ok", "v", 1))
+    w.close()
+    lines = (run_dir(tmp_path, "r1") / "journal.jsonl").read_text(encoding="utf-8").splitlines()
+    assert json.loads(lines[1]) == {
+        "type": "started",
+        "ordinal": 0,
+        "key": "k0",
+        "handle": {"provider": "echo", "chat": "chat:/w0"},
+    }
+    assert json.loads(lines[2])["handle"] is None
+    loaded = load_journal(tmp_path, "r1")
+    assert loaded.started == (
+        StartRecord(0, "k0", "echo", "chat:/w0"),
+        StartRecord(1, "k1"),
+        StartRecord(2, "k2"),
+    )
+    assert [s.ordinal for s in loaded.unfinished] == [1, 2]
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        {"type": "started", "ordinal": -1, "key": "k", "handle": None},
+        {"type": "started", "ordinal": True, "key": "k", "handle": None},
+        {"type": "started", "ordinal": 0, "key": 5, "handle": None},
+        {"type": "started", "ordinal": 0, "key": "k", "handle": "x"},
+        {"type": "started", "ordinal": 0, "key": "k", "handle": {"provider": 1, "chat": None}},
+        {"type": "started", "ordinal": 0, "key": "k", "handle": {"provider": None, "chat": 2}},
+    ],
+)
+def test_journal_start_record_bad_line(tmp_path: Path, bad: dict[str, object]) -> None:
+    _write_lines(tmp_path, "r1", bad)
+    with pytest.raises(JournalError, match="journal line 2: bad started record"):
+        load_journal(tmp_path, "r1")
+
+
+def test_journal_start_record_unfinished_logged_on_resume(tmp_path: Path) -> None:
+    w = JournalWriter.create(tmp_path, _header("first"))
+    w.append_started(StartRecord(0, "k0", "echo", "chat:/w0"))
+    w.append_started(StartRecord(1, "k1", "echo", "chat:/w1"))
+    w.append_agent(AgentRecord(0, "k0", "ok", "v", 1))
+    w.close()
+    logs: list[str] = []
+    run = JournalRun.open(
+        RunOptions(state_dir=tmp_path, run_id="second", resume_from="first"),
+        source=None,
+        filename="s.js",
+        has_args=False,
+        args=None,
+        on_log=logs.append,
+    )
+    run.close()
+    assert [line for line in logs if "never finished" in line] == [
+        "resume: agent() #1 started on echo (chat:/w1) but never finished; not replayed"
+    ]

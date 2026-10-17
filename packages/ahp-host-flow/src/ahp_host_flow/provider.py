@@ -19,11 +19,10 @@ from ahp_host.provider.base import (
     ConfigResolution,
     ConfigValue,
     ModelInfo,
-    ReconfiguresChats,
-    ReconfiguresSessions,
     SessionDescription,
     UserMessage,
 )
+from ahp_protocol.ext import flow
 
 from ahp_host_flow import __version__, catalog
 from ahp_host_flow.commands import (
@@ -40,8 +39,9 @@ from ahp_host_flow.config import (
     EFFORT_LEVELS,
     ConfigError,
     FlowConfig,
+    make_redactor,
 )
-from ahp_host_flow.dispatch import ProviderDispatcher
+from ahp_host_flow.dispatch import ProviderDispatcher, forward_overlay
 from ahp_host_flow.engine import AbortSignal, JournalError, RunOptions
 from ahp_host_flow.loading import LazyProviders
 from ahp_host_flow.sandbox import (
@@ -151,6 +151,7 @@ class FlowProvider:
         user_workflows_dir: Path | None = None,
     ) -> None:
         self.config = config
+        self.redactor = make_redactor(config.redact)
         self.providers: Mapping[str, AgentProvider] = (
             providers if providers is not None else LazyProviders(config)
         )
@@ -195,6 +196,8 @@ class FlowSession:
         self._chat_overlays: dict[str, dict[str, Any]] = {}
         self._workers: dict[str, AgentSession] = {}
         self._aborts: dict[str, AbortSignal] = {}
+        #: The customizations last published (or described), to see when a source changes.
+        self._published: list[dict[str, Any]] | None = None
 
     def _dirs(self) -> list[catalog.SourceDir]:
         config = self.provider.config
@@ -213,9 +216,8 @@ class FlowSession:
     async def describe(self) -> SessionDescription:
         dirs = self._dirs()
         entries = await catalog.discover(dirs, node=self._node())
-        return SessionDescription(
-            customizations=catalog.customizations(entries, dirs, version=__version__)
-        )
+        self._published = catalog.customizations(entries, dirs, version=__version__)
+        return SessionDescription(customizations=self._published)
 
     async def send_user_message(self, message: UserMessage, sink: TurnSink) -> None:
         context = self.context
@@ -227,6 +229,10 @@ class FlowSession:
         dirs = self._dirs()
         node = self._node()
         entries = await catalog.discover(dirs, node=node)
+        current = catalog.customizations(entries, dirs, version=__version__)
+        if current != self._published and context.publisher is not None:
+            await context.publisher.customizations_changed(current)
+            self._published = current
         if isinstance(parsed, Help):
             await sink.text_delta(help_text(catalog.visible_names(entries)))
             return
@@ -247,6 +253,7 @@ class FlowSession:
             return
 
         config = self.provider.config
+        redactor = self.provider.redactor
         workspace = next(
             (p for d in context.working_directories if (p := catalog.directory_of(d))), None
         )
@@ -255,12 +262,26 @@ class FlowSession:
                 state_dir=config.state_dir,
                 workflow_dirs=tuple(d.path for d in dirs if d.path.is_dir()),
                 run_root=workspace,
+                redact=redactor.mask_value,
             )
         except ValueError as exc:
-            await sink.turn_failed(str(exc), "flow.run")
+            await sink.turn_failed(redactor.mask(str(exc)), "flow.run")
             return
         abort = AbortSignal()
         self._aborts[chat] = abort
+        notes: asyncio.Queue[tuple[str, Mapping[str, Any] | None] | None] = asyncio.Queue()
+        current_phase: str | None = None
+
+        async def drain() -> None:
+            while (note := await notes.get()) is not None:
+                text, note_meta = note
+                if note_meta is not None:
+                    await sink.system_notification(text, meta=note_meta)
+                else:
+                    await sink.system_notification(text)
+
+        drainer = asyncio.create_task(drain())
+
         dispatcher = ProviderDispatcher(
             config=config,
             providers=self.provider.providers,
@@ -272,19 +293,42 @@ class FlowSession:
             run_values=lambda: {**self._values, **self._chat_overlays.get(chat, {})},
             run_model=message.model.id if message.model else None,
             workers=self._workers,
+            pending_overlays=self._chat_overlays,
+            redactor=redactor,
+            on_log=lambda text: notes.put_nowait((redactor.mask(text), None)),
         )
 
-        notes: asyncio.Queue[str | None] = asyncio.Queue()
+        def on_run_start(run_id: str) -> None:
+            dispatcher.run_id = run_id
+            notes.put_nowait((f"Run {run_id}", flow.meta(flow.run_started(run_id, parsed.name))))
 
-        async def drain() -> None:
-            while (text := await notes.get()) is not None:
-                await sink.system_notification(text)
+        def on_phase(title: str) -> None:
+            nonlocal current_phase
+            end_phase()
+            notes.put_nowait((f"Phase: {title}", flow.meta(flow.phase_started(title))))
+            current_phase = title
 
-        drainer = asyncio.create_task(drain())
+        def end_phase() -> None:
+            if current_phase is not None:
+                notes.put_nowait(
+                    (
+                        f"Phase finished: {current_phase}",
+                        flow.meta(flow.phase_finished(current_phase)),
+                    )
+                )
 
         async def finish() -> None:
             notes.put_nowait(None)
             await drainer
+
+        async def fail(exc: Exception, reason: str) -> None:
+            end_phase()
+            message = redactor.mask(str(exc))
+            notes.put_nowait(
+                (f"Workflow failed: {message}", flow.meta(flow.run_finished("error", message)))
+            )
+            await finish()
+            await sink.turn_failed(message, reason)
 
         try:
             try:
@@ -296,20 +340,20 @@ class FlowSession:
                     filename=filename,
                     options=options,
                     abort=abort,
-                    on_log=notes.put_nowait,
-                    on_phase=lambda title: notes.put_nowait(f"Phase: {title}"),
-                    on_run_start=lambda run_id: notes.put_nowait(f"Run {run_id}"),
+                    on_log=lambda text: notes.put_nowait((redactor.mask(text), None)),
+                    on_phase=on_phase,
+                    on_run_start=on_run_start,
                 )
             except ScriptError as exc:
-                await finish()
-                await sink.turn_failed(str(exc), "flow.script")
+                await fail(exc, "flow.script")
                 return
             except (SandboxError, JournalError, ValueError) as exc:
-                await finish()
-                await sink.turn_failed(str(exc), "flow.run")
+                await fail(exc, "flow.run")
                 return
+            end_phase()
+            notes.put_nowait(("Workflow finished", flow.meta(flow.run_finished("ok"))))
             await finish()
-            body = json.dumps(value, indent=2, ensure_ascii=False)
+            body = json.dumps(redactor.mask_value(value), indent=2, ensure_ascii=False)
             await sink.text_delta(f"```json\n{body}\n```")
         finally:
             # Also reached on cancellation: the run is over, so stop the notifier.
@@ -326,10 +370,8 @@ class FlowSession:
         if inner is None:
             # Applies to the calls a run on this chat makes from now on.
             self._chat_overlays[chat] = mapped
-        elif isinstance(inner, ReconfiguresChats):
-            await inner.chat_config_changed(chat, mapped)
-        elif isinstance(inner, ReconfiguresSessions):
-            await inner.config_changed(mapped)
+        else:
+            await forward_overlay(inner, chat, mapped)
 
     async def cancel_chat(self, chat_uri: str, reason: str | None = None) -> None:
         abort = self._aborts.get(chat_uri)

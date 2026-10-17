@@ -5,9 +5,10 @@ from __future__ import annotations
 import math
 import os
 import re
-from dataclasses import dataclass
+from collections.abc import Callable
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Final
+from typing import Any, Final
 
 # plan §3 caps
 DEFAULT_MAX_CONCURRENCY: Final = 16
@@ -47,6 +48,8 @@ class RunOptions:
     run_id: str | None = None
     # Id of an earlier run whose journal serves cached agent() calls.
     resume_from: str | None = None
+    # Masks every value the journal stores (plan §4.9); None stores values as they are.
+    redact: Callable[[Any], Any] | None = field(default=None, compare=False, repr=False)
 
     def __post_init__(self) -> None:
         if self.concurrency is not None and not (
@@ -74,6 +77,8 @@ class RunOptions:
             raise ValueError("run_id and resume_from need state_dir")
         if self.run_id is not None and self.run_id == self.resume_from:
             raise ValueError("run_id must differ from resume_from")
+        if self.redact is not None and not callable(self.redact):
+            raise ValueError("redact must be callable")
 
     def resolved_concurrency(self) -> int:
         return self.concurrency if self.concurrency is not None else default_concurrency()

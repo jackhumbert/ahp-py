@@ -113,7 +113,10 @@ Script: `conformance/resume.js`.
 A run with a state dir writes `<state_dir>/runs/<runId>/journal.jsonl`. It is
 append-only, flushed per record, and a torn last line is ignored on read. Record
 kinds: a run header (script snapshot, filename, args, the call cap and budget);
-one workflow snapshot per ref, written when the ref is first resolved; and one
+one workflow snapshot per ref, written when the ref is first resolved; one
+start record per live call (ordinal, key, and the dispatch handle: the provider
+name and worker chat URI, or null when the dispatcher cannot say), written when
+the call is dispatched and before its agent record; and one
 agent record per completed call (ordinal, key, status `ok`, `null` or `error`,
 value and output tokens). The key is the sha256 of the canonical JSON (sorted
 keys, no whitespace) of `{prompt, opts, phase, label}`.
@@ -133,8 +136,12 @@ deterministic. Calls with identical keys are interchangeable, since they are
 the same request. Cached calls count toward the 1000-call cap and
 add their recorded output tokens to `budget.spent()`, but take no concurrency
 slot, never reach the dispatcher or progress listeners, and log nothing. A
-recorded null or error replays as null. Calls in flight when a run is killed are
-not recorded and rerun.
+recorded null or error replays as null. Calls in flight when a run is killed keep
+a start record without an agent record: they are not replayed and rerun, and
+resume logs `resume: agent() #N started on <provider> (<chat>) but never
+finished; not replayed` for each (`resume: agent() #N started but never
+finished; not replayed` when the handle is null). Cached calls write no start
+record.
 
 The resumed run uses the old run's args, call cap and budget, and runs the
 journal's script snapshot unless an edited script is given. Child workflows

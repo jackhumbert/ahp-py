@@ -134,6 +134,51 @@ ahp-py's structured turns: a client names a JSON Schema in a namespaced
 ahp-py extension ahead of the spec, carried in `_meta` and a host-internal tool,
 so a stock peer ignores it.
 
+`ahp_protocol.ext.flow` does the same for typed workflow progress: a host puts a
+small descriptor under `_meta["ahp-py/flow"]` of the system notifications that
+open and close a run and its phases, and of each step's tool call. The JSON
+Schema of the descriptors ships as `flow.schema.json`, and `run_view` folds a
+chat's reduced state into phases, steps, results and usage. A stock client
+ignores the `_meta` and renders the text as before.
+
+```python
+from ahp_protocol.ext import flow
+
+started = flow.step_started(
+    ordinal=0, label="a", phase=None, chat="chat:/w0", model=None, provider="echo"
+)
+finished = flow.step_finished(status="ok", result="hi", input_tokens=1, output_tokens=2)
+chat_state = {
+    "turns": [
+        {
+            "id": "t1",
+            "state": "complete",
+            "responseParts": [
+                {
+                    "kind": "systemNotification",
+                    "_meta": flow.meta(flow.run_started("r1", "demo")),
+                },
+                {
+                    "kind": "toolCall",
+                    "toolCall": {
+                        "toolCallId": "c0",
+                        "status": "completed",
+                        "_meta": flow.meta(flow.step(started, finished)),
+                    },
+                },
+                {
+                    "kind": "systemNotification",
+                    "_meta": flow.meta(flow.run_finished("ok")),
+                },
+            ],
+        }
+    ]
+}
+view = flow.run_view(chat_state)
+assert view.status == "ok"
+assert view.steps[0].result == "hi"
+```
+
 ## Conformance
 
 "Conformant" without a conformance test is a lie, and this package's entire

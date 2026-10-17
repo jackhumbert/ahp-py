@@ -12,10 +12,12 @@ from ahp_host_flow.config import (
     ConfigError,
     FlowConfig,
     ProviderConfig,
+    RedactConfig,
     Routing,
     RoutingRule,
     WorkflowsConfig,
     load_config,
+    make_redactor,
     parse_config,
 )
 
@@ -122,12 +124,31 @@ def test_defaults(tmp_path: Path) -> None:
     assert cfg.node is None
     assert cfg.workflows == WorkflowsConfig()
     assert cfg.routing == Routing("a")
+    assert cfg.redact == RedactConfig()
+
+
+def test_masking_config_parsed(tmp_path: Path) -> None:
+    cfg = parse_config(
+        {
+            "providers": _providers(),
+            "redact": {"patterns": ["sekrit-[0-9]+"], "builtin": False},
+        },
+        base=tmp_path,
+    )
+    assert cfg.redact == RedactConfig(("sekrit-[0-9]+",), False)
+    redactor = make_redactor(cfg.redact)
+    assert redactor.mask("id sekrit-42 and " + "AKIA" + "TESTONLY" * 2) == (
+        "id [redacted] and " + "AKIA" + "TESTONLY" * 2
+    )
 
 
 @pytest.mark.parametrize(
     ("data", "match"),
     [
-        ({"providers": _providers(), "redact": {}}, "redact"),
+        ({"providers": _providers(), "redact": {"bogus": 1}}, "redact"),
+        ({"providers": _providers(), "redact": {"patterns": ["("]}}, r"redact.patterns\[0\]"),
+        ({"providers": _providers(), "redact": {"patterns": ["a*"]}}, "empty string"),
+        ({"providers": _providers(), "redact": {"builtin": "yes"}}, "redact.builtin"),
         ({"providers": _providers(via="x")}, "providers.a.*via"),
         ({"providers": {"a": {}}}, "load"),
         ({"providers": {"a": {"load": "nocolon"}}}, "load"),

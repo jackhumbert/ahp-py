@@ -10,11 +10,12 @@ from typing import Any, Final
 from urllib.parse import urlparse
 from urllib.request import url2pathname
 
+from ahp_protocol.ext.flow import FLOW_META_KEY as FLOW_META_KEY
+
 from ahp_host_flow.config import SOURCES
 from ahp_host_flow.engine import WORKFLOW_NAME
 from ahp_host_flow.sandbox import Sandbox, SandboxError
 
-FLOW_META_KEY: Final = "ahp-py/flow"
 PLUGIN_ID: Final = "ahp-host-flow.host"
 USER_ID: Final = "ahp-host-flow.user"
 
@@ -86,6 +87,8 @@ async def discover(dirs: Sequence[SourceDir], *, node: str | None) -> list[Workf
             continue
         for path in sorted(source_dir.path.glob("*.js")):
             if not WORKFLOW_NAME.fullmatch(path.stem):
+                continue
+            if path.is_symlink() or not path.is_file():
                 continue
             try:
                 text = path.read_text(encoding="utf-8")

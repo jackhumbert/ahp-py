@@ -8,6 +8,17 @@ the spec revision it targets.
 
 ## [Unreleased]
 
+### Added — ahp-py extension: typed progress
+
+- **`ahp_protocol.ext.flow`**, a dependency-free module: the `_meta` key
+  `ahp-py/flow` (`FLOW_META_KEY`), builders for the descriptors (`run_started`,
+  `phase_started`, `phase_finished`, `run_finished`, `step_started`,
+  `step_finished`, `step`, `meta`, `descriptor_of`), a JSON Schema for them
+  (`DESCRIPTOR_SCHEMA`, shipped in the wheel as `flow.schema.json`) and a pure
+  fold, `run_view` / `run_views`, from a chat's reduced state to a `RunView`
+  (phases, steps, status, result, usage, awaiting). A stock peer ignores the
+  `_meta`.
+
 ### Added — ahp-py extension: structured turns
 
 - **`ahp_protocol.ext.structured`**, a dependency-free module shared by host

@@ -9,8 +9,21 @@ from typing import TYPE_CHECKING, Any
 
 from ahp_host_flow.engine.abort import AbortSignal
 from ahp_host_flow.engine.budget import OUTPUT_TOKENS, Budget
-from ahp_host_flow.engine.dispatcher import AgentCall, AgentResult, Dispatcher
-from ahp_host_flow.engine.journal import AgentRecord, JournalStatus, JournalWriter, call_key
+from ahp_host_flow.engine.dispatcher import (
+    _DISPATCH_REPORT,
+    AgentCall,
+    AgentResult,
+    Dispatcher,
+    DispatchHandle,
+    ReportsDispatch,
+)
+from ahp_host_flow.engine.journal import (
+    AgentRecord,
+    JournalStatus,
+    JournalWriter,
+    StartRecord,
+    call_key,
+)
 from ahp_host_flow.engine.options import RunOptions
 from ahp_host_flow.engine.schema import schema_error
 
@@ -131,7 +144,29 @@ class Scheduler:
 
     async def _dispatch(self, call: AgentCall) -> Any:
         n = call.ordinal
-        task = asyncio.create_task(self._dispatcher.run_agent(call))
+        key = call_key(call)
+        reported = False
+
+        def report(handle: DispatchHandle | None) -> None:
+            nonlocal reported
+            if reported:
+                return
+            reported = True
+            if self._journal is not None:
+                h = handle if handle is not None else DispatchHandle()
+                self._journal.append_started(StartRecord(n, key, h.provider, h.chat))
+
+        reports = (
+            isinstance(self._dispatcher, ReportsDispatch) and self._dispatcher.reports_dispatch
+        )
+        if not reports:
+            report(None)
+        # Set around create_task only, so just the task's copied context sees it.
+        token = _DISPATCH_REPORT.set(report)
+        try:
+            task = asyncio.create_task(self._dispatcher.run_agent(call))
+        finally:
+            _DISPATCH_REPORT.reset(token)
         self._inflight.add(task)
         try:
             # wait() never raises the inner task's cancellation; an outer one still
@@ -142,7 +177,8 @@ class Scheduler:
                 task.cancel()
             await asyncio.gather(task, return_exceptions=True)
             self._inflight.discard(task)
-        key = call_key(call)
+            # A start record always precedes the agent record.
+            report(None)
         if task.cancelled():
             # A dispatcher that cancels its own turn is a skip (plan §4.4).
             self._log(f"agent() #{n} {'aborted' if self._aborted else 'skipped'}")

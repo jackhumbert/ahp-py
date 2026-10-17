@@ -30,6 +30,7 @@ from types import TracebackType
 from typing import Any, Self
 
 from ahp_protocol.channels import ROOT_URI
+from ahp_protocol.ext.flow import EMPTY_RUN, RunView, run_view
 from ahp_protocol.ext.structured import (
     OUTPUT_SCHEMA_META_KEY,
     STRUCTURED_OUTPUT_TOOL,
@@ -577,6 +578,18 @@ class Session:
     def state(self) -> JsonObject:
         state = self._client.mirror.state(self.uri)
         return state if isinstance(state, dict) else {}
+
+    def flow_view(self, chat: str | None = None) -> RunView:
+        """The :class:`RunView` of ``chat`` (default: the session's default chat).
+
+        The chat must be subscribed (``await session.chat()`` or ``open_chat``);
+        otherwise the mirror has nothing and the view is empty.
+        """
+        uri = chat or str(self.state.get("defaultChat") or "")
+        if not uri:
+            return EMPTY_RUN
+        state = self._client.mirror.state(uri)
+        return run_view(state if isinstance(state, dict) else {})
 
     @property
     def capabilities(self) -> JsonObject:
@@ -1186,6 +1199,14 @@ class Chat:
     def state(self) -> JsonObject:
         state = self._client.mirror.state(self.uri)
         return state if isinstance(state, dict) else {}
+
+    def flow_view(self) -> RunView:
+        """The latest workflow run in this chat, folded from its state.
+
+        An ahp-py extension: folds the ``_meta["ahp-py/flow"]`` descriptors of
+        the chat's latest run; a chat with no run gives ``status == "none"``.
+        """
+        return run_view(self.state)
 
     def turns(self) -> Sequence[JsonObject]:
         raw = self.state.get("turns")

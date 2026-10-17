@@ -111,6 +111,7 @@ async def _check_resume(
 
     # (3) Resume it from its journal.
     resumed = FakeDispatcher(**dispatcher_kwargs, hang=False)
+    logs: list[str] = []
     value = await run_script(
         None,
         node=node_path,
@@ -118,8 +119,12 @@ async def _check_resume(
         args=args,
         filename=str(script),
         options=_options(spec, state_dir=state, run_id="second", resume_from="first"),
+        on_log=logs.append,
     )
     assert value == sidecar["result"]
+    if "unfinished" in resume:
+        assert len(load_journal(state, "first").unfinished) == resume["unfinished"]
+        assert sum("never finished" in line for line in logs) == resume["unfinished"]
     assert sorted(c.prompt for c in resumed.calls) == resume["live"]
     journaled = {r.ordinal for r in load_journal(state, "second").agents}
     assert sorted(journaled - {c.ordinal for c in resumed.calls}) == resume["cached"]

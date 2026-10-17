@@ -2,15 +2,23 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
 from ahp_host import TurnSink
-from ahp_host.provider.base import BackgroundWork, Canvas, SessionPublisher
+from ahp_host.provider.base import (
+    BackgroundWork,
+    Canvas,
+    InputRequest,
+    SessionPublisher,
+    ToolConfirmation,
+)
 
 from ahp_host_flow.bridge import DROPPED_KEEP, ScopedPublisher, TurnTee
+from ahp_host_flow.engine import Redactor
 
 WORKER = "chat:/worker"
 
@@ -238,6 +246,8 @@ class RecordingSink:
 
     def __init__(self) -> None:
         self.events: list[tuple[Any, ...]] = []
+        self.outcome: Any = object()
+        self.gate: asyncio.Event | None = None
 
     async def text_delta(self, text: str) -> None:
         self.events.append(("text_delta", text))
@@ -254,6 +264,33 @@ class RecordingSink:
         resumable: bool = False,
     ) -> None:
         self.events.append(("turn_failed", message, error_type, duration_ms, resumable))
+
+    async def reasoning_delta(self, text: str) -> None:
+        self.events.append(("reasoning_delta", text))
+
+    async def tool_call_started(
+        self, call_id: str, name: str, tool_input: Any = None, **kwargs: Any
+    ) -> None:
+        self.events.append(("tool_call_started", call_id, name, tool_input, kwargs))
+
+    async def tool_call_output(self, call_id: str, content: Any, **kwargs: Any) -> None:
+        self.events.append(("tool_call_output", call_id, content, kwargs))
+
+    async def tool_call_completed(self, call_id: str, result: Any = None, **kwargs: Any) -> None:
+        self.events.append(("tool_call_completed", call_id, result, kwargs))
+
+    async def system_notification(self, text: str, **kwargs: Any) -> None:
+        self.events.append(("system_notification", text, kwargs))
+
+    async def request_input(self, request: Any) -> Any:
+        self.events.append(("request_input", request))
+        return self.outcome
+
+    async def confirm_tool_call(self, call: Any) -> Any:
+        self.events.append(("confirm_tool_call", call))
+        if self.gate is not None:
+            await self.gate.wait()
+        return self.outcome
 
 
 def _usage(
@@ -300,3 +337,143 @@ async def test_turn_tee_marks_failure_and_forwards() -> None:
     assert tee.failed is True
     assert tee.failure == "boom"
     assert sink.events == [("turn_failed", "boom", "agent.turn", 0, False)]
+
+
+SECRET = "AKIAABCDEFGHIJKLMNOP"
+MASKED = "[redacted]"
+
+
+def _masking_tee(
+    sink: RecordingSink, on_waiting: Callable[[bool], Awaitable[None]] | None = None
+) -> TurnTee:
+    return TurnTee(cast(TurnSink, sink), redactor=Redactor(), on_waiting=on_waiting)
+
+
+async def test_turn_tee_masking_off_keeps_todays_events() -> None:
+    sink = RecordingSink()
+    tee = TurnTee(cast(TurnSink, sink), redactor=Redactor(builtin=False))
+    await tee.text_delta(f"key {SECRET}")
+    await tee.tool_call_started("c1", "t", {"k": SECRET})
+    assert sink.events == [
+        ("text_delta", f"key {SECRET}"),
+        (
+            "tool_call_started",
+            "c1",
+            "t",
+            {"k": SECRET},
+            {"display_name": None, "intention": None, "meta": None},
+        ),
+    ]
+
+
+async def test_turn_tee_masks_a_secret_split_across_deltas() -> None:
+    sink = RecordingSink()
+    tee = _masking_tee(sink)
+    await tee.text_delta("key AKIAABCDE")
+    await tee.text_delta("FGHIJKLMNOP\nnext")
+    assert sink.events == [("text_delta", f"key {MASKED}\n")]
+    assert tee.reply == f"key {SECRET}\nnext"
+    await tee.flush()
+    assert sink.events[-1] == ("text_delta", "next")
+    assert SECRET not in repr(sink.events)
+
+
+async def test_turn_tee_holds_unterminated_text_until_a_tool_call() -> None:
+    sink = RecordingSink()
+    tee = _masking_tee(sink)
+    await tee.text_delta("partial")
+    assert sink.events == []
+    await tee.tool_call_started("c1", "t")
+    assert sink.events == [
+        ("text_delta", "partial"),
+        (
+            "tool_call_started",
+            "c1",
+            "t",
+            None,
+            {"display_name": None, "intention": None, "meta": None},
+        ),
+    ]
+
+
+async def test_turn_tee_masks_tool_traffic_notifications_and_failure() -> None:
+    sink = RecordingSink()
+    tee = _masking_tee(sink)
+    await tee.reasoning_delta(f"think {SECRET}\n")
+    await tee.tool_call_started("c1", "t", {"k": SECRET}, display_name=SECRET, meta={"m": 1})
+    await tee.tool_call_output("c1", [{"text": SECRET}])
+    await tee.tool_call_completed("c1", {"content": [SECRET]}, past_tense_message=SECRET)
+    await tee.system_notification(f"note {SECRET}")
+    await tee.turn_failed(f"bad {SECRET}")
+    assert tee.failure == f"bad {MASKED}"
+    assert sink.events == [
+        ("reasoning_delta", f"think {MASKED}\n"),
+        (
+            "tool_call_started",
+            "c1",
+            "t",
+            {"k": MASKED},
+            {"display_name": MASKED, "intention": None, "meta": {"m": 1}},
+        ),
+        ("tool_call_output", "c1", [{"text": MASKED}], {"meta": None}),
+        (
+            "tool_call_completed",
+            "c1",
+            {"content": [MASKED]},
+            {"success": True, "past_tense_message": MASKED},
+        ),
+        ("system_notification", f"note {MASKED}", {"markdown": False, "meta": None}),
+        ("turn_failed", f"bad {MASKED}", "agent.turn", 0, False),
+    ]
+
+
+async def test_turn_tee_passes_turn_id_through() -> None:
+    tee = _masking_tee(RecordingSink())
+    assert tee.turn_id == "turn-1"
+
+
+async def test_turn_tee_returns_the_outer_outcome_untouched() -> None:
+    sink = RecordingSink()
+    tee = _masking_tee(sink)
+    request = InputRequest(message="which?")
+    call = ToolConfirmation(call_id="c1", name="shell", invocation_message="run it")
+    # Compare through Any: mypy narrows `sink.outcome` to the first result's
+    # type after an `is` check and then rejects the second, differently typed one.
+    expected: Any = sink.outcome
+    got_input: Any = await tee.request_input(request)
+    got_confirm: Any = await tee.confirm_tool_call(call)
+    assert got_input is expected
+    assert got_confirm is expected
+    assert sink.events[0][1] is request
+    assert sink.events[1][1] is call
+
+
+async def test_turn_tee_reports_awaiting_input_once_for_overlapping_confirmations() -> None:
+    sink = RecordingSink()
+    sink.gate = asyncio.Event()
+    seen: list[bool] = []
+
+    async def on_waiting(waiting: bool) -> None:
+        seen.append(waiting)
+
+    tee = _masking_tee(sink, on_waiting)
+    one = asyncio.ensure_future(
+        tee.confirm_tool_call(
+            cast(Any, ToolConfirmation(call_id="c1", name="shell", invocation_message="run"))
+        )
+    )
+    two = asyncio.ensure_future(
+        tee.confirm_tool_call(
+            cast(Any, ToolConfirmation(call_id="c1", name="shell", invocation_message="run"))
+        )
+    )
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    assert seen == [True]
+    sink.gate.set()
+    await asyncio.gather(one, two)
+    assert seen == [True, False]
+    await tee.confirm_tool_call(
+        cast(Any, ToolConfirmation(call_id="c1", name="shell", invocation_message="run"))
+    )
+    assert seen == [True, False, True, False]

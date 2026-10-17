@@ -18,6 +18,9 @@ Every release states the protocol versions it speaks.
 
 ### Added
 
+- `Chat.flow_view()` and `Session.flow_view(chat=None)` fold an ahp-host-flow
+  run's typed progress (`ahp_protocol.ext.flow.run_view`) from the mirrored
+  chat state.
 - Structured turns, an ahp-py extension: `prompt(..., output_schema=...)` sets
   `Message._meta`, `TurnCompleted.structured` carries the host-validated result
   (None for an ordinary turn), and `actions.turn_started(meta=...)` writes

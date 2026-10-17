@@ -9,7 +9,9 @@ than sleeping.
 from __future__ import annotations
 
 import asyncio
+import json
 from collections.abc import Callable, Mapping, Sequence
+from pathlib import Path
 from typing import Any
 
 from ahp_host import ROOT_URI, Host
@@ -73,9 +75,51 @@ class Wire:
         self._reader.cancel()
 
 
+def flow_tasks() -> list[asyncio.Task[Any]]:
+    """Tasks not yet done whose coroutine chain runs code from `ahp_host_flow`."""
+
+    def ours(task: asyncio.Task[Any]) -> bool:
+        awaiting: Any = task.get_coro()
+        while awaiting is not None:
+            code = getattr(awaiting, "cr_code", None) or getattr(awaiting, "gi_code", None)
+            if code is not None and "ahp_host_flow" in Path(code.co_filename).parts:
+                return True
+            awaiting = getattr(awaiting, "cr_await", None) or getattr(
+                awaiting, "gi_yieldfrom", None
+            )
+        return False
+
+    return [task for task in asyncio.all_tasks() if not task.done() and ours(task)]
+
+
 def state(host: Host, uri: str) -> dict[str, Any]:
     found = host.sequencer.state_of(uri)
     return dict(found) if isinstance(found, Mapping) else {}
+
+
+def all_channels(host: Host) -> dict[str, str]:
+    """Every channel the host's sequencer knows (sessions, chats, root...) as JSON: state and log.
+
+    The sequencer has no public enumeration, so this reads its tables: a scan of "everything
+    published" must not depend on remembering which channels exist.
+    """
+    sequencer = host.sequencer
+    channels = {
+        uri: json.dumps(st, sort_keys=True, default=str) for uri, st in sequencer._states.items()
+    }
+    for uri, log in sequencer._log.items():
+        channels[uri] = channels.get(uri, "") + json.dumps(list(log), sort_keys=True, default=str)
+    return channels
+
+
+def leaks(host: Host, *secrets: str) -> list[str]:
+    """`channel: secret` for every secret found raw in any channel's state or log."""
+    return [
+        f"{uri}: {secret[:6]}..."
+        for uri, text in all_channels(host).items()
+        for secret in secrets
+        if secret in text
+    ]
 
 
 async def connect(host: Host) -> tuple[Wire, asyncio.Task[None]]:

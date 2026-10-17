@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import Any, Protocol, runtime_checkable
 
@@ -29,9 +30,36 @@ class AgentResult:
     usage: Mapping[str, int] = field(default_factory=dict)
 
 
+@dataclass(frozen=True)
+class DispatchHandle:
+    """Where a call runs, as far as the dispatcher can say (journal start record)."""
+
+    provider: str | None = None
+    chat: str | None = None
+
+
 @runtime_checkable
 class Dispatcher(Protocol):
     async def run_agent(self, call: AgentCall) -> AgentResult: ...
+
+
+@runtime_checkable
+class ReportsDispatch(Protocol):
+    """A dispatcher that calls `report_dispatch` once per call, as soon as it knows."""
+
+    reports_dispatch: bool
+
+
+_DISPATCH_REPORT: ContextVar[Callable[[DispatchHandle], None] | None] = ContextVar(
+    "_DISPATCH_REPORT", default=None
+)
+
+
+def report_dispatch(handle: DispatchHandle) -> None:
+    """Tell the scheduler where this call runs; a no-op outside a scheduler dispatch."""
+    report = _DISPATCH_REPORT.get()
+    if report is not None:
+        report(handle)
 
 
 class EchoDispatcher:

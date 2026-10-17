@@ -34,6 +34,7 @@ from tests.hosting import (
     Wire,
     cancel_turn,
     connect,
+    flow_tasks,
     found,
     open_session,
     run_turn,
@@ -282,6 +283,8 @@ async def test_skip(tmp_path: Path) -> None:
         turn = await wait_turn(wire, default, "t1")
         assert json.loads(text_of(turn)) == {"skipped": True}
         assert HangingProvider.instances[0].sessions[0].cancelled == ["skipped"]
+        assert await wire.until(lambda: HangingProvider.instances[0].sessions[0].closed)
+        assert await wire.until(lambda: not flow_tasks())
         (done,) = found(turn, lambda m: m.get("pastTenseMessage") == "agent() skipped")
         assert done["success"] is False
     finally:
@@ -306,6 +309,8 @@ async def test_abort(tmp_path: Path) -> None:
         session = HangingProvider.instances[0].sessions[0]
         assert await wire.until(lambda: session.cancelled == ["run aborted"])
         assert await wire.until(lambda: state(host, worker).get("activeTurn") is None)
+        assert await wire.until(lambda: session.closed)
+        assert await wire.until(lambda: not flow_tasks())
     finally:
         await shut(host, wire, serving)
 

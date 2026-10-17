@@ -82,3 +82,7 @@ def test_installed_layout_resolves_without_the_source_checkout(wheel: zipfile.Zi
     this module exists to prevent.
     """
     assert any(n.startswith("ahp_protocol/conformance/_upstream/") for n in wheel.namelist())
+
+
+def test_wheel_ships_the_flow_schema(wheel: zipfile.ZipFile) -> None:
+    assert "ahp_protocol/ext/flow.schema.json" in set(wheel.namelist())

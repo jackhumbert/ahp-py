@@ -32,6 +32,13 @@ def test_workflow_command() -> None:
     assert parse_message("/workflow greet 3") == StartRun("greet", None, None, 3)
 
 
+def test_workflow_named_workflow_parses() -> None:
+    assert parse_message("/workflow workflow") == StartRun("workflow", None, None, NO_ARGS)
+    assert parse_message('/workflow workflow {"a": 1}') == StartRun(
+        "workflow", None, None, {"a": 1}
+    )
+
+
 def test_workflow_command_needs_a_name() -> None:
     assert parse_message("/workflow") == BadRequest("Usage: /workflow <name> [json args]")
 

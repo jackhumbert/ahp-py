@@ -5,6 +5,7 @@
     "kill_when_started": ["hang build p", "hang build q"],
     "kill_after_records": 3,
     "cached": [0, 1, 2],
+    "unfinished": 2,
     "live": ["hang build p", "hang build q"]
   }
 }

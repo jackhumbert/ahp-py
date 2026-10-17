@@ -7,9 +7,12 @@ agent through `ahp-host-acp`.
 
 Status: pre-alpha. M4a is in: the provider core. `flow.toml` configures
 providers, routing and workflow sources; a run is a session, and each `agent()`
-call is a worker chat on a routed provider. Typed progress, credential masking,
-worktrees and live corpus runs (M4b) are next. See [docs/plan.md](docs/plan.md)
-and [docs/format.md](docs/format.md).
+call is a worker chat on a routed provider. Most of M4b is in too: typed
+progress, credential masking, git worktrees, journal start records and the
+fan-out corpus tests. The rest of M4b (provider factories in `ahp-host-claude`
+and `ahp-host-acp`, the subagent prompt preamble, live watching of workflow
+directories) is next. See [docs/plan.md](docs/plan.md) and
+[docs/format.md](docs/format.md).
 
 ## Running the provider
 
@@ -87,6 +90,24 @@ at the start of each run.
   passed to its inner session.
 - `log()` and `phase()` appear as system notifications, and the run's result is
   the final message.
+- Progress is typed. `_meta["ahp-py/flow"]` carries `runStarted`,
+  `phaseStarted`, `phaseFinished` and `runFinished` on the system
+  notifications, and `stepStarted`, `awaitingInput` and `stepFinished` on each
+  `agent` tool call (the running call links its worker chat; the result carries
+  the status, the structured result and usage). A stock client shows the same
+  text without them. `awaitingInput` is derived from the confirmations and
+  input requests the provider sees on the worker's turn (`TurnTee`), an
+  approximation of the session's `inputNeeded`. The shapes belong to `ahp_protocol.ext.flow`, whose
+  `run_view` folds a chat's state into phases, steps and their status;
+  `ahp-client` gives it as `session.flow_view()` (and `chat.flow_view()`).
+- `agent()` accepts `isolation: 'worktree'`. When the run's working directory is
+  a git repository, the inner session runs in a new git worktree under
+  `<state_dir>/runs/<runId>/worktrees/<ordinal>`. It is removed afterwards if it
+  has no changes; otherwise it is kept and its path is logged. Outside a git
+  repository the call logs why and returns `null`.
+- With `state_dir` set, the journal writes a `started` record (ordinal, key,
+  provider and worker chat) when a call is dispatched, before its result. A
+  resume does not replay a call that never finished; it logs it.
 
 ## flow.toml
 
@@ -112,6 +133,9 @@ rules = [ { model = "glm", provider = "glm" }, { phase = "Review", provider = "g
 [workflows]
 dirs = ["~/flows"]
 sources = ["workspace", "user", "host"]
+
+[redact]
+patterns = ['sekrit-[0-9]+']
 ```
 
 Inner providers are loaded lazily, by import path, from `load = "module:attr"`:
@@ -133,5 +157,50 @@ provider's `models`), `phase` or `label` (a glob), and `default` takes the rest.
 Relative paths resolve against the config file's directory. Unknown keys are
 errors, at any level.
 
-An opt-in smoke test makes real model calls: set `AHP_FLOW_LIVE_CONFIG` to a
-`flow.toml` and run `tests/integration/test_flow_live.py`.
+## Masking credentials
+
+A secret printed or returned by an inner (worker) agent is masked before it is
+published or stored. What is masked, exactly:
+
+- the worker chat's text, reasoning, tool calls (input, output, results);
+- structured calls: the `StructuredOutput` call's input and its accepted result;
+- approval and input prompts (`ToolConfirmation`: input, messages, title,
+  edits; `InputRequest`: message, url, questions), including the copy mirrored
+  into the session's `inputNeeded`;
+- step results on the main chat, `log()` lines and run errors;
+- the `agent()` return value and the journal's stored values and errors.
+
+A match becomes `[redacted]`. `[redact] patterns` is a list of regular
+expressions; `builtin` (default `true`) also masks common credential shapes:
+AWS access keys, GitHub and GitLab tokens, Slack tokens, PEM private key
+blocks, bearer tokens and `key=value` secrets (where only the value is masked),
+and any value stored under a secret-named key (`password`, `secret`, `token`,
+`api_key`, `access_key`, `private_key`, `auth`, `credential`...) in a structured
+value, at any depth. `builtin = false` turns the built-in rules off and leaves
+your patterns.
+
+The inner agent's own view is untouched: its prompts and the replies, tool
+results and answers handed back to it are never altered. Streamed text is
+released line by line, so a secret split across chunks of one line is still
+caught, at the price of a worker chat's text arriving a line at a time.
+
+Known gaps (not covered):
+
+- Terminals, canvases and background work an inner session opens through its
+  `ScopedPublisher` are published by the host as-is. They are covered by the
+  after-publishing layer (plan section 4.9, milestone M9), which does not exist
+  yet.
+- A secret split across a tool-call boundary mid-stream (the first half in one
+  chunk, the rest after a tool call started) is not joined; the same
+  after-publishing layer (section 4.9, M9) is the answer.
+- The built-in list is best effort, not a guarantee. It does not match, for
+  example, `key=value` values shorter than 8 characters, URL userinfo
+  (`https://user:pass@host`) or `sk-` style API keys. Add `[redact] patterns`
+  for the shapes your agents handle (plan section 4.9, "before publishing").
+
+## Tests against real models
+
+Two opt-in tests make real model calls: set `AHP_FLOW_LIVE_CONFIG` to a
+`flow.toml` and run `tests/integration/test_flow_live.py` (a smoke test) or
+`tests/integration/test_corpus.py` (a small fan-out script, which also runs on
+fakes without the variable).

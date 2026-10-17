@@ -78,6 +78,10 @@ result = await session.prompt(
 print(result.structured)  # {"count": 3}, already validated by the host
 ```
 
+For a chat driven by an ahp-host-flow workflow, `chat.flow_view()` and
+`session.flow_view()` fold its typed progress descriptors into a run view
+(phases, steps, status, results, usage).
+
 ### Terminals
 
 A terminal is the one channel whose state is *contested*: the claim decides who

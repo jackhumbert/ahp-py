@@ -1,0 +1,201 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/jackhumbert/ahp-py/tree/main/packages/ahp-protocol/src/ahp_protocol/ext/flow.schema.json",
+  "title": "ahp-py/flow progress descriptor",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/notification"
+    },
+    {
+      "$ref": "#/$defs/step"
+    }
+  ],
+  "$defs": {
+    "usage": {
+      "type": "object",
+      "required": [
+        "inputTokens",
+        "outputTokens"
+      ],
+      "properties": {
+        "inputTokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "outputTokens": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "runStarted": {
+      "type": "object",
+      "required": [
+        "runId"
+      ],
+      "properties": {
+        "runId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "workflow": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "phaseStarted": {
+      "type": "object",
+      "required": [
+        "title"
+      ],
+      "properties": {
+        "title": {
+          "type": "string"
+        }
+      }
+    },
+    "phaseFinished": {
+      "type": "object",
+      "required": [
+        "title"
+      ],
+      "properties": {
+        "title": {
+          "type": "string"
+        }
+      }
+    },
+    "runFinished": {
+      "type": "object",
+      "required": [
+        "status"
+      ],
+      "properties": {
+        "status": {
+          "enum": [
+            "ok",
+            "error"
+          ]
+        },
+        "error": {
+          "type": "string"
+        }
+      }
+    },
+    "notification": {
+      "type": "object",
+      "minProperties": 1,
+      "maxProperties": 1,
+      "properties": {
+        "runStarted": {
+          "$ref": "#/$defs/runStarted"
+        },
+        "phaseStarted": {
+          "$ref": "#/$defs/phaseStarted"
+        },
+        "phaseFinished": {
+          "$ref": "#/$defs/phaseFinished"
+        },
+        "runFinished": {
+          "$ref": "#/$defs/runFinished"
+        }
+      },
+      "additionalProperties": false
+    },
+    "stepStarted": {
+      "type": "object",
+      "required": [
+        "ordinal",
+        "label",
+        "phase",
+        "chat",
+        "model",
+        "provider"
+      ],
+      "properties": {
+        "ordinal": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "label": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "phase": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "chat": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "model": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "provider": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "stepFinished": {
+      "type": "object",
+      "required": [
+        "status",
+        "result",
+        "usage"
+      ],
+      "properties": {
+        "status": {
+          "enum": [
+            "ok",
+            "null",
+            "error",
+            "skipped"
+          ]
+        },
+        "result": {},
+        "usage": {
+          "$ref": "#/$defs/usage"
+        },
+        "error": {
+          "type": "string"
+        }
+      }
+    },
+    "step": {
+      "type": "object",
+      "required": [
+        "stepStarted"
+      ],
+      "properties": {
+        "stepStarted": {
+          "$ref": "#/$defs/stepStarted"
+        },
+        "stepFinished": {
+          "$ref": "#/$defs/stepFinished"
+        },
+        "awaitingInput": {
+          "const": true
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

@@ -18,11 +18,13 @@ from ahp_host import ROOT_URI, Host, LoopbackSingleUserPolicy
 
 from ahp_host_flow import FlowProvider, load_config
 from ahp_host_flow.engine import load_journal
-from tests.flow_fakes import HangingProvider, RecordingProvider, reset_fakes
+from ahp_host_flow.provider import FlowSession
+from tests.flow_fakes import GatedProvider, HangingProvider, RecordingProvider, reset_fakes
 from tests.hosting import (
     Wire,
     cancel_turn,
     connect,
+    flow_tasks,
     found,
     notifications,
     open_session,
@@ -64,6 +66,9 @@ load = "tests.flow_fakes:RecordingProvider"
 [providers.hang]
 load = "tests.flow_fakes:HangingProvider"
 
+[providers.gate]
+load = "tests.flow_fakes:GatedProvider"
+
 [providers.srt]
 load = {q(ECHO)}
 config = {{ structured = true }}
@@ -74,6 +79,7 @@ rules = [
   {{ provider = "rec", label = "rec*" }},
   {{ provider = "hang", label = "slow*" }},
   {{ provider = "srt", label = "srt*" }},
+  {{ provider = "gate", label = "gate*" }},
 ]
 
 [workflows]
@@ -245,6 +251,21 @@ async def test_journal_written(tmp_path: Path, node_path: str) -> None:
         await fx.shut()
 
 
+async def test_start_record_names_the_worker_chat(tmp_path: Path, node_path: str) -> None:
+    fx = await boot(tmp_path, node_path)
+    try:
+        turn = await run_turn(fx.wire, fx.chat, "t1", "```js\nreturn await agent('a')\n```")
+        assert final_json(turn) == "You said: a"
+        (run,) = (tmp_path / "state" / "runs").iterdir()
+        journal = load_journal(tmp_path / "state", run.name)
+        (worker,) = worker_chats(fx.host, SESSION)
+        assert journal.started[0].provider == "echo"
+        assert journal.started[0].chat == worker["resource"]
+        assert journal.unfinished == ()
+    finally:
+        await fx.shut()
+
+
 async def test_structured_failure_in_run(tmp_path: Path, node_path: str) -> None:
     fx = await boot(tmp_path, node_path)
     try:
@@ -286,6 +307,8 @@ async def test_skip(tmp_path: Path, node_path: str) -> None:
         turn = await wait_turn(fx.wire, fx.chat, "t1")
         assert final_json(turn) == {"a": None, "b": "You said: after"}
         assert "agent() #0 skipped" in notifications(turn)
+        assert await fx.wire.until(lambda: HangingProvider.instances[0].sessions[0].closed)
+        assert await fx.wire.until(lambda: not flow_tasks())
     finally:
         await fx.shut()
 
@@ -311,6 +334,8 @@ async def test_abort(tmp_path: Path, node_path: str) -> None:
         session = HangingProvider.instances[0].sessions[0]
         assert await fx.wire.until(lambda: session.cancelled == ["run aborted"])
         assert await fx.wire.until(lambda: state(fx.host, worker).get("activeTurn") is None)
+        assert await fx.wire.until(lambda: session.closed)
+        assert await fx.wire.until(lambda: not flow_tasks())
     finally:
         await fx.shut()
 
@@ -335,6 +360,117 @@ async def test_chat_config_overlay_forwarded(tmp_path: Path, node_path: str) -> 
         assert final_json(turn) == 'rec: wait-overlay overlay={"effort": "high"}'
         session = RecordingProvider.instances[0].sessions[0]
         assert session.overlays == [(worker, {"effort": "high"})]
+    finally:
+        await fx.shut()
+
+
+async def test_invalid_effort_logs_one_line(tmp_path: Path, node_path: str) -> None:
+    fx = await boot(tmp_path, node_path)
+    try:
+        script = "```js\nreturn await agent('hi', {label: 'rec-e', effort: 'turbo'})\n```"
+        turn = await run_turn(fx.wire, fx.chat, "t1", script)
+        assert final_json(turn) == "rec: hi"
+        lines = [n for n in notifications(turn) if n.startswith("agent() #0: effort")]
+        assert len(lines) == 1
+        assert lines[0].startswith("agent() #0: effort 'turbo' is not one of")
+        session = RecordingProvider.instances[0].sessions[0]
+        assert session.context.config.get("effort") != "turbo"
+    finally:
+        await fx.shut()
+
+
+async def test_overlay_isolation_between_workers(tmp_path: Path, node_path: str) -> None:
+    fx = await boot(tmp_path, node_path)
+    try:
+        script = (
+            "```js\n"
+            "const [a, b] = await parallel([() => agent('wait-overlay a', {label: 'rec-a'}), "
+            "() => agent('hold b', {label: 'rec-b'})]); return {a, b}\n"
+            "```"
+        )
+        await start_turn(fx.wire, fx.chat, "t1", script)
+
+        def sessions() -> list[Any]:
+            return [s for p in RecordingProvider.instances for s in p.sessions]
+
+        assert await fx.wire.until(
+            lambda: len(sessions()) == 2 and all(s.messages for s in sessions())
+        )
+        by_title = {str(c["title"]): str(c["resource"]) for c in worker_chats(fx.host, SESSION)}
+        by_chat = {s.context.chat_uri: s for s in sessions()}
+        a_chat, b_chat = by_title["rec-a"], by_title["rec-b"]
+        session_a, session_b = by_chat[a_chat], by_chat[b_chat]
+        await fx.wire.request("subscribe", {"channel": a_chat})
+        await fx.wire.dispatch(a_chat, {"type": "chat/configChanged", "config": {"effort": "high"}})
+        assert await fx.wire.until(session_a.overlay_seen.is_set)
+        session_b.released.set()
+        turn = await wait_turn(fx.wire, fx.chat, "t1")
+        assert final_json(turn) == {
+            "a": 'rec: wait-overlay a overlay={"effort": "high"}',
+            "b": "rec: hold b",
+        }
+        assert session_a.overlays == [(a_chat, {"effort": "high"})]
+        assert session_b.overlays == []
+        assert session_b.config_changes == []
+    finally:
+        await fx.shut()
+
+
+async def test_pending_overlay_applied_on_registration(
+    tmp_path: Path, node_path: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    applied = asyncio.Event()
+    original = FlowSession.chat_config_changed
+
+    async def wrapper(self: FlowSession, chat: str, values: Mapping[str, Any]) -> None:
+        await original(self, chat, values)
+        applied.set()
+
+    monkeypatch.setattr(FlowSession, "chat_config_changed", wrapper)
+    fx = await boot(tmp_path, node_path)
+    try:
+        script = "```js\nreturn await agent('hi', {label: 'gate-1'})\n```"
+        await start_turn(fx.wire, fx.chat, "t1", script)
+        worker = await subscribe_worker(fx)
+        assert await fx.wire.until(
+            lambda: bool(GatedProvider.instances) and GatedProvider.instances[0].creating.is_set()
+        )
+        await fx.wire.dispatch(worker, {"type": "chat/configChanged", "config": {"effort": "high"}})
+        await asyncio.wait_for(applied.wait(), timeout=10)
+        GatedProvider.instances[0].release.set()
+        turn = await wait_turn(fx.wire, fx.chat, "t1")
+        assert final_json(turn) == 'rec: hi overlay={"effort": "high"}'
+        (session,) = GatedProvider.instances[0].sessions
+        assert session.overlays == [(worker, {"effort": "high"})]
+    finally:
+        await fx.shut()
+
+
+async def test_customizations_republished_when_a_source_changes(
+    tmp_path: Path, node_path: str
+) -> None:
+    workflows = tmp_path / "ws" / ".claude" / "workflows"
+    write_workflow(workflows, "one", "return 1")
+    fx = await boot(tmp_path, node_path)
+
+    def names() -> set[str]:
+        container = containers(fx).get("ahp-host-flow.workspace.0", {})
+        return {str(c["name"]) for c in container.get("children", [])}
+
+    try:
+        assert await fx.wire.until(lambda: names() == {"one"}), containers(fx)
+        write_workflow(workflows, "two", "return 2")
+        await run_turn(fx.wire, fx.chat, "t1", "hello")
+        assert await fx.wire.until(lambda: names() == {"one", "two"}), containers(fx)
+    finally:
+        await fx.shut()
+
+
+async def test_workflow_named_workflow_runs(tmp_path: Path, node_path: str) -> None:
+    write_workflow(tmp_path / "ws" / ".claude" / "workflows", "workflow", "return 'named'")
+    fx = await boot(tmp_path, node_path)
+    try:
+        assert final_json(await run_turn(fx.wire, fx.chat, "t1", "/workflow workflow")) == "named"
     finally:
         await fx.shut()
 

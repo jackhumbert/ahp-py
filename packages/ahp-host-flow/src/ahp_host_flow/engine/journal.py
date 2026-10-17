@@ -1,7 +1,8 @@
 """Run journal: one append-only JSONL file per run (plan §4.2).
 
-The header record holds the script snapshot; each completed `agent()` call adds one
-record. A torn final line (a killed process) is ignored on read.
+The header record holds the script snapshot; each dispatched `agent()` call adds a
+start record and, when it completes, an agent record. A torn final line (a killed
+process) is ignored on read.
 """
 
 from __future__ import annotations
@@ -9,7 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import uuid
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import IO, Any, Final, Literal, TypeGuard
@@ -92,10 +93,26 @@ class AgentRecord:
 
 
 @dataclass(frozen=True)
+class StartRecord:
+    ordinal: int
+    key: str
+    # The dispatch handle: provider name and worker chat URI, both None when unknown.
+    provider: str | None = None
+    chat: str | None = None
+
+
+@dataclass(frozen=True)
 class LoadedJournal:
     header: RunHeader
     workflows: Mapping[str, WorkflowSnapshot]
     agents: tuple[AgentRecord, ...]
+    started: tuple[StartRecord, ...] = ()
+
+    @property
+    def unfinished(self) -> tuple[StartRecord, ...]:
+        """Started calls with no agent record: in flight when the run was killed."""
+        done = {a.ordinal for a in self.agents}
+        return tuple(s for s in self.started if s.ordinal not in done)
 
 
 def _line(record: dict[str, Any]) -> str:
@@ -103,13 +120,26 @@ def _line(record: dict[str, Any]) -> str:
 
 
 class JournalWriter:
-    def __init__(self, path: Path, run_id: str, file: IO[str]) -> None:
+    def __init__(
+        self,
+        path: Path,
+        run_id: str,
+        file: IO[str],
+        mask: Callable[[Any], Any] | None = None,
+    ) -> None:
         self._path = path
         self._run_id = run_id
         self._file: IO[str] | None = file
+        self._mask = mask
 
     @classmethod
-    def create(cls, state_dir: Path, header: RunHeader) -> JournalWriter:
+    def create(
+        cls,
+        state_dir: Path,
+        header: RunHeader,
+        *,
+        mask: Callable[[Any], Any] | None = None,
+    ) -> JournalWriter:
         d = run_dir(state_dir, header.run_id)
         try:
             d.mkdir(parents=True, exist_ok=False)
@@ -118,7 +148,7 @@ class JournalWriter:
         path = d / JOURNAL_FILE
         # newline="\n": no \r on Windows, so the file is byte-identical everywhere.
         file = open(path, "x", encoding="utf-8", newline="\n")  # noqa: SIM115
-        writer = cls(path, header.run_id, file)
+        writer = cls(path, header.run_id, file, mask)
         try:
             writer._write(
                 {
@@ -154,17 +184,27 @@ class JournalWriter:
         return self._run_id
 
     def append_agent(self, record: AgentRecord) -> None:
+        mask = self._mask
         wire: dict[str, Any] = {
             "type": "agent",
             "ordinal": record.ordinal,
             "key": record.key,
             "status": record.status,
-            "value": record.value,
+            "value": mask(record.value) if mask is not None else record.value,
             "outputTokens": record.output_tokens,
         }
         if record.status == "error":
-            wire["error"] = record.error if record.error is not None else ""
+            error = record.error if record.error is not None else ""
+            wire["error"] = mask(error) if mask is not None else error
         self._write(wire)
+
+    def append_started(self, record: StartRecord) -> None:
+        handle: dict[str, Any] | None = None
+        if record.provider is not None or record.chat is not None:
+            handle = {"provider": record.provider, "chat": record.chat}
+        self._write(
+            {"type": "started", "ordinal": record.ordinal, "key": record.key, "handle": handle}
+        )
 
     def append_workflow(self, snapshot: WorkflowSnapshot) -> None:
         self._write(
@@ -204,6 +244,7 @@ def load_journal(state_dir: Path, run_id: str) -> LoadedJournal:
     header: RunHeader | None = None
     workflows: dict[str, WorkflowSnapshot] = {}
     agents: dict[int, AgentRecord] = {}
+    started: dict[int, StartRecord] = {}
     for n, part in enumerate(parts, start=1):
         try:
             rec = json.loads(part)
@@ -258,6 +299,25 @@ def load_journal(state_dir: Path, run_id: str) -> LoadedJournal:
                     error=error,
                 ),
             )
+        elif kind == "started":
+            ordinal, key, handle = rec.get("ordinal"), rec.get("key"), rec.get("handle")
+            provider = chat = None
+            if isinstance(handle, dict):
+                provider, chat = handle.get("provider"), handle.get("chat")
+            if (
+                not _is_count(ordinal)
+                or not isinstance(key, str)
+                or (handle is not None and not isinstance(handle, dict))
+                or (provider is not None and not isinstance(provider, str))
+                or (chat is not None and not isinstance(chat, str))
+            ):
+                raise JournalError(f"journal line {n}: bad started record")
+            started.setdefault(ordinal, StartRecord(ordinal, key, provider, chat))
     if header is None:
         raise JournalError(f"journal for run {run_id!r} does not start with a run header")
-    return LoadedJournal(header, workflows, tuple(agents[o] for o in sorted(agents)))
+    return LoadedJournal(
+        header,
+        workflows,
+        tuple(agents[o] for o in sorted(agents)),
+        tuple(started[o] for o in sorted(started)),
+    )

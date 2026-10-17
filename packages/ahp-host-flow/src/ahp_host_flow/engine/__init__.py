@@ -2,7 +2,15 @@
 
 from ahp_host_flow.engine.abort import AbortSignal
 from ahp_host_flow.engine.budget import OUTPUT_TOKENS, Budget
-from ahp_host_flow.engine.dispatcher import AgentCall, AgentResult, Dispatcher, EchoDispatcher
+from ahp_host_flow.engine.dispatcher import (
+    AgentCall,
+    AgentResult,
+    Dispatcher,
+    DispatchHandle,
+    EchoDispatcher,
+    ReportsDispatch,
+    report_dispatch,
+)
 from ahp_host_flow.engine.journal import (
     JOURNAL_FILE,
     JOURNAL_VERSION,
@@ -13,6 +21,7 @@ from ahp_host_flow.engine.journal import (
     JournalWriter,
     LoadedJournal,
     RunHeader,
+    StartRecord,
     WorkflowSnapshot,
     call_key,
     canonical_json,
@@ -28,6 +37,13 @@ from ahp_host_flow.engine.options import (
     RUN_ID,
     RunOptions,
     default_concurrency,
+)
+from ahp_host_flow.engine.redact import (
+    BUILTIN_PATTERNS,
+    MASK,
+    NO_REDACTION,
+    Redactor,
+    StreamMasker,
 )
 from ahp_host_flow.engine.registry import (
     WORKFLOW_NAME,
@@ -46,12 +62,15 @@ from ahp_host_flow.engine.scheduler import (
 from ahp_host_flow.engine.schema import schema_error
 
 __all__ = [
+    "BUILTIN_PATTERNS",
     "CPU_RESERVE",
     "DEFAULT_MAX_CONCURRENCY",
     "JOURNAL_FILE",
     "JOURNAL_VERSION",
+    "MASK",
     "MAX_AGENTS_PER_RUN",
     "MAX_ITEMS_PER_CALL",
+    "NO_REDACTION",
     "OUTPUT_TOKENS",
     "RUNS_DIR",
     "RUN_ID",
@@ -63,6 +82,7 @@ __all__ = [
     "AgentResult",
     "Budget",
     "BudgetExhaustedError",
+    "DispatchHandle",
     "Dispatcher",
     "EchoDispatcher",
     "JournalError",
@@ -70,13 +90,17 @@ __all__ = [
     "JournalStatus",
     "JournalWriter",
     "LoadedJournal",
+    "Redactor",
     "Registry",
     "Replay",
+    "ReportsDispatch",
     "ResolvedScript",
     "RunHeader",
     "RunOptions",
     "Scheduler",
     "SchedulerRefusal",
+    "StartRecord",
+    "StreamMasker",
     "WorkflowRefError",
     "WorkflowSnapshot",
     "call_key",
@@ -84,6 +108,7 @@ __all__ = [
     "default_concurrency",
     "load_journal",
     "new_run_id",
+    "report_dispatch",
     "resolve_workflow",
     "run_dir",
     "schema_error",

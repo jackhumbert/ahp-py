@@ -140,6 +140,28 @@ async def test_customizations_skip_missing_directories(tmp_path: Path) -> None:
     assert customizations(await discover(dirs, node=None), dirs, version="1") == []
 
 
+async def test_catalog_skips_symlinks_and_non_regular_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    directory = tmp_path / "wf"
+    directory.mkdir()
+    (directory / "real.js").write_text("return 1\n", encoding="utf-8")
+    (directory / "dir.js").mkdir()
+    link = directory / "link.js"
+    # Whatever the platform allows, the entry is a symlink as far as the catalog can tell, so the
+    # assertion always runs (creating a real link needs a privilege some systems withhold).
+    real_is_symlink = Path.is_symlink
+    monkeypatch.setattr(
+        Path, "is_symlink", lambda self: self.name == "link.js" or real_is_symlink(self)
+    )
+    link.write_text("return 2\n", encoding="utf-8")
+    dirs = [SourceDir("user", directory, USER_ID, "Workflows (user)")]
+    names = [e.name for e in await discover(dirs, node=None)]
+    assert "dir" not in names
+    assert "real" in names
+    assert "link" not in names
+
+
 @pytest.mark.node
 async def test_meta_is_read_not_executed(tmp_path: Path, node_path: str) -> None:
     directory = tmp_path / "wf"
