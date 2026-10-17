@@ -655,7 +655,7 @@ class SessionPublisher(Protocol):
         """Rename the session, for an agent whose sessions are named elsewhere."""
         ...
 
-    async def config_changed(self, values: Mapping[str, Any]) -> None:
+    async def config_changed(self, values: Mapping[str, Any], *, chat: str | None = None) -> None:
         """Change session config values, for an agent reconfigured elsewhere.
 
         The provider-side twin of a client's `session/configChanged`: the
@@ -663,6 +663,10 @@ class SessionPublisher(Protocol):
         clients should show what is actually in force. Merged, like a client's;
         saved, so a restart resumes with it. The provider is not called back
         with its own change.
+
+        With *chat* (1.1.0), the twin of `chat/configChanged` instead: merged
+        into that chat's own overlay, for a value the chat set for itself
+        (`ReconfiguresChats`). A chat the session does not own is ignored.
         """
         ...
 

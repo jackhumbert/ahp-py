@@ -416,6 +416,29 @@ class TestChatConfig:
 
         assert fresh.chat_config == {other: {"prefix": "Again:"}}
 
+    async def test_the_agent_can_change_one_chats_own_value(self, host: Host) -> None:
+        """`SessionPublisher.config_changed(chat=)`: a value a chat set for
+        itself moved in the agent (plan mode left, say), so that chat's
+        overlay moves -- not the session's, and not another chat's."""
+        client = await _attach(host)
+        default, other = await self._two_chats(client, "echo:/chat-cfg-5")
+        await self._set(client, other, {"prefix": "Mine:"})
+        agent = host._sessions["echo:/chat-cfg-5"].agent_session
+        assert isinstance(agent, EchoSession)
+        publisher = agent.context.publisher
+        assert publisher is not None
+
+        await publisher.config_changed({"prefix": "Moved:"}, chat=other)
+        await publisher.config_changed({"prefix": "Nowhere:"}, chat="ahp-chat:/not-ours")
+        await client.collect(seconds=0.3)
+
+        chat_state = host.sequencer.state_of(other)
+        assert chat_state["config"] == {"values": {"prefix": "Moved:"}}
+        assert "config" not in host.sequencer.state_of(default)
+        session_state = host.sequencer.state_of("echo:/chat-cfg-5")
+        assert session_state["config"]["values"].get("prefix") != "Moved:"
+        assert agent.chat_config[other] == {"prefix": "Mine:"}, "the agent heard its own change"
+
 
 class TestCustomizationsAndProgress:
     """Session state that changes while nobody is taking a turn."""

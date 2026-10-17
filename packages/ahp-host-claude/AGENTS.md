@@ -26,7 +26,10 @@ server's AGENTS.md requires ("Adding a provider adapter").
   are offered only as explicit choices, narrowed to the session, never a
   bypass mode or a directory (`permissions.choices`); a chat narrowed away
   from the session's folder runs its gate in Ask (`ClaudeSession._gate`); the
-  permission mode Claude Code reports at init is put back to the session's.
+  permission mode Claude Code reports at init is put back to the session's; a
+  chat's own approval mode (AHP 1.1.0) moves only that chat's gate, and a
+  mode Claude Code moves itself stays in the chat that set one
+  (`LocalClaudeSession.chat_config_changed`, `_follow_mode`).
 - SDK behaviour not documented by the SDK was read from the CLI it bundles
   (`claude_agent_sdk/_bundled/claude`): `strings` it and search for the
   control request or message schema (`subtype:R("...")`).

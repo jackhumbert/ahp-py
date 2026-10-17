@@ -72,12 +72,20 @@ Status: pre-alpha.
   resume. A switch made on claude.ai (Remote Control) is followed here too,
   and the setting shows it - except to a mode not listed above (such as
   bypass permissions), which puts the session back in Ask instead.
+
+  It can also be set for **one chat** (AHP 1.1.0, `chat/configChanged`; the
+  property is `chatMutable`): Accept edits in one chat no longer loosens every
+  other. The session's mode then applies to every chat without one of its
+  own, a mode Claude Code moves itself (a plan approved, a switch on
+  claude.ai) moves only where it was set, and clearing a chat's value puts it
+  back on the session's. Needs ahp-host with `ReconfiguresChats`.
 - **Effort**, a session setting (`effort`: Default, Low, Medium, High, Extra
   high, Max), passed to Claude Code at start-up. Claude Code cannot change it
   on a running client, so a change mid-session restarts Claude on the same
   conversation - straight away if idle, else after the turn in flight. Which
   levels a model takes is in its `supportedEffortLevels` metadata on the model
-  list, for a client to offer only those.
+  list, for a client to offer only those. Like the approval mode it can be set
+  for one chat, which restarts only that chat's Claude.
 - **Background shells**: a command Claude leaves running in the background is
   listed on the chat (AHP 1.0.0 background work) with its command line until it
   finishes or is stopped, so a client can show what is still going after the
@@ -106,9 +114,9 @@ Status: pre-alpha.
   turns in its own history. A source that cannot be cut there (its turns
   predate this adapter's marks, or it is not running here) is handed to Claude
   as its transcript instead. Forking a whole session (`createSession.fork`)
-  works the same way. The approval mode, effort, folders and customizations
-  are the session's and apply to every chat; Remote Control is the default
-  chat's only, and a session listed through claude.ai cannot open a second
+  works the same way. The approval mode and effort are the session's unless a
+  chat sets its own (above); folders and customizations are the session's
+  and apply to every chat; Remote Control is the default chat's only, and a session listed through claude.ai cannot open a second
   chat. A chat can be narrowed to some of the session's folders, or none: with
   none it gets no file or shell tools, and one that leaves out the session's
   own folder (where Claude Code works from) asks before every change whatever

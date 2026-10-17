@@ -92,7 +92,7 @@ tests still negotiate `1.0.0`.
 | 1.1.0 feature | Status |
 |---|---|
 | One pending list for both kinds (`PendingMessage.kind`) | Steering is offered to the running turn entry by entry, in list order, and removed by its own id; idle, steering runs ahead of the queue, and a queued pick skips steering entries. An id already handed to the agent is refused for edit or removal, a removal must match id and kind, and an unknown kind is refused. A saved session's legacy `steeringMessage` still runs |
-| `chat/configChanged`, `chatMutable` | Validated against the owning session's schema: `chatMutable` properties only, `replace` allowed (it is how a chat resets). `ReconfiguresChats.chat_config_changed` gets the chat's whole overlay, and an agent attached later is told each overlay. The echo provider's `prefix` is `chatMutable` |
+| `chat/configChanged`, `chatMutable` | Validated against the owning session's schema: `chatMutable` properties only, `replace` allowed (it is how a chat resets). `ReconfiguresChats.chat_config_changed` gets the chat's whole overlay, and an agent attached later is told each overlay; a provider reports its own change to one with `SessionPublisher.config_changed(chat=)`. The echo provider's `prefix` and the Claude provider's approval mode and effort are `chatMutable` |
 | `CreateChatParams.title` | The chat's initial title; blank falls back to "New Chat" |
 | `SessionModelInfo.vendor` | `ModelInfo.vendor`, passed through. Neither shipped provider sets it: their runtimes report none |
 | Windowed delivery (`flowControl`, `channel/*`) | Not offered: a `subscribe` or `reconnect` that asks gets ordinary delivery, which the spec allows |

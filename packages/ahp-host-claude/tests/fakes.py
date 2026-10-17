@@ -394,6 +394,8 @@ class FakePublisher:
         self.tasks: list[asyncio.Task[None]] = []
         self.refusals = 0
         self.config_changes: list[dict[str, Any]] = []
+        #: The `chat=` each config change named (None: the session's own).
+        self.config_chats: list[str | None] = []
         #: The chat's background work as the host would hold it, by id, and
         #: which chat each was published for (None: the default chat).
         self.background: dict[str, dict[str, Any]] = {}
@@ -451,8 +453,9 @@ class FakePublisher:
     async def title_changed(self, title: str) -> None:
         return
 
-    async def config_changed(self, values: Mapping[str, Any]) -> None:
+    async def config_changed(self, values: Mapping[str, Any], *, chat: str | None = None) -> None:
         self.config_changes.append(dict(values))
+        self.config_chats.append(chat)
 
     async def open_tool_chat(
         self,

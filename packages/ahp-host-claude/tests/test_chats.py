@@ -11,9 +11,11 @@ from ahp_host.provider.base import (
     AgentSessionContext,
     CancelsChats,
     ChatContext,
+    ConfigRequest,
     FollowsChatWorkingDirectories,
     ForkedFrom,
     HostsChats,
+    ReconfiguresChats,
     UserMessage,
 )
 from claude_agent_sdk import AssistantMessage, ClaudeAgentOptions, ResultMessage, TextBlock
@@ -212,6 +214,202 @@ async def test_the_approval_mode_is_the_sessions(tmp_path: Path) -> None:
     await session.chat_opened(ChatContext(session_uri="s", chat_uri="ahp-chat:/x"))
     await session.config_changed({"permissionMode": "acceptEdits"})
     assert session.chats["ahp-chat:/x"].approvals == "acceptEdits"
+
+
+# -- a chat's own approval mode and effort (AHP 1.1.0) ----------------------------
+
+
+def _mode_changes(harness: Harness) -> list[tuple[Any, str | None]]:
+    """Each approval mode the adapter published, and the chat it named."""
+    publisher = harness.publisher
+    return [
+        (values["permissionMode"], chat)
+        for values, chat in zip(publisher.config_changes, publisher.config_chats, strict=True)
+        if "permissionMode" in values
+    ]
+
+
+async def test_both_settings_may_be_set_per_chat(tmp_path: Path) -> None:
+    """`chatMutable`, and the hook that honours it: marking one without the
+    other would have the state say one thing and Claude do another."""
+    harness = Harness(tmp_path)
+    resolved = await harness.provider.resolve_config(ConfigRequest(provider="claude", values={}))
+    assert resolved.properties["permissionMode"]["chatMutable"] is True
+    assert resolved.properties["effort"]["chatMutable"] is True
+    assert "chatMutable" not in resolved.properties["remoteControl"]
+    assert isinstance(await harness.session(), ReconfiguresChats)
+
+
+async def test_a_chat_can_approve_more_without_loosening_the_others(tmp_path: Path) -> None:
+    """Security-relevant: the reason per-chat config exists upstream."""
+    harness = Harness(tmp_path, _answer("b1", "x"))
+    session = await harness.session()
+    await session.chat_opened(ChatContext(session_uri="s", chat_uri="ahp-chat:/x"))
+    await session.chat_opened(ChatContext(session_uri="s", chat_uri="ahp-chat:/y"))
+    await session.send_user_message(UserMessage(text="b", chat_uri="ahp-chat:/x"), RecordingSink())
+
+    await session.chat_config_changed("ahp-chat:/x", {"permissionMode": "acceptEdits"})
+
+    x, y = session.chats["ahp-chat:/x"], session.chats["ahp-chat:/y"]
+    assert x.approvals == "acceptEdits"
+    assert harness.clients[0].permission_modes == ["acceptEdits"]
+    assert session.approvals == "default"
+    assert y.approvals == "default"
+
+
+async def test_the_sessions_mode_passes_over_a_chat_with_its_own(tmp_path: Path) -> None:
+    harness = Harness(tmp_path)
+    session = await harness.session()
+    await session.chat_opened(ChatContext(session_uri="s", chat_uri="ahp-chat:/x"))
+    await session.chat_opened(ChatContext(session_uri="s", chat_uri="ahp-chat:/y"))
+    await session.chat_config_changed("ahp-chat:/x", {"permissionMode": "acceptEdits"})
+
+    await session.config_changed({"permissionMode": "plan"})
+
+    assert session.approvals == "plan"
+    assert session.chats["ahp-chat:/y"].approvals == "plan"
+    assert session.chats["ahp-chat:/x"].approvals == "acceptEdits"
+
+
+async def test_an_overlay_without_the_key_puts_the_chat_back_on_the_session(
+    tmp_path: Path,
+) -> None:
+    """ "To reset a property to the session's value, replace the overlay with
+    one that omits the property" -- the host hands over the whole overlay."""
+    harness = Harness(tmp_path)
+    session = await harness.session(config={"permissionMode": "acceptEdits"})
+    await session.chat_opened(ChatContext(session_uri="s", chat_uri="ahp-chat:/x"))
+    await session.chat_config_changed("ahp-chat:/x", {"permissionMode": "plan"})
+    assert session.chats["ahp-chat:/x"].approvals == "plan"
+
+    await session.chat_config_changed("ahp-chat:/x", {})
+
+    assert session.chats["ahp-chat:/x"].approvals == "acceptEdits"
+
+
+async def test_the_default_chat_keeps_its_own_apart_from_the_sessions(tmp_path: Path) -> None:
+    """The default chat's conversation is the session object itself, so the
+    session's own value is held apart: a chat opened afterwards, and the
+    saved state, get the session's -- not the default chat's."""
+    harness = Harness(tmp_path, _answer("a1"))
+    session = await harness.session()
+    await session.send_user_message(UserMessage(text="a", chat_uri=DEFAULT), RecordingSink())
+
+    await session.chat_config_changed(DEFAULT, {"permissionMode": "acceptEdits"})
+    await session.chat_opened(ChatContext(session_uri="s", chat_uri="ahp-chat:/x"))
+
+    assert session.approvals == "acceptEdits"
+    assert session.session_approvals == "default"
+    assert session.chats["ahp-chat:/x"].approvals == "default"
+    state = await harness.provider.resume_state_of(session)
+    assert state is not None
+    assert state["permissionMode"] == "default"
+
+
+async def test_a_resumed_session_gets_each_chats_own_back_from_the_host(tmp_path: Path) -> None:
+    """Not saved by the adapter: the overlay is chat state the host keeps,
+    and the host tells a resumed agent each one, as `chat_config_changed`."""
+    harness = Harness(tmp_path, _answer("a1"))
+    session = await harness.session()
+    await session.send_user_message(UserMessage(text="a", chat_uri=DEFAULT), RecordingSink())
+    await session.chat_config_changed(DEFAULT, {"permissionMode": "acceptEdits"})
+    state = await harness.provider.resume_state_of(session)
+    assert state is not None
+
+    resumed = await harness.provider.resume_session(harness.context(resume_state=dict(state)))
+    assert isinstance(resumed, LocalClaudeSession)
+    assert resumed.approvals == "default"
+    await resumed.chat_config_changed(DEFAULT, {"permissionMode": "acceptEdits"})
+    assert resumed.approvals == "acceptEdits"
+    assert resumed.session_approvals == "default"
+
+
+async def test_a_chats_own_effort_restarts_only_that_chat(tmp_path: Path) -> None:
+    harness = Harness(tmp_path, _answer("a1"), _answer("b1", "x"), _answer("b2", "x"))
+    session = await harness.session()
+    await session.send_user_message(UserMessage(text="a", chat_uri=DEFAULT), RecordingSink())
+    await session.chat_opened(ChatContext(session_uri="s", chat_uri="ahp-chat:/x"))
+    await session.send_user_message(UserMessage(text="b", chat_uri="ahp-chat:/x"), RecordingSink())
+    default, other = harness.clients
+
+    await session.chat_config_changed("ahp-chat:/x", {"effort": "high"})
+
+    assert other.disconnected
+    assert not default.disconnected
+    await session.send_user_message(UserMessage(text="c", chat_uri="ahp-chat:/x"), RecordingSink())
+    assert harness.clients[-1].options.effort == "high"
+    assert session.effort == "default"
+
+
+async def test_leaving_plan_mode_in_a_chat_with_its_own_mode_stays_in_that_chat(
+    tmp_path: Path,
+) -> None:
+    """Security-relevant. Claude Code moves its own mode (a plan approved); the
+    gate follows, and only where the mode was set: that chat's overlay, told
+    to clients on that chat, never the session's or another chat's."""
+    harness = Harness(tmp_path)
+    session = await harness.session()
+    await session.chat_opened(ChatContext(session_uri="s", chat_uri="ahp-chat:/x"))
+    await session.chat_config_changed("ahp-chat:/x", {"permissionMode": "plan"})
+    x = session.chats["ahp-chat:/x"]
+
+    await x._left_plan_mode()
+
+    assert x.approvals == "default"
+    assert _mode_changes(harness) == [("default", "ahp-chat:/x")]
+    assert session.session_approvals == "default"
+    await session.config_changed({"permissionMode": "acceptEdits"})
+    assert x.approvals == "default", "the chat's own mode stopped being its own"
+
+
+async def test_a_mode_moved_in_a_chat_without_its_own_is_the_sessions(tmp_path: Path) -> None:
+    """And every running Claude follows -- the default chat's included, whose
+    gate used to move while its Claude Code stayed in plan mode."""
+    harness = Harness(tmp_path, _answer("a1"))
+    session = await harness.session(config={"permissionMode": "plan"})
+    await session.send_user_message(UserMessage(text="a", chat_uri=DEFAULT), RecordingSink())
+    await session.chat_opened(ChatContext(session_uri="s", chat_uri="ahp-chat:/x"))
+    await session.chat_opened(ChatContext(session_uri="s", chat_uri="ahp-chat:/y"))
+    await session.chat_config_changed("ahp-chat:/y", {"permissionMode": "plan"})
+
+    await session.chats["ahp-chat:/x"]._left_plan_mode()
+
+    assert _mode_changes(harness) == [("default", None)]
+    assert session.session_approvals == "default"
+    assert session.approvals == "default"
+    assert harness.clients[0].permission_modes[-1:] == ["default"]
+    assert session.chats["ahp-chat:/y"].approvals == "plan"
+
+
+async def test_our_own_switch_echoed_in_a_narrowed_chat_is_not_a_change(tmp_path: Path) -> None:
+    """A chat narrowed away from the session's folder runs Claude Code in Ask
+    while its mode stays looser, and Claude Code reports that Ask back.
+    Followed, it rewrote the mode clients see -- the session's, for every
+    chat. Only our own switch is passed over: one made after it is followed."""
+    other = tmp_path / "other"
+    other.mkdir()
+    harness = Harness(tmp_path, _answer("a1"), _answer("a2"))
+    session = await harness.session(
+        working_directories=[harness.work.as_uri(), other.as_uri()],
+        config={"permissionMode": "acceptEdits"},
+    )
+    # The first turn fixes Claude Code's `cwd`, which narrowing then leaves
+    # out; narrowing restarts Claude, on the next turn.
+    await session.send_user_message(UserMessage(text="a", chat_uri=DEFAULT), RecordingSink())
+    await session.chat_working_directories_changed(DEFAULT, [other.as_uri()])
+    await session.send_user_message(UserMessage(text="b", chat_uri=DEFAULT), RecordingSink())
+    await session.config_changed({"permissionMode": "auto"})
+    assert harness.clients[-1].permission_modes[-1:] == ["default"]
+
+    await session._on_mode_elsewhere("default")
+
+    assert session.approvals == "auto"
+    assert _mode_changes(harness) == []
+
+    # Not ours this time: a switch made on claude.ai.
+    await session._on_mode_elsewhere("default")
+    assert session.approvals == "default"
+    assert _mode_changes(harness) == [("default", None)]
 
 
 async def test_a_chat_narrowed_away_from_the_sessions_folder_asks_for_everything(

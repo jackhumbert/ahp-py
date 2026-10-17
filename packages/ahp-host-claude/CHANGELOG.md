@@ -2,6 +2,28 @@
 
 ## [Unreleased]
 
+### Added — per-chat approvals and effort (AHP 1.1.0)
+
+- **The approval mode and effort can be set for one chat**
+  (`chat/configChanged`; both properties are now `chatMutable`, and
+  `LocalClaudeSession` is `ReconfiguresChats`). Security-relevant: approving
+  more in one chat no longer loosens every other. The session's own values
+  apply to every chat without one of its own and are what the resume state
+  saves; a chat's own comes back from the host on resume. Effort restarts
+  only that chat's Claude.
+- A mode Claude Code moves itself - a plan approved, a mode picked with an
+  approval, a switch on claude.ai - moves only where it was set: a chat with
+  its own mode is told on that chat (`config_changed(chat=)`), otherwise the
+  session's moves and every chat without its own follows.
+
+### Fixed
+
+- Claude Code's report of the Ask mode this adapter sets in a chat narrowed
+  away from the session's folder is no longer taken for a switch, which
+  rewrote the session's approval mode to Ask for every chat.
+- A mode change in another chat now switches the default chat's running
+  Claude too; only its gate used to move.
+
 ### Added
 
 - A message Claude Code injects into a chat other than the default one (a

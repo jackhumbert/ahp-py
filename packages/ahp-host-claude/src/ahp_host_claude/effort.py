@@ -29,6 +29,9 @@ PROPERTY: Final = {
     "default": DEFAULT,
     # Changeable during a session: Claude restarts on the same conversation.
     "sessionMutable": True,
+    # And per chat (AHP 1.1.0): each chat runs its own Claude process, so only
+    # that chat's restarts.
+    "chatMutable": True,
 }
 
 

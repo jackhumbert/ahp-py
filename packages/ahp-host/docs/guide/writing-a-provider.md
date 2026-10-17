@@ -308,7 +308,7 @@ no turn is running. Hold it for the life of the session.
 |---|---|
 | `customizations_changed(customizations, server_tools=)` | Republish **your** customization tree. The host merges it: a client's published plugins and an automation's copies are kept, and an entry you name keeps the user's on/off decision (`enablement` on a plugin or MCP server, `enabled` on a child) unless your entry states the field itself. |
 | `mcp_server_changed(id, state, channel=)` | An MCP server's lifecycle. Publish `{"kind": "starting", "blocking": True}` if its startup holds back the next message, and implement `BackgroundsMcpServers` to let a client stop waiting. |
-| `activity_changed(activity)` / `title_changed(title)` / `config_changed(values)` | Session metadata that moved on its own. |
+| `activity_changed(activity)` / `title_changed(title)` / `config_changed(values, chat=None)` | Session metadata that moved on its own. With `chat=`, a value that chat set for itself (`ReconfiguresChats`) moved, and only its overlay changes. |
 | `changes_published(changeset, changes, chat=)` | Publish or refresh a changeset; a refresh shows as `recomputing`. With `chat`, it belongs to that chat's catalogue and roll-up. |
 | `background_work_set(work, chat=)` / `background_work_removed(id, chat=)` | Work running in the background for a chat. |
 | `canvas_set(canvas, chat=)` / `canvas_removed(instance_id, chat=)` | A live canvas on a chat (experimental): an `ahp-canvas:` channel the chat references. Its `url` is never persisted and is redacted from wire logs. |

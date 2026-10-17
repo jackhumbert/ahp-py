@@ -1043,10 +1043,20 @@ class _Publisher:
         )
         await self._host._mirror_summary(self._session)
 
-    async def config_changed(self, values: Mapping[str, Any]) -> None:
-        await self._host.sequencer.publish(
-            self._session.uri, {"type": "session/configChanged", "config": dict(values)}
-        )
+    async def config_changed(self, values: Mapping[str, Any], *, chat: str | None = None) -> None:
+        if chat is None:
+            await self._host.sequencer.publish(
+                self._session.uri, {"type": "session/configChanged", "config": dict(values)}
+            )
+        else:
+            # Never defaulted to the default chat: no `chat` means the
+            # session's own value, which is a different thing to change.
+            channel = self._chat_of(chat)
+            if channel is None:
+                return
+            await self._host.sequencer.publish(
+                channel, {"type": "chat/configChanged", "config": dict(values)}
+            )
         await self._host._persist(self._session)
 
     def _chat_of(self, chat: str | None) -> str | None:

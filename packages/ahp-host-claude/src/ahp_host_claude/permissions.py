@@ -103,6 +103,10 @@ APPROVALS_PROPERTY: Final[Mapping[str, Any]] = {
     # Changeable during a session: the host tells the session
     # (`ClaudeSession.config_changed`) and it switches the running client.
     "sessionMutable": True,
+    # And per chat (AHP 1.1.0): each chat is its own Claude Code conversation
+    # with its own gate, so approving more in one chat need not loosen the
+    # others (`LocalClaudeSession.chat_config_changed`).
+    "chatMutable": True,
 }
 
 

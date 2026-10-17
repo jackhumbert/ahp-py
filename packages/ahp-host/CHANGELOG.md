@@ -31,6 +31,8 @@ versions each release speaks.
   new `ReconfiguresChats.chat_config_changed(chat, values)` is called with the
   chat's whole overlay — also when an agent attaches later. The echo
   provider's `prefix` is `chatMutable`.
+- `SessionPublisher.config_changed(values, chat=...)`: a provider reports a
+  value one chat set for itself moving (`chat/configChanged` on that chat).
 - `createChat` honours `title`.
 - `ModelInfo.vendor` → `SessionModelInfo.vendor`.
 - `createTcpConnection` is dispatched and answered `PermissionDenied`; this
