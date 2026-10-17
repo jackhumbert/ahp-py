@@ -173,11 +173,11 @@ item.
 | opt | AHP mapping |
 |---|---|
 | `model` | `Message.model = {id}`; aliases (`haiku`, `sonnet`, `opus`, `glm`) resolve through the routing profile (§5) |
-| `effort` | session `config.effort` where the provider has it; otherwise ignored, with one `log()` |
+| `effort` | the inner session's `config.effort` where the provider has it; otherwise ignored, with one `log()`. Since 1.1.0 it is also `chatMutable` on the child chat (§4.5), so a client can change one agent's effort mid-run |
 | `isolation:'worktree'` | `git worktree add` under the run dir, used as the inner session's working directory; removed if unchanged, otherwise kept and its changeset published on the child chat |
 | `agentType` | an agent from the inner session's customizations; unknown means an error, as in Claude |
 | `schema` | see below |
-| approvals | per-profile policy: auto-approve what the profile allows, and raise the rest in the child chat for a human |
+| approvals | per-profile policy, as the inner session's approval mode: auto-approve what the profile allows, and raise the rest in the child chat for a human. Since 1.1.0 the mode is `chatMutable` on the child chat (§4.5), so loosening one agent from a phone never loosens the others |
 | skip / abort | cancelling the child chat's turn makes that `agent()` return `null`; cancelling the main turn aborts the run |
 | errors | a resumable error uses `turnResume` once, then the call returns `null` with a `log()` line |
 
@@ -198,6 +198,39 @@ tiers:
 3. **Text.** The schema goes in the prompt and the engine parses the last JSON
    block. A bounded number of "fix your JSON" follow-ups are sent in the same
    chat.
+
+### 4.5 Per-chat config, steering and titles (AHP 1.1.0)
+
+ahp-py moved to AHP 1.1.0 while M1 was in progress. Nothing breaks, but four
+1.1.0 features change the design:
+
+- **Per-chat config.** A config property marked `chatMutable` can be set on
+  one chat (`chat/configChanged`), and the provider follows it through
+  `ReconfiguresChats.chat_config_changed`. `ahp-host-claude` already marks
+  `permissionMode` and `effort` this way. `ahp-host-flow` marks the same two
+  properties `chatMutable` on the run session. A child chat's overlay is
+  forwarded to that child's inner session as its own config, by
+  `ConfiguresSessions`, or by `chat_config_changed` on its chat. So a client
+  can tighten or loosen one agent's approvals, or raise its effort, mid-run,
+  without touching the others or the run. An inner session that reports its
+  own change (`config_changed`) lands on its child chat (done in M1).
+- **One inner session per call, still.** Per-chat config would let one inner
+  session host every call as a chat (`HostsChats` plus per-chat config), with
+  one agent process per run instead of one per call. But a chat can only
+  narrow its session's working directories, and `isolation: 'worktree'` needs
+  a new one. So M3 keeps a session per call, and sharing is a later
+  optimisation for calls with the same working directory.
+- **Steering.** 1.1.0 unifies steering and queued messages in one list with a
+  per-entry kind. A child chat is read-only by default. If its profile makes
+  it interactive, a steering message there is forwarded to the inner session
+  (`SteersTurns`), which lets a person nudge one agent mid-turn (M5). The run's
+  main chat queues nothing while a run is active.
+- **Titles and vendors.** `createChat`/`open_tool_chat` take a title, so a
+  child chat is titled by `label` (or the prompt's first line).
+  `ModelInfo.vendor` lets the run session advertise every inner provider's
+  models with their vendor, so a client can pick a run's default model across
+  Claude and GLM. On the remote side, `ahp-client`'s `create_chat(title=)`
+  serves M6.
 
 ## 5. Routing and the first ACP target
 
@@ -288,10 +321,10 @@ A live GLM smoke test is opt-in, behind a marker.
 | M0 | Package skeleton. Sandbox + RPC + echo `agent()`. Meta parse; banned APIs throw. **Spike:** an inner provider session's sink bridged into an `open_tool_chat` worker chat | `flow run` of a 3-line script prints the result; the spike shows EchoProvider's turn in a child chat |
 | M1 | Engine semantics on a fake dispatcher: null rules, caps, phase/log, budget, `workflow()` | one conformance script per row of §3 passes |
 | M2 | Journal + resume | kill mid-run, resume: identical results, and live calls start only at the first edited call |
-| M3 | `ahp-host-flow` + in-process Claude: workspace/user/host workflow sources as customizations, child chats, model/effort, StructuredOutput client tool, worktrees, skip/abort, approval relay | fan-out and triage corpus scripts pass against Claude; a run is watched and controlled from VS Code or iOS |
+| M3 | `ahp-host-flow` + in-process Claude: workspace/user/host workflow sources as customizations, child chats titled by `label`, model/effort, per-chat approval mode and effort (`ReconfiguresChats`, §4.5), StructuredOutput client tool, worktrees, skip/abort, approval relay, models advertised with `vendor` | fan-out and triage corpus scripts pass against Claude; a run is watched and controlled from VS Code or iOS |
 | M4 | In-process ACP (opencode/GLM): MCP StructuredOutput, text fallback, routing | a script routes its Review phase to GLM and gets a schema-valid result |
-| M5 | Full corpus unmodified; client-published workflows (+ automation capture); restart resume (`ResumableAgentProvider`); per-child changesets; automations | the plan/build/review corpus script lands a change; a cron automation runs a workflow |
-| M6 | `ClientDispatcher` remote + gateway; the `SessionOrigin` request upstream | one call runs on a gateway node and is mirrored into its child chat |
+| M5 | Full corpus unmodified; client-published workflows (+ automation capture); restart resume (`ResumableAgentProvider`); per-child changesets; steering a child chat (§4.5); automations | the plan/build/review corpus script lands a change; a cron automation runs a workflow |
+| M6 | `ClientDispatcher` remote + gateway (one remote chat per call, `create_chat(title=)`); the `SessionOrigin` request upstream | one call runs on a gateway node and is mirrored into its child chat |
 | M7 | Extensions (§6) + shim | `ask()` round-trips to a phone; a dual-target script runs in both runtimes |
 
 **M0 spike result.** `tests/integration/test_spike_worker_chat.py` showed:
