@@ -33,6 +33,8 @@ from ahp_client.api.client import (
 from ahp_client.api.events import (
     Delta,
     InputRequested,
+    MessageRedacted,
+    PartRedacted,
     Reasoning,
     Reconnected,
     ResponsePartAdded,
@@ -104,6 +106,8 @@ __all__ = [
     "Delta",
     "FileSide",
     "InputRequested",
+    "MessageRedacted",
+    "PartRedacted",
     "Reasoning",
     "Reconnected",
     "ResponsePartAdded",

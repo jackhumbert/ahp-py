@@ -21,7 +21,7 @@ from pathlib import Path
 from ahp_host.core import Host, HostInfo, LoopbackSingleUserPolicy
 from ahp_host.ws import serve_websocket
 
-from ahp_host_flow import __version__
+from ahp_host_flow import __version__, redaction
 from ahp_host_flow.config import ConfigError, FlowConfig, load_config
 from ahp_host_flow.provider import FlowProvider
 from ahp_host_flow.worktree import register_worktree_operations
@@ -72,8 +72,15 @@ async def _serve(host: Host, *, bind: str, port: int, token: str | None) -> None
             loop.add_signal_handler(sig, stop.set)
     async with serve_websocket(host, bind=bind, port=port, connection_token=token) as server:
         log.info("serving workflows on %s:%s", bind, server.bound_port)
-        with contextlib.suppress(asyncio.CancelledError):
-            await stop.wait()
+        poller = redaction.start_poller(host)
+        try:
+            with contextlib.suppress(asyncio.CancelledError):
+                await stop.wait()
+        finally:
+            if poller is not None:
+                poller.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await poller
     await host.aclose()
 
 

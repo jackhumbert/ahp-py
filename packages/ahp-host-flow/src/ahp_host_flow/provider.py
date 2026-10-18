@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import weakref
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -290,6 +291,14 @@ class FlowProvider:
             if user_workflows_dir is not None
             else Path.home() / ".claude" / "workflows"
         )
+        #: Every session this provider created or resumed, until it is collected.
+        self._sessions: weakref.WeakSet[FlowSession] = weakref.WeakSet()
+
+    def live_run_ids(self) -> frozenset[str]:
+        """The run id of every run live now (not the ones a restart left to resume)."""
+        return frozenset(
+            entry.run_id for session in list(self._sessions) for entry in session._runs.values()
+        )
 
     @property
     def agent(self) -> AgentInfo:
@@ -313,10 +322,14 @@ class FlowProvider:
         return ()
 
     async def create_session(self, context: AgentSessionContext) -> FlowSession:
-        return FlowSession(self, context)
+        session = FlowSession(self, context)
+        self._sessions.add(session)
+        return session
 
     async def resume_session(self, context: AgentSessionContext) -> FlowSession:
-        return FlowSession(self, context)
+        session = FlowSession(self, context)
+        self._sessions.add(session)
+        return session
 
     async def resume_state_of(self, session: AgentSession) -> Mapping[str, Any] | None:
         return session.resume_state() if isinstance(session, FlowSession) else None

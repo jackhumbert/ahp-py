@@ -24,6 +24,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Final
 
+from ahp_protocol.ext.redaction import REDACTED_TEXT
+
 __all__ = [
     "DESCRIPTOR_SCHEMA",
     "EMPTY_RUN",
@@ -39,6 +41,7 @@ __all__ = [
     "meta",
     "phase_finished",
     "phase_started",
+    "redacted_step",
     "run_finished",
     "run_started",
     "run_view",
@@ -219,6 +222,23 @@ def step(
         body["stepFinished"] = dict(finished)
     if awaiting:
         body["awaitingInput"] = True
+    return body
+
+
+def redacted_step(descriptor: Mapping[str, Any]) -> dict[str, Any]:
+    """A copy of a step descriptor with its result (and error) replaced by ``[redacted]``.
+
+    ``stepStarted`` and ``awaitingInput`` are kept; a descriptor without
+    ``stepFinished`` is returned as a shallow copy.
+    """
+    body = dict(descriptor)
+    finished = body.get("stepFinished")
+    if isinstance(finished, Mapping):
+        redacted = dict(finished)
+        redacted["result"] = REDACTED_TEXT
+        if "error" in redacted:
+            redacted["error"] = REDACTED_TEXT
+        body["stepFinished"] = redacted
     return body
 
 

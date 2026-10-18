@@ -20,6 +20,7 @@ from types import EllipsisType, TracebackType
 from typing import Any, Final, Protocol, Self
 
 from ahp_protocol.channels import ROOT_URI
+from ahp_protocol.ext.redaction import REDACTION_CAPABILITY
 from ahp_protocol.transport import Transport, TransportClosed
 from ahp_protocol.types import JsonObject
 from ahp_protocol.versions import DEFAULT_SUPPORTED_VERSIONS, parse_version
@@ -94,6 +95,10 @@ class ClientConfig:
     client_info: JsonObject | None = None
     capabilities: JsonObject | None = None
     locale: str | None = None
+    #: Opt in to ahp-py's redaction extension. Advertised in ``_meta``, never in
+    #: ``capabilities`` (``ClientCapabilities`` has no slot for it); on only
+    #: because the mirror implements it (invariant 11).
+    redaction: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -328,6 +333,8 @@ class AhpClient(CommandsMixin):
         chosen_locale = locale if locale is not None else self._config.locale
         if chosen_locale is not None:
             params["locale"] = chosen_locale
+        if self._config.redaction:
+            params["_meta"] = {REDACTION_CAPABILITY: {}}
 
         raw = await self.request("initialize", params)
         result: JsonObject = raw if isinstance(raw, dict) else {}
@@ -356,6 +363,8 @@ class AhpClient(CommandsMixin):
             "lastSeenServerSeq": last_seen_server_seq,
             "subscriptions": list(subscriptions),
         }
+        if self._config.redaction:
+            params["_meta"] = {REDACTION_CAPABILITY: {}}
         raw = await self.request("reconnect", params)
         return raw if isinstance(raw, dict) else {}
 

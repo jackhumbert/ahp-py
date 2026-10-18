@@ -16,6 +16,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, TypeAlias
 
+from ahp_protocol.ext.redaction import MESSAGE_REDACTED, PART_REDACTED
 from ahp_protocol.types import JsonObject
 
 from ahp_client.client import actions, elicitation
@@ -23,6 +24,8 @@ from ahp_client.client import actions, elicitation
 __all__ = [
     "Delta",
     "InputRequested",
+    "MessageRedacted",
+    "PartRedacted",
     "Reasoning",
     "Reconnected",
     "ResponsePartAdded",
@@ -509,6 +512,39 @@ class TurnCancelled(_Base):
 
 
 @dataclass(frozen=True, slots=True)
+class PartRedacted(_Base):
+    """The host redacted one response part (ahp-py extension; needs opt-in).
+
+    The mirror has already replaced the part's content with a marker.
+    """
+
+    @property
+    def part_id(self) -> str:
+        return str(self.action.get("partId", ""))
+
+    @property
+    def reason(self) -> str:
+        return str(self.action.get("reason", ""))
+
+    @property
+    def redacted_at(self) -> str:
+        return str(self.action.get("redactedAt", ""))
+
+
+@dataclass(frozen=True, slots=True)
+class MessageRedacted(_Base):
+    """The host redacted a turn's user message (ahp-py extension; needs opt-in)."""
+
+    @property
+    def reason(self) -> str:
+        return str(self.action.get("reason", ""))
+
+    @property
+    def redacted_at(self) -> str:
+        return str(self.action.get("redactedAt", ""))
+
+
+@dataclass(frozen=True, slots=True)
 class UnknownEvent(_Base):
     """An action type we do not model.
 
@@ -537,8 +573,17 @@ TurnEvent: TypeAlias = (
     | TurnCompleted
     | TurnFailed
     | TurnCancelled
+    | PartRedacted
+    | MessageRedacted
     | UnknownEvent
 )
+
+#: ahp-py extension actions. Deliberately not in `_BY_TYPE`, whose keys must be
+#: spec action types (`tests/client/test_events.py` holds it to that).
+_EXTENSION_BY_TYPE: dict[str, Any] = {
+    PART_REDACTED: PartRedacted,
+    MESSAGE_REDACTED: MessageRedacted,
+}
 
 #: Action type -> event class. Anything absent becomes `UnknownEvent`.
 #:
@@ -658,7 +703,8 @@ def event_for(
     """
     raw_action = envelope.get("action")
     action: Mapping[str, Any] = raw_action if isinstance(raw_action, Mapping) else {}
-    cls = _BY_TYPE.get(str(action.get("type")), UnknownEvent)
+    action_type = str(action.get("type"))
+    cls = _BY_TYPE.get(action_type) or _EXTENSION_BY_TYPE.get(action_type) or UnknownEvent
     payload = dict(envelope)
     if cls is ToolCallReady:
         info = _tool_info(tools, payload, action)
@@ -676,7 +722,7 @@ def event_for(
         # `case TurnFailed(reason=r)` gets "" unless it is filled here --
         # `ErrorInfo.message` is required, so there is always something to read.
         return TurnFailed(payload, _error_message(payload))
-    return cls(payload)  # type: ignore[no-any-return]
+    return cls(payload)
 
 
 def _tool_info(

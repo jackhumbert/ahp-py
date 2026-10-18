@@ -456,17 +456,79 @@ Known gaps (not covered):
 
 - Terminals, canvases and background work an inner session opens through its
   `ScopedPublisher` are published by the host as-is. They are covered by the
-  after-publishing layer (plan section 4.9, milestone M9), which does not exist
-  yet.
+  after-publishing layer (plan section 4.9, milestone M9; see "Redacting after
+  publishing"), which can remove them after the fact.
 - A secret split across a tool-call boundary mid-stream (the first half in one
   chunk, the rest after a tool call started) is not joined; the same
-  after-publishing layer (section 4.9, M9) is the answer.
+  after-publishing layer (`flow redact`) is the answer.
 - Changeset file contents (per-child worktree changesets) are published
   verbatim: masking them would corrupt the diff.
 - The built-in list is best effort, not a guarantee. It does not match, for
   example, `key=value` values shorter than 8 characters, URL userinfo
   (`https://user:pass@host`) or `sk-` style API keys. Add `[redact] patterns`
   for the shapes your agents handle (plan section 4.9, "before publishing").
+
+## Redacting after publishing
+
+Masking is the before-publishing layer; this is the after layer, for a secret
+that got through. `flow redact <runId> <ordinal> [--reason R] --config
+flow.toml [--wait S]` queues a request in `<state_dir>/redact` that the running
+`python -m ahp_host_flow` applies. Exit code 0 means done, 1 means refused or
+failed, and 3 means nobody picked it up yet (the request stays queued and runs
+when the host next starts). `--state-dir DIR` instead rewrites only the journal
+of a CLI or library run, with no host involved.
+
+What is redacted for the call with that ordinal:
+
+- the worker chat's markdown, reasoning and tool-call parts;
+- the step's `agent` tool call on the main chat: its result content, its
+  structured content and the `stepFinished` result in `_meta['ahp-py/flow']`,
+  so `flow_view` shows `[redacted]`;
+- the journal record: its value becomes `[redacted]` and it is marked
+  `redacted: {reason, redactedAt}`, so a resume replays `[redacted]`.
+
+A run that is still running is refused: by name for runs the serving process
+executes, and for any other process through `journal.lock` beside the journal,
+which a run's writer holds while it is open (the operating system drops it if
+the process dies). That covers `--state-dir` and the direct API too, and a lock
+held elsewhere is never waited for or broken. A journal written before this
+lock existed has none to find, so a live writer of that vintage is not detected.
+
+The redaction is not atomic: the journal is rewritten first, then the worker
+chat's parts, then the `agent` tool call. If it fails part way (the store is
+unwritable, say) the error lists what was already redacted, `flow redact` prints
+it, and running the same command again finishes the rest (parts that already
+carry a marker are skipped and the journal rewrite is idempotent). The audit
+entry for each published redaction names who asked: the request spool records
+the operating-system user as `flow redact (local operator <user>)`, and
+`redact_step` requires a stated `actor`.
+
+**The agent's own context is not redacted.** The inner session's conversation
+and provider state keep the original; only the shared view and the journal
+change.
+
+Also not redacted: the worker turn's message (the prompt), the run's final
+returned value block, runs resumed from this run (they are listed as
+descendants; redact them by their own run id), and wire logs written before the
+redaction.
+
+**A secret written into the script itself survives.** The journal header keeps
+the script's source and `args`, a `workflow` record keeps the source of any
+workflow the run called, and the main chat's user message holds the script text
+as it was sent. `flow redact` touches none of these, so a literal secret in a
+script (or in `--args`) stays in the journal, in the stored session and in every
+resume. Pass secrets to a script at run time from somewhere the script reads
+(an environment variable through a tool, say), not as literals, and use
+`Host.redact_message` on the main chat's turn for the shared view; the journal
+header cannot be redacted with this tool.
+
+A live client sees the change only if it opted in (ahp-client
+`connect(..., redaction=True)`); any other client gets the redacted state on its
+next snapshot. Redaction is host-initiated: there is no AHP client path.
+
+Embedders that hold the `Host` call
+`ahp_host_flow.redaction.redact_step(host, state_dir=..., run_id=...,
+ordinal=..., reason=..., actor=...)`.
 
 ## Tests against real models
 

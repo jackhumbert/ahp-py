@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import dataclasses
 import os
 import uuid
 from collections.abc import AsyncIterator, Iterator, Mapping, Sequence
@@ -73,7 +74,7 @@ from ahp_client.api.terminals import (
     terminal_dimension,
 )
 from ahp_client.client import actions
-from ahp_client.client.client import AhpClient
+from ahp_client.client.client import AhpClient, ClientConfig
 from ahp_client.client.errors import AhpClientError, RpcError
 from ahp_client.client.events import ActionEvent, ClientEvent, SessionRemoved
 from ahp_client.client.mirror import StateMirror
@@ -133,6 +134,7 @@ def connect(
     client_id: str | None = None,
     reconnect: bool = True,
     resources: ResourceServer | None = None,
+    redaction: bool = False,
     **host_options: Any,
 ) -> ClientContext:
     """Open a supervised connection.
@@ -152,6 +154,12 @@ def connect(
     Exactly one of *url*, *transport* or *transport_factory* is required.
     Passing a bare *transport* implies ``reconnect=False``: a transport can only
     be connected once, so there is nothing to reconnect *to*.
+
+    *redaction=True* opts in to ahp-py's redaction extension: the host then sends
+    ``ahp-py/chat/partRedacted`` and ``ahp-py/chat/messageRedacted`` live, the
+    mirror applies them and the stream yields ``PartRedacted`` /
+    ``MessageRedacted``. It is folded into ``client_config``, so a config passed
+    in *host_options* keeps its other fields.
     """
     from ahp_client.hosts.policy import disabled_policy
 
@@ -196,6 +204,10 @@ def connect(
 
         async def handler(method: str, params: Mapping[str, Any]) -> Any:
             return await served.handle(method, params)
+
+    if redaction:
+        cfg = host_options.pop("client_config", None) or ClientConfig()
+        host_options["client_config"] = dataclasses.replace(cfg, redaction=True)
 
     config = HostConfig(
         factory,

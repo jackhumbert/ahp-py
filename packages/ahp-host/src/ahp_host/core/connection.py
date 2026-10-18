@@ -54,6 +54,9 @@ class Connection:
         self.peer = peer
         self.initialized = False
         self.protocol_version: str | None = None
+        # The ahp-py extensions this peer advertised in `_meta` (initialize, or
+        # a reconnect that arrived first). Empty for a stock client.
+        self.extensions: frozenset[str] = frozenset()
         # Whatever the transport learned at admission time. For a WebSocket
         # that is the upgrade request's headers and its `?tkn=`; for another
         # transport it may be nothing at all.

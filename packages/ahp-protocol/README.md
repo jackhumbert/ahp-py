@@ -179,6 +179,34 @@ assert view.status == "ok"
 assert view.steps[0].result == "hi"
 ```
 
+`ahp_protocol.ext.redaction` is the extension for redacting content after it was
+published. A host rewrites a response part (or a turn's user message) to a marker
+that uses only existing part kinds, `[redacted]` plus a reason and time under
+`_meta["ahp-py/redaction"]`, with ids unchanged. It sends the extension actions
+`ahp-py/chat/partRedacted` and `ahp-py/chat/messageRedacted` only to a connection
+that advertised the `ahp-py/redaction` capability at initialize; a stock client
+never receives an action it does not know and sees the redacted state in its next
+snapshot. `apply_redaction` is the pure reducer both peers share. Only the shared
+view is redacted, never an agent's own context.
+
+```python
+from ahp_protocol.ext.redaction import apply_redaction, marker_of, part_redacted
+
+state = {
+    "turns": [
+        {
+            "id": "t1",
+            "state": "complete",
+            "responseParts": [{"kind": "markdown", "id": "p1", "content": "token=abc"}],
+        }
+    ]
+}
+action = part_redacted("t1", "p1", "leaked", "2026-01-01T00:00:00.000Z")
+part = apply_redaction(state, action)["turns"][0]["responseParts"][0]
+assert part["content"] == "[redacted]"
+assert marker_of(part)["reason"] == "leaked"
+```
+
 ## Conformance
 
 "Conformant" without a conformance test is a lie, and this package's entire

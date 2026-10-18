@@ -27,6 +27,15 @@ from typing import Any, Final
 
 from ahp_protocol import errors
 from ahp_protocol.channels import AUTOMATIONS_URI, ROOT_URI
+from ahp_protocol.ext.redaction import (
+    REDACTABLE_PART_KINDS,
+    REDACTION_CAPABILITY,
+    apply_redaction,
+    find_part,
+    find_turn,
+    message_redacted,
+    part_redacted,
+)
 from ahp_protocol.reducers import REDUCERS, js
 from ahp_protocol.reducers.clock import now_iso
 from ahp_protocol.transport.base import Transport
@@ -95,6 +104,7 @@ from ahp_host.core.plugin_copies import (
     split_copy_uri,
 )
 from ahp_host.core.policy import Policy, TracksChannels
+from ahp_host.core.redaction import AUDIT_KIND, RedactionError, extensions_of, redacts_live
 from ahp_host.core.resources import (
     NullResourceProvider,
     ResourceContent,
@@ -2400,7 +2410,7 @@ class Host:
         updated = {key: dict(fresh.properties.get(key, prop)) for key, prop in properties.items()}
         state["config"] = {**config, "schema": {**schema, "properties": updated}}
 
-    async def _persist(self, session: _Session) -> None:
+    async def _persist(self, session: _Session, *, immediate: bool = False) -> None:
         """Write a session's channels to the store, debounced.
 
         A resumable provider is asked for its resume state each time, so what
@@ -2415,6 +2425,10 @@ class Host:
         after that (cancelling turns, retracting their requests) is the
         process stopping, not the session changing, and must not overwrite the
         state the next process needs.
+
+        ``immediate`` writes now instead of debounced, and does not swallow a
+        failure: a redaction must reach disk before it is reported done, and an
+        operator has to learn when it did not.
         """
         if self._closing:
             return
@@ -2432,34 +2446,36 @@ class Host:
             state = self.sequencer.state_of(uri)
             if isinstance(state, Mapping):
                 channels[uri] = dict(state)
+        stored = StoredSession(
+            uri=session.uri,
+            provider=session.provider_id,
+            created_at=session.created_at,
+            channels=channels,
+            title=session.title,
+            resume_state=session.resume_state,
+            input_requests=[
+                {
+                    "id": r.id,
+                    "kind": r.kind,
+                    "chat": r.channel,
+                    "turnId": r.turn_id,
+                    **({"key": r.key} if r.key is not None else {}),
+                }
+                for r in self.pending.in_channels(session.chat_uris)
+                if r.channel is not None and r.turn_id is not None
+            ],
+            # The embedder's, asked for at write time rather than
+            # cached: a policy that re-keys ownership between the
+            # session starting and this write should not persist a
+            # stale answer.
+            metadata=self._session_metadata(session.uri),
+            interrupted_by_restart=tuple(sorted(session.interrupted)),
+        )
+        if immediate:
+            await self.store.save(stored)
+            return
         with contextlib.suppress(Exception):
-            await self.store.save_soon(
-                StoredSession(
-                    uri=session.uri,
-                    provider=session.provider_id,
-                    created_at=session.created_at,
-                    channels=channels,
-                    title=session.title,
-                    resume_state=session.resume_state,
-                    input_requests=[
-                        {
-                            "id": r.id,
-                            "kind": r.kind,
-                            "chat": r.channel,
-                            "turnId": r.turn_id,
-                            **({"key": r.key} if r.key is not None else {}),
-                        }
-                        for r in self.pending.in_channels(session.chat_uris)
-                        if r.channel is not None and r.turn_id is not None
-                    ],
-                    # The embedder's, asked for at write time rather than
-                    # cached: a policy that re-keys ownership between the
-                    # session starting and this write should not persist a
-                    # stale answer.
-                    metadata=self._session_metadata(session.uri),
-                    interrupted_by_restart=tuple(sorted(session.interrupted)),
-                )
-            )
+            await self.store.save_soon(stored)
 
     def _content_store(self) -> ContentStore:
         """A session's content store, bounded as the embedder asked."""
@@ -2810,6 +2826,7 @@ class Host:
 
         connection.client_id = _connection_identity(params.get("clientId"))
         connection.protocol_version = chosen
+        connection.extensions = extensions_of(params)
 
         if not self.policy.authorize_connection(connection.info):
             self._audit("connection.refused", connection, allowed=False)
@@ -2839,6 +2856,9 @@ class Host:
             "serverInfo": self.info.to_wire(),
             "snapshots": snapshots,
         }
+        # `InitializeResult._meta` is the schema's slot for namespaced host
+        # capabilities; a stock client ignores keys it does not know.
+        result["_meta"] = {REDACTION_CAPABILITY: {}}
         if self.telemetry:
             result["telemetry"] = dict(self.telemetry)
         if self.default_directory is not None:
@@ -5250,6 +5270,169 @@ class Host:
             return ResourceInfo(uri=uri, type="directory").to_wire()
         raise errors.invalid_params(f"{uri} is a directory")
 
+    # ─── redaction after publishing ──────────────────────────────────────
+
+    async def redact(
+        self,
+        channel: str,
+        turn_id: str,
+        part_id: str,
+        reason: str,
+        *,
+        actor: str,
+        keep_meta: Mapping[str, Any] | None = None,
+        now: datetime | None = None,
+    ) -> dict[str, Any]:
+        """Replace one response part's content with a redaction marker, everywhere.
+
+        Host-initiated by design: there is no client-dispatchable path. A client
+        dispatching ``ahp-py/chat/partRedacted`` is refused by the unconditional
+        client-dispatch gate (invariant 11) and echoed with ``rejectionReason``
+        (invariant 12). No ``Policy`` hook is consulted because the embedder is
+        the caller.
+
+        The agent's own context -- the provider's conversation state -- is NOT
+        redacted; only the shared view is. A session title the host seeded from
+        a first message is not changed either.
+
+        Connections that advertised the extension get the action live; the rest
+        are owed a snapshot and never see an unknown action. Replay across the
+        redaction is cut (``docs/decisions/0007``). The store is written before
+        this returns, and the audit entry names who, when, what and why -- never
+        the content. *actor* is required: the audit's "who" is never null.
+
+        Raises :class:`RedactionError` for a target that is not there (also when
+        it vanishes between the check and the sequencer's lock: nothing is
+        sequenced, delivered or audited then), for a missing actor, and during
+        shutdown (``aclose``: refused before anything is published, because the
+        store is no longer written). If the redaction is published but the
+        store write fails, the audit entry is still recorded with
+        ``persisted: false`` and the error, and :class:`RedactionError` says
+        the stored session may still hold the original. Returns the envelope.
+        """
+        if self.sequencer.reducer_of(channel) != "chat":
+            raise RedactionError(f"{channel} is not a chat channel")
+        part = find_part(self.sequencer.state_of(channel), turn_id, part_id)
+        if part is None:
+            raise RedactionError(f"no part {part_id!r} in turn {turn_id!r} of {channel}")
+        kind = part.get("kind")
+        if kind not in REDACTABLE_PART_KINDS:
+            raise RedactionError(f"a {kind!r} part cannot be redacted")
+        redacted_at = iso(now or datetime.now(UTC))
+        action = part_redacted(turn_id, part_id, reason, redacted_at, meta=keep_meta)
+        return await self._publish_redaction(
+            channel,
+            action,
+            original=part,
+            target={"turnId": turn_id, "partId": part_id},
+            reason=reason,
+            actor=actor,
+            redacted_at=redacted_at,
+        )
+
+    async def redact_message(
+        self,
+        channel: str,
+        turn_id: str,
+        reason: str,
+        *,
+        actor: str,
+        now: datetime | None = None,
+    ) -> dict[str, Any]:
+        """Redact a turn's user message. Same rules as :meth:`redact` (ADR 0007).
+
+        Host-initiated only; the agent's own context is not redacted; a session
+        title seeded from this message is not changed.
+        """
+        if self.sequencer.reducer_of(channel) != "chat":
+            raise RedactionError(f"{channel} is not a chat channel")
+        turn = find_turn(self.sequencer.state_of(channel), turn_id)
+        if turn is None:
+            raise RedactionError(f"no turn {turn_id!r} in {channel}")
+        message = turn.get("message")
+        if not isinstance(message, Mapping):
+            raise RedactionError(f"turn {turn_id!r} of {channel} has no message to redact")
+        redacted_at = iso(now or datetime.now(UTC))
+        return await self._publish_redaction(
+            channel,
+            message_redacted(turn_id, reason, redacted_at),
+            original=message,
+            target={"turnId": turn_id, "target": "message"},
+            reason=reason,
+            actor=actor,
+            redacted_at=redacted_at,
+        )
+
+    async def _publish_redaction(
+        self,
+        channel: str,
+        action: Mapping[str, Any],
+        *,
+        original: Any,
+        target: Mapping[str, Any],
+        reason: str,
+        actor: str,
+        redacted_at: str,
+    ) -> dict[str, Any]:
+        # Refused BEFORE anything is published. Once `aclose` has written every
+        # session, `_persist` is a deliberate no-op (the process stopping must
+        # not overwrite what the next one needs), so a redaction published now
+        # would reach the live view but never the store: the caller would hear
+        # "done" with the secret still on disk. An explicit error is the honest
+        # answer; the operator redacts again after the restart.
+        if self._closing:
+            raise RedactionError("the host is shutting down; nothing was redacted")
+        if not isinstance(actor, str) or not actor.strip():
+            raise RedactionError("a redaction needs a stated actor (who is doing this)")
+        envelope = await self.sequencer.redact(
+            channel, action, lambda s: apply_redaction(s, action), deliver=redacts_live
+        )
+        if envelope is None:
+            raise RedactionError(f"{channel} is gone")
+        # From here the redaction IS published, so the audit entry is written
+        # whatever happens to the store: an operator reading the log must be able
+        # to see that a redaction happened and whether it reached disk.
+        persisted = True
+        failure: str | None = None
+        session = self._session_for(channel)
+        if session is not None:
+            try:
+                # Stored content the original referenced goes with it, then the
+                # rewritten state is on disk before the caller hears "done".
+                for uri in content_uris(original):
+                    session.content.discard(uri)
+                if self._closing:
+                    # Shutdown began while the redaction was being sequenced;
+                    # `_persist` would silently skip the write.
+                    raise RuntimeError("the host began shutting down before the store was written")
+                await self._persist(session, immediate=True)
+            except Exception as exc:
+                persisted = False
+                failure = f"{type(exc).__name__}: {exc}"
+                _log.exception("redaction on %s was published but not stored", channel)
+        # Identifiers, who, when, why -- never the part or the message.
+        self._audit(
+            AUDIT_KIND,
+            None,
+            channel=channel,
+            reason=reason,
+            detail={
+                **target,
+                "redactedAt": redacted_at,
+                "actor": actor,
+                "serverSeq": envelope["serverSeq"],
+                "persisted": persisted,
+                "error": failure,
+            },
+        )
+        if not persisted:
+            raise RedactionError(
+                f"redaction of {channel} was published (serverSeq {envelope['serverSeq']}) but "
+                f"could not be stored ({failure}); the stored session may still hold the "
+                "original, so redact again once the store works"
+            )
+        return envelope
+
     def _content_owner(self, uri: str) -> _Session | None:
         """The session whose store holds `uri`, if any."""
         for session in self._sessions.values():
@@ -7023,6 +7206,10 @@ class Host:
         # resumes on a client-asserted `clientId` alone, which is exactly why
         # admission is the Policy's decision and not this method's.
         first_request = not connection.initialized
+        # Before replay: it is what decides which frames this peer may be sent.
+        # A reconnect can be the FIRST request (invariant 16), so a client
+        # re-advertises its extensions here.
+        connection.extensions = connection.extensions | extensions_of(params)
         if first_request:
             connection.client_id = _connection_identity(params.get("clientId"))
             connection.protocol_version = self.supported_versions[0]

@@ -41,6 +41,13 @@ A canvas's live source `url` is redacted too, wherever a `CanvasState` appears
 (it is the object carrying `canvasId`): "Source URLs MUST be redacted from
 diagnostic logs" (1.0.0). A URL elsewhere is ordinary data and stays.
 
+A content redaction (`Host.redact`) is a different matter, and the limit is
+stated plainly: the wire log is an append-only transcript. Frames written
+BEFORE a redaction keep the original content and are never rewritten. Frames
+written after it -- the extension action on opted-in connections, every later
+snapshot -- carry only the redacted state. Delete or rotate a wire log that
+captured a secret.
+
 The key list is deliberately broader than AHP's own surface (`token` is the only
 one the protocol defines today) because a provider adapter may put its own
 credentials in `_meta`, and a log is the wrong place to discover that it did.

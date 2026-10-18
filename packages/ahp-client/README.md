@@ -82,6 +82,24 @@ For a chat driven by an ahp-host-flow workflow, `chat.flow_view()` and
 `session.flow_view()` fold its typed progress descriptors into a run view
 (phases, steps, status, results, usage).
 
+### Redaction (ahp-py extension)
+
+A host can redact a response part or a turn's user message after publishing it.
+That is an ahp-py extension, so a client opts in:
+
+```python
+async with connect(url, redaction=True) as client:
+    ...
+```
+
+The opt-in rides in `initialize`'s `_meta` (and `reconnect`'s), never in
+`capabilities`. The mirror then applies `ahp-py/chat/partRedacted` and
+`ahp-py/chat/messageRedacted` with `ahp_protocol.ext.redaction.apply_redaction`,
+replacing the content with a `[redacted]` marker, and the event stream yields
+`PartRedacted` or `MessageRedacted`. Without the opt-in the host never sends the
+action: the client sees the redacted state on its next snapshot (resubscribe or
+reconnect), and until then still shows what it already had.
+
 ### Terminals
 
 A terminal is the one channel whose state is *contested*: the claim decides who

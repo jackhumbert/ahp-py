@@ -34,18 +34,28 @@ It is the protocol's own coalescing knob, but no in-tree client sends it -- VS
 Code's ``subscribe()`` transmits ``{channel}`` and nothing else -- and honouring
 it means buffering on the path that carries the ordering guarantee. It is listed
 in ``docs/roadmap.md`` §5 rather than guessed at here.
+
+**Redaction** (`redact`) rewrites a channel's state after the fact, so replay
+must never hand back what it removed. The channel's log is dropped and its
+eviction watermark raised to the redaction's ``serverSeq``: a client below it
+gets a snapshot (the redacted state, ``fromSeq`` at or above the redaction),
+and the redaction envelope itself is delivered only to subscribers the caller
+selects. Those who were not sent it are *owed* a snapshot on their next
+reconnect, since their mirror still holds the original.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from collections import deque
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from typing import Any, Protocol
 
 from ahp_protocol.reducers import REDUCERS
 
+from ahp_host.core.redaction import RedactionError
 from ahp_host.core.seq import InMemorySequence, SequenceAllocator
 
 __all__ = ["Sequencer", "Subscriber", "SubscriptionObserver"]
@@ -85,6 +95,8 @@ class Sequencer:
         replay_limit: int = 1024,
         allocator: SequenceAllocator | None = None,
         observer: SubscriptionObserver | None = None,
+        owed_ttl: float = 3600.0,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._lock = asyncio.Lock()
         self._allocator = allocator or InMemorySequence()
@@ -108,6 +120,29 @@ class Sequencer:
         #: can tell the truth.
         self._evicted_through: dict[str, int] = {}
         self._subscribers: dict[str, set[Subscriber]] = {}
+        # channel -> {client id -> expiry}: clients that were subscribed when a
+        # redaction was published but were not sent it (stock clients). Their
+        # mirror still holds the original, so their next reconnect must get a
+        # snapshot even if their lastSeenServerSeq (advanced by other channels'
+        # traffic, serverSeq is host-global) is above the redaction.
+        #
+        # The expiry is None while the client is connected and becomes
+        # `now + owed_ttl` when its connection closes (`unsubscribe_all`): a
+        # client that never comes back must not pin an entry forever, so the set
+        # is bounded by the connected clients plus those that left within the
+        # last `owed_ttl` seconds -- the host's reconnect window. A client that
+        # returns later than that has been forgotten and gets the normal replay
+        # answer; the redaction's replay cut (`_evicted_through`) still covers
+        # every client whose cursor is below the redaction.
+        #
+        # Keyed by client id because that is all a `reconnect` carries: it has
+        # no credential, so the host cannot tell two connections asserting the
+        # same id apart, and one of them resubscribing clears the debt for the
+        # id. Not fixable here; `Policy.authorize_connection` is where identity
+        # is decided.
+        self._snapshot_owed: dict[str, dict[str, float | None]] = {}
+        self._owed_ttl = owed_ttl
+        self._clock = clock
         #: Settable after construction so a host can register itself, which it
         #: cannot do while it is still building its own sequencer.
         self.observer = observer
@@ -161,6 +196,15 @@ class Sequencer:
             self._subscribers.pop(uri, None)
             self._log.pop(uri, None)
             self._evicted_through.pop(uri, None)
+            self._snapshot_owed.pop(uri, None)
+
+    def channels(self, reducer: str | None = None) -> list[str]:
+        """Registered channel URIs in registration order, optionally of one reducer.
+
+        The public enumeration: callers ask by reducer, never by scheme
+        (invariant 15).
+        """
+        return [uri for uri, name in self._reducers.items() if reducer is None or name == reducer]
 
     def has_channel(self, uri: str) -> bool:
         return uri in self._states
@@ -241,6 +285,65 @@ class Sequencer:
 
             return envelope
 
+    async def redact(
+        self,
+        channel: str,
+        action: Mapping[str, Any],
+        transform: Callable[[Any], Any],
+        *,
+        deliver: Callable[[Subscriber], bool],
+    ) -> dict[str, Any] | None:
+        """Rewrite a channel's state, sequence *action* for it, and cut its replay.
+
+        *transform* maps the current state to the redacted one; it runs before
+        a number is taken, so a raise consumes no ``serverSeq`` and leaves state
+        and log untouched (invariant 7). Returning the state unchanged (the
+        same object) is treated as a raise: :class:`RedactionError`, nothing
+        consumed, delivered or owed. *deliver* picks the subscribers that
+        understand *action*; the others are owed a snapshot instead.
+
+        Returns the envelope, or ``None`` when the channel does not exist.
+        """
+        async with self._lock:
+            if channel not in self._states:
+                return None
+            current = self._states[channel]
+            next_state = transform(current)
+            if next_state is current:
+                # The transform found nothing to change (the target went away
+                # between the caller's check and this lock). Sequencing it would
+                # consume a serverSeq, cut replay and owe snapshots for a no-op
+                # that nothing could audit truthfully (invariant 7).
+                raise RedactionError(f"target not found: redacting {channel} changed nothing")
+            self._prune_owed()
+
+            self._seq = self._allocator.next()
+            envelope: dict[str, Any] = {
+                "channel": channel,
+                "action": dict(action),
+                "serverSeq": self._seq,
+            }
+            self._states[channel] = next_state
+
+            # Replay truncation (see the redaction ADR). Every logged action at
+            # or below this seq may carry the original content -- deltas,
+            # responsePart, toolCall*, the turnStarted message -- so no client
+            # may be replayed across it. A client below it gets a snapshot:
+            # the redacted state with fromSeq >= this seq, so Snapshot.fromSeq
+            # ordering (invariant 8) holds by construction. Actions after it
+            # are logged as usual and reduce onto the redacted state. The
+            # redaction envelope itself is not logged: the snapshot covers it.
+            self._log.pop(channel, None)
+            self._evicted_through[channel] = self._seq
+
+            message = {"jsonrpc": "2.0", "method": "action", "params": envelope}
+            for subscriber in self._subscribers.get(channel, ()):
+                if deliver(subscriber):
+                    subscriber.enqueue(message)
+                else:
+                    self._snapshot_owed.setdefault(channel, {})[subscriber.client_id] = None
+            return envelope
+
     def _append(self, channel: str, envelope: dict[str, Any]) -> None:
         """Add to the channel's replay log, recording anything it pushes out.
 
@@ -285,11 +388,33 @@ class Sequencer:
             self._register(subscriber, channel)
             if channel not in self._states:
                 return None
+            self._clear_owed(subscriber.client_id, [channel])
             return {
                 "resource": channel,
                 "state": self._states[channel],
                 "fromSeq": self._seq,
             }
+
+    def _clear_owed(self, client_id: str, channels: Iterable[str]) -> None:
+        """Forget that *client_id* is owed a snapshot. MUST be called with the lock held."""
+        for uri in channels:
+            owed = self._snapshot_owed.get(uri)
+            if owed is None:
+                continue
+            owed.pop(client_id, None)
+            if not owed:
+                del self._snapshot_owed[uri]
+
+    def _prune_owed(self) -> None:
+        """Drop owed entries whose client left and did not return in time. Lock held."""
+        now = self._clock()
+        for uri in list(self._snapshot_owed):
+            owed = self._snapshot_owed[uri]
+            expired = [c for c, at in owed.items() if at is not None and at <= now]
+            for client_id in expired:
+                del owed[client_id]
+            if not owed:
+                del self._snapshot_owed[uri]
 
     def _register(self, subscriber: Subscriber, channel: str) -> None:
         """Add a subscriber. MUST be called with the lock held."""
@@ -317,9 +442,18 @@ class Sequencer:
         async with self._lock:
             # Materialised first: emptied channels are deleted below, and
             # deleting from the dict being iterated raises.
+            self._prune_owed()
             for channel in [uri for uri, subs in self._subscribers.items() if subscriber in subs]:
                 subscribers = self._subscribers[channel]
                 subscribers.discard(subscriber)
+                owed = self._snapshot_owed.get(channel)
+                if (
+                    owed is not None
+                    and subscriber.client_id in owed
+                    and not any(s.client_id == subscriber.client_id for s in subscribers)
+                ):
+                    # Gone, and nobody else holds the id: start the clock.
+                    owed[subscriber.client_id] = self._clock() + self._owed_ttl
                 if not subscribers:
                     del self._subscribers[channel]
                     self._notify_observer(channel, observed=False)
@@ -381,6 +515,7 @@ class Sequencer:
             # each with the same `serverSeq`. A conformant mirror folds each
             # one, so a chat's text came back multiplied -- and a 50 KB request
             # answered with 62 MB.
+            self._prune_owed()
             requested = list(dict.fromkeys(subscriptions))
             known = [uri for uri in requested if uri in self._states]
             missing = [uri for uri in requested if uri not in self._states]
@@ -406,8 +541,14 @@ class Sequencer:
             # one `type` for the whole request -- so a single unreplayable
             # channel means snapshots, and the budget's job is to make that
             # rare rather than to make it partial.
-            can_replay = not from_previous_epoch and all(
-                last_seen_server_seq >= self._evicted_through.get(uri, 0) for uri in known
+            client_id = subscriber.client_id if subscriber is not None else None
+            owed = client_id is not None and any(
+                client_id in self._snapshot_owed.get(uri, ()) for uri in known
+            )
+            can_replay = (
+                not from_previous_epoch
+                and all(last_seen_server_seq >= self._evicted_through.get(uri, 0) for uri in known)
+                and not owed
             )
 
             if can_replay:
@@ -438,6 +579,8 @@ class Sequencer:
             # nothing and failed a strict schema check. If the field ever
             # belongs here, that is an upstream spec change, not a unilateral
             # one on this wire.
+            if client_id is not None:
+                self._clear_owed(client_id, known)
             return {
                 "type": "snapshot",
                 "snapshots": [

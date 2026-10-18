@@ -7,7 +7,7 @@ an AHP session, and each `agent()` call is a **child chat** of it, so any AHP
 client can watch and steer the whole run. Extensions to the format are opt-in,
 and a script written for Claude Code runs unchanged.
 
-Status: M0-M8 done (M4b only in part: typed progress, credential masking, worktrees, journal start records, the fan-out corpus run). The M4b remainder (from_config factories in ahp-host-claude and ahp-host-acp, the subagent prompt preamble, watching workflow dirs) is still open. M9 (redaction after publishing) is next. Milestones are in §8.
+Status: M0-M9 done (M4b only in part: typed progress, credential masking, worktrees, journal start records, the fan-out corpus run). The M4b remainder (from_config factories in ahp-host-claude and ahp-host-acp, the subagent prompt preamble, watching workflow dirs) is still open. M10 (extensions) is next. Milestones are in §8.
 
 ## 1. Where it sits
 
@@ -387,6 +387,11 @@ cannot remove or replace part of a channel's history. So there are two layers:
 - **Upstream:** a `chat/partRedacted` action (and a message variant) with
   reducer semantics, so every client applies it the same way (§10). Until
   that is agreed, the live layer stays behind its capability.
+- **Shipped (M9).** The capability is `_meta['ahp-py/redaction']` at
+  initialize; the extension actions are `ahp-py/chat/partRedacted` and
+  `ahp-py/chat/messageRedacted`; the replay log is truncated rather than
+  rewritten (`ahp-host` ADR 0007); `flow redact` reaches a running host through
+  a request spool under `<state_dir>/redact`.
 
 ### 4.10 Python workflows
 
@@ -598,6 +603,8 @@ Open for M4 (structured turns):
 
 **M8 result.** The acceptance corpus (§3): four scripts under `conformance/corpus` (`build_to_spec`, `fanout`, `triage`, `commit_prep`) run unmodified through the provider on a scripted fake (`tests/corpus_fakes.py`), with call counts 6, 4, 5 and 3, structured results threaded between stages, and the plan/build/review script landing its files; the fan-out script also has the opt-in live test. `ahp-host` gained `ReadsClientPlugins` (read the plugins published into a session, a client's or an automation's captured copy) and `GatesSteering`, plus the worker-chat input gate (worker chats accept only steering, only while their turn runs). Client source: `workflows/*.js` in a client's plugin are read through `ReadsClientPlugins`, listed first in a container of the provider's own with `shadowedBy`, run as `/name` or `/client:name` from the served text, re-published when the client republishes, opt-in through `[workflows] sources`; a client `.py` is never read. A saved automation naming a client workflow is captured at save time. Per-child changesets: a kept worktree is published on its worker chat with Apply and Discard. Steering: `interactive = true` forwards steering to an inner session that `SteersTurns`, else rejects it with a reason. Automations: `/<workflow> <json args>` runs unattended as an ordinary flow run. Open: `workflow()` cannot reach client workflows; no cron test in this package (ahp-host covers cron); changeset links are lost on restart; the operations are unavailable under ahp-node; `meta.x.schedule` is M10.
 
+**M9 result.** Redaction after publishing, across four packages. Protocol: `ahp_protocol.ext.redaction` (capability, extension actions, pure `apply_redaction`) and `flow.redacted_step`. `ahp-host`: `Host.redact` and `Host.redact_message` validate the target, publish through `Sequencer.redact` (selective delivery to opted-in clients, replay-log truncation and owed snapshots for the rest), write the store immediately, record a `chat.redacted` audit entry (who, when, target, reason, never content) and discard the original from the content store. `ahp-client`: opt-in (`redaction=True`), the mirror applies the actions, `PartRedacted` and `MessageRedacted` events. `ahp-host-flow`: the journal rewrite (`redact_agent_record`, value `[redacted]` plus a `redacted` marker, kept through resume), `redact_step`, the request spool and the server poller, and `flow redact` with exit codes 0, 1 and 3. Not redacted: the agent's own context (the inner session's conversation and provider state), the worker turn's prompt, the run's final value, the journals of resumed descendants, wire-log frames written before the redaction, and seeded session titles. Tests prove each: two-client host tests (opted-in sees it live, stock client gets no unknown action and sees the redacted state after resubscribe, neither gets the original through replay, the store file and audit never hold it), the ahp-client mirror tests, `test_journal_redaction_*`, `test_flow_redaction_*` and `test_cli_redact_*`. Exactly what the flow tests prove: `test_journal_redaction_resume_replays_redacted_value` (library level) shows a run resumed from a redacted journal replays `[redacted]` without dispatching the call; `test_flow_redaction_run` (a real run on a host with a `FileSessionStore`) shows that after `redact_step` plus `Host.redact_message` on the worker prompt the stored session file holds no trace of the secret for the worker chat or the main chat, and neither does the journal; `test_flow_redaction_survives_restart_and_resume` shows the same after a crash, a redaction on the restarted host and a second restart, and that a client's `chat/turnResume` of the cut-off run then replays `[redacted]` for the redacted call (not re-dispatched), re-dispatches only the held one, and leaves no trace in the stores or the new journal. Review fixes: the audit actor is required (`redact_step(actor=)`, the spool records `flow redact (local operator <user>)`); a journal's writer holds `journal.lock` and `redact_agent_record` raises `JournalBusyError` rather than rewrite under it (this process or another; a journal from before the lock is not detected); a redaction that fails part way reports what was already redacted and a retry finishes it. Still not redacted: a secret written literally into the script (the journal header's `source`/`args`, `workflow` records and the main chat's message holding the script text).
+
 ## 9. Risks
 
 - **Format drift:** Claude's workflow format is internal. Mitigation:
@@ -635,7 +642,8 @@ upstream:
 3. **Restart semantics:** what a host does with a turn that was running and
    the open input requests, and how a client learns what was withdrawn (§4.8; `ahp-host` `docs/requests.md` entry 11).
 4. **Redaction:** `chat/partRedacted` (and a message variant), with reducer
-   semantics and the rule that only the shared view is redacted (§4.9).
+   semantics and the rule that only the shared view is redacted (§4.9)
+   (`ahp-host` `docs/requests.md` entry 13).
 5. **Delegated sessions:** a `SessionOrigin` kind,
    `{kind: "delegation", session, chat, toolCallId}`, so a session started on
    another host's behalf can point back to the chat that started it (§2;

@@ -18,6 +18,10 @@ Every release states the protocol versions it speaks.
 
 ### Added
 
+- Redaction, an ahp-py extension: `ClientConfig.redaction` and
+  `connect(..., redaction=True)` advertise it in `_meta`; the mirror applies
+  the extension actions via `ahp_protocol.ext.redaction.apply_redaction`; the
+  stream yields `PartRedacted` and `MessageRedacted`.
 - `Chat.flow_view()` and `Session.flow_view(chat=None)` fold an ahp-host-flow
   run's typed progress (`ahp_protocol.ext.flow.run_view`) from the mirrored
   chat state.

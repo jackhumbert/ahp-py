@@ -169,6 +169,18 @@ class ContentStore:
             uri.startswith(CONTENT_SCHEME) and uri.removeprefix(f"{CONTENT_SCHEME}/") in self._blobs
         )
 
+    def discard(self, uri: str) -> bool:
+        """Remove the blob *uri* names. Returns whether this store held it.
+
+        Used by ``Host.redact``. A blob shared with a changeset of the same
+        session is gone too, deliberately: redaction wins over a diff view.
+        """
+        if not self.owns(uri):
+            return False
+        data = self._blobs.pop(uri.removeprefix(f"{CONTENT_SCHEME}/"))
+        self._bytes -= len(data)
+        return True
+
     def absorb(self, other: ContentStore, uris: Collection[str] | None = None) -> None:
         """Take blobs *other* holds -- for a chat moving between sessions.
 

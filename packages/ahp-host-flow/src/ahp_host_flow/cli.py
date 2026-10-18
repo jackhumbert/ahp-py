@@ -5,12 +5,23 @@ import asyncio
 import dataclasses
 import json
 import sys
+import time
 from collections.abc import Sequence
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from ahp_host.core.automations import iso
+
+from ahp_host_flow import redaction
 from ahp_host_flow.config import ConfigError, load_config
-from ahp_host_flow.engine import EchoDispatcher, JournalError, RunOptions, load_journal
+from ahp_host_flow.engine import (
+    EchoDispatcher,
+    JournalError,
+    RunOptions,
+    load_journal,
+    redact_agent_record,
+)
 from ahp_host_flow.inprocess import FlowRunFailed, run_in_process
 from ahp_host_flow.sandbox import (
     NO_ARGS,
@@ -70,6 +81,28 @@ def _build_parser() -> argparse.ArgumentParser:
             "a flow.toml: run the script through its providers on an in-process host "
             "(concurrency, budget, timeout, workflows and state come from it)"
         ),
+    )
+    redact = sub.add_parser(
+        "redact",
+        help="redact one finished agent() call from a run's journal (and a host's shared view)",
+        description=(
+            "Redact call ORDINAL of run RUN_ID. --state-dir rewrites the journal only; "
+            "--config also asks the host serving that flow.toml to redact the shared view "
+            "(through <state_dir>/redact, which its poller works off). The inner agent's own "
+            "context is not redacted. A run a `flow run` process is still writing is refused (the "
+            "journal is locked while its writer is open)."
+        ),
+    )
+    redact.add_argument("run_id", help="the run's id")
+    redact.add_argument("ordinal", type=int, help="the agent() call's ordinal")
+    redact.add_argument("--reason", default="redacted by an operator", help="recorded in the audit")
+    where = redact.add_mutually_exclusive_group(required=True)
+    where.add_argument("--config", metavar="PATH", help="a flow.toml whose running host to ask")
+    where.add_argument("--state-dir", help="redact the journal only, with no host")
+    redact.add_argument(
+        "--wait",
+        type=float,
+        help="with --config: seconds to wait for the host's answer (default: 10)",
     )
     return parser
 
@@ -132,9 +165,81 @@ def _run_with_config(parser: argparse.ArgumentParser, args: argparse.Namespace) 
     return 0
 
 
+def _redact_journal(args: argparse.Namespace) -> int:
+    state_dir = Path(args.state_dir)
+    try:
+        redact_agent_record(
+            state_dir,
+            args.run_id,
+            args.ordinal,
+            reason=args.reason,
+            redacted_at=iso(datetime.now(UTC)),
+        )
+    except (JournalError, ValueError) as exc:
+        _stderr(f"flow: {exc}")
+        return 1
+    report = {
+        "ok": True,
+        "runId": args.run_id,
+        "ordinal": args.ordinal,
+        "journal": True,
+        "sharedView": False,
+        "descendants": list(redaction.descendants(state_dir, args.run_id)),
+    }
+    print(json.dumps(report, indent=2))
+    _stderr("flow: the journal is redacted; a running host's shared view is redacted with --config")
+    return 0
+
+
+def _redact_through_host(args: argparse.Namespace) -> int:
+    try:
+        config = load_config(Path(args.config))
+    except ConfigError as exc:
+        _stderr(f"flow: {exc}")
+        return 1
+    try:
+        request = redaction.queue_request(config.state_dir, args.run_id, args.ordinal, args.reason)
+    except ValueError as exc:
+        _stderr(f"flow: {exc}")
+        return 1
+    result = redaction.result_path(request)
+    deadline = time.monotonic() + args.wait
+    while not result.exists():
+        if time.monotonic() >= deadline:
+            _stderr(
+                "flow: no running host has picked up the request yet; "
+                f"it stays queued at {request} and is applied when the host next starts"
+            )
+            return 3
+        time.sleep(0.1)
+    body = json.loads(result.read_text(encoding="utf-8"))
+    print(json.dumps(body, indent=2))
+    if body.get("ok") is True:
+        return 0
+    _stderr(f"flow: {body.get('error', 'redaction failed')}")
+    done = body.get("done")
+    if isinstance(done, list) and done:
+        _stderr("flow: already redacted: " + "; ".join(str(d) for d in done))
+        _stderr("flow: run the same command again to finish it")
+    return 1
+
+
+def _redact(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
+    if args.state_dir is not None:
+        if args.wait is not None:
+            parser.error("--wait only applies with --config")
+        return _redact_journal(args)
+    if args.wait is None:
+        args.wait = 10.0
+    return _redact_through_host(args)
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
+
+    if args.command == "redact":
+        return _redact(parser, args)
 
     if args.config is not None:
         return _run_with_config(parser, args)

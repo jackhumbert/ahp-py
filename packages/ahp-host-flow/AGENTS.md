@@ -13,7 +13,8 @@ is the design; milestones M0–M10 there say what exists and what's next.
   `loading` (inner providers by import path), `bridge` (`ScopedPublisher`,
   `TurnTee`), `catalog` (workflow sources as customizations), `commands`
   (parsing the message that starts a run), `dispatch` (`ProviderDispatcher`,
-  worker chats), `worktree` (git worktrees for `isolation: 'worktree'`),
+  worker chats), `worktree` (git worktrees for `isolation: 'worktree'`), `redaction`
+  (`flow redact`: `redact_step`, the request spool),
   `provider` (`FlowProvider`/`FlowSession`), `inprocess` (an
   in-memory host for `flow run --config`) and `__main__` (the server). They may
   import `ahp_host`; `engine/` and `sandbox/` may not. `library` (`run`, `FlowRun`) and `verbs`
@@ -61,10 +62,18 @@ is the design; milestones M0–M10 there say what exists and what's next.
   reasoning and tool calls (`TurnTee`), structured calls (`MaskingSink`, handed
   to `StructuredTurn`), approval and input prompts, step results, log lines,
   the journal and the `agent()` return. Not covered, and documented as known
-  gaps (README, plan §4.9 / M9): terminals, canvases and background work an
+  gaps (README, plan §4.9; M9 shipped the after-publishing layer): terminals, canvases and background work an
   inner session opens through `ScopedPublisher`, a secret split across a
   tool-call boundary, and anything the best-effort builtin list misses. New
   output paths must mask too.
+- `redaction` (after publishing) may import `ahp_host`; `engine/` may not, so
+  the journal rewrite lives in `engine/journal.py` (`redact_agent_record`).
+  Redaction never touches what the inner agent was sent or holds. `flow redact`
+  reaches a running host only through `<state_dir>/redact` (`queue_request`,
+  `process_requests`); there is no AHP client path, redaction is
+  host-initiated. A live run is refused (`live_runs`, and `journal.lock`, which a `JournalWriter`
+  holds while open, for another process). `redact_step` takes a required `actor`. Journal agent records may carry
+  `redacted` (`JOURNAL_VERSION` stays 1).
 - `awaitingInput` is derived from the `TurnTee`'s confirmations and input
   requests, an approximation of the session's `inputNeeded`.
 - `agent()` results are re-validated against `opts.schema` in the engine

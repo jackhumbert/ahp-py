@@ -369,6 +369,41 @@ reads it; a private `_meta` key would only be understood by ahp-py's own
 clients, and the shape mirrors `ChatOrigin`'s `tool` kind, which clients
 already render.
 
+## 13. Redaction after publishing (upstream)
+
+**What the spec says today.** Nothing. History is append-only: there is no
+action that changes what an already-published part says, so content that
+should not have been published stays in every client's mirror and in any
+replay of the channel.
+
+**What ahp-py does.** An extension, gated by the capability
+`_meta['ahp-py/redaction']` sent at `initialize`: the host-initiated actions
+`ahp-py/chat/partRedacted` `{turnId, partId, reason, redactedAt}` and
+`ahp-py/chat/messageRedacted`, reduced by the pure
+`ahp_protocol.ext.redaction.apply_redaction`. A stock client is never sent the
+action; the host truncates the channel's replay log at the redaction so the
+original cannot be replayed, and a stock client gets the redacted state on its
+next snapshot. See ADR 0007.
+
+**Request.** A standard `chat/partRedacted` and a message variant, with the
+reducer semantics of `apply_redaction`:
+
+- The target is a turn id plus a part id, using the reducer's identity rule for
+  parts (the same one `chat/responsePart` updates use); a message variant
+  targets the turn's user message.
+- The replacement keeps the part's kind and id; its text becomes
+  `[redacted]` and `_meta` records `{reason, redactedAt}`. A tool call keeps its
+  id, name and status; its text fields and content are replaced and structured
+  content is dropped.
+- An unknown target leaves the state unchanged.
+- Only the **shared view** is redacted. What an agent holds in its own context
+  is outside the protocol and is not covered.
+
+Why upstream: without a standard action, a redaction is invisible to every
+connected stock client until it resubscribes, replay must be truncated by
+convention, and a client cannot tell a redacted part from one that said
+`[redacted]`.
+
 ## Still deliberately not requested
 
 The list above holds, and one addition:

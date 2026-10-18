@@ -10,6 +10,47 @@ versions each release speaks.
 
 ## [Unreleased]
 
+### Added — redaction after publishing (ahp-py extension)
+
+- **`Host.redact(channel, turn_id, part_id, reason, ...)`** and
+  **`Host.redact_message(channel, turn_id, reason, ...)`**, with
+  **`RedactionError`** for a target that is not there. Host-initiated only: a
+  client dispatching the extension action is refused (invariants 11, 12). The
+  agent's own context is not redacted, only the shared view.
+- **`Sequencer.redact` / `Sequencer.channels`** and **`ContentStore.discard`**
+  (stored content a redacted part referenced is dropped).
+- **The `_meta['ahp-py/redaction']` capability.** A client advertises it in
+  `initialize` (or a first-request `reconnect`); the host always answers with
+  `InitializeResult._meta['ahp-py/redaction']`.
+- **Delivery only to opted-in connections.** They receive
+  `ahp-py/chat/partRedacted` / `messageRedacted` as an ordinary sequenced
+  action; a stock client is never sent an unknown action.
+- **Replay truncation and owed snapshots.** The channel's replay log is cut at
+  the redaction and a stock subscriber is owed a snapshot, so no reconnect can
+  resend the original (ADR 0007).
+- Documented in the README, the deploying guide, docs/requests.md entry 13 and
+  ADR 0007.
+- **`actor` is required** (keyword-only) on `Host.redact` / `redact_message`; a
+  blank one raises `RedactionError`. The audit's "who" is never null.
+- **Audit survives a failed store write.** The `chat.redacted` entry is recorded
+  once the redaction is published, with `persisted` and `error`; the caller gets a
+  `RedactionError` saying the stored session may still hold the original. A
+  redaction during `aclose` is refused before anything is published.
+- **A vanished target consumes nothing.** `Sequencer.redact` raises
+  `RedactionError` when the transform returns the state unchanged, so no
+  `serverSeq` is consumed, nothing is delivered or audited (invariant 7).
+- **Owed-snapshot entries are bounded.** An entry for a client whose connection
+  closed expires after `Sequencer(owed_ttl=3600)` seconds. The debt is keyed by
+  the client-asserted id: two connections asserting the same id cannot be told
+  apart (a `reconnect` carries no credential).
+- **Immediate store write.** `_persist(immediate=True)` writes the redacted
+  state before `redact` returns and does not swallow a failure.
+- **`chat.redacted` audit event**: channel, turn, part or message, `redactedAt`,
+  `actor`, `serverSeq` and the reason -- never the content.
+- **Wire-log rule, stated plainly.** Frames written before a redaction keep the
+  original and are never rewritten; frames after it carry only the redacted
+  state. Delete or rotate a wire log that captured a secret.
+
 ### Added — gating steering
 
 - **`GatesSteering`** (`ahp_host.provider`): an optional protocol on an agent

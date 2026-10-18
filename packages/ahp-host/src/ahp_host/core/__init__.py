@@ -13,6 +13,7 @@ from ahp_host.core.automations import (
 )
 from ahp_host.core.host import Host, HostInfo
 from ahp_host.core.policy import ConnectionInfo, Denied, LoopbackSingleUserPolicy, Policy
+from ahp_host.core.redaction import RedactionError
 from ahp_host.core.sequencer import Sequencer
 
 __all__ = [
@@ -29,6 +30,7 @@ __all__ = [
     "InMemoryAutomationStore",
     "LoopbackSingleUserPolicy",
     "Policy",
+    "RedactionError",
     "Sequencer",
     "classify",
     "negotiate",

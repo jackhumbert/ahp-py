@@ -506,6 +506,64 @@ fresh snapshots, but it is told that on **every** reconnect thereafter, because
 the reference client records the sequence with a maximum and stays permanently
 ahead of a counter that restarted at zero.
 
+## Redaction after publishing
+
+AHP cannot take back what it has published: history is append-only, and a
+delta, a tool call's output and a reasoning block all sit in clients' mirrors
+and in the replay log. This host adds an **ahp-py extension** for the case where
+something must be removed afterwards (a pasted secret, personal data).
+`Host.redact(channel, turn_id, part_id, reason, *, actor, keep_meta, now)`
+(`actor` is required: the audit's "who" is never null) replaces one response part; `Host.redact_message(channel, turn_id, reason, ...)`
+does the same for a turn's user message. Both raise `RedactionError` for a
+target that is not there. Redaction is **host-initiated**: it is the embedder's
+operator action, and a client that dispatches the extension action is refused
+and echoed like any other client-sent server action (invariant 12).
+
+**What can be targeted.** `markdown`, `reasoning` and `toolCall` parts. A part
+with no id, and an `inputRequest` part, cannot be targeted.
+
+**The marker.** The part keeps its kind and id and its text becomes
+`[redacted]`, with `_meta['ahp-py/redaction'] = {reason, redactedAt}`. A tool
+call keeps its id, name and status; its text fields become `[redacted]`, its
+content becomes a single text item and structured content is dropped. Every
+stock client renders it, because it is an ordinary part of an ordinary kind.
+
+**Delivery.** A client that sends `_meta: {'ahp-py/redaction': {}}` in
+`initialize` (or in a first-request `reconnect`) receives
+`ahp-py/chat/partRedacted` / `ahp-py/chat/messageRedacted` live, as a sequenced
+action on the channel. Every other client is **never sent it**: an unknown action
+must not reach a stock client. Its live view keeps the original until it
+resubscribes or reconnects, and then it gets a snapshot (the host forces one on
+reconnect even when its `lastSeenServerSeq` is already past the redaction). A
+stock client may see a `serverSeq` gap; that is legal, since it is traffic it
+did not see.
+
+**Replay cannot return the original.** The channel's replay log is truncated at
+the redaction, so a reconnect that would have replayed the original is answered
+with a snapshot instead ([ADR 0007](docs/decisions/0007-redaction-truncates-replay.md)).
+The stored session is rewritten immediately, not on the debounce, and content-store
+blobs the part referenced are discarded. The audit event `chat.redacted` records
+who, when, which target and why, and never the content. It also records
+`persisted` (and `error` when false): the entry is written whenever the redaction
+was *published*, even if the store write then failed -- in which case
+`RedactionError` is raised telling the caller the stored session may still hold
+the original, and redacting again once the store works rewrites it. A redaction
+during `aclose` is refused with `RedactionError` before anything is published. A
+target that vanishes between the check and the sequencer's lock raises `target not
+found` and consumes no `serverSeq`.
+
+**What it does not do.**
+
+- **The wire log is not rewritten.** Frames written to `--wire-log` before the
+  redaction still hold the original. Rotate or delete those files; the host
+  cannot edit them.
+- **The agent's own context and provider state are not redacted**, only the
+  shared view. A model that has seen the content still has it.
+- A session title seeded from a first message is not changed; rename the session
+  with `session/titleChanged`.
+- An `ahp-gateway` in front of the host does not advertise the capability, so
+  its clients get the redacted state on their next snapshot.
+
 ## Embedding it behind a proxy
 
 The library ships one `Policy` that permits everything

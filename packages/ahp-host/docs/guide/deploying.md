@@ -300,6 +300,31 @@ assert "outboxOverflows" in payload
 Serve that on loopback, or on a port your orchestrator can reach and nobody
 else — the counters disclose session and connection counts.
 
+### Redacting after publishing
+
+When something already published has to go (a pasted secret, personal data),
+call `Host.redact(channel, turn_id, part_id, reason, actor=...)` (or
+`Host.redact_message` for a user message) from **your own control path**. It is
+the embedder's operator action: no client can dispatch it, so an admin endpoint,
+a CLI or a support tool of yours is the caller, and `actor` should name who
+asked.
+
+```text
+await host.redact(chat_channel, turn_id, part_id, "pasted a credential", actor="ops@example")
+```
+
+`actor` is required. The stored session is rewritten immediately, before the call
+returns; if that write fails, the audit entry is still recorded (`persisted:
+false`) and `RedactionError` says the stored session may still hold the original.
+A redaction during shutdown is refused before anything is published. The audit
+sink receives a `chat.redacted` event with who, when, which target and the
+reason, and never the content. Three things stay yours to handle: **rotate or
+delete wire logs** written before the redaction (they still hold the original
+frames), the agent's own context and provider state are not redacted (end or
+reset that session if the model must forget), and a client without the
+`ahp-py/redaction` capability keeps seeing the original in its live view until it
+resubscribes or reconnects. See the README's "Redaction after publishing".
+
 ## Backpressure: a slow peer is disconnected, not buffered
 
 A connection's outbox is bounded. A peer that stops reading — a suspended

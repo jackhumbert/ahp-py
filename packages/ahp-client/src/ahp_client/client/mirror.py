@@ -29,6 +29,7 @@ from enum import Enum
 from typing import Any, Final
 
 from ahp_protocol.channels import ROOT_URI, reducer_for_state
+from ahp_protocol.ext.redaction import apply_redaction, is_redaction_action
 from ahp_protocol.reducers import REDUCERS, Reducer
 from ahp_protocol.types import JsonObject
 
@@ -436,11 +437,25 @@ class StateMirror:
         else:
             self._promote_pending_turn_start(channel, action)
 
-        channel.confirmed = channel.reducer(channel.confirmed, action)
+        self._reduce_confirmed(channel, action)
         if server_seq:
             channel.last_seq = server_seq
         channel.version += 1
         return ApplyOutcome.APPLIED
+
+    @staticmethod
+    def _reduce_confirmed(channel: ChannelMirror, action: Mapping[str, Any]) -> None:
+        """The one place a confirmed state is reduced from a server action.
+
+        ahp-py's redaction actions are not in the spec's reducer, so they are
+        routed to the shared pure helper (invariant 5: never copy a reducer).
+        Applied whether or not this client opted in: a host only sends them to
+        opted-in clients, and applying one is harmless otherwise.
+        """
+        if channel.reducer_name == "chat" and is_redaction_action(action):
+            channel.confirmed = apply_redaction(channel.confirmed, action)
+        else:
+            channel.confirmed = channel.reducer(channel.confirmed, action)
 
     def on_reconnect(
         self,

@@ -8,6 +8,24 @@ the spec revision it targets.
 
 ## [Unreleased]
 
+### Added — ahp-py extension: redaction after publishing
+
+- **`ahp_protocol.ext.redaction`**, a dependency-free module: the capability and
+  `_meta` key `ahp-py/redaction` (`REDACTION_CAPABILITY`, `REDACTION_META_KEY`),
+  the extension actions `ahp-py/chat/partRedacted` and
+  `ahp-py/chat/messageRedacted` (`PART_REDACTED`, `MESSAGE_REDACTED`, builders
+  `part_redacted` / `message_redacted`), lookups (`find_turn`, `find_part`,
+  `part_id_of`, `marker_of`) and the pure reducer `apply_redaction`. A markdown
+  or reasoning part becomes `[redacted]` and a tool call keeps an allowlist of
+  non-content fields (status unchanged); a user message becomes `[redacted]`
+  keeping `origin`, `model`, `agent`. Ids and order stay stable; an unknown
+  target returns the input unchanged. Only existing part kinds are used, so a
+  stock client renders the result.
+- **`flow.redacted_step`**: a step descriptor with its result (and error)
+  replaced by `[redacted]`.
+- A stock peer never receives the actions: the stock chat reducer ignores them,
+  and a host sends them only to a connection that advertised the capability.
+
 ### Added — ahp-py extension: typed progress
 
 - **`ahp_protocol.ext.flow`**, a dependency-free module: the `_meta` key

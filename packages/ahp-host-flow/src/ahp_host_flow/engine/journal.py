@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import sys
 import uuid
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -19,10 +21,14 @@ from typing import IO, Any, Final, Literal, TypeGuard
 
 from ahp_host_flow.engine.dispatcher import AgentCall
 from ahp_host_flow.engine.options import RUN_ID
+from ahp_host_flow.engine.redact import MASK
 
 JOURNAL_VERSION: Final = 1
 RUNS_DIR: Final = "runs"
 JOURNAL_FILE: Final = "journal.jsonl"
+#: Beside the journal: a lock the run's writer holds for as long as it is open.
+#: `redact_agent_record` refuses to rewrite a journal while the lock is held.
+LOCK_FILE: Final = "journal.lock"
 
 JournalStatus = Literal["ok", "null", "error"]
 _STATUSES: Final = frozenset({"ok", "null", "error"})
@@ -30,6 +36,46 @@ _STATUSES: Final = frozenset({"ok", "null", "error"})
 
 class JournalError(Exception):
     """A journal that cannot be written or read; the message is user-facing."""
+
+
+class JournalBusyError(JournalError):
+    """A journal a live writer holds; it must not be rewritten under it."""
+
+
+def _try_lock(handle: IO[bytes]) -> bool:
+    """Take an exclusive, non-blocking advisory lock on *handle*; `False` if held.
+
+    The operating system drops it when the holder exits, however it exits, so a
+    crashed run never leaves a stale lock behind.
+    """
+    try:
+        if sys.platform == "win32":
+            import msvcrt
+
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        return False
+    return True
+
+
+def _unlock(handle: IO[bytes]) -> None:
+    try:
+        if sys.platform == "win32":
+            import msvcrt
+
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    except OSError:
+        pass
 
 
 def canonical_json(value: Any) -> str:
@@ -92,6 +138,8 @@ class AgentRecord:
     value: Any
     output_tokens: int = 0
     error: str | None = None
+    # Set once the value was redacted after publishing: {"reason", "redactedAt"}.
+    redacted: Mapping[str, str] | None = None
 
 
 @dataclass(frozen=True)
@@ -130,11 +178,13 @@ class JournalWriter:
         run_id: str,
         file: IO[str],
         mask: Callable[[Any], Any] | None = None,
+        lock: IO[bytes] | None = None,
     ) -> None:
         self._path = path
         self._run_id = run_id
         self._file: IO[str] | None = file
         self._mask = mask
+        self._lock = lock
 
     @classmethod
     def create(
@@ -152,7 +202,15 @@ class JournalWriter:
         path = d / JOURNAL_FILE
         # newline="\n": no \r on Windows, so the file is byte-identical everywhere.
         file = open(path, "x", encoding="utf-8", newline="\n")  # noqa: SIM115
-        writer = cls(path, header.run_id, file, mask)
+        # Held until `close`: how `redact_agent_record` (possibly in another
+        # process) tells a live writer from a finished or crashed run.
+        lock = open(d / LOCK_FILE, "a+b")  # noqa: SIM115
+        if not _try_lock(lock):
+            lock.close()
+            file.close()
+            path.unlink(missing_ok=True)
+            raise JournalError(f"run {header.run_id!r} is already being written")
+        writer = cls(path, header.run_id, file, mask, lock)
         try:
             writer._write(
                 {
@@ -175,6 +233,7 @@ class JournalWriter:
             # behind, so the same run id can be used again.
             writer.close()
             path.unlink(missing_ok=True)
+            (d / LOCK_FILE).unlink(missing_ok=True)
             d.rmdir()
             raise
         return writer
@@ -200,6 +259,8 @@ class JournalWriter:
         if record.status == "error":
             error = record.error if record.error is not None else ""
             wire["error"] = mask(error) if mask is not None else error
+        if record.redacted is not None:
+            wire["redacted"] = dict(record.redacted)
         self._write(wire)
 
     def append_started(self, record: StartRecord) -> None:
@@ -226,6 +287,10 @@ class JournalWriter:
         file, self._file = self._file, None
         if file is not None:
             file.close()
+        lock, self._lock = self._lock, None
+        if lock is not None:
+            _unlock(lock)
+            lock.close()
 
     def _write(self, record: dict[str, Any]) -> None:
         # A dispatch can finish after the run ended; its record is dropped.
@@ -238,6 +303,19 @@ class JournalWriter:
 
 def _is_count(value: Any) -> TypeGuard[int]:
     return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
+def _redacted_marker(raw: Any) -> dict[str, str] | Literal[False] | None:
+    """The `redacted` field of an agent record; False when it is malformed."""
+    if raw is None:
+        return None
+    if (
+        isinstance(raw, dict)
+        and isinstance(raw.get("reason"), str)
+        and isinstance(raw.get("redactedAt"), str)
+    ):
+        return {"reason": raw["reason"], "redactedAt": raw["redactedAt"]}
+    return False
 
 
 def load_journal(state_dir: Path, run_id: str) -> LoadedJournal:
@@ -297,6 +375,11 @@ def load_journal(state_dir: Path, run_id: str) -> LoadedJournal:
                 or (error is not None and not isinstance(error, str))
             ):
                 raise JournalError(f"journal line {n}: bad agent record")
+            # Written by redact_agent_record; readers before M9 ignore the key, so
+            # JOURNAL_VERSION stays 1.
+            redacted = _redacted_marker(rec.get("redacted"))
+            if redacted is False:
+                raise JournalError(f"journal line {n}: bad agent record")
             agents.setdefault(
                 ordinal,
                 AgentRecord(
@@ -306,6 +389,7 @@ def load_journal(state_dir: Path, run_id: str) -> LoadedJournal:
                     value=rec.get("value"),
                     output_tokens=tokens,
                     error=error,
+                    redacted=redacted or None,
                 ),
             )
         elif kind == "started":
@@ -332,3 +416,72 @@ def load_journal(state_dir: Path, run_id: str) -> LoadedJournal:
         tuple(agents[o] for o in sorted(agents)),
         tuple(started[o] for o in sorted(started)),
     )
+
+
+def redact_agent_record(
+    state_dir: Path, run_id: str, ordinal: int, *, reason: str, redacted_at: str
+) -> AgentRecord:
+    """Rewrite a finished agent() record in place: value and error become `[redacted]`
+    and the record is marked `redacted`. Every other line stays byte-identical; the
+    torn or empty tail is dropped (a torn line may hold a partial copy of the value).
+    The file is replaced atomically.
+
+    A run whose writer is still open (this process or another) holds `journal.lock`;
+    this raises `JournalBusyError` instead of rewriting a file under it, and holds the
+    lock itself for the rewrite. A journal written before the lock existed has none
+    to find, so a live writer of that vintage is not detected. Runs resumed from this
+    one hold their own copies and are not touched.
+    """
+    if not _is_count(ordinal):
+        raise ValueError(f"ordinal must be a non-negative int: {ordinal!r}")
+    path = run_dir(state_dir, run_id) / JOURNAL_FILE
+    if not path.is_file():
+        raise JournalError(f"no journal for run {run_id!r} under {state_dir}")
+    guard = open(path.with_name(LOCK_FILE), "a+b")  # noqa: SIM115
+    try:
+        if not _try_lock(guard):
+            raise JournalBusyError(
+                f"run {run_id!r} is still being written by a live process; "
+                "wait for it to end or abort it"
+            )
+        try:
+            _rewrite(path, ordinal, reason, redacted_at)
+        finally:
+            _unlock(guard)
+    finally:
+        guard.close()
+    for record in load_journal(state_dir, run_id).agents:
+        if record.ordinal == ordinal:
+            return record
+    raise JournalError(f"run {run_id!r} has no finished agent() #{ordinal}")
+
+
+def _rewrite(path: Path, ordinal: int, reason: str, redacted_at: str) -> None:
+    lines = path.read_bytes().decode("utf-8").split("\n")[:-1]
+    found = False
+    for i, part in enumerate(lines):
+        try:
+            rec = json.loads(part)
+        except ValueError:
+            rec = None
+        if not isinstance(rec, dict) or not isinstance(rec.get("type"), str):
+            raise JournalError(f"journal line {i + 1} is not a valid record")
+        if rec["type"] == "agent" and rec.get("ordinal") == ordinal:
+            rec["value"] = MASK
+            if "error" in rec:
+                rec["error"] = MASK
+            rec["redacted"] = {"reason": reason, "redactedAt": redacted_at}
+            lines[i] = _line(rec).rstrip("\n")
+            found = True
+    if not found:
+        raise JournalError(f"{path.parent.name!r} has no finished agent() #{ordinal}")
+    tmp = path.with_name(f"{JOURNAL_FILE}.{uuid.uuid4().hex}.tmp")
+    try:
+        with open(tmp, "x", encoding="utf-8", newline="\n") as f:
+            f.write("\n".join(lines) + "\n")
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise

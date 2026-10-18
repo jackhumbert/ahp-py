@@ -17,6 +17,7 @@ from ahp_host_flow.engine.journal import (
     JOURNAL_VERSION,
     RUNS_DIR,
     AgentRecord,
+    JournalBusyError,
     JournalError,
     JournalStatus,
     JournalWriter,
@@ -28,6 +29,7 @@ from ahp_host_flow.engine.journal import (
     canonical_json,
     load_journal,
     new_run_id,
+    redact_agent_record,
     run_dir,
 )
 from ahp_host_flow.engine.options import (
@@ -97,6 +99,7 @@ __all__ = [
     "DispatchHandle",
     "Dispatcher",
     "EchoDispatcher",
+    "JournalBusyError",
     "JournalError",
     "JournalRun",
     "JournalStatus",
@@ -125,6 +128,7 @@ __all__ = [
     "load_journal",
     "new_run_id",
     "reattach_handle",
+    "redact_agent_record",
     "report_dispatch",
     "resolve_workflow",
     "run_dir",
