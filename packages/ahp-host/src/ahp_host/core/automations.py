@@ -28,12 +28,10 @@ rejected rather than saved as a trigger that can never fire.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import copy
 import hashlib
 import json
 import logging
-import os
 from collections.abc import Collection, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
@@ -42,6 +40,7 @@ from typing import Any, Final, Protocol
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from ahp_host.core.plugin_copies import PluginCopy
+from ahp_host.core.private_files import make_owner_only
 from ahp_host.core.store import _write_atomically
 
 __all__ = [
@@ -613,8 +612,7 @@ class FileAutomationStore:
     def __init__(self, directory: Path) -> None:
         self.directory = Path(directory)
         self.directory.mkdir(parents=True, exist_ok=True, mode=0o700)
-        with contextlib.suppress(OSError):
-            os.chmod(self.directory, 0o700)
+        make_owner_only(self.directory, directory=True)
         self._writing = asyncio.Lock()
 
     def _path_for(self, resource: str) -> Path:

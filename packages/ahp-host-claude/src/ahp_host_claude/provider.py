@@ -2072,12 +2072,13 @@ class ClaudeSession:
             subagent.sink = sink
             subagent.attached.set()
             pending, subagent.pending = subagent.pending, []
-            for item in pending:
-                await self._route_to_subagent(subagent, item)
             try:
+                for item in pending:
+                    await self._route_to_subagent(subagent, item)
                 await subagent.done.wait()
             except asyncio.CancelledError:
-                # A client stopped the worker chat: stop that task, and only
+                # A client stopped the worker chat, even while its first
+                # messages were still being shown: stop that task, and only
                 # it -- the host does not interrupt the whole session for this.
                 stop = getattr(self._client, "stop_task", None)
                 if stop is not None and subagent.task.task_id:

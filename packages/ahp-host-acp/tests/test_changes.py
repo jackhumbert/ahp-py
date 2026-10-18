@@ -28,11 +28,11 @@ def test_diffs_are_read_from_tool_content() -> None:
 
 def test_whole_file_diff_announced_before_the_write(tmp_path: Path) -> None:
     path = tmp_path / "notes.txt"
-    path.write_text("one\n")
+    path.write_bytes(b"one\n")
     edits = _edits(tmp_path)
     diff = Diff(str(path), "one\n", "one\ntwo\n")
     edits.announced([diff], tmp_path)
-    path.write_text("one\ntwo\n")
+    path.write_bytes(b"one\ntwo\n")
     assert edits.completed([diff], tmp_path)[1]
     assert _only(edits) == (b"one\n", b"one\ntwo\n")
     assert edits.changes()[0].uri == path.as_uri()
@@ -41,7 +41,7 @@ def test_whole_file_diff_announced_before_the_write(tmp_path: Path) -> None:
 def test_a_fragment_diff_is_rebuilt_into_whole_files(tmp_path: Path) -> None:
     # Claude Code's ACP adapter sends an Edit's old_string/new_string.
     path = tmp_path / "code.py"
-    path.write_text("a = 1\nb = 3\nc = 4\n")
+    path.write_bytes(b"a = 1\nb = 3\nc = 4\n")
     edits = _edits(tmp_path)
     assert edits.completed([Diff(str(path), "b = 2", "b = 3")], tmp_path)[1]
     assert _only(edits) == (b"a = 1\nb = 2\nc = 4\n", b"a = 1\nb = 3\nc = 4\n")
@@ -57,7 +57,7 @@ def test_a_fragment_keeps_the_files_line_endings(tmp_path: Path) -> None:
 
 def test_an_ambiguous_fragment_is_left_out_rather_than_guessed(tmp_path: Path) -> None:
     path = tmp_path / "code.py"
-    path.write_text("x = 3\ny = 3\n")
+    path.write_bytes(b"x = 3\ny = 3\n")
     edits = _edits(tmp_path)
     assert edits.completed([Diff(str(path), "2", "3")], tmp_path) == ([], False)
     assert edits.changes() == []
@@ -65,7 +65,7 @@ def test_an_ambiguous_fragment_is_left_out_rather_than_guessed(tmp_path: Path) -
 
 def test_a_creation_has_no_before(tmp_path: Path) -> None:
     path = tmp_path / "new.txt"
-    path.write_text("hello\n")
+    path.write_bytes(b"hello\n")
     edits = _edits(tmp_path)
     edits.completed([Diff("new.txt", None, "hello\n")], tmp_path)  # relative to the cwd
     assert _only(edits) == (None, b"hello\n")
@@ -73,11 +73,11 @@ def test_a_creation_has_no_before(tmp_path: Path) -> None:
 
 def test_an_overwrite_announced_as_a_creation_keeps_the_old_file(tmp_path: Path) -> None:
     path = tmp_path / "a.txt"
-    path.write_text("old\n")
+    path.write_bytes(b"old\n")
     edits = _edits(tmp_path)
     diff = Diff(str(path), None, "new\n")
     edits.announced([diff], tmp_path)
-    path.write_text("new\n")
+    path.write_bytes(b"new\n")
     edits.completed([diff], tmp_path)
     assert _only(edits) == (b"old\n", b"new\n")
 
@@ -86,7 +86,7 @@ def test_files_outside_the_roots_are_not_read(tmp_path: Path) -> None:
     root = tmp_path / "root"
     root.mkdir()
     outside = tmp_path / "secret.txt"
-    outside.write_text("what is really on disk\n")
+    outside.write_bytes(b"what is really on disk\n")
     edits = _edits(root)
     edits.announced([Diff(str(outside), "a\n", "b\n")], root)
     edits.completed([Diff(str(outside), "a\n", "b\n")], root)
@@ -95,27 +95,27 @@ def test_files_outside_the_roots_are_not_read(tmp_path: Path) -> None:
 
 def test_a_failed_call_counts_for_nothing(tmp_path: Path) -> None:
     path = tmp_path / "notes.txt"
-    path.write_text("one\n")
+    path.write_bytes(b"one\n")
     edits = _edits(tmp_path)
     diff = Diff(str(path), "one\n", "gone\n")
     edits.announced([diff], tmp_path)
     edits.abandoned([diff], tmp_path)
     assert edits.changes() == []
     # A later, real edit is measured from the file as it is then.
-    path.write_text("one\ntwo\n")
+    path.write_bytes(b"one\ntwo\n")
     edits.completed([Diff(str(path), "one\n", "one\ntwo\n")], tmp_path)
     assert _only(edits) == (b"one\n", b"one\ntwo\n")
 
 
 def test_later_edits_keep_the_first_before_and_a_revert_drops_out(tmp_path: Path) -> None:
     path = tmp_path / "notes.txt"
-    path.write_text("v2\n")
+    path.write_bytes(b"v2\n")
     edits = _edits(tmp_path)
     edits.completed([Diff(str(path), "v1\n", "v2\n")], tmp_path)
-    path.write_text("v3\n")
+    path.write_bytes(b"v3\n")
     edits.completed([Diff(str(path), "v2\n", "v3\n")], tmp_path)
     assert _only(edits) == (b"v1\n", b"v3\n")
-    path.write_text("v1\n")
+    path.write_bytes(b"v1\n")
     edits.completed([Diff(str(path), "v3\n", "v1\n")], tmp_path)
     assert edits.changes() == []
     assert edits.changeset.change_kind == "session"
@@ -123,17 +123,17 @@ def test_later_edits_keep_the_first_before_and_a_revert_drops_out(tmp_path: Path
 
 def test_each_call_gets_its_own_before_and_after(tmp_path: Path) -> None:
     path = tmp_path / "notes.txt"
-    path.write_text("v1\n")
+    path.write_bytes(b"v1\n")
     edits = _edits(tmp_path)
     first = Diff(str(path), "v1\n", "v2\n")
     edits.announced([first], tmp_path)
-    path.write_text("v2\n")
+    path.write_bytes(b"v2\n")
     ((diff, change),) = edits.completed([first], tmp_path)[0]
     assert diff is first
     assert (change.before, change.after) == (b"v1\n", b"v2\n")
     # The second call's edit is from v2, while the session's runs from v1.
     second = Diff(str(path), "v2", "v3")  # a fragment, seen only once written
-    path.write_text("v3\n")
+    path.write_bytes(b"v3\n")
     ((_, change),) = edits.completed([second], tmp_path)[0]
     assert (change.before, change.after) == (b"v2\n", b"v3\n")
     assert _only(edits) == (b"v1\n", b"v3\n")
@@ -141,7 +141,7 @@ def test_each_call_gets_its_own_before_and_after(tmp_path: Path) -> None:
 
 def test_previews_read_the_file_before_the_write(tmp_path: Path) -> None:
     whole = tmp_path / "whole.txt"
-    whole.write_text("one\n")
+    whole.write_bytes(b"one\n")
     fragment = tmp_path / "code.py"
     fragment.write_bytes(b"a = 1\r\nb = 2\r\n")
     edits = _edits(tmp_path)

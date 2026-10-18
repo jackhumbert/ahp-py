@@ -39,12 +39,14 @@ def _terminal_backend(args: argparse.Namespace) -> Any:
 
     `pty_backend` needs `fcntl` and `termios`, which exist only on POSIX. A
     top-level import made the whole demo host unstartable on Windows even
-    without `--terminal`, where no terminal code runs at all.
+    without `--terminal`, where no terminal code runs at all. Asked for there,
+    it declines by name and exits, rather than serving a host that would answer
+    every `createTerminal` as if it had a terminal.
     """
     try:
         from ahp_host.core.pty_backend import PtyTerminalBackend
     except ImportError as exc:
-        raise SystemExit(f"--terminal needs a POSIX pty, unavailable here: {exc}") from exc
+        raise SystemExit(f"--terminal: {exc}") from exc
     return PtyTerminalBackend(
         default_cwd=str(Path(args.serve_directory).resolve()) if args.serve_directory else None
     )

@@ -442,3 +442,30 @@ class TestAncestorChain:
     async def test_the_root_itself_is_real(self, rooted: RootedFilesystemResourceProvider) -> None:
         entries = await rooted.list_dir(rooted.root.as_uri())
         assert [e.name for e in entries] == ["kept.txt"]
+
+
+class TestWatches:
+    """The polling watcher walks by path with `os.walk`, which on Windows
+    descends a junction (it is not what `os.path.islink` calls a link). A watch
+    on the root then reported the names and change timing of files the jail
+    refuses to read. Here rather than only in the integration suite because CI
+    gates on this file on a Windows runner."""
+
+    @staticmethod
+    def _watched(root: Path) -> set[str]:
+        from ahp_host.core.watches import PollingResourceWatcher, WatchRequest
+
+        request = WatchRequest(root=_uri(root), recursive=True)
+        return set(PollingResourceWatcher()._scan(request))
+
+    def test_a_junction_out_of_the_root_is_not_walked(self, jail: Jail) -> None:
+        _provider, root, outside = jail
+        _junction(outside, root / "door")
+        watched = self._watched(root)
+        assert _uri(root / "sub" / "nested.txt") in watched
+        assert not any("secret.txt" in uri for uri in watched), watched
+
+    def test_a_symlinked_directory_out_of_the_root_is_not_walked(self, jail: Jail) -> None:
+        _provider, root, outside = jail
+        _symlink(outside, root / "door", directory=True)
+        assert not any("secret.txt" in uri for uri in self._watched(root))

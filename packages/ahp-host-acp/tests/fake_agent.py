@@ -200,6 +200,16 @@ def ask(method: str, params: dict[str, Any]) -> dict[str, Any]:
     return wait_for(lambda m: m.get("id") == request_id and "method" not in m)
 
 
+def read_exact(path: Path) -> str:
+    """The file as the bytes on disk say, with no newline translation."""
+    return path.read_bytes().decode("utf-8")
+
+
+def write_exact(path: Path, content: str) -> None:
+    """Write ``content`` byte for byte: text mode would turn each LF into CRLF on Windows."""
+    path.write_bytes(content.encode("utf-8"))
+
+
 def edit_call(session_id: str, call_id: str, diff: dict[str, Any], status: str) -> None:
     update(
         session_id,
@@ -534,11 +544,11 @@ def prompt(session_id: str, words: str) -> dict[str, Any]:
         return {"stopReason": "end_turn"}
     if words == "edit":
         path = cwd / "notes.txt"
-        old = path.read_text(encoding="utf-8")
+        old = read_exact(path)
         new = old + "more\n"
         diff = {"path": str(path), "oldText": old, "newText": new}
         edit_call(session_id, "edit_1", diff, "pending")
-        path.write_text(new, encoding="utf-8")
+        write_exact(path, new)
         # The result replaces the diff the call showed while it ran.
         update(
             session_id,
@@ -552,18 +562,18 @@ def prompt(session_id: str, words: str) -> dict[str, Any]:
         return {"stopReason": "end_turn"}
     if words == "fragment":
         path = cwd / "code.py"
-        path.write_text(path.read_text(encoding="utf-8").replace("b = 2", "b = 3"), "utf-8")
+        write_exact(path, read_exact(path).replace("b = 2", "b = 3"))
         diff = {"path": str(path), "oldText": "b = 2", "newText": "b = 3"}
         edit_call(session_id, "edit_2", diff, "completed")
         return {"stopReason": "end_turn"}
     if words == "create":
         path = cwd / "new.txt"
-        path.write_text("hello\n", encoding="utf-8")
+        write_exact(path, "hello\n")
         edit_call(session_id, "edit_3", {"path": str(path), "newText": "hello\n"}, "completed")
         return {"stopReason": "end_turn"}
     if words == "askedit":
         path = cwd / "notes.txt"
-        old = path.read_text(encoding="utf-8")
+        old = read_exact(path)
         diff = {"path": str(path), "oldText": old, "newText": old + "asked\n"}
         asked: dict[str, Any] = {
             "toolCallId": "edit_5",
@@ -578,14 +588,14 @@ def prompt(session_id: str, words: str) -> dict[str, Any]:
             {"sessionId": session_id, "toolCall": asked, "options": PERMISSION_OPTIONS[:3]},
         )
         if chosen(reply) in ("once", "always"):
-            path.write_text(diff["newText"], encoding="utf-8")
+            write_exact(path, diff["newText"])
             finish(session_id, "edit_5")
         else:
             finish(session_id, "edit_5", "failed")
         return {"stopReason": "end_turn"}
     if words == "badedit":
         path = cwd / "notes.txt"
-        diff = {"path": str(path), "oldText": path.read_text("utf-8"), "newText": "gone\n"}
+        diff = {"path": str(path), "oldText": read_exact(path), "newText": "gone\n"}
         edit_call(session_id, "edit_4", diff, "pending")
         finish(session_id, "edit_4", "failed")
         return {"stopReason": "end_turn"}

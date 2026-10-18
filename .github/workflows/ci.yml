@@ -61,6 +61,12 @@ jobs:
           tests/unit/test_resource_jail_windows.py
           tests/unit/test_resource_jail_windows_paths.py
           tests/unit/test_resource_jail.py
+      - name: Owner-only files
+        # Stored sessions and wire logs get a protected DACL on Windows, where
+        # `chmod` only toggles the read-only attribute.
+        if: runner.os == 'Windows'
+        working-directory: packages/ahp-host
+        run: uv run --no-sync pytest -rs tests/unit/test_private_files.py
       - name: Claude host
         working-directory: packages/ahp-host-claude
         run: uv run --no-sync pytest && uv run --no-sync python -m ahp_host_claude --help

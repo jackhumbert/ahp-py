@@ -75,10 +75,11 @@ class Harness:
 async def test_an_edit_carries_its_diff_and_joins_the_changeset(tmp_path: Path) -> None:
     target = tmp_path / "work" / "a.py"
     Harness(tmp_path)  # makes the folder
-    target.write_text("before\n")
+    # Bytes: `write_text` would write CRLF on Windows.
+    target.write_bytes(b"before\n")
 
     def write() -> None:
-        target.write_text("after\n")
+        target.write_bytes(b"after\n")
 
     harness = Harness(
         tmp_path,

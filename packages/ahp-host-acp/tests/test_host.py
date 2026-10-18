@@ -18,7 +18,7 @@ def _provider(root: Path, log: Path) -> AcpProvider:
 
 
 async def test_chats_completions_and_file_edits_through_the_host(tmp_path: Path) -> None:
-    (tmp_path / "notes.txt").write_text("one\n")
+    (tmp_path / "notes.txt").write_bytes(b"one\n")
     host = Host(_provider(tmp_path, tmp_path / "agent.log"), LoopbackSingleUserPolicy())
     wire, serving = await connect(host)
     try:

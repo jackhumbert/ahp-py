@@ -104,13 +104,17 @@ Accepted: `file:///C:/Users/me/proj` and VS Code's `file:///c%3A/Users/me/proj`,
 case-insensitively. Results always come back as `file:///C:/…` in the stored
 case and long (never 8.3) names. Refused: `..`, alternate data streams
 (`file.txt:stream`), device names (`CON`, `NUL`, `COM1`…), names ending in a dot
-or space, `\\?\` and UNC spellings, and any authority but `localhost`.
+or space, `\\?\` and UNC spellings, any authority but `localhost`, and a path
+with no drive letter. Those last few are not paths on Windows at all, so they
+answer `InvalidParams` (-32602) rather than a jail refusal: `file:///etc` is
+outside a POSIX jail (`PermissionDenied` or `NotFound`) but malformed here.
 
 Limits, each of which fails closed: roots must be on a local drive letter (not
 a network share or mapped network drive); an 8.3 spelling of the *root* is not
 recognised; files whose content a filesystem filter supplies (OneDrive
-placeholders, dedup, WOF compression) list and resolve but are not read; and
-resource watches are POSIX-only.
+placeholders, dedup, WOF compression) list and resolve but are not read.
+Resource watches work, polling by path; the walk does not descend links or
+junctions (`SECURITY.md` has the race that remains).
 
 ### Reads are bounded
 

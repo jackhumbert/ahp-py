@@ -10,6 +10,8 @@ which evicts the channel's own replay history.
 from __future__ import annotations
 
 import asyncio
+import os
+import sys
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
@@ -315,7 +317,34 @@ class TestResourceWatch:
         )
         assert response["error"]["code"] == -32009
 
+    @pytest.mark.parametrize("where", ["sibling", "parent", "filesystem root"])
     async def test_a_watch_outside_the_jail_is_refused(
+        self, watching: tuple[Host, Path, PollingResourceWatcher], where: str
+    ) -> None:
+        """Spelled from the served root so it is a real path on every platform.
+
+        This used to watch `file:///etc`, which on Windows is not outside the
+        jail but not a path at all: it has no drive, and the Windows jail
+        answers InvalidParams to it on every `resource*` command
+        (`test_resource_jail_windows_paths.py` pins that). The parent and the
+        filesystem root are STRICT ANCESTORS, which resolve -- the case the
+        watch path once let through."""
+        host, root, _ = watching
+        outside = {
+            "sibling": root.parent / "elsewhere",
+            "parent": root.parent,
+            "filesystem root": Path(root.anchor),
+        }[where]
+        if where == "sibling":
+            outside.mkdir()
+        client = await _attach(host)
+        response = await client.request(
+            "createResourceWatch", {"channel": ROOT_URI, "uri": outside.as_uri()}
+        )
+        assert response["error"]["code"] in (-32008, -32009), response
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="`/etc` has no drive: not a Windows path")
+    async def test_a_watch_on_a_system_directory_is_refused(
         self, watching: tuple[Host, Path, PollingResourceWatcher]
     ) -> None:
         host, _root, _ = watching
@@ -335,6 +364,38 @@ class TestResourceWatch:
             assert response["error"]["code"] == -32009
         finally:
             await host.aclose()
+
+    async def test_a_link_out_of_the_jail_is_not_watched_through(
+        self, watching: tuple[Host, Path, PollingResourceWatcher]
+    ) -> None:
+        """A recursive watch on the root must not report files a link inside it
+        leads to: the jail refuses them a read. On Windows a junction (which
+        needs no privilege) was walked; `test_resource_jail_windows.py` covers
+        junctions and symlinks there. This is the end-to-end form."""
+        host, root, _ = watching
+        outside = root.parent / "outside"
+        outside.mkdir()
+        try:
+            os.symlink(outside, root / "door", target_is_directory=True)
+        except OSError as exc:  # Windows without the privilege or Developer Mode
+            pytest.skip(f"cannot create a symlink here: {exc}")
+        client = await _attach(host)
+        channel = await _watch(client, root, recursive=True)
+        await client.request("subscribe", {"channel": channel})
+        await asyncio.sleep(0.15)
+
+        (outside / "secret.txt").write_text("s")
+        (root / "inside.txt").write_text("i")
+        await client.collect(seconds=0.6)
+
+        changed = [
+            item["uri"]
+            for envelope in client.actions(channel)
+            if envelope["action"]["type"] == "resourceWatch/changed"
+            for item in envelope["action"]["changes"]["items"]
+        ]
+        assert any(uri.endswith("inside.txt") for uri in changed), changed
+        assert not any("secret.txt" in uri for uri in changed), changed
 
 
 class TestFilters:

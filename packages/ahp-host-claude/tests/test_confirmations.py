@@ -101,7 +101,8 @@ class TestDenials:
 
 class TestPreviews:
     def test_an_edit_is_shown_applied_to_the_file(self, tmp_path: Path) -> None:
-        (tmp_path / "a.py").write_text("x = 1\ny = 2\n")
+        # Bytes: `write_text` would write CRLF on Windows.
+        (tmp_path / "a.py").write_bytes(b"x = 1\ny = 2\n")
         change = preview(
             "Edit",
             {"file_path": "a.py", "old_string": "y = 2", "new_string": "y = 3"},
@@ -280,7 +281,7 @@ async def test_a_denial_tells_claude_why(tmp_path: Path) -> None:
 
 async def test_an_edit_is_previewed_on_its_prompt(tmp_path: Path) -> None:
     (tmp_path / "work").mkdir()
-    (tmp_path / "work" / "a.py").write_text("old\n")
+    (tmp_path / "work" / "a.py").write_bytes(b"old\n")
     results: list[Any] = []
     sink = RecordingSink()
     edit = {"file_path": "a.py", "old_string": "old", "new_string": "new"}

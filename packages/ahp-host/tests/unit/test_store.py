@@ -20,7 +20,7 @@ import asyncio
 import json
 import logging
 import os
-import stat
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -32,6 +32,8 @@ from ahp_host.core.store import (
     InMemorySessionStore,
     StoredSession,
 )
+
+from .test_private_files import assert_owner_only
 
 pytestmark = pytest.mark.anyio
 
@@ -382,18 +384,25 @@ class TestFileModes:
         await store.save(_session())
 
         (path,) = list(directory.glob("*.json"))
-        assert stat.S_IMODE(path.stat().st_mode) == 0o600
+        assert_owner_only(path, directory=False)
 
     async def test_the_directory_is_owner_only_even_if_it_already_existed(
         self, tmp_path: Path
     ) -> None:
         """`mkdir(exist_ok=True)` accepts whatever mode it finds, so the mode is
-        asserted on every open rather than only on creation."""
+        asserted on every open rather than only on creation. On Windows the
+        directory instead inherited its parent's ACL, which under a drive root
+        lets every local user read it; a file already in it is covered too."""
         directory = tmp_path / "sessions"
         directory.mkdir(mode=0o755)
+        (directory / "already-there.json").write_text("{}")
         FileSessionStore(directory)
 
-        assert stat.S_IMODE(directory.stat().st_mode) == 0o700
+        assert_owner_only(directory, directory=True)
+        if sys.platform == "win32":
+            # POSIX hides it behind the directory's 0o700; Windows has no
+            # traverse check, so the file's own ACL is what protects it.
+            assert_owner_only(directory / "already-there.json", directory=False)
 
 
 class TestInMemory:

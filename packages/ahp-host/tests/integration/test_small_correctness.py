@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sys
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -18,7 +19,6 @@ from ahp_protocol.channels import ROOT_URI
 from ahp_protocol.transport import memory_pair
 
 from ahp_host.core import Host, LoopbackSingleUserPolicy
-from ahp_host.core.pty_backend import PtyTerminalBackend
 from ahp_host.provider import EchoProvider
 from ahp_host.provider.base import AgentSessionContext, TurnSink, UserMessage
 
@@ -72,6 +72,10 @@ async def bare() -> AsyncIterator[Host]:
 
 @pytest.fixture
 async def shell() -> AsyncIterator[Host]:
+    if sys.platform == "win32":
+        pytest.skip("the `!command` shell runs on a pty, which is POSIX-only")
+    from ahp_host.core.pty_backend import PtyTerminalBackend
+
     made = Host(EchoProvider(), LoopbackSingleUserPolicy(), terminals=PtyTerminalBackend())
     try:
         yield made

@@ -358,8 +358,8 @@ async def test_usage_carries_the_context_window_and_cost(
 
 
 async def test_edits_become_the_sessions_changeset(tmp_path: Path, log: Path) -> None:
-    (tmp_path / "notes.txt").write_text("one\n")
-    (tmp_path / "code.py").write_text("a = 1\nb = 2\n")
+    (tmp_path / "notes.txt").write_bytes(b"one\n")
+    (tmp_path / "code.py").write_bytes(b"a = 1\nb = 2\n")
     publisher = RecordingPublisher()
     session = await _provider(tmp_path, log).create_session(context(tmp_path, publisher))
     try:

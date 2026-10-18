@@ -34,6 +34,34 @@ versions each release speaks.
 
 ### Fixed
 
+- **Stored sessions, automation definitions and the wire log are owner-only
+  on Windows.** `chmod` only sets the read-only attribute there, so they kept
+  their directory's inherited ACL, which under a drive root lets every local
+  user read them. They now get a protected DACL granting the current user
+  alone; files created in a store directory inherit it, and files already
+  there are re-covered. New `core/private_files.make_owner_only`. A
+  filesystem with no permissions is logged instead of silently ignored, on
+  every platform.
+- **A resource watch no longer walks through links (security).** On Windows
+  `os.walk` descends junctions, which need no privilege to create, so once
+  the watcher walked real paths (below) a watch on the jail root reported the
+  names and change timing of files outside it. The poller now skips symlinks,
+  junctions and other name-surrogate reparse points on every platform.
+- `resources_windows.uri_from_parts` no longer calls `PureWindowsPath.as_uri()`,
+  deprecated in Python 3.14; under warnings-as-errors every Windows
+  `resourceList` answered InternalError. URIs are spelled exactly as before.
+- The demo workspace (`python -m ahp_host`) on Windows: stage, commit and
+  revert resolved no files (a `file:///C:/...` URI parsed to `/C:/...`, and
+  relative paths used backslashes), and edits rewrote CRLF files as LF while
+  reporting LF. It now reads and writes bytes and keeps each line's ending.
+- `PtyTerminalBackend` on a platform without `fcntl`/`termios` (Windows) fails
+  at import with a message saying a POSIX pty is required, and `--terminal`
+  exits with it, instead of a bare `No module named 'fcntl'`.
+- `node_command`, `systemd_path` and `systemd_unit` take a `PurePath`, so the
+  (Linux-only) unit text can be generated from a POSIX path on any OS.
+- The test suite runs on Windows: pty-only tests skip there with a reason, and
+  the conformance and small-correctness modules no longer fail to collect.
+
 - `PollingResourceWatcher` reported nothing on Windows: it walked
   `path_from_file_uri("file:///C:/x")`, which is `/C:/x` there. It now walks
   **`native_path_from_file_uri`** (new; same refusals), which maps the drive.

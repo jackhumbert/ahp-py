@@ -55,13 +55,13 @@ credentials in `_meta`, and a log is the wrong place to discover that it did.
 
 from __future__ import annotations
 
-import contextlib
 import json
-import os
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Final
+
+from ahp_host.core.private_files import make_owner_only
 
 __all__ = ["REDACTED", "WireLog", "redact"]
 
@@ -127,9 +127,10 @@ class WireLog:
         # is a full transcript of every session on the host, and `record`
         # redacts credentials but cannot redact the conversation.
         self._handle = self.path.open("w", encoding="utf-8")
-        # Windows, or a filesystem with no mode bits: not worth failing over.
-        with contextlib.suppress(OSError):
-            os.chmod(self.path, 0o600)
+        # 0o600 on POSIX; on Windows, where `chmod` only sets the read-only
+        # attribute, a protected DACL granting the current user alone. A
+        # filesystem that can express neither is logged, not fatal.
+        make_owner_only(self.path, directory=False)
 
     def record(self, direction: str, message: Mapping[str, Any], connection_id: str) -> None:
         if self._handle.closed:

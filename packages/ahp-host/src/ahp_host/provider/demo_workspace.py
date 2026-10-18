@@ -238,12 +238,16 @@ class DemoWorkspace:
         core = self.root / "src/greeter/core.py"
         if core.is_file():
             before = self.head_bytes("src/greeter/core.py") or core.read_bytes()
-            text = core.read_text()
+            # Bytes in, bytes out: `read_text`/`write_text` translate line
+            # endings on Windows, so the file on disk would not be the bytes
+            # reported below (and a CRLF checkout would be rewritten as LF).
+            text = core.read_bytes().decode()
             greeting = message.strip().replace('"', "'") or "hello"
             after_text = _replace_assignment(text, "GREETING", f'"{greeting}"')
             after_text = _replace_assignment(after_text, "RETRIES", "3")
-            core.write_text(after_text)
-            changes.append(FileChange(uri=core.as_uri(), before=before, after=after_text.encode()))
+            after_core = after_text.encode()
+            core.write_bytes(after_core)
+            changes.append(FileChange(uri=core.as_uri(), before=before, after=after_core))
 
         config = self.root / "config.json"
         if config.is_file():
@@ -267,7 +271,7 @@ class DemoWorkspace:
 
         created = self.root / "NOTES-FROM-AGENT.md"
         body = f"# Notes from the agent\n\nAsked: {message.strip()}\n"
-        created.write_text(body)
+        created.write_bytes(body.encode())
         # `before=None` is a creation. The file really is on disk now, which is
         # what lets a client open it -- publishing a creation for a file that
         # does not exist is how "the file was not found" happens.
@@ -371,11 +375,15 @@ class DemoWorkspace:
     # ─── the operations ──────────────────────────────────────────────────
 
     def _relative(self, uri: str) -> str | None:
-        from urllib.parse import unquote, urlparse
+        from urllib.parse import urlparse
+        from urllib.request import url2pathname
 
         try:
-            path = Path(unquote(urlparse(uri).path)).resolve()
-            return str(path.relative_to(self.root))
+            # `url2pathname` rather than `Path(unquote(...))`: on Windows
+            # `Path.as_uri` writes `file:///C:/x`, whose URI path is `/C:/x`,
+            # a path that names nothing. It also does the unquoting.
+            path = Path(url2pathname(urlparse(uri).path)).resolve()
+            return path.relative_to(self.root).as_posix()
         except (ValueError, OSError):
             return None
 
@@ -440,7 +448,8 @@ def _replace_assignment(text: str, name: str, value: str) -> str:
     lines = text.splitlines(keepends=True)
     for index, line in enumerate(lines):
         if line.startswith(f"{name} = "):
-            ending = "\n" if line.endswith("\n") else ""
+            # Keep the line's own terminator (`\r\n` in a CRLF checkout).
+            ending = line[len(line.rstrip("\r\n")) :]
             lines[index] = f"{name} = {value}{ending}"
             break
     return "".join(lines)

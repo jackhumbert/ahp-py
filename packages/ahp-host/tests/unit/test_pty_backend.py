@@ -21,8 +21,14 @@ from pathlib import Path
 import pytest
 from ahp_protocol.errors import AhpError
 
-from ahp_host.core.pty_backend import PtyTerminalBackend
 from ahp_host.core.terminals import TerminalRequest, TerminalSessionClaim
+
+# Before the import below: it needs `fcntl`, which Windows does not have, and a
+# module that cannot be imported is a collection error rather than a skip.
+if sys.platform == "win32":
+    pytest.skip("the pty backend is POSIX-only (needs fcntl/termios)", allow_module_level=True)
+
+from ahp_host.core.pty_backend import PtyTerminalBackend
 
 pytestmark = [
     pytest.mark.anyio,

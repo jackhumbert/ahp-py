@@ -53,7 +53,7 @@ import sys
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePath
 from subprocess import list2cmdline
 from typing import IO
 from xml.sax.saxutils import escape
@@ -134,7 +134,11 @@ def python_for_service() -> str:
 
 
 def node_command(
-    config: Path, log_file: Path | None, *, python: str | None = None, verb: str = "run"
+    config: PurePath,
+    log_file: PurePath | None,
+    *,
+    python: str | None = None,
+    verb: str = "run",
 ) -> list[str]:
     command = [
         python or sys.executable,
@@ -512,8 +516,14 @@ def _systemd_quote(argument: str, *, exec_word: bool = True) -> str:
     return '"' + escaped.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
-def systemd_path(home: Path, inherited: str | None = None) -> str:
-    """The unit's PATH: the user's bin folders, then `inherited` (or a stock one)."""
+def systemd_path(home: PurePath, inherited: str | None = None) -> str:
+    """The unit's PATH: the user's bin folders, then `inherited` (or a stock one).
+
+    Always `:`-separated, never `os.pathsep`: this is the text of a systemd unit,
+    whose PATH is a Linux one wherever the text happens to be generated. `home`
+    is a `PurePath` so the text can be generated (and tested) from a POSIX home
+    on any OS; on Linux, where it is installed, it is a `PosixPath` anyway.
+    """
     stock = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
     parts = [str(home / ".local" / "bin"), str(home / "bin")]
     for part in (inherited or stock).split(":"):
@@ -525,7 +535,7 @@ def systemd_path(home: Path, inherited: str | None = None) -> str:
 def systemd_unit(
     command: Sequence[str],
     *,
-    home: Path,
+    home: PurePath,
     path: str,
     description: str,
     drain_timeout: float = _DEFAULT_DRAIN_TIMEOUT,

@@ -1261,7 +1261,10 @@ def _folder_uri(folder: str) -> str:
     if folder.startswith("file:"):
         return folder
     if _DRIVE.match(folder):
-        return PureWindowsPath(folder).as_uri()
+        # Not `PureWindowsPath.as_uri()`: pathlib deprecated `as_uri` on pure paths
+        # (gone in 3.19), and this one must work from any platform's gateway.
+        path = PureWindowsPath(folder)
+        return "file:///" + path.drive + quote(path.as_posix()[len(path.drive) :])
     if folder.startswith("/"):
         return "file://" + quote(str(PurePosixPath(folder)))
     raise invalid_params(f"{folder!r} is not an absolute path or a file URI")

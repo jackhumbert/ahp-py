@@ -74,7 +74,14 @@ Its limits, all of which fail closed:
   list and resolve. Reading them safely would need a second open by name.
 - **An 8.3 short spelling of the root is not the root.** Short names *below* the
   root are accepted and canonicalised to their long names.
-- **Resource watches are not supported** on Windows (the watch path is POSIX-only).
+- **Resource watches poll by path**, as on POSIX. The watched root is resolved
+  and jail-checked through this jail, and the walk does not descend a symlink,
+  a junction or any other name-surrogate reparse point (Python's `os.walk`
+  descends junctions on Windows; a junction needs no privilege to create, so a
+  watch on the root reported files the jail refuses to read). It is not the
+  handle walk: a directory swapped for a link *during* a poll can be descended
+  for that poll, on either platform. Such a watch reports names and change
+  timing, never content.
 - **Hard links** inside the root are the same file wherever else they are linked
   from, exactly as on POSIX.
 
@@ -113,6 +120,29 @@ Two files with very different sensitivities:
   approved a tool call — and carries no conversation content by construction.
 
 Attach the second to a report freely. Read the first before you attach it.
+
+### Who can read them
+
+The wire log, and the `FileSessionStore` and `FileAutomationStore` directories
+(stored sessions are whole transcripts), are made **owner-only**
+(`core/private_files.py`):
+
+- **POSIX:** `0o600` on the file, `0o700` on a store directory, asserted with
+  `chmod` on every open because a creation mode is masked by the umask and an
+  existing directory keeps whatever mode it had. Session files are created
+  `0o600`.
+- **Windows:** mode bits mean nothing there (`chmod` only toggles the read-only
+  attribute), so the file or directory gets a **protected DACL** — nothing
+  inherited from the parent — with one ACE granting the current user full
+  control. On a directory the ACE is inheritable, so files created in it
+  afterwards are owner-only too, and it is re-propagated to children that
+  already exist: Windows has no traverse check, so a locked directory does not
+  hide a readable file inside it the way `0o700` does.
+
+Neither excludes the same account's other processes, or administrators (root;
+on Windows anyone with the backup or take-ownership privilege, SYSTEM
+included). A filesystem that cannot express permissions at all (FAT/exFAT, some
+network mounts) is logged as a warning naming the path and the host carries on.
 
 ## Supported versions
 

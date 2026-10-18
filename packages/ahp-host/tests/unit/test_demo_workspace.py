@@ -12,7 +12,8 @@ import json
 import subprocess
 from pathlib import Path
 from typing import ClassVar
-from urllib.parse import unquote, urlparse
+from urllib.parse import urlparse
+from urllib.request import url2pathname
 
 import pytest
 
@@ -41,7 +42,7 @@ def _sandbox(root: Path) -> DemoWorkspace:
 
 
 def _path(uri: str) -> Path:
-    return Path(unquote(urlparse(uri).path))
+    return Path(url2pathname(urlparse(uri).path))
 
 
 class TestTheEditsAreReal:
@@ -56,6 +57,19 @@ class TestTheEditsAreReal:
             else:
                 assert path.is_file(), f"{path.name} reported, does not exist"
                 assert path.read_bytes() == change.after
+
+    def test_a_crlf_file_keeps_its_line_endings_and_the_reported_bytes(
+        self, tmp_path: Path
+    ) -> None:
+        """Text-mode I/O translates `\\n` to `\\r\\n` on Windows, so a report built
+        from the string written would not be the file -- and a CRLF checkout
+        would be silently rewritten as LF on every platform."""
+        workspace = _sandbox(tmp_path)
+        core = tmp_path / "src" / "greeter" / "core.py"
+        core.write_bytes(b'GREETING = "hello"\r\nRETRIES = 1\r\nOTHER = 2\r\n')
+        report = next(c for c in workspace.apply_demo_edits("howdy") if c.uri.endswith("core.py"))
+        assert core.read_bytes() == report.after
+        assert report.after == b'GREETING = "howdy"\r\nRETRIES = 3\r\nOTHER = 2\r\n'
 
     def test_all_three_diff_shapes(self, tmp_path: Path) -> None:
         changes = _sandbox(tmp_path).apply_demo_edits("howdy")

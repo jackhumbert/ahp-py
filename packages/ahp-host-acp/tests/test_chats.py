@@ -270,7 +270,7 @@ def test_nothing_broader_than_the_answer_is_ever_picked() -> None:
 
 async def test_an_edit_is_previewed_then_shown_as_a_file_edit(tmp_path: Path, log: Path) -> None:
     notes = tmp_path / "notes.txt"
-    notes.write_text("one\n")
+    notes.write_bytes(b"one\n")
     session = await _provider(tmp_path, log).create_session(context(tmp_path))
     try:
         sink = await _say(session, "askedit")
@@ -287,7 +287,7 @@ async def test_an_edit_is_previewed_then_shown_as_a_file_edit(tmp_path: Path, lo
 
 
 async def test_a_failed_edit_keeps_its_text_and_shows_no_diff(tmp_path: Path, log: Path) -> None:
-    (tmp_path / "notes.txt").write_text("one\n")
+    (tmp_path / "notes.txt").write_bytes(b"one\n")
     session = await _provider(tmp_path, log).create_session(context(tmp_path))
     try:
         sink = await _say(session, "badedit")

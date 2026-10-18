@@ -17,6 +17,7 @@ import asyncio
 import json
 import os
 import subprocess
+import sys
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -463,11 +464,15 @@ class TestTheExitIsAnnounced:
     on the wire: after `exit 7` the last frame was the input echo, then
     silence.
 
-    Needs a real pty -- a fake backend cannot exit.
+    The real-pty variant needs a POSIX pty and is skipped elsewhere; the host's
+    half (publish the exit, code included, last) is also checked against a
+    process that exits when told to, which runs on every platform.
     """
 
     @pytest.fixture
     async def pty_host(self) -> AsyncIterator[Host]:
+        if sys.platform == "win32":
+            pytest.skip("needs a real pty, which is POSIX-only")
         from ahp_host.core.pty_backend import PtyTerminalBackend
 
         host = Host(EchoProvider(), LoopbackSingleUserPolicy(), terminals=PtyTerminalBackend())
@@ -540,9 +545,61 @@ class TestTheExitIsAnnounced:
         ]
         assert state["lifecycle"] == {"status": "exited", "exitCode": 7}
 
-    async def test_the_catalogue_carries_the_required_fields(self, pty_host: Host) -> None:
+    async def test_a_process_that_exits_is_announced_with_its_code_last(self) -> None:
+        """The same property without a shell: the host, not the pty, is what
+        publishes `terminal/exited` -- so it is checked on Windows too."""
+
+        class ExitsOnInput(FakeProcess):
+            def __init__(self) -> None:
+                super().__init__()
+                self._done = asyncio.Event()
+
+            async def write(self, data: bytes) -> None:
+                await super().write(data)
+                if b"exit 7" in data:
+                    self._done.set()
+
+            async def wait(self) -> int | None:
+                await self._done.wait()
+                return 7
+
+        backend = FakeBackend()
+        backend.process = ExitsOnInput()
+        host = Host(EchoProvider(), LoopbackSingleUserPolicy(), terminals=backend)
+        try:
+            client = await _client(host)
+            channel = await _open(client, "ahp-terminal:/exit-fake")
+            await client.notify(
+                "dispatchAction",
+                {
+                    "channel": channel,
+                    "clientSeq": 1,
+                    "action": {"type": "terminal/input", "data": "exit 7\n"},
+                },
+            )
+            await _acted(client, channel, "terminal/exited")
+            await client.collect(seconds=0.3)
+
+            actions = [a["action"] for a in client.actions(channel)]
+            exits = [a for a in actions if a["type"] == "terminal/exited"]
+            assert exits[-1]["exitCode"] == 7
+            assert actions[-1]["type"] == "terminal/exited", [a["type"] for a in actions[-4:]]
+            state = (await client.request("subscribe", {"channel": channel}))["result"]["snapshot"][
+                "state"
+            ]
+            assert state["lifecycle"] == {"status": "exited", "exitCode": 7}
+        finally:
+            await host.aclose()
+
+    async def test_the_catalogue_carries_the_required_fields(
+        self, wired: tuple[Host, FakeBackend]
+    ) -> None:
         """`TerminalInfo` requires `resource`, `title` and `claim`. We sent
-        `{resource, isPty}` -- and `isPty` is not even a TerminalInfo field."""
+        `{resource, isPty}` -- and `isPty` is not even a TerminalInfo field.
+
+        The host's catalogue, not the shell's, is under test, so this runs on
+        the fake backend and therefore on every platform."""
+        pty_host, _ = wired
         client = await _client(pty_host)
         await client.request("createSession", {"channel": "echo:/t-cat"})
         await _session_ready(pty_host, client, "echo:/t-cat")
@@ -791,6 +848,8 @@ class TestTheBangCommandShellDiesWithItsTurn:
 
     @pytest.fixture
     async def spied(self) -> AsyncIterator[tuple[Host, list[Any]]]:
+        if sys.platform == "win32":
+            pytest.skip("the `!command` shell runs on a pty, which is POSIX-only")
         from ahp_host.core.pty_backend import PtyTerminalBackend
 
         started: list[Any] = []

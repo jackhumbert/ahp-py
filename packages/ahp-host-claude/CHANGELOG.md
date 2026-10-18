@@ -56,6 +56,11 @@
 
 ### Fixed
 
+- Stopping a subagent's worker chat while its first messages were still being
+  replayed left the subagent's task running (the replay sat outside the
+  cancellation handler); it is now stopped, and only it. Seen as a timeout on
+  CI's Windows runner.
+
 - A plugin Claude Code reports with a relative path (loaded from a relative
   directory) no longer fails the whole customization tree: `as_uri` refused
   it, so no customization was published. It is read under the session's

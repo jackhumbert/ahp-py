@@ -264,7 +264,9 @@ embedder supplied. That matters because `root/configChanged` is
 client-dispatchable, VS Code sends it about ten times per connect, and a
 permissive policy is the norm for a loopback host.
 
-**Terminals** run real commands on a POSIX pty behind `--terminal`, with shell
+**Terminals** run real commands on a POSIX pty behind `--terminal` (there is no
+Windows backend: importing `PtyTerminalBackend` there raises an `ImportError`
+that says so, and `--terminal` exits with that message), with shell
 integration parsed (never injected), process-group teardown on hangup, and
 `terminal/exited` announced so a client can close the tab. A `!command` turn is
 a one-shot: its child dies when the turn is cancelled and again when the host
@@ -633,6 +635,10 @@ This library's position:
   and then opening it, which has a window in which a component can be swapped.
 - `--wire-log` redacts credentials and writes owner-only. It still contains
   every message of every session, which is a transcript, not a trace.
+  `FileSessionStore` and `FileAutomationStore` directories are owner-only too:
+  `0o700`/`0o600` on POSIX, and on Windows — where `chmod` only sets the
+  read-only attribute — a protected ACL granting the current user alone, which
+  files created in the directory inherit (details in `SECURITY.md`).
 
 **This is single-trust-domain.** It is not multi-tenant, and it is not safe to
 expose to an untrusted network. Both known existing hosts punt on this too — VS

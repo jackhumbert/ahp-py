@@ -39,9 +39,10 @@ Three ordinary durability properties on top of that:
 The format version stays 1 when a field is added that an older reader can ignore
 (`interruptedByRestart` and `inputRequests` were); it moves only for a change that would be misread.
 
-Owner-only modes throughout -- 0o600 on files, 0o700 on the directory -- for the
-reason `core/wirelog.py` does the same: what is on disk is the entire
-conversation in plaintext.
+Owner-only throughout -- 0o600 on files, 0o700 on the directory; on Windows a
+protected DACL granting only the current user, which the files inherit -- for
+the reason `core/wirelog.py` does the same: what is on disk is the entire
+conversation in plaintext. See `core/private_files.py`.
 
 There is no default persistence, matching `core/seq.py`. `InMemorySessionStore`
 is what a host gets unless the embedder names a location; this library does not
@@ -61,6 +62,8 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
+
+from ahp_host.core.private_files import make_owner_only
 
 __all__ = [
     "DEFAULT_DEBOUNCE_SECONDS",
@@ -301,9 +304,9 @@ class FileSessionStore:
         self.directory.mkdir(parents=True, exist_ok=True, mode=0o700)
         # `mkdir`'s mode is masked by the umask and ignored entirely when the
         # directory already exists, so owner-only is asserted rather than
-        # requested. Suppressed where there are no mode bits (Windows).
-        with contextlib.suppress(OSError):
-            os.chmod(self.directory, 0o700)
+        # requested -- and on Windows, where mode bits mean nothing, as a
+        # protected DACL the session files then inherit (`core/private_files`).
+        make_owner_only(self.directory, directory=True)
         self._debounce = debounce
         self._pending: dict[str, StoredSession] = {}
         self._timer: asyncio.Task[None] | None = None

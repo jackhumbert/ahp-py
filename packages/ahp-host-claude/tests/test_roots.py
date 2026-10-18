@@ -257,7 +257,8 @@ def test_a_byte_order_mark_is_tolerated(tmp_path: Path) -> None:
 
 def test_chat_tools_from_a_flag_or_the_config_file(tmp_path: Path) -> None:
     config = tmp_path / "ahp.toml"
-    config.write_text(f'root = "{tmp_path}"\nchat_tools = ["WebSearch"]\n')
+    # A TOML literal string: a Windows path's backslashes are not escapes.
+    config.write_text(f"root = '{tmp_path}'\nchat_tools = [\"WebSearch\"]\n")
     assert load(_parse_args(["--config", str(config)])).chat_tools == ("WebSearch",)
     assert load(_parse_args(["--config", str(config), "--chat-tools", ""])).chat_tools == ()
     assert load(_parse_args(["--root", str(tmp_path)])).chat_tools is None

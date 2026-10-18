@@ -44,6 +44,13 @@ Under construction. `docs/plan.md` is the design and its §7 is the build order.
   config, effort dropped under a `child_config` effort, `max_running` per flow
   session, restarts and limits).
 
+### Fixed
+
+- The orchestrator's `start_session` and `list_folder` no longer fail on a
+  Windows folder path (`C:\...`) under Python 3.14, where `PurePath.as_uri()`
+  is deprecated (an error under warnings-as-errors). The `file:` URI is spelled
+  by hand, identical to the stdlib's.
+
 ### Changed — AHP 1.1.0 (upstream `main`, unreleased)
 
 - **A surface's `flowControl` is not passed to a node.** Windowed delivery is

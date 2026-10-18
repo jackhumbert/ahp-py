@@ -11,6 +11,7 @@ import contextlib
 from pathlib import Path
 from typing import Any
 
+import pytest
 from ahp_host.provider.base import AgentSessionContext, UserMessage
 from claude_agent_sdk import (
     AssistantMessage,
@@ -26,7 +27,7 @@ from claude_agent_sdk._internal.message_parser import parse_message
 from claude_agent_sdk.types import ToolResultBlock
 
 from ahp_host_claude.background import Task, work_for
-from ahp_host_claude.provider import ClaudeProvider
+from ahp_host_claude.provider import ClaudeProvider, LocalClaudeSession
 from tests.fakes import FakeClient, FakePublisher, RecordingSink, Step, eventually
 
 _BASH = {"command": "npm run dev", "run_in_background": True, "description": "Start dev server"}
@@ -324,11 +325,43 @@ async def test_stopping_a_foreground_worker_stops_only_its_task(tmp_path: Path) 
     harness = Harness(tmp_path, script)
     session = await harness.provider.create_session(harness.context())
     turn = asyncio.create_task(session.send_user_message(UserMessage(text="x"), RecordingSink()))
+    # Its worker has started (a task cancelled before its first step never runs).
     await eventually(
-        lambda: bool(harness.publisher.chats) and bool(harness.publisher.chats[0].tasks)
+        lambda: (
+            bool(harness.publisher.chats)
+            and bool(harness.publisher.chats[0].tasks)
+            and bool(harness.publisher.chats[0].sinks[0].events)
+        )
     )
     chat = harness.publisher.chats[0]
     chat.tasks[0].cancel()
+    await eventually(lambda: harness.clients[0].stopped_tasks == ["a2"])
+    assert not harness.clients[0].interrupted
+    turn.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await turn
+
+
+async def test_stopping_a_worker_still_replaying_its_first_messages_stops_its_task(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The worker's first messages arrive before its turn starts and are shown
+    # when it does; a client stopping the chat in that window must stop the
+    # task too, not only after the replay (which is where a slow runner lands).
+    entered, release = asyncio.Event(), asyncio.Event()
+    routed = LocalClaudeSession._route_to_subagent
+
+    async def slow(self: LocalClaudeSession, subagent: Any, item: Any) -> None:
+        entered.set()
+        await release.wait()
+        await routed(self, subagent, item)
+
+    monkeypatch.setattr(LocalClaudeSession, "_route_to_subagent", slow)
+    harness = Harness(tmp_path, _foreground_task()[:-2])
+    session = await harness.provider.create_session(harness.context())
+    turn = asyncio.create_task(session.send_user_message(UserMessage(text="x"), RecordingSink()))
+    await eventually(entered.is_set)
+    harness.publisher.chats[0].tasks[0].cancel()
     await eventually(lambda: harness.clients[0].stopped_tasks == ["a2"])
     assert not harness.clients[0].interrupted
     turn.cancel()

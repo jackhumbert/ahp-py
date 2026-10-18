@@ -36,15 +36,28 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import fcntl
 import logging
 import os
 import shutil
 import signal
 import struct
-import termios
+import sys
 from collections.abc import Mapping, Sequence
 from typing import Final
+
+# A pty is a POSIX facility; these two modules are how this backend sizes one.
+# Windows has neither, so importing this module there says so in words rather
+# than as a bare `No module named 'fcntl'` -- and the same `ImportError` is what
+# the demo's `--terminal` and the tests key on to decline the feature.
+try:
+    import fcntl
+    import termios
+except ImportError as _no_pty:
+    raise ImportError(
+        f"the pty terminal backend needs a POSIX pty (the fcntl and termios modules), "
+        f"which {sys.platform} does not have; implement TerminalBackend for this "
+        f"platform or serve without terminals"
+    ) from _no_pty
 
 from ahp_host.core.resources import path_from_file_uri
 from ahp_host.core.terminals import (

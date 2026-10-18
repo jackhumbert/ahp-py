@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import sys
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
@@ -65,6 +66,13 @@ async def _serve(host: Host) -> tuple[FakeClient, asyncio.Task[None]]:
 
 @pytest.fixture
 async def writable(root: Path) -> AsyncIterator[tuple[Path, FakeClient]]:
+    if sys.platform == "win32":
+        # Not a gap in coverage: there is no write path on Windows to test. The
+        # Windows jail is read-only and `writable=True` raises `ValueError` at
+        # construction (README, SECURITY.md); that refusal is asserted by
+        # `tests/unit/test_resource_jail_windows.py`, and a read-only host
+        # granting no write by `test_a_read_only_host_does_not_grant_write`.
+        pytest.skip("writes are POSIX-only: the Windows jail refuses writable=True")
     host = Host(
         EchoProvider(),
         LoopbackSingleUserPolicy(),

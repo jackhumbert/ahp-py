@@ -6,7 +6,7 @@ import plistlib
 import subprocess
 import sys
 import xml.etree.ElementTree as ET
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import pytest
 
@@ -130,8 +130,9 @@ def _unit_lines(unit: str) -> dict[str, str]:
     return dict(line.split("=", 1) for line in unit.splitlines() if "=" in line)
 
 
-def test_the_systemd_unit_runs_the_supervisor_and_keeps_it_up(tmp_path: Path) -> None:
-    home = tmp_path / "home"
+def test_the_systemd_unit_runs_the_supervisor_and_keeps_it_up() -> None:
+    # A POSIX home on every OS: the unit text is Linux's whatever generates it.
+    home = PurePosixPath("/home/u")
     command = node_command(
         home / ".config/ahp/node.toml", None, python="/venv/bin/python", verb="supervise"
     )
@@ -164,7 +165,7 @@ def test_the_systemd_unit_quotes_spaces_and_escapes_specifiers() -> None:
 
 
 def test_the_systemd_path_falls_back_to_a_stock_one_without_duplicates() -> None:
-    home = Path("/home/u")
+    home = PurePosixPath("/home/u")
     assert systemd_path(home, None).startswith("/home/u/.local/bin:/home/u/bin:/usr/local/sbin")
     assert systemd_path(home, "/home/u/.local/bin:/usr/bin") == (
         "/home/u/.local/bin:/home/u/bin:/usr/bin"

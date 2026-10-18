@@ -9,6 +9,8 @@ import pytest
 
 from ahp_host.core.wirelog import REDACTED, WireLog, redact
 
+from .test_private_files import assert_owner_only
+
 
 def test_writes_the_verbatim_message_plus_a_sidecar(tmp_path: Path) -> None:
     log = WireLog(tmp_path / "agent-host-test.jsonl")
@@ -114,4 +116,4 @@ class TestRedaction:
         path = tmp_path / "agent-host-test.jsonl"
         log = WireLog(path)
         log.close()
-        assert path.stat().st_mode & 0o077 == 0, "group/other can read the transcript"
+        assert_owner_only(path, directory=False)

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import sys
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
@@ -24,7 +25,6 @@ from ahp_protocol.transport import memory_pair
 
 from ahp_host.core import Host, LoopbackSingleUserPolicy
 from ahp_host.core.automations import InMemoryAutomationStore
-from ahp_host.core.pty_backend import PtyTerminalBackend
 from ahp_host.core.resources import RootedFilesystemResourceProvider
 from ahp_host.core.watches import PollingResourceWatcher
 from ahp_host.provider import EchoProvider
@@ -32,6 +32,20 @@ from ahp_host.provider import EchoProvider
 from .schemas import assert_valid_action, assert_valid_result, assert_valid_state
 
 pytestmark = pytest.mark.anyio
+
+#: The pty backend is POSIX by construction (`fcntl`, `termios`), so it is
+#: imported only where it exists. Everything else in this file is the wire's
+#: shape and runs on every platform; only the one test that drives a real shell
+#: needs it.
+HAS_PTY = sys.platform != "win32"
+
+
+def _terminals() -> Any:
+    if not HAS_PTY:
+        return None
+    from ahp_host.core.pty_backend import PtyTerminalBackend
+
+    return PtyTerminalBackend()
 
 
 @pytest.fixture
@@ -161,7 +175,7 @@ async def recorder() -> AsyncIterator[tuple[Host, Recorder]]:
         EchoProvider(customizations=True, delay=0.01),
         LoopbackSingleUserPolicy(),
         resources=RootedFilesystemResourceProvider(Path.cwd()),
-        terminals=PtyTerminalBackend(),
+        terminals=_terminals(),
         default_directory="file://" + os.getcwd(),
         completion_trigger_characters=("#",),
     )
@@ -265,6 +279,7 @@ class TestTheWireMatchesTheSpec:
             serve.cancel()
             await host.aclose()
 
+    @pytest.mark.skipif(not HAS_PTY, reason="drives a real shell on a pty, which is POSIX-only")
     async def test_a_terminal(self, recorder: tuple[Host, Recorder]) -> None:
         """`root/terminalsChanged` and `terminal/*` -- where the missing
         required `title`/`claim` and the ISO-string timestamp lived."""

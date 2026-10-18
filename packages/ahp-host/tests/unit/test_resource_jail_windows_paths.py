@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import struct
 import sys
+import warnings
 from pathlib import Path
 
 import pytest
@@ -90,6 +91,31 @@ class TestFileUris:
         assert uri_from_parts("C:", ["Users", "me", "proj"]) == "file:///C:/Users/me/proj"
         assert uri_from_parts("C:", []) == "file:///C:/"
         assert uri_from_parts("D:", ["a b", "é.txt"]) == "file:///D:/a%20b/%C3%A9.txt"
+
+    @pytest.mark.parametrize(
+        ("parts", "spelled"),
+        [
+            ([], "file:///C:/"),
+            (["a b", "x#y", "50%", "q?"], "file:///C:/a%20b/x%23y/50%25/q%3F"),
+            (
+                ["é", "日本語.txt", "\U0001f600"],
+                "file:///C:/%C3%A9/%E6%97%A5%E6%9C%AC%E8%AA%9E.txt/%F0%9F%98%80",
+            ),
+            (
+                [";", "&", "+", "=", "~", "@", ",", "!", "()", "[]", "'"],
+                "file:///C:/%3B/%26/%2B/%3D/~/%40/%2C/%21/%28%29/%5B%5D/%27",
+            ),
+            # NTFS names are UTF-16 and may hold a lone surrogate.
+            (["lone\ud800"], "file:///C:/lone%ED%A0%80"),
+        ],
+    )
+    def test_the_spelling_is_the_one_the_stdlib_used(self, parts: list[str], spelled: str) -> None:
+        """Pinned to `PureWindowsPath.as_uri()`'s output from before Python 3.14
+        deprecated it, and called with warnings as errors, because that is how
+        the deprecation broke every Windows `resourceList` (InternalError)."""
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            assert uri_from_parts("C:", parts) == spelled
 
     @pytest.mark.parametrize(
         "parts", [["Users", "me"], ["a b", "é", "日本語.txt"], ["x#y", "50%", "q?"]]

@@ -18,7 +18,7 @@ from ahp_host.core.resources import RootedFilesystemResourceProvider
 from ahp_host.provider.echo import EchoProvider
 
 from ahp_gateway.core import OrchestratorConfig
-from ahp_gateway.core.orchestrator import FLEET_TOOLS
+from ahp_gateway.core.orchestrator import FLEET_TOOLS, _folder_uri
 from ahp_gateway.registry import NodeRecord
 from tests.fleet import DEV, Fleet, everyone_is_a_dev, generation, providers, reconnected
 
@@ -89,6 +89,22 @@ def _text(result: Mapping[str, Any]) -> str:
     return "\n".join(
         part["text"] for part in result.get("content") or [] if part.get("type") == "text"
     )
+
+
+@pytest.mark.parametrize(
+    ("folder", "uri"),
+    [
+        # A Windows path is a `file:///C:/...` URI whichever platform the gateway
+        # runs on, and a POSIX one is not mistaken for it. The node names the
+        # folder, so it is the node's spelling that matters, not the host's.
+        ("C:\\Users\\me\\my proj", "file:///C:/Users/me/my%20proj"),
+        ("c:/work/repo", "file:///c:/work/repo"),
+        ("/home/me/my proj", "file:///home/me/my%20proj"),
+        ("file:///srv/repo", "file:///srv/repo"),
+    ],
+)
+def test_a_folder_is_named_as_a_file_uri_on_every_platform(folder: str, uri: str) -> None:
+    assert _folder_uri(folder) == uri
 
 
 async def test_the_orchestrator_is_offered_when_its_agent_runs_somewhere(tmp_path: Path) -> None:

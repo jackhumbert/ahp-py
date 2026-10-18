@@ -73,7 +73,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path, PureWindowsPath
 from typing import Any
-from urllib.parse import unquote, urlparse
+from urllib.parse import quote_from_bytes, unquote, urlparse
 
 from ahp_protocol import errors
 
@@ -243,8 +243,19 @@ def strict_ancestor_depth(
 
 
 def uri_from_parts(drive: str, parts: Sequence[str]) -> str:
-    """`file:///C:/Users/me/proj` -- the form VS Code and `Path.as_uri` produce."""
-    return PureWindowsPath(f"{drive}\\", *parts).as_uri()
+    """`file:///C:/Users/me/proj` -- the form VS Code and `Path.as_uri` produce.
+
+    Spelled by hand rather than with `PureWindowsPath.as_uri()`, which Python
+    3.14 deprecates (only the concrete `Path.as_uri()` stays): under
+    `-W error` the warning became an exception and every Windows
+    `resourceList` answered InternalError. This is the 3.13 stdlib's spelling
+    of the same `PureWindowsPath` -- `file:///` and the drive, then the rest
+    percent-encoded as UTF-8 with only `/` safe, lone surrogates passed through
+    as Windows' `os.fsencode` did -- so the published URIs do not change.
+    """
+    pure = PureWindowsPath(f"{drive}\\", *parts)
+    rest = pure.as_posix()[len(pure.drive) :]
+    return "file:///" + pure.drive + quote_from_bytes(rest.encode("utf-8", "surrogatepass"))
 
 
 # ─── pure: reparse points ─────────────────────────────────────────────────

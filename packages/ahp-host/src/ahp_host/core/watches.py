@@ -243,7 +243,10 @@ class PollingResourceWatcher:
             # which is the difference between skipping `node_modules` and
             # walking it and discarding the results.
             subdirectories[:] = [
-                name for name in subdirectories if request.matches(_join(relative_dir, name))
+                name
+                for name in subdirectories
+                if request.matches(_join(relative_dir, name))
+                and not _is_link(os.path.join(directory, name))
             ]
             for name in files:
                 relative = _join(relative_dir, name)
@@ -290,6 +293,39 @@ class PollingResourceWatcher:
         if stat.S_ISDIR(stats.st_mode):
             return None
         return {uri_from_path(root): (stats.st_mtime_ns, stats.st_size)}
+
+
+#: `IsReparseTagNameSurrogate`: the reparse point stands for another name (a
+#: symlink, a junction, a volume mount point, a WSL link). The same test the
+#: Windows jail applies (`resources_windows.is_name_surrogate`), spelled out
+#: here so the watcher does not import the Win32 module.
+_NAME_SURROGATE = 0x20000000
+
+
+def _is_link(path: str) -> bool:
+    """Whether the walk must not descend into this directory entry.
+
+    `os.walk(followlinks=False)` skips symlinked directories, which is all it
+    needs to do on POSIX -- but on Windows it skips only what `os.path.islink`
+    calls a link, and a JUNCTION is not one: measured on CPython 3.14, a
+    junction in the watched tree pointing out of the jail was walked, and its
+    target's file names and change timing reported to a peer the jail refuses
+    a read of. Junctions need no privilege to create. So every name-surrogate
+    reparse point is pruned, on every platform, like the symlink it is; an
+    entry that cannot be examined is not descended either.
+
+    This prunes what the walk SEES. The poller walks by path, not by handle,
+    so it is not the race-free walk the jails are (see SECURITY.md).
+    """
+    try:
+        stats = os.lstat(path)
+    except OSError:
+        return True
+    if stat.S_ISLNK(stats.st_mode):
+        return True
+    attributes: int = getattr(stats, "st_file_attributes", 0)
+    tag: int = getattr(stats, "st_reparse_tag", 0)
+    return bool(attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT and tag & _NAME_SURROGATE)
 
 
 def _join(relative_dir: str, name: str) -> str:
