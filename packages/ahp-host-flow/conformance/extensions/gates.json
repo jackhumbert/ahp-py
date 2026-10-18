@@ -1,0 +1,16 @@
+{
+  "answers": { "Ship?": "yes", "Name?": "Ada", "Config?": { "n": 3 }, "Pick?": "maybe" },
+  "approvals": { "Delete?": true },
+  "result": { "a": "first", "yes": "yes", "name": "Ada", "cfg": { "n": 3 }, "bad": null, "ok": true, "no": false, "b": "second" },
+  "gates": [
+    [0, "ask", "Ship?", { "choices": ["yes", "no"] }],
+    [1, "ask", "Name?", {}],
+    [2, "ask", "Config?", { "schema": { "type": "object", "properties": { "n": { "type": "integer" } }, "required": ["n"] } }],
+    [3, "ask", "Pick?", { "choices": ["a", "b"] }],
+    [4, "approve", "Delete?", { "diff": "-x\n+y\n" }],
+    [5, "approve", "Drop table?", {}]
+  ],
+  "calls": [[0, "first"], [1, "second"]],
+  "canvases": [["https://example.com/view", "View"]],
+  "logs_contain": ["ask() #3: answer rejected: 'maybe' is not one of the choices"]
+}

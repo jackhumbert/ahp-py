@@ -9,7 +9,9 @@ from pathlib import Path
 from typing import Any, Final, Protocol
 from urllib.parse import urlparse
 from urllib.request import url2pathname
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from ahp_host.core.automations import CronExpression
 from ahp_protocol.ext.flow import FLOW_META_KEY as FLOW_META_KEY
 
 from ahp_host_flow.config import PYTHON_SOURCES_DEFAULT, SOURCES
@@ -334,6 +336,34 @@ def _description(meta: Mapping[str, Any] | None) -> str:
     return ""
 
 
+def schedule_of(meta: Mapping[str, Any] | None) -> tuple[dict[str, str] | None, str | None]:
+    """The default schedule `meta.x.schedule` offers, and a warning when it is not usable.
+
+    A cron string (UTC) or `{expression, timeZone?}`. The checks are the ones ahp-host runs
+    on a saved definition, so an offered schedule always saves.
+    """
+    x = meta.get("x") if isinstance(meta, Mapping) else None
+    if not isinstance(x, Mapping) or "schedule" not in x:
+        return (None, None)
+    raw = x["schedule"]
+    expression: str
+    tz: Any
+    if isinstance(raw, str):
+        expression, tz = raw, "UTC"
+    elif isinstance(raw, Mapping) and isinstance(raw.get("expression"), str):
+        expression, tz = raw["expression"], raw.get("timeZone", "UTC")
+    else:
+        return (None, "meta.x.schedule must be a cron string or {expression, timeZone?}")
+    if not isinstance(tz, str):
+        return (None, "meta.x.schedule must be a cron string or {expression, timeZone?}")
+    try:
+        CronExpression.parse(expression)
+        ZoneInfo(tz)
+    except (ValueError, ZoneInfoNotFoundError) as exc:
+        return (None, f"meta.x.schedule {expression!r} is not a valid schedule: {exc}")
+    return ({"expression": expression, "timeZone": tz}, None)
+
+
 def _child(entry: WorkflowEntry) -> dict[str, Any]:
     phases = entry.meta.get("phases") if entry.meta is not None else None
     flow: dict[str, Any] = {
@@ -345,6 +375,12 @@ def _child(entry: WorkflowEntry) -> dict[str, Any]:
         flow["shadowedBy"] = entry.shadowed_by
     if entry.language == "python":
         flow["language"] = "python"
+    schedule, warning = schedule_of(entry.meta)
+    if schedule is not None:
+        flow["schedule"] = schedule
+    if warning is not None:
+        flow["warnings"] = [warning]
+        _logger.warning("%s: %s", entry.name, warning)
     return {
         "type": "prompt",
         "id": f"{entry.container_id}.{entry.name}",

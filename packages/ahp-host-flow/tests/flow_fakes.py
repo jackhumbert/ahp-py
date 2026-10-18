@@ -249,6 +249,7 @@ class RestartHoldProvider:
 
     prompts: ClassVar[list[str]] = []
     holding: ClassVar[bool] = True
+    sessions_created: ClassVar[int] = 0
 
     def __init__(self, *, provider_id: str = "hold") -> None:
         self.provider_id = provider_id
@@ -263,6 +264,7 @@ class RestartHoldProvider:
         )
 
     async def create_session(self, context: AgentSessionContext) -> RestartHoldSession:
+        RestartHoldProvider.sessions_created += 1
         return RestartHoldSession(context)
 
 
@@ -534,6 +536,7 @@ def reset_fakes() -> None:
     FileWriterProvider.instances.clear()
     RestartHoldProvider.prompts.clear()
     RestartHoldProvider.holding = True
+    RestartHoldProvider.sessions_created = 0
 
 
 class BrokenSessionProvider:

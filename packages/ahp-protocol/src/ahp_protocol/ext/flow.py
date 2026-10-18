@@ -20,7 +20,7 @@ written by a peer.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Final
 
@@ -32,6 +32,7 @@ __all__ = [
     "FLOW_META_KEY",
     "NOTIFICATION_KINDS",
     "RUN_FINISHED_STATUSES",
+    "SCHEDULE_TRIGGER_ID",
     "SCHEMA_FILE",
     "STEP_STATUSES",
     "PhaseView",
@@ -39,6 +40,7 @@ __all__ = [
     "StepView",
     "descriptor_of",
     "meta",
+    "offered_schedule",
     "phase_finished",
     "phase_started",
     "redacted_step",
@@ -49,6 +51,7 @@ __all__ = [
     "step",
     "step_finished",
     "step_started",
+    "with_offered_schedule",
 ]
 
 #: Key in ``_meta``; the value is one descriptor.
@@ -61,6 +64,8 @@ NOTIFICATION_KINDS: Final = ("runStarted", "phaseStarted", "phaseFinished", "run
 STEP_STATUSES: Final = ("ok", "null", "error", "skipped")
 #: ``runFinished.status``.
 RUN_FINISHED_STATUSES: Final = ("ok", "error")
+#: The id of the schedule trigger :func:`with_offered_schedule` adds.
+SCHEDULE_TRIGGER_ID: Final = "ahp-py/flow-schedule"
 
 _NULLABLE_STRING: Final = {"type": ["string", "null"]}
 
@@ -253,6 +258,58 @@ def descriptor_of(meta: Any) -> Mapping[str, Any] | None:
         return None
     found = meta.get(FLOW_META_KEY)
     return found if isinstance(found, Mapping) else None
+
+
+def offered_schedule(customization: Mapping[str, Any]) -> dict[str, str] | None:
+    """The default schedule a workflow's customization offers, or ``None``.
+
+    A host lists a workflow's ``meta.x.schedule`` as ``schedule`` in the descriptor
+    under :data:`FLOW_META_KEY`; anything that is not ``{expression, timeZone}``
+    strings is not an offer.
+    """
+    meta = customization.get("_meta")
+    flow_meta = meta.get(FLOW_META_KEY) if isinstance(meta, Mapping) else None
+    s = flow_meta.get("schedule") if isinstance(flow_meta, Mapping) else None
+    if (
+        isinstance(s, Mapping)
+        and isinstance(s.get("expression"), str)
+        and isinstance(s.get("timeZone"), str)
+    ):
+        return {"expression": s["expression"], "timeZone": s["timeZone"]}
+    return None
+
+
+def with_offered_schedule(
+    definition: Mapping[str, Any], customization: Mapping[str, Any]
+) -> dict[str, Any]:
+    """A copy of an automation ``definition`` with the offered schedule added as a trigger.
+
+    Calling it is how a client accepts the default; the host never applies it itself.
+    A definition that already has a schedule trigger, or a customization that offers
+    none, gets its triggers back unchanged. ``definition`` is not mutated.
+    """
+    out = dict(definition)
+    raw = definition.get("triggers")
+    # Not `or []`: invariant 5. Any sequence of triggers (a list, a tuple) is extended;
+    # anything else (a string, bytes, a mapping, None) is replaced.
+    triggers: list[Any] = (
+        list(raw)
+        if isinstance(raw, Sequence) and not isinstance(raw, (str, bytes, bytearray))
+        else []
+    )
+    offered = offered_schedule(customization)
+    if offered is not None and not any(
+        isinstance(t, Mapping) and t.get("kind") == "schedule" for t in triggers
+    ):
+        triggers.append(
+            {
+                "id": SCHEDULE_TRIGGER_ID,
+                "kind": "schedule",
+                "schedule": {"expression": offered["expression"], "timeZone": offered["timeZone"]},
+            }
+        )
+    out["triggers"] = triggers
+    return out
 
 
 @dataclass(frozen=True)

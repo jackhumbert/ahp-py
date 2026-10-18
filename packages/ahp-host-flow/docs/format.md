@@ -14,7 +14,7 @@ Script: `conformance/meta.js`; Python twin: `conformance/meta.py`.
 `export const meta = {...}` must be a pure literal: `name`, `description`,
 optional `whenToUse`, and `phases`, a list of `{title, detail?, model?}`. It is
 read with a parser, without running the script. Unknown keys, at the top level
-and inside `phases[]`, are accepted and ignored. `meta.x.schedule` is reserved for M10 (a default cron for the workflow) and has no effect yet.
+and inside `phases[]`, are accepted and ignored. `meta.x.schedule` is an ahp-py extension: see [Extensions](#extensions-ahp-py-only).
 
 ## agent
 
@@ -182,6 +182,119 @@ The runner is a separate `python -I` process, not a security boundary. `-I`
 ignores `PYTHONPATH`, so `ahp-host-flow` must be installed in that interpreter
 (an editable install counts).
 `print()` goes to stderr; stdout carries the protocol.
+
+## Extensions (ahp-py only)
+
+Claude Code has none of these. It ignores `opts.x` and leaves `ask`,
+`approve` and `canvas` undefined (the plan §3 probe), so a script that uses
+them runs unchanged under Claude Code only through the shim below. A Python
+workflow runs on ahp-py only. Everything here is opt-in: a script that uses
+none of it behaves exactly as described above.
+
+### ask, approve and canvas
+
+Scripts: `conformance/extensions/gates.js`, `conformance/extensions/gates.py`,
+`conformance/extensions/no_gates.js`, `conformance/extensions/no_gates.py`,
+`conformance/extensions/gate_errors.js` and `conformance/extensions/gate_errors.py`.
+`gates` runs them with answers, `no_gates` with no way to answer, `gate_errors`
+checks the argument errors.
+
+- `ask(question, {choices?, schema?})` pauses the run until a client answers
+  and returns the answer, or `null` when it is declined or the run is aborted.
+  `choices` is a non-empty array of strings; `schema` is a JSON Schema object;
+  not both. A `null` or absent option counts as not given. On the run's main
+  chat an answer that does not fit `choices` or `schema` is asked again, with
+  the reason shown, up to 3 times in all (`ASK_ATTEMPTS`); after the third the
+  gate gives `null` with a `log()` line. The engine re-validates whatever comes
+  back, whoever answered: an answer that does not fit becomes `null` with a
+  `log()` line. With neither option the answer is a string.
+- `approve(summary, {diff?})` returns `true` or `false`, and `false` when it is
+  declined or aborted. `diff` is a string or an array of
+  `{path, before?, after?}`.
+- `canvas(url, {title?})` shows a live view of an http(s) URL on the run. It
+  returns nothing, never waits, and is ignored with a log line where no client
+  can show it.
+- Errors are `TypeError`s (JavaScript and Python alike; in Python `ask()` and
+  `approve()` raise on await, and the options are keyword arguments), with these messages:
+  `ask() needs a question string`, `ask() choices must be a non-empty array of
+  strings`, `ask() schema must be an object`, `ask() takes choices or schema,
+  not both`, `approve() needs a summary string`, `approve() diff must be a
+  string or an array of {path, before?, after?}`, `canvas() needs an http(s)
+  URL`, `canvas() title must be a string`. In JavaScript, an `opts` that is not
+  an object gives `<verb>() opts must be an object`. Arguments are checked in
+  the order above, before anything reaches the host. The host checks the same
+  shapes again, and refuses unknown option keys, whatever the runner sent (a
+  `toJSON` or a replaced `JSON.stringify` can change what is sent): a refused
+  gate throws an `Error` with the host's reason and takes no gate ordinal.
+- Gates have a counter of their own, apart from the `agent()` ordinals and the
+  1000-call cap. The host assigns it when the request line arrives, and it is
+  shared with `workflow()` children, like the other counters.
+- The answer is masked once before the script sees it (credential masking,
+  plan §4.9), and the masked answer is what the journal records and a resumed
+  run replays. The prompt shown to the client is masked too. A script that asks
+  for a secret therefore gets `[redacted]` back.
+- Journal and resume: every gate writes a `gate` record before it asks (status
+  `open`) and after the answer (status `answered`). Its key is a hash of the
+  kind, the question and the options. On resume an answered gate whose key
+  matches replays its answer without asking; a gate that was open is asked
+  again. Gates never end the `agent()` cache.
+- A run with nobody to answer (a headless `flow run`, the library API) fails an
+  `ask()` or `approve()` with an error that says so, and the verb throws it.
+
+### opts.x.provider
+
+`agent(prompt, {x: {provider: 'name'}})` sends that one call to the configured
+provider of that name, ahead of any routing rule and the default. A non-object
+`x` or a provider that is not a non-empty string is ignored. An unconfigured
+name fails the call: `null` plus a `log()` line that lists the configured names.
+
+### opts.x.chat
+
+`agent(prompt, {x: {chat: 'name'}})` runs the call as a follow-up turn in the
+named worker chat and its inner session, created by the first call that names
+it. Calls that name one chat are serialized, so each sees the earlier turns.
+The chat closes when the run ends. It works for in-process providers only: a
+fleet or remote provider, and `isolation: 'worktree'`, fail the call. The inner
+session is created by the first call, so the chat keeps that call's config
+(`effort`, and the approval mode): a later call to the same name that asks for
+another one runs with the first, and a `log()` line says so. `model` is sent
+with each message, so it may change from call to call. On resume
+the chat and its session are created again; the inner agent remembers earlier
+turns only if its provider can resume sessions.
+
+### opts.x.attach
+
+`agent(prompt, {x: {attach: [...]}})` hands the call attachments on its
+message. An entry is `{kind: 'file', path, label?}` or
+`{kind: 'result', value, label?}` (a prior result, as an embedded JSON
+resource). The prompt text is not changed. A file path is resolved with symlinks
+followed and must be a regular file inside the run's working directories;
+anything else fails the call before a worker chat opens, as does a bad entry
+(`null` plus a log line). In-process providers only.
+
+### meta.x.schedule
+
+`meta.x.schedule` is a cron string or `{expression, timeZone}`; the time zone
+is `UTC` when absent. The host offers it on the workflow's customization and
+never creates an automation itself. A client applies it with
+`ahp_protocol.ext.flow.with_offered_schedule`. An invalid schedule is left out,
+the workflow is still listed, and the reason is in the customization's
+`warnings` and in the host log.
+
+### The shim
+
+Script: `conformance/shim/dual_target.js`. It has no Python twin: Claude Code
+runs only JavaScript.
+
+`shim/flow-shim.js` defines `ask`, `approve` and `canvas` where the runtime
+lacks them. Paste it right after `export const meta = {...}`. The package ships
+it as `ahp_host_flow/shim/flow-shim.js`; `flow shim` prints it. Under ahp-host-flow
+the real functions are kept. Under Claude Code `ask()` and `approve()` fall back
+to an `agent()` call with a schema, `canvas()` does nothing, and `opts.x` is
+ignored. `FLOW_SHIM = { askDefault: undefined, approveDefault: undefined }`
+sets values to return instead of asking an agent; `approveDefault: false` is
+the safe choice for destructive steps. If you only need `ask`, a shorter
+alternative is `const ask = globalThis.ask ?? (async () => null)`.
 
 ## Choices not yet checked against Claude Code
 

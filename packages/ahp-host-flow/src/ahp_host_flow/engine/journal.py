@@ -1,10 +1,11 @@
 """Run journal: one append-only JSONL file per run (plan §4.2).
 
 The header record holds the script snapshot; each dispatched `agent()` call adds a
-start record and, when it completes, an agent record. A torn final line (a killed
-process) is ignored on read. Record types other than run/workflow/agent/started are
-ignored on load, on purpose, so a later record kind (M10 gates) stays readable by
-this code; keep it so.
+start record and, when it completes, an agent record; each `ask()`/`approve()` gate
+adds a gate record (open when asked, answered when it has an answer). A torn final line
+(a killed process) is ignored on read. Record types other than
+run/workflow/agent/started/gate are ignored on load, on purpose, so a later record kind
+stays readable by this code; keep it so.
 """
 
 from __future__ import annotations
@@ -32,6 +33,10 @@ LOCK_FILE: Final = "journal.lock"
 
 JournalStatus = Literal["ok", "null", "error"]
 _STATUSES: Final = frozenset({"ok", "null", "error"})
+
+GateStatus = Literal["open", "answered"]
+_GATE_STATUSES: Final = frozenset({"open", "answered"})
+_GATE_RECORD_KINDS: Final = frozenset({"ask", "approve"})
 
 
 class JournalError(Exception):
@@ -154,17 +159,35 @@ class StartRecord:
 
 
 @dataclass(frozen=True)
+class GateRecord:
+    """One `ask()`/`approve()` gate: `open` when asked, `answered` once it has an answer."""
+
+    ordinal: int
+    key: str
+    kind: str
+    status: GateStatus
+    # The answer the script got (masked for ask, a bool for approve); None while open.
+    answer: Any = None
+
+
+@dataclass(frozen=True)
 class LoadedJournal:
     header: RunHeader
     workflows: Mapping[str, WorkflowSnapshot]
     agents: tuple[AgentRecord, ...]
     started: tuple[StartRecord, ...] = ()
+    gates: tuple[GateRecord, ...] = ()
 
     @property
     def unfinished(self) -> tuple[StartRecord, ...]:
         """Started calls with no agent record: in flight when the run was killed."""
         done = {a.ordinal for a in self.agents}
         return tuple(s for s in self.started if s.ordinal not in done)
+
+    @property
+    def open_gates(self) -> tuple[GateRecord, ...]:
+        """Gates asked but never answered: open when the run was killed."""
+        return tuple(g for g in self.gates if g.status == "open")
 
 
 def _line(record: dict[str, Any]) -> str:
@@ -273,6 +296,22 @@ class JournalWriter:
             {"type": "started", "ordinal": record.ordinal, "key": record.key, "handle": handle}
         )
 
+    def append_gate(self, record: GateRecord) -> None:
+        mask = self._mask
+        answer = record.answer if record.status == "answered" else None
+        if mask is not None and record.status == "answered":
+            answer = mask(answer)
+        self._write(
+            {
+                "type": "gate",
+                "ordinal": record.ordinal,
+                "key": record.key,
+                "kind": record.kind,
+                "status": record.status,
+                "answer": answer,
+            }
+        )
+
     def append_workflow(self, snapshot: WorkflowSnapshot) -> None:
         self._write(
             {
@@ -319,8 +358,8 @@ def _redacted_marker(raw: Any) -> dict[str, str] | Literal[False] | None:
 
 
 def load_journal(state_dir: Path, run_id: str) -> LoadedJournal:
-    """Read a run's journal. Record types other than run/workflow/agent/started are
-    ignored, on purpose, so a later record kind (M10 gates) stays readable; keep it so.
+    """Read a run's journal. Record types other than run/workflow/agent/started/gate are
+    ignored, on purpose, so a later record kind stays readable; keep it so.
     """
     path = run_dir(state_dir, run_id) / JOURNAL_FILE
     if not path.is_file():
@@ -332,6 +371,7 @@ def load_journal(state_dir: Path, run_id: str) -> LoadedJournal:
     workflows: dict[str, WorkflowSnapshot] = {}
     agents: dict[int, AgentRecord] = {}
     started: dict[int, StartRecord] = {}
+    gates: dict[int, GateRecord] = {}
     for n, part in enumerate(parts, start=1):
         try:
             rec = json.loads(part)
@@ -408,6 +448,20 @@ def load_journal(state_dir: Path, run_id: str) -> LoadedJournal:
             ):
                 raise JournalError(f"journal line {n}: bad started record")
             started.setdefault(ordinal, StartRecord(ordinal, key, provider, chat, session))
+        elif kind == "gate":
+            ordinal, key = rec.get("ordinal"), rec.get("key")
+            gate_kind, status = rec.get("kind"), rec.get("status")
+            if (
+                not _is_count(ordinal)
+                or not isinstance(key, str)
+                or gate_kind not in _GATE_RECORD_KINDS
+                or status not in _GATE_STATUSES
+            ):
+                raise JournalError(f"journal line {n}: bad gate record")
+            # An answered record wins over an open one, whatever the line order.
+            have = gates.get(ordinal)
+            if have is None or (have.status == "open" and status == "answered"):
+                gates[ordinal] = GateRecord(ordinal, key, gate_kind, status, rec.get("answer"))
     if header is None:
         raise JournalError(f"journal for run {run_id!r} does not start with a run header")
     return LoadedJournal(
@@ -415,6 +469,7 @@ def load_journal(state_dir: Path, run_id: str) -> LoadedJournal:
         workflows,
         tuple(agents[o] for o in sorted(agents)),
         tuple(started[o] for o in sorted(started)),
+        tuple(gates[o] for o in sorted(gates)),
     )
 
 

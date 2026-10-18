@@ -1,0 +1,14 @@
+{
+  "result": [
+    "ask() needs a question string",
+    "ask() choices must be a non-empty array of strings",
+    "ask() takes choices or schema, not both",
+    "ask() schema must be an object",
+    "approve() needs a summary string",
+    "approve() diff must be a string or an array of {path, before?, after?}",
+    "canvas() needs an http(s) URL",
+    "canvas() title must be a string"
+  ],
+  "gates": [],
+  "canvases": []
+}

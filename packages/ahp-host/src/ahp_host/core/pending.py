@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import secrets
 from collections.abc import Collection, Sequence
 from dataclasses import dataclass, field
 from typing import Any
@@ -80,6 +81,13 @@ class PendingRequests:
     """The registry. One per host."""
 
     def __init__(self) -> None:
+        #: Unique to this process. A restored turn still holds the request parts
+        #: an earlier process published, answered ones included, and the chat
+        #: reducer resolves a request by finding the first part with its id. A
+        #: counter that restarts at 1 re-minted `input-1` while the restored
+        #: turn already had an answered `input-1`, so a client's answer to the
+        #: new question was read from the old part.
+        self._boot = secrets.token_hex(4)
         self._by_id: dict[str, PendingRequest] = {}
         self._by_scope: dict[str, set[str]] = {}
         #: Keyed by (channel, key), NOT by the bare key. A `toolCallId` is
@@ -133,7 +141,7 @@ class PendingRequests:
         pinning the victim in `InputNeeded` until the session was disposed.
         """
         self._counter += 1
-        request_id = f"{kind}-{self._counter}"
+        request_id = f"{kind}-{self._boot}-{self._counter}"
         request = PendingRequest(
             id=request_id,
             scope=scope,

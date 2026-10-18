@@ -23,6 +23,7 @@ from ahp_host_flow.catalog import (
     python_dirs,
     read_client_workflows,
     resolve,
+    schedule_of,
     source_dirs,
     visible_names,
 )
@@ -423,3 +424,31 @@ async def test_client_listed_names_must_be_plain_file_names() -> None:
     entries = await read_client_workflows(_PLUGIN, reader, node=None)
     assert [e.name for e in entries] == ["nightly"]
     assert reader.reads == [f"{_WF}/nightly.js"]
+
+
+def test_flowext_schedule_of() -> None:
+    assert schedule_of({"x": {"schedule": "0 6 * * 1-5"}}) == (
+        {"expression": "0 6 * * 1-5", "timeZone": "UTC"},
+        None,
+    )
+    berlin = {"expression": "30 7 * * *", "timeZone": "Europe/Berlin"}
+    assert schedule_of({"x": {"schedule": berlin}}) == (berlin, None)
+
+    schedule, warning = schedule_of({"x": {"schedule": "61 * * * *"}})
+    assert schedule is None
+    assert warning is not None
+    assert warning.startswith("meta.x.schedule '61 * * * *' is not a valid schedule")
+
+    nowhere = {"expression": "0 6 * * *", "timeZone": "Nowhere/Land"}
+    schedule, warning = schedule_of({"x": {"schedule": nowhere}})
+    assert schedule is None
+    assert warning is not None
+    assert warning.startswith("meta.x.schedule '0 6 * * *' is not a valid schedule")
+
+    assert schedule_of({"x": {"schedule": 5}}) == (
+        None,
+        "meta.x.schedule must be a cron string or {expression, timeZone?}",
+    )
+    assert schedule_of({}) == (None, None)
+    assert schedule_of(None) == (None, None)
+    assert schedule_of({"x": "y"}) == (None, None)

@@ -2,7 +2,8 @@
 
 Nothing answers a confirmation or input an inner session asks for in a worker
 chat, so the run fails at the first one (it is never auto-approved): use a
-non-asking `approval_mode` in flow.toml.
+non-asking `approval_mode` in flow.toml. The same goes for the workflow's own
+`ask()` and `approve()` gates on the main chat.
 """
 
 from __future__ import annotations
@@ -72,15 +73,42 @@ def _describe(request: Mapping[str, Any]) -> str:
     return f"{name} ({what})" if what else str(name)
 
 
-async def _unanswerable(host: Host, session_uri: str) -> str:
-    """Wait for the first confirmation or input an inner session asks for; say what it is.
+def _gate_description(entry: Mapping[str, Any]) -> str:
+    request = entry.get("request")
+    request = request if isinstance(request, Mapping) else {}
+    tool = entry.get("toolCall")
+    tool = tool if isinstance(tool, Mapping) else {}
+    questions = request.get("questions")
+    first = questions[0] if isinstance(questions, list) and questions else None
+    for text in (
+        request.get("message"),
+        tool.get("invocationMessage"),
+        first.get("message") if isinstance(first, Mapping) else None,
+    ):
+        if isinstance(text, str) and text:
+            return text
+    return "a question"
 
-    This host has no client to answer, so the run would wait for it forever.
+
+async def _unanswerable(host: Host, session_uri: str, main_chat: str) -> str:
+    """Wait for the first confirmation or input a session asks for; say what it is.
+
+    This host has no client to answer, so the run would wait for it forever. A
+    gate on the run's main chat is the workflow's own `ask()`/`approve()`; any
+    other entry is an inner session's.
     """
     while True:
         state = host.sequencer.state_of(session_uri)
         needed = state.get("inputNeeded") if isinstance(state, Mapping) else None
         if isinstance(needed, list) and needed and isinstance(needed[0], Mapping):
+            entry = needed[0]
+            if entry.get("chat") == main_chat:
+                verb = "approve()" if "toolCall" in entry else "ask()"
+                return (
+                    f"the workflow's {verb} gate needs an answer: {_gate_description(entry)}. "
+                    "Nothing answers it with --config (no client is connected); run the "
+                    "workflow on a host a client can reach to answer it"
+                )
             return (
                 f"an agent() call asked for confirmation or input: {_describe(needed[0])}. "
                 "Nothing answers it with --config; set approval_mode in flow.toml "
@@ -147,8 +175,10 @@ async def _run_message(
                 provider="flow", working_directories=[root.resolve().as_uri()]
             ) as session,
         ):
+            created = host.sequencer.state_of(session.uri)
+            main_chat = created.get("defaultChat") if isinstance(created, Mapping) else None
             consume = asyncio.create_task(_consume(session.prompt(text), on_note))
-            watcher = asyncio.create_task(_unanswerable(host, session.uri))
+            watcher = asyncio.create_task(_unanswerable(host, session.uri, str(main_chat)))
             try:
                 await asyncio.wait({consume, watcher}, return_when=asyncio.FIRST_COMPLETED)
                 if not consume.done():

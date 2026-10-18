@@ -8,6 +8,18 @@ the spec revision it targets.
 
 ## [Unreleased]
 
+### Added — ahp-py extension: workflow schedules
+
+- **`flow.offered_schedule`**, **`flow.with_offered_schedule`** and
+  **`flow.SCHEDULE_TRIGGER_ID`**: a host offers a workflow's default schedule as
+  `{expression, timeZone}` under `_meta['ahp-py/flow'].schedule` on its customization;
+  `offered_schedule` reads it back (`None` unless both are strings) and
+  `with_offered_schedule` returns an automation definition with it added as a schedule
+  trigger (id `ahp-py/flow-schedule`), unless the definition already has one. The host
+  never applies it; calling it is how a client accepts the default. Any sequence of
+  triggers (a list or a tuple) is extended and the result is a list; anything else
+  (a string, bytes, a mapping, `None`) is replaced.
+
 ### Added — ahp-py extension: redaction after publishing
 
 - **`ahp_protocol.ext.redaction`**, a dependency-free module: the capability and

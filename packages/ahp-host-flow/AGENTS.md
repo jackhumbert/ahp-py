@@ -15,10 +15,11 @@ is the design; milestones M0–M10 there say what exists and what's next.
   (parsing the message that starts a run), `dispatch` (`ProviderDispatcher`,
   worker chats), `worktree` (git worktrees for `isolation: 'worktree'`), `redaction`
   (`flow redact`: `redact_step`, the request spool),
-  `provider` (`FlowProvider`/`FlowSession`), `inprocess` (an
+  `provider` (`FlowProvider`/`FlowSession`), `gates` (`MainChatGates`: ask, approve and canvas on the main chat), `inprocess` (an
   in-memory host for `flow run --config`) and `__main__` (the server). They may
   import `ahp_host`; `engine/` and `sandbox/` may not. `library` (`run`, `FlowRun`) and `verbs`
-  are top-level modules too; `library` may not import `ahp_host`.
+  are top-level modules too; `library` may not import `ahp_host`. `engine/gates.py` (`GateRunner`) is
+  engine code and may not import `ahp_host`.
 - Dispatch is split by provider kind (`ProviderConfig.kind`: `inprocess`,
   `fleet`, `remote`). `dispatch.StepDispatcher` is the shared base (the main
   chat's `agent` tool call and its typed progress); `ProviderDispatcher`
@@ -61,9 +62,10 @@ is the design; milestones M0–M10 there say what exists and what's next.
   changes what the inner agent is sent or gets back. Covered: worker chat text,
   reasoning and tool calls (`TurnTee`), structured calls (`MaskingSink`, handed
   to `StructuredTurn`), approval and input prompts, step results, log lines,
-  the journal and the `agent()` return. Not covered, and documented as known
-  gaps (README, plan §4.9; M9 shipped the after-publishing layer): terminals, canvases and background work an
-  inner session opens through `ScopedPublisher`, a secret split across a
+  the journal and the `agent()` return. The run's own `canvas()` title and
+  URL are masked before `canvas_set`. Not covered, and documented as known
+  gaps (README, plan §4.9; M9 shipped the after-publishing layer): terminals
+  and background work an inner session opens through `ScopedPublisher`, a secret split across a
   tool-call boundary, and anything the best-effort builtin list misses. New
   output paths must mask too.
 - `redaction` (after publishing) may import `ahp_host`; `engine/` may not, so
@@ -109,8 +111,20 @@ is the design; milestones M0–M10 there say what exists and what's next.
   the chat and turn id.
 - Continuing a run uses `RunOptions.continue_run`, never the `--resume` prefix
   rule (plan §3 is unchanged).
-- Journal readers ignore unknown record types, so M10 gate records stay
-  readable. Keep it so.
+- Journal readers know run/workflow/agent/started/gate records and still
+  ignore unknown types. Gate ordinals come from their own host-side counter,
+  never the `agent()` one. A continued run's gate call ids use `gate-r<k>`.
+  Gate prompts and answers are masked, and the masked answer is what the
+  script and the journal get.
+- `conformance/extensions` keeps `.py` twins; `conformance/shim/dual_target.js`
+  has none (Claude Code runs only JS). `shim/flow-shim.js` must stay plain JS
+  that runs in both runtimes, and its text must stay embedded verbatim in
+  `dual_target.js`. The package ships a byte-identical copy,
+  `src/ahp_host_flow/shim/flow-shim.js` (`ahp_host_flow.shim.source()`, `flow shim`);
+  change both together (`test_flowext_shim_resource` checks it).
+- Gate options are re-checked by the host (`engine/gates.options_error`, in
+  `GateRunner.issue`): a script can make its runner send anything (`toJSON`, a
+  replaced `JSON.stringify`), so a runner's own checks are never the authority.
 - A continued run's tool-call ids use the prefix `agent-r<k>`.
 - A `.py` workflow from a client is never read or loaded (plan §4.10 trust);
   `python_sources` refuses `client`.

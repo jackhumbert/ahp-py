@@ -1,0 +1,8 @@
+{
+  "gates_off": true,
+  "result": [
+    "ask() has no answer path in this run: no client can answer a human gate here",
+    "approve() has no answer path in this run: no client can answer a human gate here"
+  ],
+  "logs_contain": ["canvas(): no client can show a canvas in this run; ignored"]
+}

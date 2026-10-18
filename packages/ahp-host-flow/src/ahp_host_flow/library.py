@@ -14,6 +14,7 @@ from ahp_host_flow.engine import (
     AbortSignal,
     AgentCall,
     Dispatcher,
+    GateRunner,
     JournalRun,
     Registry,
     RunOptions,
@@ -175,6 +176,8 @@ async def run(
         if jr is not None:
             jr.close()
         raise
+    # No gate answerer in-process: ask()/approve() fail clearly (like headless flow run).
+    gate_runner = GateRunner(None, abort=abort, mask=options.redact, on_log=on_log)
     state = RunState(
         scheduler=scheduler,
         options=options,
@@ -183,6 +186,7 @@ async def run(
         node=node,
         on_log=on_log,
         on_phase=on_phase,
+        gates=gate_runner,
     )
     flow = FlowRun(state, jr.run_id if jr else None)
     try:
@@ -192,6 +196,7 @@ async def run(
     finally:
         await flow._cancel_pending()
         state.kill_children(SandboxError("run ended"))
+        gate_runner.close()
         scheduler.close()
         if jr is not None:
             jr.close()

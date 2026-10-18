@@ -11,8 +11,9 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Mapping
+from typing import Any
 
-from ahp_host_flow.engine import OUTPUT_TOKENS, AgentCall, AgentResult
+from ahp_host_flow.engine import OUTPUT_TOKENS, AgentCall, AgentResult, GateCall
 
 
 class FakeDispatcher:
@@ -70,3 +71,48 @@ class FakeDispatcher:
             raise
         finally:
             self.in_flight -= 1
+
+
+class FakeGates:
+    """A scriptable `Gates`: answers by question, records every call and canvas.
+
+    A question starting with `hang` never gets an answer (unless `hang=False`).
+    """
+
+    def __init__(
+        self,
+        *,
+        answers: Mapping[str, Any] | None = None,
+        approvals: Mapping[str, bool] | None = None,
+        hang: bool = True,
+    ) -> None:
+        self._answers = dict(answers or {})
+        self._approvals = dict(approvals or {})
+        self._hang = hang
+        self.calls: list[GateCall] = []
+        self.canvases: list[tuple[str, str | None]] = []
+        self._asked: set[str] = set()
+        self._cond = asyncio.Condition()
+
+    async def wait_asked(self, question: str) -> None:
+        async with self._cond:
+            await self._cond.wait_for(lambda: question in self._asked)
+
+    async def _record(self, call: GateCall) -> None:
+        self.calls.append(call)
+        async with self._cond:
+            self._asked.add(call.question)
+            self._cond.notify_all()
+        if self._hang and call.question.startswith("hang"):
+            await asyncio.Event().wait()
+
+    async def ask(self, call: GateCall) -> Any:
+        await self._record(call)
+        return self._answers.get(call.question)
+
+    async def approve(self, call: GateCall) -> bool:
+        await self._record(call)
+        return self._approvals.get(call.question, False)
+
+    async def canvas(self, url: str, title: str | None) -> None:
+        self.canvases.append((url, title))

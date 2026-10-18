@@ -12,11 +12,22 @@ from ahp_host_flow.engine.dispatcher import (
     reattach_handle,
     report_dispatch,
 )
+from ahp_host_flow.engine.gates import (
+    GATE_KINDS,
+    GateCall,
+    GateRunner,
+    Gates,
+    GateUnavailableError,
+    gate_key,
+    no_answer_path,
+)
 from ahp_host_flow.engine.journal import (
     JOURNAL_FILE,
     JOURNAL_VERSION,
     RUNS_DIR,
     AgentRecord,
+    GateRecord,
+    GateStatus,
     JournalBusyError,
     JournalError,
     JournalStatus,
@@ -63,7 +74,7 @@ from ahp_host_flow.engine.remote import (
     RemoteSpec,
     RemoteWorkers,
 )
-from ahp_host_flow.engine.resume import LIBRARY_FILENAME, JournalRun, Replay
+from ahp_host_flow.engine.resume import LIBRARY_FILENAME, GateReplay, JournalRun, Replay
 from ahp_host_flow.engine.scheduler import (
     AgentLimitError,
     BudgetExhaustedError,
@@ -76,6 +87,7 @@ __all__ = [
     "BUILTIN_PATTERNS",
     "CPU_RESERVE",
     "DEFAULT_MAX_CONCURRENCY",
+    "GATE_KINDS",
     "IDLE_TIMEOUT",
     "JOURNAL_FILE",
     "JOURNAL_VERSION",
@@ -99,6 +111,13 @@ __all__ = [
     "DispatchHandle",
     "Dispatcher",
     "EchoDispatcher",
+    "GateCall",
+    "GateRecord",
+    "GateReplay",
+    "GateRunner",
+    "GateStatus",
+    "GateUnavailableError",
+    "Gates",
     "JournalBusyError",
     "JournalError",
     "JournalRun",
@@ -125,8 +144,10 @@ __all__ = [
     "call_key",
     "canonical_json",
     "default_concurrency",
+    "gate_key",
     "load_journal",
     "new_run_id",
+    "no_answer_path",
     "reattach_handle",
     "redact_agent_record",
     "report_dispatch",

@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextlib
+import json
 import logging
+import mimetypes
 from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable, Mapping, MutableMapping, Sequence
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Final, cast
 
 from ahp_host import TurnSink
@@ -18,6 +22,7 @@ from ahp_host.provider.base import (
     AgentSession,
     AgentSessionContext,
     ModelSelection,
+    ProviderChat,
     ReconfiguresChats,
     ReconfiguresSessions,
     ReturnsStructuredOutput,
@@ -49,7 +54,7 @@ from ahp_host_flow.engine import (
     report_dispatch,
     schema_error,
 )
-from ahp_host_flow.routing import route
+from ahp_host_flow.routing import route, x_opts
 from ahp_host_flow.worktree import (
     Worktree,
     WorktreeChangesets,
@@ -82,6 +87,84 @@ def worker_title(call: AgentCall) -> str:
     if len(title) > TITLE_MAX:
         return title[: TITLE_MAX - 1] + "…"
     return title
+
+
+def named_chat(opts: Mapping[str, Any]) -> str | None:
+    """`opts.x.chat`, the name of a reused worker chat; None when absent."""
+    x = x_opts(opts)
+    if "chat" not in x:
+        return None
+    value = x["chat"]
+    if not (isinstance(value, str) and value):
+        raise FlowAgentError("opts.x.chat must be a non-empty string")
+    return value
+
+
+def message_attachments(opts: Mapping[str, Any], roots: Sequence[Path]) -> list[dict[str, Any]]:
+    """`opts.x.attach` as AHP message attachments; raises FlowAgentError on a bad entry.
+
+    A file becomes a MessageResourceAttachment (label, uri, contentType) and a prior result a
+    MessageEmbeddedResourceAttachment (label, base64 JSON data, contentType). A file is resolved
+    (symlinks followed) and must be a regular file inside one of the run's working directories.
+    """
+    x = x_opts(opts)
+    if "attach" not in x:
+        return []
+    items = x["attach"]
+    if not isinstance(items, list):
+        raise FlowAgentError("opts.x.attach must be an array")
+    out: list[dict[str, Any]] = []
+    for i, item in enumerate(items):
+        if not isinstance(item, Mapping):
+            raise FlowAgentError(f"opts.x.attach[{i}]: kind must be 'file' or 'result'")
+        label = item.get("label")
+        if "label" in item and not isinstance(label, str):
+            raise FlowAgentError(f"opts.x.attach[{i}]: label must be a string")
+        kind = item.get("kind")
+        if kind == "file":
+            path = item.get("path")
+            if not isinstance(path, str):
+                raise FlowAgentError(f"opts.x.attach[{i}]: a file needs a path")
+            p = Path(path)
+            if not p.is_absolute():
+                if not roots:
+                    raise FlowAgentError(f"opts.x.attach[{i}]: needs a local working directory")
+                p = roots[0] / p
+            try:
+                resolved = p.resolve(strict=True)
+            except OSError as exc:
+                raise FlowAgentError(f"opts.x.attach[{i}]: {path} does not exist") from exc
+            if not resolved.is_file() or not any(
+                resolved.is_relative_to(r.resolve()) for r in roots
+            ):
+                raise FlowAgentError(
+                    f"opts.x.attach[{i}]: {path} is outside the run's working directories"
+                )
+            attachment: dict[str, Any] = {
+                "type": "resource",
+                "uri": resolved.as_uri(),
+                "label": label or resolved.name,
+            }
+            content_type = mimetypes.guess_type(resolved.name)[0]
+            if content_type is not None:
+                attachment["contentType"] = content_type
+            out.append(attachment)
+        elif kind == "result":
+            try:
+                text = json.dumps(item.get("value"), ensure_ascii=False, allow_nan=False)
+            except ValueError as exc:
+                raise FlowAgentError(f"opts.x.attach[{i}]: {exc}") from exc
+            out.append(
+                {
+                    "type": "embeddedResource",
+                    "label": label or f"result {i}",
+                    "contentType": "application/json",
+                    "data": base64.b64encode(text.encode("utf-8")).decode("ascii"),
+                }
+            )
+        else:
+            raise FlowAgentError(f"opts.x.attach[{i}]: kind must be 'file' or 'result'")
+    return out
 
 
 def inner_config(
@@ -141,6 +224,25 @@ class _Worker:
     skipped: bool = False
     started: bool = False
     error: str | None = None
+    #: Set when the host has ended the turn (`done` is set a little before).
+    over: asyncio.Event = field(default_factory=asyncio.Event)
+
+
+@dataclass
+class _NamedChat:
+    """A named worker chat (`opts.x.chat`) and the inner session its calls share.
+
+    Calls replay from the journal by key, never through this chat: on resume the first live
+    call recreates the chat and the session, so earlier turns exist only in the replay cache
+    and the inner agent forgets them unless its provider resumes sessions.
+    """
+
+    provider: str
+    worker: ProviderChat
+    inner: AgentSession
+    title: str
+    #: The inner session's config (approval mode, effort), fixed by the first call.
+    config: Mapping[str, Any] = field(default_factory=dict)
 
 
 class _TeeSession:
@@ -329,6 +431,20 @@ class ProviderDispatcher(StepDispatcher):
         self.worker_providers: MutableMapping[str, str] = (
             worker_providers if worker_providers is not None else {}
         )
+        #: Named worker chats (`opts.x.chat`) of this run and a lock per name.
+        self._named: dict[str, _NamedChat] = {}
+        self._named_locks: dict[str, asyncio.Lock] = {}
+
+    def _roots(self) -> list[Path]:
+        return [p for w in self.working_directories if (p := catalog.directory_of(w)) is not None]
+
+    async def aclose(self) -> None:
+        """Close the named chats' sessions; they live until the run ends."""
+        for named in self._named.values():
+            with contextlib.suppress(Exception):
+                await named.inner.aclose()
+        self._named.clear()
+        self._named_locks.clear()
 
     async def _run_call(self, call: AgentCall, name: str, title: str, call_id: str) -> AgentResult:
         try:
@@ -345,6 +461,10 @@ class ProviderDispatcher(StepDispatcher):
                 f"agent() #{call.ordinal}: effort {effort!r} is not one of "
                 f"{', '.join(EFFORT_LEVELS)}; ignored"
             )
+        chat_name = named_chat(opts)
+        if chat_name is not None and opts.get("isolation") == "worktree":
+            raise FlowAgentError("opts.x.chat cannot be combined with isolation: 'worktree'")
+        attachments = message_attachments(opts, self._roots())
         wt: Worktree | None = None
         if opts.get("isolation") == "worktree":
             workdir = next(
@@ -364,7 +484,31 @@ class ProviderDispatcher(StepDispatcher):
         #: The worker chat, once opened (empty when setup failed before it).
         opened: list[str] = []
         try:
-            return await self._run_worker(call, name, title, call_id, provider, wt, opened)
+            if chat_name is None:
+                return await self._run_worker(
+                    call,
+                    name,
+                    title,
+                    call_id,
+                    provider,
+                    wt,
+                    opened,
+                    chat_name=None,
+                    attachments=attachments,
+                )
+            # Calls to one name are serialized: a session runs one turn at a time.
+            async with self._named_locks.setdefault(chat_name, asyncio.Lock()):
+                return await self._run_worker(
+                    call,
+                    name,
+                    title,
+                    call_id,
+                    provider,
+                    wt,
+                    opened,
+                    chat_name=chat_name,
+                    attachments=attachments,
+                )
         finally:
             # Every exit after the worktree exists (a failed or cancelled setup too) releases it.
             if wt is not None:
@@ -430,15 +574,36 @@ class ProviderDispatcher(StepDispatcher):
         provider: AgentProvider,
         wt: Worktree | None,
         opened: list[str],
+        chat_name: str | None = None,
+        attachments: Sequence[dict[str, Any]] = (),
     ) -> AgentResult:
         spec = self.config.providers[name]
         opts = call.opts
-        worker = await self.publisher.open_tool_chat(
-            title,
-            tool_call_id=call_id,
-            chat=self.chat,
-            interactivity="full" if spec.interactive else "read-only",
-        )
+        existing = self._named.get(chat_name) if chat_name else None
+        if existing is not None and existing.provider != name:
+            raise FlowAgentError(
+                f"opts.x.chat {chat_name!r} runs on provider {existing.provider!r}; "
+                f"this call routes to {name!r}"
+            )
+        if existing is not None:
+            worker = existing.worker
+            title = existing.title
+            # The session was created with the first call's config; only the model is per
+            # message. A follow-up asking for another effort or approval mode keeps the first.
+            wanted = inner_config(spec, self.run_values(), opts)
+            if wanted != dict(existing.config):
+                self._note(
+                    f"agent() #{call.ordinal}: opts.x.chat {chat_name!r} keeps its first call's "
+                    f"config {json.dumps(dict(existing.config), sort_keys=True)}; "
+                    f"{json.dumps(wanted, sort_keys=True)} ignored"
+                )
+        else:
+            worker = await self.publisher.open_tool_chat(
+                title,
+                tool_call_id=call_id,
+                chat=self.chat,
+                interactivity="full" if spec.interactive else "read-only",
+            )
         opened.append(worker.resource)
         self.worker_providers[worker.resource] = name
         report_dispatch(DispatchHandle(provider=name, chat=worker.resource))
@@ -448,6 +613,8 @@ class ProviderDispatcher(StepDispatcher):
         raw: dict[str, Any] = {"text": call.prompt, "origin": {"kind": "agent"}}
         if schema:
             raw["_meta"] = {OUTPUT_SCHEMA_META_KEY: dict(schema)}
+        if attachments:
+            raw["attachments"] = list(attachments)
         model = model_for(spec, provider, opts, self.run_model)
         started = self._steps[call_id]
         started["chat"] = worker.resource
@@ -461,17 +628,23 @@ class ProviderDispatcher(StepDispatcher):
             model=ModelSelection(id=model) if model else None,
             chat_uri=worker.resource,
         )
-        inner = await provider.create_session(
-            AgentSessionContext(
-                session_uri=self.session_uri,
-                chat_uri=worker.resource,
-                provider_id=provider.agent.provider,
-                working_directories=(wt.cwd.as_uri(),) if wt else self.working_directories,
-                model=model,
-                config=inner_config(spec, self.run_values(), opts),
-                publisher=ScopedPublisher(self.publisher, worker.resource),
+        if existing is not None:
+            inner = existing.inner
+        else:
+            config = inner_config(spec, self.run_values(), opts)
+            inner = await provider.create_session(
+                AgentSessionContext(
+                    session_uri=self.session_uri,
+                    chat_uri=worker.resource,
+                    provider_id=provider.agent.provider,
+                    working_directories=(wt.cwd.as_uri(),) if wt else self.working_directories,
+                    model=model,
+                    config=config,
+                    publisher=ScopedPublisher(self.publisher, worker.resource),
+                )
             )
-        )
+            if chat_name is not None:
+                self._named[chat_name] = _NamedChat(name, worker, inner, title, config)
         self.workers[worker.resource] = inner
         pending = (
             self.pending_overlays.pop(worker.resource, None)
@@ -538,6 +711,7 @@ class ProviderDispatcher(StepDispatcher):
             if not state.started:
                 state.skipped = True
             state.done.set()
+            state.over.set()
 
         try:
             # `on_end` is the only word of a turn cancelled before `run` starts.
@@ -545,6 +719,11 @@ class ProviderDispatcher(StepDispatcher):
                 raise FlowAgentError("could not start a turn in the worker chat")
             # `run_turn` returns when the turn starts, so wait on our own signal.
             await state.done.wait()
+            if chat_name is not None:
+                # `run_turn` refuses while a turn runs and `done` is set before the host
+                # ends the turn, so the next call would otherwise race the turn end.
+                with contextlib.suppress(TimeoutError):
+                    await asyncio.wait_for(state.over.wait(), ABORT_GRACE)
         except asyncio.CancelledError:
             # The run was aborted (a worker skip cancels only the callback).
             state.aborting = True
@@ -563,8 +742,9 @@ class ProviderDispatcher(StepDispatcher):
             if state.skipped and not state.started:
                 with contextlib.suppress(Exception):
                     await inner.cancel("skipped")
-            with contextlib.suppress(Exception):
-                await inner.aclose()
+            if chat_name is None:
+                with contextlib.suppress(Exception):
+                    await inner.aclose()
 
         link = {"content": [link_item]}
         in_tok, out_tok = usage["input_tokens"], usage["output_tokens"]
@@ -798,11 +978,21 @@ class RoutingDispatcher:
 
     async def run_agent(self, call: AgentCall) -> AgentResult:
         name = route(self.config.routing, call)
-        spec = self.config.providers.get(name)
-        # An unknown name is the in-process dispatcher's to report.
-        kind = spec.kind if spec is not None else "inprocess"
+        if name not in self.config.providers:
+            configured = ", ".join(sorted(self.config.providers))
+            raise FlowAgentError(
+                f"provider {name!r} is not configured (opts.x.provider); configured: {configured}"
+            )
+        spec = self.config.providers[name]
+        kind = spec.kind
+        chat = named_chat(call.opts)
+        if (chat is not None or "attach" in x_opts(call.opts)) and kind != "inprocess":
+            raise FlowAgentError(
+                f"opts.x.{'chat' if chat else 'attach'} needs an in-process provider; "
+                f"{name!r} is a {kind} provider"
+            )
         dispatcher: Dispatcher | None
-        if kind == "remote" and spec is not None and self._remote is not None:
+        if kind == "remote" and self._remote is not None:
             dispatcher = self._remotes.get(name)
             if dispatcher is None:
                 dispatcher = self._remotes[name] = self._remote(name, spec)

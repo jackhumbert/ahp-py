@@ -68,6 +68,7 @@ from ahp_host_flow.engine import (
     load_journal,
 )
 from ahp_host_flow.fleet import FleetClients, FleetDispatcher
+from ahp_host_flow.gates import MainChatGates
 from ahp_host_flow.loading import LazyProviders
 from ahp_host_flow.sandbox import (
     NO_ARGS,
@@ -673,6 +674,16 @@ class FlowSession:
         # A continued run's calls get ids of their own: the cut-off ones stay in the turn.
         call_id_prefix = f"agent-r{resumes}" if resumes else "agent"
 
+        gates = MainChatGates(
+            sink=sink,
+            publisher=publisher,
+            chat=chat,
+            redactor=redactor,
+            on_log=on_log,
+            call_id_prefix=f"gate-r{resumes}" if resumes else "gate",
+            working_directories=context.working_directories,
+        )
+
         remote_workers = RemoteWorkerChats(
             config=config,
             sink=sink,
@@ -819,6 +830,7 @@ class FlowSession:
                     on_log=on_log,
                     on_phase=on_phase,
                     on_run_start=on_run_start,
+                    gates=gates,
                 )
             except ScriptError as exc:
                 await fail(exc, "flow.script")

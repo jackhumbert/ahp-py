@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import fnmatch
+from collections.abc import Mapping
+from typing import Any
 
 from ahp_host_flow.config import Routing, RoutingRule
 from ahp_host_flow.engine import AgentCall
@@ -20,8 +22,24 @@ def _matches(rule: RoutingRule, call: AgentCall) -> bool:
     )
 
 
+def x_opts(opts: Mapping[str, Any]) -> Mapping[str, Any]:
+    """`opts.x`, the extension options; a non-object `x` is ignored, as Claude Code ignores it."""
+    x = opts.get("x")
+    return x if isinstance(x, Mapping) else {}
+
+
+def pinned_provider(call: AgentCall) -> str | None:
+    """The provider `opts.x.provider` pins the call to, if it is a non-empty string."""
+    provider = x_opts(call.opts).get("provider")
+    return provider if isinstance(provider, str) and provider else None
+
+
 def route(routing: Routing, call: AgentCall) -> str:
-    """The provider for `call`: the first rule whose every set field matches, else the default."""
+    """The provider for `call`: the one `opts.x.provider` pins, else the first rule whose every
+    set field matches, else the default."""
+    pinned = pinned_provider(call)
+    if pinned is not None:
+        return pinned
     for rule in routing.rules:
         if _matches(rule, call):
             return rule.provider

@@ -254,6 +254,47 @@ Limits:
 - A second interruption before already-finished later calls are reached runs
   them again, because the new journal holds only the calls it has reached.
 
+## Extensions (ahp-py only)
+
+These are opt-in additions to the script format. Claude Code has none of them:
+it ignores `opts.x` and leaves `ask`, `approve` and `canvas` undefined. The full
+rules are in [docs/format.md](docs/format.md#extensions-ahp-py-only).
+
+```js
+// Pin one call to a configured provider.
+const review = await agent('review the change', {x: {provider: 'glm'}})
+
+// A named chat: the second call is a follow-up turn in the same session.
+const plan = await agent('plan the change', {x: {chat: 'planner'}})
+const next = await agent('now list the risks', {x: {chat: 'planner'}})
+
+// Files and prior results as message attachments.
+await agent('summarise', {x: {attach: [
+  {kind: 'file', path: 'docs/notes.md'},
+  {kind: 'result', value: plan, label: 'plan'},
+]}})
+
+// Human gates: any connected client can answer.
+const go = await ask('Proceed?', {choices: ['yes', 'no']})
+const ok = await approve('Apply the plan', {diff: 'one-line summary of the diff'})
+canvas('https://example.com/run', {title: 'Live view'})
+```
+
+`meta.x.schedule` offers a default schedule: `x: {schedule: '0 9 * * 1-5'}` or
+`x: {schedule: {expression: '0 9 * * 1-5', timeZone: 'Europe/London'}}`
+(`UTC` when absent). The host only offers it on the workflow's customization; a
+client applies it to an automation.
+
+To run the same script under Claude Code, paste `shim/flow-shim.js` right after
+`export const meta = {...}`. It ships with the package: `flow shim` prints it
+(`ahp_host_flow.shim.source()` returns it), so a pip install has it too. Under ahp-host-flow it keeps the real functions;
+under Claude Code it falls back to `agent()` (set `FLOW_SHIM.askDefault` or
+`approveDefault` to answer without one). Python workflows are ahp-py-only.
+
+`flow run --config` has no client, so it cannot answer a gate: an `ask()` or
+`approve()` fails with an error that says so. Attachments and named chats work
+with in-process providers only.
+
 ## Fleet and remote providers
 
 Two more kinds of provider run a call somewhere else than this process
@@ -347,8 +388,9 @@ A saved automation whose message is `/<workflow> <json args>` runs the workflow
 unattended through ahp-host's automations, started manually or by cron. The run
 is an ordinary flow run, with a journal and typed progress. If the template names
 a client workflow, the host captures the client's plugin when the automation is
-saved, so the unattended run never reads the client. A workflow's own default
-cron (`meta.x.schedule`) is M10; for now the schedule is the automation's.
+saved, so the unattended run never reads the client. A workflow can also offer
+its own default cron (`meta.x.schedule`), which a client applies when it saves
+the automation; see [Extensions](#extensions-ahp-py-only).
 
 ### Worktree changesets
 

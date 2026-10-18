@@ -12,6 +12,7 @@ const RUN_ACTIVE = -32003;
 const AGENT_LIMIT = -32004;
 const BUDGET_EXHAUSTED = -32005;
 const WORKFLOW_ERROR = -32006;
+const GATE_ERROR = -32007;
 const METHOD_NOT_FOUND = -32601;
 const INVALID_PARAMS = -32602;
 const INTERNAL_ERROR = -32603;
@@ -332,6 +333,66 @@ Object.defineProperty(dtfProto, 'formatToParts', {
     const value = await started;
     const json = JSON.stringify(value);
     return json === undefined ? null : JSON.parse(json);
+  });
+  const isPlain = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
+  const gateOpts = (fn, opts) => {
+    if (opts === undefined || opts === null) return {};
+    if (!isPlain(opts)) throw new TypeError(fn + '() opts must be an object');
+    return opts;
+  };
+  define('ask', async function ask(question, opts) {
+    if (typeof question !== 'string') throw new TypeError('ask() needs a question string');
+    opts = gateOpts('ask', opts);
+    const { choices, schema } = opts;
+    const hasChoices = choices !== undefined && choices !== null;
+    const hasSchema = schema !== undefined && schema !== null;
+    if (
+      hasChoices &&
+      !(Array.isArray(choices) && choices.length > 0 && choices.every((c) => typeof c === 'string'))
+    ) {
+      throw new TypeError('ask() choices must be a non-empty array of strings');
+    }
+    if (hasSchema && !isPlain(schema)) throw new TypeError('ask() schema must be an object');
+    if (hasChoices && hasSchema) throw new TypeError('ask() takes choices or schema, not both');
+    const options = {};
+    if (hasChoices) options.choices = JSON.parse(JSON.stringify(choices));
+    if (hasSchema) options.schema = JSON.parse(JSON.stringify(schema));
+    const reply = await call('gate', { kind: 'ask', question, options });
+    if (!reply.ok) throw new Error(reply.message);
+    return reply.result?.value ?? null;
+  });
+  define('approve', async function approve(summary, opts) {
+    if (typeof summary !== 'string') throw new TypeError('approve() needs a summary string');
+    opts = gateOpts('approve', opts);
+    const { diff } = opts;
+    const optional = (v) => v === undefined || v === null || typeof v === 'string';
+    if (
+      diff !== undefined &&
+      diff !== null &&
+      typeof diff !== 'string' &&
+      !(
+        Array.isArray(diff) &&
+        diff.every((d) => isPlain(d) && typeof d.path === 'string' && optional(d.before) && optional(d.after))
+      )
+    ) {
+      throw new TypeError('approve() diff must be a string or an array of {path, before?, after?}');
+    }
+    const options = {};
+    if (diff !== undefined && diff !== null) options.diff = JSON.parse(JSON.stringify(diff));
+    const reply = await call('gate', { kind: 'approve', question: summary, options });
+    if (!reply.ok) throw new Error(reply.message);
+    return reply.result?.value === true;
+  });
+  define('canvas', function canvas(url, opts) {
+    if (typeof url !== 'string' || !/^https?:\\/\\/\\S/i.test(url)) {
+      throw new TypeError('canvas() needs an http(s) URL');
+    }
+    opts = gateOpts('canvas', opts);
+    const { title } = opts;
+    if (title !== undefined && title !== null && typeof title !== 'string') {
+      throw new TypeError('canvas() title must be a string');
+    }
+    hostNotify('canvas', JSON.stringify({ url, title: title ?? null }));
   });
   define('log', function log(message) {
     hostNotify('log', JSON.stringify({ message: String(message) }));

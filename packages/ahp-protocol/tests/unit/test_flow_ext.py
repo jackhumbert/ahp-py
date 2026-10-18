@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import json
 from pathlib import Path
 from typing import Any
@@ -361,3 +362,56 @@ def test_flow_ext_later_part_with_same_ordinal_wins() -> None:
     assert len(view.steps) == 1
     assert view.steps[0].tool_call_id == "second"
     assert view.steps[0].result == "done"
+
+
+def offering(schedule: Any) -> dict[str, Any]:
+    return {"name": "nightly", "_meta": {flow.FLOW_META_KEY: {"schedule": schedule}}}
+
+
+def test_flowext_schedule_offered() -> None:
+    good = {"expression": "0 6 * * 1-5", "timeZone": "UTC"}
+    assert flow.offered_schedule(offering(good)) == good
+    assert flow.offered_schedule({"name": "x"}) is None
+    assert flow.offered_schedule({"_meta": {flow.FLOW_META_KEY: {}}}) is None
+    assert flow.offered_schedule(offering("0 6 * * *")) is None
+    assert flow.offered_schedule(offering({"expression": "0 6 * * *"})) is None
+    assert flow.offered_schedule(offering({"expression": 5, "timeZone": "UTC"})) is None
+
+
+def test_flowext_schedule_applied() -> None:
+    offered = {"expression": "0 6 * * 1-5", "timeZone": "UTC"}
+    child = offering(offered)
+    trigger = {"id": "ahp-py/flow-schedule", "kind": "schedule", "schedule": offered}
+    assert flow.SCHEDULE_TRIGGER_ID == "ahp-py/flow-schedule"
+
+    definition: dict[str, Any] = {"title": "t", "triggers": []}
+    before = copy.deepcopy(definition)
+    assert flow.with_offered_schedule(definition, child)["triggers"] == [trigger]
+    assert definition == before
+
+    mine = {"id": "mine", "kind": "schedule", "schedule": {"expression": "1 1 * * *"}}
+    held = {"title": "t", "triggers": [mine]}
+    assert flow.with_offered_schedule(held, child)["triggers"] == [mine]
+
+    assert flow.with_offered_schedule(definition, {"name": "x"})["triggers"] == []
+    assert flow.with_offered_schedule({"title": "t"}, {"name": "x"})["triggers"] == []
+    assert flow.with_offered_schedule({"title": "t"}, child)["triggers"] == [trigger]
+
+
+def test_flowext_schedule_applied_to_any_sequence() -> None:
+    offered = {"expression": "0 6 * * 1-5", "timeZone": "UTC"}
+    child = offering(offered)
+    trigger = {"id": "ahp-py/flow-schedule", "kind": "schedule", "schedule": offered}
+    manual = {"id": "m", "kind": "manual"}
+    # A tuple of triggers is extended, like a list; the result is always a list.
+    assert flow.with_offered_schedule({"triggers": (manual,)}, child)["triggers"] == [
+        manual,
+        trigger,
+    ]
+    held = {"id": "mine", "kind": "schedule", "schedule": {"expression": "1 1 * * *"}}
+    assert flow.with_offered_schedule({"triggers": (held,)}, child)["triggers"] == [held]
+    # An empty tuple is a sequence of no triggers, not a missing field.
+    assert flow.with_offered_schedule({"triggers": ()}, child)["triggers"] == [trigger]
+    # Not a sequence of triggers: replaced, never iterated.
+    for raw in ("schedule", b"xy", {"kind": "schedule"}, None, 5):
+        assert flow.with_offered_schedule({"triggers": raw}, child)["triggers"] == [trigger]

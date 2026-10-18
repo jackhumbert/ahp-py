@@ -19,8 +19,11 @@ if TYPE_CHECKING:
 __all__ = [
     "OutsideRunnerError",
     "agent",
+    "approve",
     "args",
+    "ask",
     "budget",
+    "canvas",
     "log",
     "parallel",
     "phase",
@@ -70,6 +73,39 @@ def workflow(name_or_ref: str | Mapping[str, str], args: Any = MISSING) -> Await
     """Run a child workflow (one level of nesting) and return its value."""
     rt = _runtime("workflow")
     return rt.workflow(name_or_ref) if args is MISSING else rt.workflow(name_or_ref, args)
+
+
+def ask(
+    question: str,
+    *,
+    choices: Sequence[str] | None = None,
+    schema: Mapping[str, Any] | None = None,
+) -> Awaitable[Any]:
+    """Ask a human; the awaitable gives the answer, or None when declined or aborted."""
+    opts: dict[str, Any] = {}
+    if choices is not None:
+        opts["choices"] = choices
+    if schema is not None:
+        opts["schema"] = schema
+    return _runtime("ask").ask(question, **opts)
+
+
+def approve(
+    summary: str, *, diff: str | Sequence[Mapping[str, Any]] | None = None
+) -> Awaitable[bool]:
+    """Ask a human to approve; the awaitable gives True, or False when denied."""
+    opts: dict[str, Any] = {}
+    if diff is not None:
+        opts["diff"] = diff
+    return _runtime("approve").approve(summary, **opts)
+
+
+def canvas(url: str, *, title: str | None = None) -> None:
+    """Show an http(s) page as a live view on the run's main chat."""
+    opts: dict[str, Any] = {}
+    if title is not None:
+        opts["title"] = title
+    _runtime("canvas").canvas(url, **opts)
 
 
 class _Budget:

@@ -172,3 +172,19 @@ async def test_pending_in_channels() -> None:
     assert pending.in_channels(["z"]) == []
     pending.resolve(first.id, RequestOutcome("accept"))
     assert pending.in_channels({"a"}) == [third]
+
+
+async def test_ids_never_repeat_across_registries() -> None:
+    """A new process (a new registry) must not re-mint an earlier process's ids.
+
+    A turn restored after a restart still holds the request parts the earlier
+    process published; an id minted again would be answered from the old part.
+    """
+    first, second = PendingRequests(), PendingRequests()
+    a = first.open("turn-1", "input")
+    b = second.open("turn-1", "input")
+    assert a.id.startswith("input-")
+    assert b.id.startswith("input-")
+    assert a.id != b.id
+    first.cancel_scope("turn-1", "done")
+    second.cancel_scope("turn-1", "done")

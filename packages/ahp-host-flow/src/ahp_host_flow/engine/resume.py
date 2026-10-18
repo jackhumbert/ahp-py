@@ -8,8 +8,10 @@ from collections.abc import Callable, Sequence
 from typing import Any, Final
 
 from ahp_host_flow.engine.dispatcher import AgentCall, DispatchHandle
+from ahp_host_flow.engine.gates import GateCall, gate_key
 from ahp_host_flow.engine.journal import (
     AgentRecord,
+    GateRecord,
     JournalError,
     JournalWriter,
     RunHeader,
@@ -106,6 +108,38 @@ class Replay:
         return queue.popleft() if queue else None
 
 
+class GateReplay:
+    """Serves an earlier run's answered gates by key.
+
+    The n-th gate issued with a key gets the n-th answered record with it. Gates
+    never end the agent() cache (they do not touch `Replay`) and match by key in a
+    prefix resume and with `continue_run` alike: an answered gate whose question and
+    options are unchanged replays its answer. Open records are not served, so the
+    gate is asked again.
+    """
+
+    def __init__(
+        self,
+        records: Sequence[GateRecord],
+        *,
+        on_log: Callable[[str], None] | None = None,
+    ) -> None:
+        self._by_key: dict[str, deque[GateRecord]] = {}
+        for rec in sorted(records, key=lambda r: r.ordinal):
+            if rec.status == "answered":
+                self._by_key.setdefault(rec.key, deque()).append(rec)
+        self._on_log = on_log
+        self.served: list[int] = []
+
+    def lookup(self, call: GateCall) -> GateRecord | None:
+        """Call once per gate, as it is issued; None means ask it live."""
+        queue = self._by_key.get(gate_key(call.kind, call.question, call.options))
+        if not queue:
+            return None
+        self.served.append(call.ordinal)
+        return dataclasses.replace(queue.popleft(), ordinal=call.ordinal)
+
+
 class JournalRun:
     """The journal writer, replay cursor and script snapshots of one run."""
 
@@ -121,10 +155,12 @@ class JournalRun:
         args: Any,
         options: RunOptions,
         inherited: dict[str, WorkflowSnapshot],
+        gate_replay: GateReplay | None = None,
     ) -> None:
         self.run_id = run_id
         self.writer = writer
         self.replay = replay
+        self.gate_replay = gate_replay
         self.source = source
         self.filename = filename
         self.has_args = has_args
@@ -152,6 +188,7 @@ class JournalRun:
                 raise ValueError("a scriptless run has no source")
             filename = LIBRARY_FILENAME
         replay: Replay | None = None
+        gate_replay: GateReplay | None = None
         inherited: dict[str, WorkflowSnapshot] = {}
         effective = options
         if options.resume_from is not None:
@@ -202,6 +239,13 @@ class JournalRun:
                 prefix_only=not options.continue_run,
                 unfinished=old.unfinished if options.continue_run else (),
             )
+            gate_replay = GateReplay(old.gates, on_log=on_log)
+            if on_log is not None:
+                for gate in old.open_gates:
+                    on_log(
+                        f"resume: {gate.kind}() gate #{gate.ordinal} was still open; "
+                        "it is asked again"
+                    )
             inherited = dict(old.workflows)
         elif source is None and not scriptless:
             raise ValueError("a script source is needed unless resuming")
@@ -230,6 +274,7 @@ class JournalRun:
             args=args,
             options=effective,
             inherited=inherited,
+            gate_replay=gate_replay,
         )
         # Every child snapshot the old run had goes into the new journal now, not
         # when the child is next reached: a resumed run that stops before then

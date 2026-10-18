@@ -55,3 +55,16 @@ def test_first_match_wins() -> None:
 
 def test_default_without_rules() -> None:
     assert route(Routing("a"), _call(label="x")) == "a"
+
+
+def test_flowext_provider_route_pin_wins() -> None:
+    routing = Routing("a", (RoutingRule("b", model="glm"),))
+    assert route(routing, _call({"model": "glm", "x": {"provider": "a"}})) == "a"
+    assert route(routing, _call({"model": "glm"})) == "b"
+
+
+def test_flowext_provider_route_ignores_bad_x() -> None:
+    routing = Routing("a", (RoutingRule("b", model="glm"),))
+    for x in ("b", {"provider": 5}, {"provider": ""}):
+        assert route(routing, _call({"model": "glm", "x": x})) == "b"
+        assert route(routing, _call({"x": x})) == "a"

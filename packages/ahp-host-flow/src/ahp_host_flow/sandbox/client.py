@@ -20,6 +20,11 @@ from ahp_host_flow.engine import (
     AgentLimitError,
     AgentRecord,
     Dispatcher,
+    GateCall,
+    GateRecord,
+    GateRunner,
+    Gates,
+    GateUnavailableError,
     JournalRun,
     Registry,
     ResolvedScript,
@@ -36,6 +41,8 @@ from ahp_host_flow.sandbox.node import MIN_NODE_MAJOR, NodeNotFoundError
 RUNNER: Final = Path(__file__).with_name("runner.mjs")
 # Passed as `args` when the caller gives none; the script then sees `undefined`.
 NO_ARGS: Final = object()
+# Seconds a run waits at its end for canvas() calls still being published.
+CANVAS_FLUSH_TIMEOUT: Final = 5.0
 
 Language = Literal["js", "py"]
 
@@ -129,6 +136,7 @@ class RunState:
     node: str | None
     on_log: Callable[[str], None] | None
     on_phase: Callable[[str], None] | None
+    gates: GateRunner
     # Child runners of the other language, alive while the run is.
     children: set[Sandbox] = field(default_factory=set)
 
@@ -203,6 +211,7 @@ class Sandbox:
         # A child connection serves a `workflow()` child of the run; its own `workflow()` fails.
         self._child_connection = False
         self._agent_tasks: set[asyncio.Task[None]] = set()
+        self._canvas_tasks: set[asyncio.Task[None]] = set()
 
     async def __aenter__(self) -> Sandbox:
         await self.start()
@@ -329,7 +338,13 @@ class Sandbox:
                 future.set_result(msg)
         elif "id" in msg:
             # Synchronous, before the task starts: ordinals, phases and refusals follow line order.
-            issued = self._issue(msg) if method == "agent" else None
+            issued = (
+                self._issue(msg)
+                if method == "agent"
+                else self._issue_gate(msg)
+                if method == "gate"
+                else None
+            )
             task = asyncio.create_task(self._on_request(msg, issued))
             self._handlers.add(task)
             task.add_done_callback(self._handlers.discard)
@@ -357,19 +372,40 @@ class Sandbox:
         except Exception as exc:
             return exc
 
+    def _issue_gate(
+        self, msg: Mapping[str, Any]
+    ) -> tuple[GateCall, GateRecord | None] | Exception | None:
+        """Take the gate's ordinal at the host; a malformed request is returned, not raised."""
+        state = self._run
+        if state is None:
+            return None
+        params = msg.get("params")
+        params = params if isinstance(params, Mapping) else {}
+        try:
+            return state.gates.issue(
+                params.get("kind"), params.get("question"), params.get("options")
+            )
+        except Exception as exc:
+            return exc
+
     async def _on_request(
         self,
         msg: Mapping[str, Any],
-        issued: tuple[AgentCall, AgentRecord | None] | Exception | None = None,
+        issued: tuple[AgentCall, AgentRecord | None]
+        | tuple[GateCall, GateRecord | None]
+        | Exception
+        | None = None,
     ) -> None:
         method = msg.get("method")
-        if method in ("agent", "workflow"):
+        if method in ("agent", "workflow", "gate"):
             task = asyncio.current_task()
             if task is not None:
                 self._agent_tasks.add(task)
             try:
                 if method == "agent":
                     await self._on_agent(msg, issued)
+                elif method == "gate":
+                    await self._on_gate(msg, issued)
                 else:
                     await self._on_workflow(msg)
             except asyncio.CancelledError:
@@ -404,7 +440,10 @@ class Sandbox:
     async def _on_agent(
         self,
         msg: Mapping[str, Any],
-        issued: tuple[AgentCall, AgentRecord | None] | Exception | None,
+        issued: tuple[AgentCall, AgentRecord | None]
+        | tuple[GateCall, GateRecord | None]
+        | Exception
+        | None,
     ) -> None:
         state = self._run
         if state is None or issued is None:
@@ -415,6 +454,8 @@ class Sandbox:
             if isinstance(issued, Exception):
                 raise issued
             call, cached = issued
+            if not isinstance(call, AgentCall) or isinstance(cached, GateRecord):
+                raise TypeError("not an agent request")
             value = await scheduler.run(call, cached)
         except SchedulerRefusal as exc:
             code = (
@@ -430,6 +471,34 @@ class Sandbox:
                 "id": msg["id"],
                 "result": {"value": value, "spent": scheduler.budget.spent},
             }
+        )
+
+    async def _on_gate(
+        self,
+        msg: Mapping[str, Any],
+        issued: tuple[AgentCall, AgentRecord | None]
+        | tuple[GateCall, GateRecord | None]
+        | Exception
+        | None,
+    ) -> None:
+        state = self._run
+        if state is None or issued is None:
+            await self._write_error(msg["id"], protocol.INTERNAL_ERROR, "no run is active")
+            return
+        if isinstance(issued, Exception):
+            await self._write_error(msg["id"], protocol.INVALID_PARAMS, str(issued))
+            return
+        call, cached = issued
+        if not isinstance(call, GateCall) or isinstance(cached, AgentRecord):
+            await self._write_error(msg["id"], protocol.INTERNAL_ERROR, "not a gate request")
+            return
+        try:
+            value = await state.gates.run(call, cached)
+        except GateUnavailableError as exc:
+            await self._write_error(msg["id"], protocol.GATE_ERROR, str(exc))
+            return
+        await self._write(
+            {"jsonrpc": protocol.JSONRPC, "id": msg["id"], "result": {"value": value}}
         )
 
     async def _on_workflow(self, msg: Mapping[str, Any]) -> None:
@@ -464,6 +533,10 @@ class Sandbox:
             return
         if method == "log" and state.on_log is not None:
             state.on_log(str(params.get("message", "")))
+        elif method == "canvas":
+            task = asyncio.create_task(state.gates.canvas(params.get("url"), params.get("title")))
+            self._canvas_tasks.add(task)
+            task.add_done_callback(self._canvas_tasks.discard)
         elif method == "phase":
             title = str(params.get("title", ""))
             state.scheduler.set_phase(title)
@@ -555,6 +628,7 @@ class Sandbox:
         on_agent_start: Callable[[AgentCall], None] | None = None,
         on_agent_end: Callable[[AgentCall, Any], None] | None = None,
         on_run_start: Callable[[str], None] | None = None,
+        gates: Gates | None = None,
     ) -> Any:
         """Run a script; `agent()` calls go through a Scheduler to `dispatcher`.
 
@@ -606,6 +680,14 @@ class Sandbox:
                 if jr is not None:
                     jr.close()
                 raise
+            gate_runner = GateRunner(
+                gates,
+                abort=abort,
+                mask=options.redact,
+                on_log=on_log,
+                journal=jr.writer if jr else None,
+                replay=jr.gate_replay if jr else None,
+            )
             state = RunState(
                 scheduler=scheduler,
                 options=options,
@@ -614,6 +696,7 @@ class Sandbox:
                 node=self._node,
                 on_log=on_log,
                 on_phase=on_phase,
+                gates=gate_runner,
             )
             self._run = state
             try:
@@ -653,6 +736,13 @@ class Sandbox:
                 scheduler.close()
                 state.kill_children(SandboxError("run ended", stderr=self.stderr_tail))
                 self._run = None
+                canvases = list(self._canvas_tasks)
+                if canvases:
+                    _, stuck = await asyncio.wait(canvases, timeout=CANVAS_FLUSH_TIMEOUT)
+                    for canvas_task in stuck:
+                        canvas_task.cancel()
+                    await asyncio.gather(*stuck, return_exceptions=True)
+                state.gates.close()
                 tasks = list(self._agent_tasks)
                 for task in tasks:
                     task.cancel()
@@ -690,6 +780,7 @@ async def run_script(
     on_agent_start: Callable[[AgentCall], None] | None = None,
     on_agent_end: Callable[[AgentCall, Any], None] | None = None,
     on_run_start: Callable[[str], None] | None = None,
+    gates: Gates | None = None,
 ) -> Any:
     """Run a script with a throwaway sandbox; Node for `.js`, the Python runner for `.py`."""
     name = filename
@@ -708,4 +799,5 @@ async def run_script(
             on_agent_start=on_agent_start,
             on_agent_end=on_agent_end,
             on_run_start=on_run_start,
+            gates=gates,
         )

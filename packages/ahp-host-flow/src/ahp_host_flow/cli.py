@@ -13,7 +13,7 @@ from typing import Any
 
 from ahp_host.core.automations import iso
 
-from ahp_host_flow import redaction
+from ahp_host_flow import redaction, shim
 from ahp_host_flow.config import ConfigError, load_config
 from ahp_host_flow.engine import (
     EchoDispatcher,
@@ -81,6 +81,10 @@ def _build_parser() -> argparse.ArgumentParser:
             "a flow.toml: run the script through its providers on an in-process host "
             "(concurrency, budget, timeout, workflows and state come from it)"
         ),
+    )
+    sub.add_parser(
+        "shim",
+        help="print shim/flow-shim.js, the dual-target shim to paste after a script's meta",
     )
     redact = sub.add_parser(
         "redact",
@@ -240,6 +244,10 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if args.command == "redact":
         return _redact(parser, args)
+
+    if args.command == "shim":
+        sys.stdout.write(shim.source())
+        return 0
 
     if args.config is not None:
         return _run_with_config(parser, args)

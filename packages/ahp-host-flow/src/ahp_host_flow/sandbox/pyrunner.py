@@ -20,6 +20,7 @@ import inspect
 import json
 import math
 import os
+import re
 import sys
 import threading
 import traceback
@@ -249,6 +250,24 @@ def _text(value: object) -> str:
     return str(value)
 
 
+def _diff_ok(diff: object) -> bool:
+    if isinstance(diff, str):
+        return True
+    if not isinstance(diff, (list, tuple)):
+        return False
+
+    def optional(value: object) -> bool:
+        return value is None or isinstance(value, str)
+
+    return all(
+        isinstance(d, Mapping)
+        and isinstance(d.get("path"), str)
+        and optional(d.get("before"))
+        and optional(d.get("after"))
+        for d in diff
+    )
+
+
 class _Link:
     """The connection: numbered requests out, their responses in, notifications."""
 
@@ -389,6 +408,66 @@ class Runtime:
     def log(self, message: object) -> None:
         self.link.notify("log", {"message": _text(message)})
 
+    def ask(self, question: object, **opts: Any) -> asyncio.Future[Any]:
+        if not isinstance(question, str):
+            return failed(TypeError("ask() needs a question string"))
+        choices, schema = opts.get("choices"), opts.get("schema")
+        if choices is not None and not (
+            isinstance(choices, (list, tuple))
+            and len(choices) > 0
+            and all(isinstance(c, str) for c in choices)
+        ):
+            return failed(TypeError("ask() choices must be a non-empty array of strings"))
+        if schema is not None and not isinstance(schema, Mapping):
+            return failed(TypeError("ask() schema must be an object"))
+        if choices is not None and schema is not None:
+            return failed(TypeError("ask() takes choices or schema, not both"))
+        options: dict[str, Any] = {}
+        if choices is not None:
+            options["choices"] = list(choices)
+        if schema is not None:
+            options["schema"] = schema
+        try:
+            options = clone_json(options)
+        except (TypeError, ValueError) as exc:
+            return failed(TypeError(f"ask() opts must be JSON: {exc}"))
+        reply = self.link.call("gate", {"kind": "ask", "question": question, "options": options})
+        return asyncio.ensure_future(self._gate_result(reply))
+
+    def approve(self, summary: object, **opts: Any) -> asyncio.Future[bool]:
+        if not isinstance(summary, str):
+            return failed(TypeError("approve() needs a summary string"))
+        diff = opts.get("diff")
+        if diff is not None and not _diff_ok(diff):
+            return failed(
+                TypeError("approve() diff must be a string or an array of {path, before?, after?}")
+            )
+        options: dict[str, Any] = {} if diff is None else {"diff": diff}
+        try:
+            options = clone_json(options)
+        except (TypeError, ValueError) as exc:
+            return failed(TypeError(f"approve() opts must be JSON: {exc}"))
+        reply = self.link.call("gate", {"kind": "approve", "question": summary, "options": options})
+        return asyncio.ensure_future(self._approve_result(reply))
+
+    async def _gate_result(self, reply: asyncio.Future[Any]) -> Any:
+        msg = await reply
+        if msg.get("error") is not None:
+            raise RuntimeError(_error_text(msg))
+        result = msg.get("result")
+        return result.get("value") if isinstance(result, dict) else None
+
+    async def _approve_result(self, reply: asyncio.Future[Any]) -> bool:
+        return await self._gate_result(reply) is True
+
+    def canvas(self, url: object, **opts: Any) -> None:
+        if not isinstance(url, str) or re.match(r"(?i)https?://\S", url) is None:
+            raise TypeError("canvas() needs an http(s) URL")
+        title = opts.get("title")
+        if title is not None and not isinstance(title, str):
+            raise TypeError("canvas() title must be a string")
+        self.link.notify("canvas", {"url": url, "title": title})
+
     def workflow(self, ref: object, args: Any = MISSING) -> asyncio.Future[Any]:
         if self.child:
             return failed(RuntimeError(protocol.NEST_MESSAGE))
@@ -472,6 +551,9 @@ def _namespace(rt: Runtime, filename: str) -> dict[str, Any]:
         "pipeline": rt.pipeline,
         "phase": rt.phase,
         "log": rt.log,
+        "ask": rt.ask,
+        "approve": rt.approve,
+        "canvas": rt.canvas,
         "budget": rt.budget,
         "workflow": rt.workflow,
         "args": rt.args,

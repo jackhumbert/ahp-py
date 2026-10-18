@@ -86,5 +86,5 @@ def test_journal_ignores_an_unknown_record_type(tmp_path: Path) -> None:
     writer.close()
     path = run_dir(tmp_path, "r1") / "journal.jsonl"
     with open(path, "a", encoding="utf-8", newline="\n") as f:
-        f.write('{"type":"gate","id":"g1","state":"open"}\n')
+        f.write('{"type":"future","id":"g1","state":"open"}\n')
     assert load_journal(tmp_path, "r1").agents == (rec,)

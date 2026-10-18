@@ -1,0 +1,311 @@
+"""`ask()`, `approve()` and `canvas()` on the run's main chat (plan §6).
+
+The engine's `GateRunner` numbers and journals the gates; this is the `Gates` it
+asks: an `ask()` is an input request on the main chat (a select, text, number or
+boolean form built from `choices` or a flat `schema`), an `approve()` a tool
+confirmation with an edits preview, and `canvas()` goes out through `canvas_set`
+(experimental in AHP 1.0.0). Everything published is masked first; the client's
+answer reaches the script as it was typed (the engine masks it once, for the
+journal and the script).
+"""
+
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import hashlib
+import json
+from collections.abc import Callable, Mapping, Sequence
+from pathlib import Path
+from typing import Any, Final
+
+from ahp_host import TurnSink
+from ahp_host.provider.base import (
+    Canvas,
+    InputQuestion,
+    InputRequest,
+    ResolvesInput,
+    SessionPublisher,
+    ToolConfirmation,
+)
+from ahp_host.provider.changes import FileChange
+
+from ahp_host_flow import catalog
+from ahp_host_flow.engine import GateCall, Redactor, schema_error
+
+#: The same bound as `ahp_host.core.structured.MAX_ATTEMPTS`: invalid answers re-asked.
+ASK_ATTEMPTS: Final = 3
+CANVAS_EXTENSION_ID: Final = "ahp-py/flow"
+CANVAS_ID: Final = "workflow"
+
+_QUESTION_ID: Final = "answer"
+_SCALAR_KINDS: Final = {
+    "string": "text",
+    "number": "number",
+    "integer": "integer",
+    "boolean": "boolean",
+}
+
+
+def _enum_of(prop: Mapping[str, Any]) -> list[str] | None:
+    values = prop.get("enum")
+    if isinstance(values, list) and values and all(isinstance(v, str) for v in values):
+        return list(values)
+    return None
+
+
+def _flat_questions(
+    schema: Mapping[str, Any],
+) -> list[InputQuestion] | None:
+    """One question per property, or None when the schema is not a flat form."""
+    props = schema.get("properties")
+    if schema.get("type") != "object" or not isinstance(props, Mapping) or not props:
+        return None
+    required = schema.get("required")
+    required = required if isinstance(required, list) else []
+    questions: list[InputQuestion] = []
+    for name, prop in props.items():
+        if not isinstance(name, str) or not isinstance(prop, Mapping):
+            return None
+        kind: str
+        options: list[dict[str, Any]] = []
+        type_ = prop.get("type")
+        enum = _enum_of(prop)
+        items = prop.get("items")
+        if type_ == "string" and enum is not None:
+            kind, options = "single-select", [{"id": v, "label": v} for v in enum]
+        elif isinstance(type_, str) and type_ in _SCALAR_KINDS and "enum" not in prop:
+            kind = _SCALAR_KINDS[type_]
+        elif (
+            type_ == "array"
+            and isinstance(items, Mapping)
+            and items.get("type") == "string"
+            and (values := _enum_of(items)) is not None
+        ):
+            kind, options = "multi-select", [{"id": v, "label": v} for v in values]
+        else:
+            return None
+        title = prop.get("title")
+        extra: dict[str, Any] = {}
+        if isinstance(title, str) and title:
+            extra["title"] = title
+        if name in required:
+            extra["required"] = True
+        description = prop.get("description")
+        message = next((t for t in (description, title) if isinstance(t, str) and t), name)
+        questions.append(InputQuestion(name, kind, message, options, extra))
+    return questions
+
+
+def gate_form(question: str, options: Mapping[str, Any]) -> tuple[str | None, list[InputQuestion]]:
+    """The request's message and questions for an `ask()` call."""
+    choices = options.get("choices")
+    schema = options.get("schema")
+    if choices is not None:
+        return None, [
+            InputQuestion(
+                _QUESTION_ID,
+                "single-select",
+                question,
+                [{"id": c, "label": c} for c in choices],
+                {"required": True},
+            )
+        ]
+    if isinstance(schema, Mapping):
+        flat = _flat_questions(schema)
+        if flat is not None:
+            return question, flat
+        text = (
+            f"{question}\n\nAnswer with JSON matching this schema:\n{json.dumps(schema, indent=2)}"
+        )
+        return None, [InputQuestion(_QUESTION_ID, "text", text, extra={"required": True})]
+    return None, [InputQuestion(_QUESTION_ID, "text", question, extra={"required": True})]
+
+
+def _submitted(answers: Mapping[str, Any], qid: str) -> tuple[bool, Any]:
+    a = answers.get(qid)
+    if not isinstance(a, Mapping) or a.get("state") != "submitted":
+        return False, None
+    v = a.get("value")
+    return True, (v.get("value") if isinstance(v, Mapping) else v)
+
+
+def gate_answer(options: Mapping[str, Any], answers: Mapping[str, Any]) -> tuple[Any, str | None]:
+    """The script's value from the submitted *answers*, and why it is unusable (or None)."""
+    choices = options.get("choices")
+    schema = options.get("schema")
+    value: Any
+    if choices is not None:
+        _, value = _submitted(answers, _QUESTION_ID)
+        if value not in choices:
+            return value, f"{value!r} is not one of the choices"
+        return value, None
+    if isinstance(schema, Mapping):
+        flat = _flat_questions(schema)
+        if flat is not None:
+            value = {}
+            for q in flat:
+                found, v = _submitted(answers, q.id)
+                if found and v is not None:
+                    value[q.id] = v
+        else:
+            _, text = _submitted(answers, _QUESTION_ID)
+            try:
+                value = json.loads(text if isinstance(text, str) else "")
+            except ValueError as exc:
+                return text, f"not JSON: {exc}"
+        return value, schema_error(schema, value)
+    _, value = _submitted(answers, _QUESTION_ID)
+    return value, None
+
+
+class MainChatGates:
+    """The engine's `Gates` on the run's main chat."""
+
+    def __init__(
+        self,
+        *,
+        sink: TurnSink,
+        publisher: SessionPublisher,
+        chat: str,
+        redactor: Redactor,
+        on_log: Callable[[str], None] | None = None,
+        call_id_prefix: str = "gate",
+        working_directories: Sequence[str] = (),
+    ) -> None:
+        self._sink = sink
+        self._publisher = publisher
+        self.chat = chat
+        self._redactor = redactor
+        self._on_log = on_log
+        self._prefix = call_id_prefix
+        self._workspace = next(
+            (p for d in working_directories if (p := catalog.directory_of(d))), None
+        )
+
+    def _log(self, message: str) -> None:
+        if self._on_log is not None:
+            self._on_log(message)
+
+    def _masked_form(
+        self, question: str, options: Mapping[str, Any]
+    ) -> tuple[str | None, list[InputQuestion]]:
+        mask = self._redactor.mask
+        message, questions = gate_form(question, options)
+        masked: list[InputQuestion] = []
+        for q in questions:
+            extra = (
+                {**q.extra, "title": mask(str(q.extra["title"]))} if "title" in q.extra else q.extra
+            )
+            # Option ids stay as typed: an answer must match them.
+            labelled = [{**o, "label": mask(str(o["label"]))} for o in q.options]
+            masked.append(InputQuestion(q.id, q.kind, mask(q.message), labelled, extra))
+        return mask(message) if message is not None else None, masked
+
+    async def ask(self, call: GateCall) -> Any:
+        message, questions = self._masked_form(self._redactor.mask(call.question), call.options)
+        # The validation form is built from the raw options; only what is shown is masked.
+        key = ""
+        reason: str | None = None
+        try:
+            for attempt in range(ASK_ATTEMPTS):
+                key = f"{self._prefix}-{call.ordinal}-{attempt}"
+                shown = message
+                if attempt > 0 and reason is not None:
+                    shown = f"{self._redactor.mask(reason)}\n\n{message or ''}".rstrip()
+                outcome = await self._sink.request_input(
+                    InputRequest(message=shown, questions=questions, key=key)
+                )
+                if not outcome.accepted:
+                    return None
+                value, reason = gate_answer(call.options, outcome.answers)
+                if reason is None:
+                    return value
+        except asyncio.CancelledError:
+            if isinstance(self._sink, ResolvesInput) and key:
+                with contextlib.suppress(Exception):
+                    await self._sink.input_resolved(key, response="cancel")
+            raise
+        self._log(f"ask() #{call.ordinal}: no valid answer after {ASK_ATTEMPTS} attempts: {reason}")
+        return None
+
+    def _edits(self, call: GateCall, diff: list[Any]) -> list[FileChange]:
+        if self._workspace is None:
+            self._log(
+                f"approve() #{call.ordinal}: no local working directory; diff paths not previewed"
+            )
+            return []
+        mask = self._redactor.mask
+
+        def text(value: Any) -> bytes | None:
+            return mask(str(value)).encode("utf-8") if value is not None else None
+
+        edits: list[FileChange] = []
+        for item in diff:
+            if not isinstance(item, Mapping) or not isinstance(item.get("path"), str):
+                continue
+            path = Path(item["path"])
+            if not path.is_absolute():
+                path = self._workspace / path
+            edits.append(
+                FileChange(
+                    uri=path.as_uri(),
+                    before=text(item.get("before")),
+                    after=text(item.get("after")),
+                )
+            )
+        return edits
+
+    async def approve(self, call: GateCall) -> bool:
+        call_id = f"{self._prefix}-{call.ordinal}"
+        summary = self._redactor.mask(call.question)
+        diff = call.options.get("diff")
+        message = summary
+        edits: list[FileChange] = []
+        if isinstance(diff, str):
+            message = f"{summary}\n\n```diff\n{self._redactor.mask(diff)}\n```"
+        elif isinstance(diff, list):
+            edits = self._edits(call, diff)
+        try:
+            await self._sink.tool_call_started(
+                call_id, "approve", {"summary": summary}, display_name="Approve"
+            )
+            outcome = await self._sink.confirm_tool_call(
+                ToolConfirmation(
+                    call_id=call_id,
+                    name="approve",
+                    invocation_message=message,
+                    display_name="Approve",
+                    tool_input={"summary": summary},
+                    confirmation_title="Approve this step?",
+                    edits=edits,
+                )
+            )
+            if not outcome.approved:
+                return False
+            await self._sink.tool_call_completed(
+                call_id,
+                {"content": [{"type": "text", "text": "approved"}]},
+                success=True,
+                past_tense_message="Approved",
+            )
+            return True
+        except asyncio.CancelledError:
+            with contextlib.suppress(Exception):
+                await self._sink.tool_call_confirmed(
+                    call_id, approved=False, reason_message="run aborted"
+                )
+            raise
+
+    async def canvas(self, url: str, title: str | None) -> None:
+        mask = self._redactor.mask
+        await self._publisher.canvas_set(
+            Canvas(
+                instance_id="flow-canvas-" + hashlib.sha256(url.encode()).hexdigest()[:16],
+                extension_id=CANVAS_EXTENSION_ID,
+                canvas_id=CANVAS_ID,
+                title=mask(title) if title else None,
+                url=mask(url),
+            ),
+            chat=self.chat,
+        )

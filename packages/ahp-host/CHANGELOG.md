@@ -10,6 +10,15 @@ versions each release speaks.
 
 ## [Unreleased]
 
+### Fixed
+
+- Request ids (`input-…`, `confirm-…`) carry a token unique to the host
+  process. A turn restored after a restart still holds the request parts the
+  previous process published, and the chat reducer resolves a request by the
+  first part with its id; a counter restarting at 1 re-minted an answered
+  request's id, so a client's answer to a new question was read from the old
+  part.
+
 ### Added — redaction after publishing (ahp-py extension)
 
 - **`Host.redact(channel, turn_id, part_id, reason, ...)`** and

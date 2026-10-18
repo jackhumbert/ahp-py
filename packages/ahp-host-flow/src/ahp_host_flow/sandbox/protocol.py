@@ -47,6 +47,14 @@ Node -> Python methods, only while a `run` is active:
   phase, budget, caps and abort are the run's, and only `args` and the returned
   value cross as JSON. The parent gets `{value, spent}`. That runner's own
   `workflow()` is answered with WORKFLOW_ERROR NEST_MESSAGE.
+- request `gate` {kind: 'ask' | 'approve', question: str, options: object} ->
+  result {value: any}: `ask` gives the answer or null, `approve` true or false.
+  `options` holds only what the script set (`choices`/`schema` for ask, `diff`
+  for approve). The host takes the gate ordinal, from a counter of its own
+  (separate from the agent ordinals), when the line arrives. Error GATE_ERROR
+  (no client can answer here), whose message the verb throws, or INVALID_PARAMS
+  for a malformed request.
+- notification `canvas` {url: str, title: str | null}
 - notification `log` {message: str}
 - notification `phase` {title: str}; sets the run's current phase at the host.
 
@@ -75,6 +83,7 @@ RUN_ACTIVE: Final = -32003
 AGENT_LIMIT: Final = -32004  # agent() refused: per-run call cap
 BUDGET_EXHAUSTED: Final = -32005  # agent() refused: output-token budget spent
 WORKFLOW_ERROR: Final = -32006  # workflow() reference could not be resolved
+GATE_ERROR: Final = -32007  # ask()/approve() has no answer path
 
 INVALID_REQUEST: Final = -32600
 METHOD_NOT_FOUND: Final = -32601
