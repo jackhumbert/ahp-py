@@ -192,6 +192,27 @@ class _Advapi:
         finally:
             self.k.LocalFree(descriptor)
 
+    def canonical(self, sddl: str) -> str:
+        """`sddl` as Windows writes it back: a well-known SID becomes its alias
+        (the built-in Administrator is `LA`, not `S-1-5-21-...-500`)."""
+        descriptor = ctypes.c_void_p()
+        if not self.a.ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            sddl, _SDDL_REVISION_1, ctypes.byref(descriptor), None
+        ):
+            raise self.fail()
+        try:
+            text = ctypes.c_wchar_p()
+            if not self.a.ConvertSecurityDescriptorToStringSecurityDescriptorW(
+                descriptor, _SDDL_REVISION_1, _DACL_SECURITY_INFORMATION, ctypes.byref(text), None
+            ):
+                raise self.fail()
+            try:
+                return str(text.value)
+            finally:
+                self.k.LocalFree(text)
+        finally:
+            self.k.LocalFree(descriptor)
+
     def get_dacl(self, path: Path) -> str:
         descriptor = ctypes.c_void_p()
         status = self.a.GetNamedSecurityInfoW(
@@ -233,3 +254,12 @@ def windows_dacl(path: Path) -> str:
 def windows_user_sid() -> str:
     """The current user's SID string. Windows only; for tests and diagnosis."""
     return _Advapi().user_sid()
+
+
+def windows_user_trustee() -> str:
+    """The current user as a trustee in the SDDL `windows_dacl` returns: its SID,
+    or the alias Windows writes for a well-known one (`LA` for the built-in
+    Administrator, which is what CI's Windows runner runs as). Windows only."""
+    advapi = _Advapi()
+    sddl = advapi.canonical(f"D:(A;;FA;;;{advapi.user_sid()})")
+    return sddl.rsplit(";", 1)[1].rstrip(")")

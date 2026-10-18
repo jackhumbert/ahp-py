@@ -35,7 +35,9 @@ def assert_owner_only(path: Path, *, directory: bool) -> None:
         assert stat.S_IMODE(path.stat().st_mode) == (0o700 if directory else 0o600)
         return
     sddl = private_files.windows_dacl(path)
-    user = private_files.windows_user_sid()
+    # As Windows spells it in SDDL: the SID, or an alias such as `LA` when the
+    # account is a well-known one (CI's runner is the built-in Administrator).
+    user = private_files.windows_user_trustee()
     # Exactly one ACE, allowing the current user; no Users, Authenticated
     # Users, Everyone, Administrators or SYSTEM entry inherited from above.
     assert [(kind, trustee) for kind, _flags, _rights, trustee in _aces(sddl)] == [("A", user)], (
@@ -90,6 +92,12 @@ class TestWindows:
         make_owner_only(directory, directory=True)
         (directory / "new.txt").write_text("x")
         assert_owner_only(directory / "new.txt", directory=False)
+
+    def test_the_trustee_is_the_user_as_windows_writes_it(self) -> None:
+        trustee = private_files.windows_user_trustee()
+        sid = private_files.windows_user_sid()
+        # A real account's SID, or the alias of a well-known one -- never empty.
+        assert trustee == sid or (trustee.isalpha() and len(trustee) == 2)
 
     def test_a_file_that_already_existed_is_covered_too(self, tmp_path: Path) -> None:
         """No traverse check on Windows (everyone holds
