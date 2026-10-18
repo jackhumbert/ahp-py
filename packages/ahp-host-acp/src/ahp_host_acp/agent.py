@@ -27,11 +27,35 @@ the node (roots, port, bind, token, state). What the agent reports about
 itself (its options, models and commands) is kept in the node's state
 directory for this agent, `agent.json`. Registered as the `acp` entry in the
 `ahp_host.agents` group.
+
+`from_config` builds the same provider from Python, for a flow.toml (or any
+embedder) with no node:
+
+    [providers.opencode]
+    load = "ahp_host_acp:from_config"
+    config = "~/.config/ahp/opencode.toml"   # passed as config=Path(...)
+
+or with the options inline, each key a keyword argument:
+
+    [providers.opencode]
+    load = "ahp_host_acp:from_config"
+
+    [providers.opencode.config]
+    roots = ["~/projects"]
+
+The file is this package's own config file (server-only keys such as `port` in
+it are ignored; as a keyword they are refused); keyword options override it.
+flow.toml's loader hands `from_config` the host's `roots` (plus the runs folder)
+and a `state_dir` unless the table sets them; setting `roots` in the table stops
+that, and a worktree's working directory (under the runs folder) then falls
+outside the roots.
 """
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+import os
+from collections.abc import Mapping, Sequence
+from pathlib import Path
 from typing import Any
 
 from ahp_host.node import NodeContext
@@ -39,12 +63,18 @@ from ahp_host.node import NodeContext
 from ahp_host_acp.config import (
     DEFAULT_AGENT_NAME,
     DEFAULT_PROVIDER_ID,
+    DEFAULT_STATE,
+    SERVER_ONLY_KEYS,
     ConfigError,
     _command,
     _mcp_servers,
     _models,
     _option_values,
+    _path,
+    _roots_from_file,
     _strings,
+    read_config_file,
+    roots_option,
 )
 from ahp_host_acp.provider import (
     CATALOGUE_FILE,
@@ -53,8 +83,9 @@ from ahp_host_acp.provider import (
     AgentSpec,
     is_valid_provider_id,
 )
+from ahp_host_acp.roots import Roots
 
-_OPTIONS = frozenset(
+AGENT_OPTIONS = frozenset(
     {
         "provider_id",
         "agent_name",
@@ -70,7 +101,11 @@ _OPTIONS = frozenset(
 
 
 def create(options: Mapping[str, Any], node: NodeContext) -> AcpProvider:
-    unknown = sorted(set(options) - _OPTIONS)
+    return provider_from_options(options, node.roots, node.state_dir)
+
+
+def provider_from_options(options: Mapping[str, Any], roots: Roots, state_dir: Path) -> AcpProvider:
+    unknown = sorted(set(options) - AGENT_OPTIONS)
     if unknown:
         raise ConfigError(f"acp agent: unknown option(s): {', '.join(unknown)}")
     provider_id = str(options.get("provider_id", DEFAULT_PROVIDER_ID))
@@ -83,7 +118,7 @@ def create(options: Mapping[str, Any], node: NodeContext) -> AcpProvider:
         raise ConfigError("model_command must be a string containing {model}")
     description = options.get("description")
     return AcpProvider(
-        node.roots,
+        roots,
         AgentSpec(
             command=_command(None, options),
             env=_strings(options, "env"),
@@ -95,5 +130,46 @@ def create(options: Mapping[str, Any], node: NodeContext) -> AcpProvider:
         models=_models(None, options),
         provider_id=provider_id,
         description=str(description) if description is not None else DEFAULT_DESCRIPTION,
-        catalogue_file=node.state_dir / CATALOGUE_FILE,
+        catalogue_file=state_dir / CATALOGUE_FILE,
     )
+
+
+def from_config(
+    config: str | os.PathLike[str] | None = None,
+    *,
+    roots: Roots
+    | str
+    | os.PathLike[str]
+    | Sequence[str | os.PathLike[str]]
+    | Mapping[str, str | os.PathLike[str]]
+    | None = None,
+    state_dir: str | os.PathLike[str] | None = None,
+    **options: Any,
+) -> AcpProvider:
+    """A provider from a config file and/or keywords, with no node; keywords win."""
+    data = read_config_file(Path(config).expanduser()) if config is not None else {}
+    unknown = sorted(set(options) - AGENT_OPTIONS)
+    if unknown:
+        raise ConfigError(f"acp from_config: unknown option(s): {', '.join(unknown)}")
+    # The file's server-only keys (port, token_file, ...) are ignored. As keywords they stay
+    # unknown options and are refused above. What is left of the file, minus the node-level
+    # keys (root, roots, state_dir) read below, is the per-agent options.
+    from_file = {key: value for key, value in data.items() if key not in SERVER_ONLY_KEYS}
+    merged = {key: value for key, value in from_file.items() if key in AGENT_OPTIONS}
+    merged.update(options)
+    served = roots_option(roots) if roots is not None else _roots_from_file(data)
+    if served is None:
+        raise ConfigError(
+            "no folder to serve: pass roots=, or set root / [roots] in the config file"
+        )
+    for path in served.paths:
+        if not path.is_dir():
+            raise ConfigError(f"{path} is not a directory")
+    if state_dir is not None:
+        state = Path(state_dir).expanduser()
+    elif "state_dir" in data:
+        state = _path(data["state_dir"], "state_dir")
+    else:
+        state = DEFAULT_STATE
+    state.mkdir(parents=True, exist_ok=True, mode=0o700)
+    return provider_from_options(merged, served, state)

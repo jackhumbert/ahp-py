@@ -17,6 +17,7 @@ from ahp_host.provider.base import AgentInfo, AgentSessionContext, TurnSink, Use
 from ahp_protocol.ext.structured import OUTPUT_SCHEMA_META_KEY
 
 from ahp_host_flow.catalog import directory_of
+from tests.preamble import stripped
 
 
 def _first_line(text: str, prefix: str) -> str:
@@ -142,6 +143,7 @@ class ScriptedSession:
     context: AgentSessionContext
 
     async def send_user_message(self, message: UserMessage, sink: TurnSink) -> None:
+        message = stripped(message)
         raw = message.raw if isinstance(message.raw, Mapping) else {}
         meta = raw.get("_meta")
         schema = meta.get(OUTPUT_SCHEMA_META_KEY) if isinstance(meta, Mapping) else None

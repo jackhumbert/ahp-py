@@ -9,3 +9,5 @@ ahp-protocol = { workspace = true }
 ahp-host = { workspace = true }
 ahp-client = { workspace = true }
 ahp-gateway = { workspace = true }
+ahp-host-claude = { workspace = true }
+ahp-host-acp = { workspace = true }

@@ -39,6 +39,7 @@ from ahp_host_flow.engine.dispatcher import (
     reattach_handle,
     report_dispatch,
 )
+from ahp_host_flow.engine.preamble import with_preamble
 
 _log = logging.getLogger(__name__)
 
@@ -67,6 +68,8 @@ class RemoteSpec:
     #: *models* names it or is empty, as for fleet calls.
     run_model: str | None = None
     idle_timeout: float = IDLE_TIMEOUT
+    #: Text put before the prompt the remote agent is sent (flow.toml `preamble`).
+    preamble: str | None = None
 
 
 class RemoteOut(Protocol):
@@ -232,7 +235,7 @@ class ClientDispatcher:
         schema = raw_schema if isinstance(raw_schema, Mapping) else None
         try:
             event = await chat.prompt(
-                call.prompt,
+                with_preamble(call.prompt, spec.preamble),
                 output_schema=schema,
                 model=self._model(call),
                 idle_timeout=spec.idle_timeout,

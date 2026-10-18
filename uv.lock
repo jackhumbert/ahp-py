@@ -209,6 +209,14 @@ dependencies = [
     { name = "jsonschema" },
 ]
 
+[package.optional-dependencies]
+acp = [
+    { name = "ahp-host-acp" },
+]
+claude = [
+    { name = "ahp-host-claude" },
+]
+
 [package.dev-dependencies]
 dev = [
     { name = "ahp-gateway" },
@@ -224,8 +232,11 @@ dev = [
 requires-dist = [
     { name = "ahp-client", editable = "packages/ahp-client" },
     { name = "ahp-host", extras = ["ws"], editable = "packages/ahp-host" },
+    { name = "ahp-host-acp", marker = "extra == 'acp'", editable = "packages/ahp-host-acp" },
+    { name = "ahp-host-claude", marker = "extra == 'claude'", editable = "packages/ahp-host-claude" },
     { name = "jsonschema", specifier = ">=4.18" },
 ]
+provides-extras = ["acp", "claude"]
 
 [package.metadata.requires-dev]
 dev = [

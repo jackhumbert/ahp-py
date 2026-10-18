@@ -27,6 +27,7 @@ from typing import Any, Final
 
 from ahp_protocol import errors
 from ahp_protocol.channels import AUTOMATIONS_URI, ROOT_URI
+from ahp_protocol.ext.delegation import ORIGIN_META_KEY, parse_delegation
 from ahp_protocol.ext.redaction import (
     REDACTABLE_PART_KINDS,
     REDACTION_CAPABILITY,
@@ -178,9 +179,11 @@ from ahp_host.provider.base import (
     OpensSessions,
     ProviderChat,
     ProviderTerminal,
+    ProvidesOperations,
     ReconfiguresChats,
     ReconfiguresSessions,
     ResumableAgentProvider,
+    ResumesOnRestore,
     ResumesTurns,
     SessionPublisher,
     SteersTurns,
@@ -1862,9 +1865,25 @@ class Host:
         #: anyone measured what a 64 MiB file costs.
         self.max_read_bytes = max_read_bytes
         self._watches: dict[str, _Watch] = {}
-        #: Changeset operations the embedder made invocable. Empty by default,
-        #: and nothing in this library ever adds to it.
+        #: Changeset operations that can be invoked: those the embedder registered
+        #: (`register_operation`) and those a provider declared
+        #: (`ProvidesOperations`, added just below). This library ships none of its
+        #: own, so a host with neither has none.
         self._operations: dict[str, OperationHandler] = {}
+        #: Operation id -> the provider that declared it (`ProvidesOperations`).
+        self._provider_operations: dict[str, str] = {}
+        for provider_id, each in self.providers.items():
+            if not isinstance(each, ProvidesOperations):
+                continue
+            for op_id, handler in each.changeset_operations().items():
+                first = self._provider_operations.get(op_id)
+                if first is not None:
+                    raise ValueError(
+                        f"operation {op_id!r} is declared by providers {first!r} "
+                        f"and {provider_id!r}"
+                    )
+                self._operations[op_id] = handler
+                self._provider_operations[op_id] = provider_id
         # Decisions, not conversation. Absent by default: a host that records
         # nothing is the honest default for one that cannot say where the
         # record would go.
@@ -2033,6 +2052,19 @@ class Host:
                     await provider.attach_directory(_Directory(self, provider_id))
                 except Exception:
                     _log.exception("attach_directory failed for %s", provider_id)
+        # A provider names the restored sessions that need their agent now,
+        # because they hold state it must republish.
+        for session, _ in restored:
+            provider = self._provider_of(session)
+            if not isinstance(provider, ResumesOnRestore):
+                continue
+            try:
+                wanted = provider.resume_on_restore(session.resume_state or {})
+            except Exception:
+                _log.exception("resume_on_restore failed for %s", session.uri)
+                wanted = False
+            if wanted:
+                await self._resume_if_restored(session)
         # Last, once every session and directory is in place: this starts
         # turns, and a turn may touch any of them.
         for session, stored in restored:
@@ -2296,6 +2328,9 @@ class Host:
                 # Canvases are runtime-only (their channels are never stored),
                 # so a stored reference would point at nothing.
                 restored_state.pop("canvases", None)
+                # Changeset channels are never stored either: prune the links,
+                # and a provider republishes what it still has.
+                restored_state.pop("changesets", None)
                 session.chat_uris.add(uri)
             elif reducer == "terminal":
                 # Whatever was running died with the previous process: a
@@ -2310,6 +2345,7 @@ class Host:
             elif uri == stored.uri:
                 await self._refresh_config_schema(stored.provider, restored_state)
                 self._forget_restored_clients(session, restored_state)
+                restored_state.pop("changesets", None)
             await self.sequencer.register_channel(uri, restored_state, reducer)
 
         for request in withdrawn:
@@ -5680,7 +5716,9 @@ class Host:
     async def _invoke_changeset_operation(
         self, connection: Connection, params: Mapping[str, Any]
     ) -> dict[str, Any]:
-        """Run an embedder-registered operation. There are no built-in ones.
+        """Run a registered operation: the embedder's, or one a provider declared.
+
+        There are no built-in ones.
 
         `commit`, `create-pr`, `discard-changes` and `sync` are VS Code private
         string constants, not protocol names. One is a credentialed network call
@@ -5823,7 +5861,16 @@ class Host:
                 )
 
     def register_operation(self, operation_id: str, handler: OperationHandler) -> None:
-        """Make an operation invocable. Explicit, per operation, by the embedder."""
+        """Make an operation invocable. Explicit, per operation, by the embedder.
+
+        An id a provider declared (`ProvidesOperations`) is refused; the
+        embedder's own id registered again is overwritten.
+        """
+        declared_by = self._provider_operations.get(operation_id)
+        if declared_by is not None:
+            raise ValueError(
+                f"operation {operation_id!r} is already registered by provider {declared_by!r}"
+            )
         self._operations[operation_id] = handler
 
     def session_of_changeset(self, changeset_uri: str) -> str | None:
@@ -6802,7 +6849,12 @@ class Host:
         return source, self._copy_turns(source.chat_uri, fork.get("turnId"))
 
     async def _create_session(self, connection: Connection, params: Mapping[str, Any]) -> None:
-        await self._new_session(connection, params)
+        # Only the delegation kind is a client's to claim (ahp-py's interim kind,
+        # docs/requests.md entry 12); `automation` stays host-only and any other
+        # kind is ignored. It is the client's word, not verified.
+        meta = params.get("_meta")
+        origin = parse_delegation(meta.get(ORIGIN_META_KEY)) if isinstance(meta, Mapping) else None
+        await self._new_session(connection, params, origin=origin)
 
     async def _new_session(
         self,

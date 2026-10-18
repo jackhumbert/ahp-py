@@ -10,6 +10,10 @@ Under construction. `docs/plan.md` is the design and its §7 is the build order.
 
 ### Added
 
+- **Delegation origin on flow-started sessions.** The flow `start_session` tool takes
+  optional `originChat` and `originToolCall`; with both, the node session is created
+  with a delegation `origin` naming the flow session, that chat and that tool call
+  (`createSession` `_meta["ahp-py/origin"]`, plain AHP to the node).
 - **Fleet tools for flow sessions.** Sessions of the agents in
   `OrchestratorConfig.flow_agents` (default `["flow"]`) are joined by the
   gateway as an active client offering `start_session`, `wait_for_sessions`,

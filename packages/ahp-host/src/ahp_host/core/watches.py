@@ -42,7 +42,7 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, Literal, Protocol, runtime_checkable
 
-from ahp_host.core.resources import path_from_file_uri, uri_from_path
+from ahp_host.core.resources import native_path_from_file_uri, uri_from_path
 
 __all__ = [
     "PollingResourceWatcher",
@@ -221,7 +221,7 @@ class PollingResourceWatcher:
 
     def _scan(self, request: WatchRequest) -> dict[str, tuple[int, int]]:
         try:
-            root = path_from_file_uri(request.root)
+            root = native_path_from_file_uri(request.root)
         except Exception:
             # A watch on something this watcher cannot walk -- a `virtual:` URI,
             # say. It reports nothing rather than failing the subscription; an

@@ -219,7 +219,10 @@ finds its models late republishes them (`root/agentsChanged`, only when the
 list differs; `Host.refresh_agents()` for an embedder), `AgentInfo.customizations`
 is published, and a `Completes` provider declares its own completion trigger
 characters (`DeclaresCompletionTriggers`) — used when the embedder passes none,
-which is how `ahp-node` reaches its agents' completions. All of it is in
+which is how `ahp-node` reaches its agents' completions. A `ProvidesOperations`
+provider declares its changeset operations, which the host registers when it is
+built, and a `ResumesOnRestore` provider names the restored sessions that need
+their agent at once instead of on the first turn. All of it is in
 [the provider guide](https://github.com/jackhumbert/ahp-py/blob/main/packages/ahp-host/docs/guide/writing-a-provider.md).
 
 **Params are validated where the schema is specific, and the refusal is the
@@ -289,6 +292,12 @@ are validated before they are saved, with the refusal echoed as
 trigger id, a message whose origin is not `automation`, an unknown provider.
 **Event triggers are refused** — their types are host-defined, and this host
 defines none, so `listAutomationTriggerDefinitions` answers an empty list.
+**A client can name the session it started a session for.** `createSession`
+`_meta["ahp-py/origin"]` with `{kind: "ahp-py/delegation", session, chat,
+toolCallId}` (`ahp_protocol.ext.delegation`) is seeded into the session's
+immutable `origin`, so it is in `listSessions` and persisted. It is the client's
+claim and is not verified; only this kind is accepted, `automation` stays
+host-only and any other kind is ignored.
 **Client plugins travel with the automation** (`session.customizations`,
 advertised as `automations.customizations`): when a definition is saved the
 host copies each new or changed plugin from the client that saved it, serves

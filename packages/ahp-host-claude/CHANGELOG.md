@@ -2,6 +2,25 @@
 
 ## [Unreleased]
 
+### Added — `from_config`
+
+- **`ahp_host_claude.from_config(config=None, *, roots=None, state_dir=None,
+  client_factory=None, **options)`**: a synchronous factory for a provider with
+  no node (`load = "ahp_host_claude:from_config"` in a flow.toml). It reads this
+  package's config file (server-only keys such as `port` are ignored in the
+  file, and refused as keywords like any unknown option) and keyword options
+  override it. Nothing connects to Claude Code: the models and Remote Control
+  default are discovered on the first session
+  (`ClaudeProvider(lazy_discovery=True)`; `remote_control=None` means Claude
+  Code's own default). A discovery that fails or names no models is not final:
+  it is asked again at the next session's first use, so a provider no host ever
+  attaches to still recovers. The background rediscovery
+  (`attach_agent_updates`) shares the discovery lock, so it never runs
+  alongside, or repeats, a first-use discovery.
+- `config.read_config_file`, `config.roots_option` and `config.SERVER_ONLY_KEYS`
+  are public; `agent.parse_agent_options` is the checked form of an agent's
+  options, shared by `create` and `from_config`.
+
 ### Added — structured turns
 
 - **`ClaudeSession` is a `ReturnsStructuredOutput`.** A turn whose message
@@ -37,6 +56,10 @@
 
 ### Fixed
 
+- A plugin Claude Code reports with a relative path (loaded from a relative
+  directory) no longer fails the whole customization tree: `as_uri` refused
+  it, so no customization was published. It is read under the session's
+  working directory.
 - Claude Code's report of the Ask mode this adapter sets in a chat narrowed
   away from the session's folder is no longer taken for a switch, which
   rewrote the session's approval mode to Ask for every chat.

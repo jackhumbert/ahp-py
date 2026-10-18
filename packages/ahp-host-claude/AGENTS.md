@@ -33,6 +33,14 @@ server's AGENTS.md requires ("Adding a provider adapter").
   (`mcp__host__...`, the per-turn `StructuredOutput`) pass the approval gate
   like client tools, since they run in the host and touch nothing on this
   machine (`ClaudeSession._pre_tool_use`, `client_tools.is_host_tool`).
+- `agent.py` is the `claude` agent type for `ahp-node` and `from_config`, a
+  synchronous factory (`load = "ahp_host_claude:from_config"`) that shares
+  `parse_agent_options` and `config.read_config_file` with it. It builds
+  `ClaudeProvider(lazy_discovery=True)`: nothing connects at construction, and
+  `_ensure_discovered` asks Claude Code once, on the first `create_session` or
+  `resume_session` (`agent` never does). A new per-agent key goes in
+  `AGENT_OPTIONS`; a new server-only file key in `config.SERVER_ONLY_KEYS`, which
+  `from_config` ignores in the file and refuses as a keyword (like any unknown option).
 - SDK behaviour not documented by the SDK was read from the CLI it bundles
   (`claude_agent_sdk/_bundled/claude`): `strings` it and search for the
   control request or message schema (`subtype:R("...")`).

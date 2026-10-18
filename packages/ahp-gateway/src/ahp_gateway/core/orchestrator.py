@@ -55,6 +55,7 @@ from ahp_client.client import actions
 from ahp_client.serve import ClientToolHost
 from ahp_protocol import AhpError, Transport
 from ahp_protocol.errors import invalid_params
+from ahp_protocol.ext.delegation import delegation_origin
 from ahp_protocol.ext.structured import (
     OUTPUT_SCHEMA_META_KEY,
     STRUCTURED_OUTPUT_TOOL,
@@ -266,6 +267,8 @@ FLOW_TOOLS: Final[tuple[dict[str, Any], ...]] = (
                 },
                 "output_schema": {"type": "object"},
                 "title": {"type": "string"},
+                "originChat": {"type": "string"},
+                "originToolCall": {"type": "string"},
             },
             "required": ["node", "agent", "prompt"],
         },
@@ -887,6 +890,18 @@ class Orchestrator:
         model = model if isinstance(model, str) and model else None
         folder = arguments.get("folder")
         folder = folder if isinstance(folder, str) and folder else None
+        # The delegation the node session names as its origin: this flow session, and the
+        # chat and tool call on whose behalf the engine starts it. Both or neither.
+        origin_chat = arguments.get("originChat")
+        origin_call = arguments.get("originToolCall")
+        origin = (
+            delegation_origin(adopted.uri, origin_chat, origin_call)
+            if isinstance(origin_chat, str)
+            and origin_chat
+            and isinstance(origin_call, str)
+            and origin_call
+            else None
+        )
         async with adopted.lock:
             # An engine, not a model, is calling: wait for a free slot, don't refuse.
             # The limit is this flow session's, as `max_running` is one orchestrator
@@ -917,6 +932,7 @@ class Orchestrator:
                 uri=f"{agent}:/{uuid.uuid4()}",
                 working_directories=[_folder_uri(folder)] if folder else None,
                 config=config,
+                origin=origin,
             )
             title = arguments.get("title")
             title = title if isinstance(title, str) and title else prompt.splitlines()[0][:60]

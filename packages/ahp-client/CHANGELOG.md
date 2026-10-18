@@ -6,6 +6,13 @@ Every release states the protocol versions it speaks.
 
 ## [Unreleased]
 
+### Added — ahp-py extension: delegation session origin
+
+- `create_session(origin=)` takes an `ahp_protocol.ext.delegation.delegation_origin`
+  and sends it in `createSession` `_meta["ahp-py/origin"]`, so the session names
+  the session, chat and tool call it was started for. Anything else is a
+  `ValueError`, before any request.
+
 ### Added — AHP 1.1.0 (upstream `main`, unreleased)
 
 - `create_tcp_connection(channel, host, port)` wraps the experimental

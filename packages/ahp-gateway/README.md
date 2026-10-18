@@ -54,6 +54,11 @@ What holds for a flow session, whatever the engine asks:
   wait on, read or stop the sessions it started. Another principal can neither
   prompt the flow session nor read or drive (prompt, cancel, answer) a session
   its run started: they are listed like any session, and refused.
+- **Delegation.** `start_session` takes optional `originChat` and
+  `originToolCall`; with both, the node session is created with a delegation
+  `origin` (`{kind: "ahp-py/delegation", session: <the flow session>, chat,
+  toolCallId}`, plain AHP `_meta` on `createSession`), so a client can nest it
+  under the call that started it.
 - **Config.** A started session gets `child_config` (by default
   `{"permissionMode": "auto"}`). A requested `permissionMode` may only be
   stricter (`plan` < `default` < `acceptEdits` < `auto` < `bypassPermissions`);

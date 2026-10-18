@@ -9,7 +9,13 @@ from typing import Any
 
 import pytest
 
-from ahp_host_flow.engine import MAX_AGENTS_PER_RUN, JournalError, RunOptions, load_journal
+from ahp_host_flow.engine import (
+    MAX_AGENTS_PER_RUN,
+    JournalError,
+    RunOptions,
+    WorkflowDir,
+    load_journal,
+)
 from ahp_host_flow.sandbox import (
     MIN_NODE_MAJOR,
     NO_ARGS,
@@ -23,7 +29,7 @@ from ..fakes import FakeDispatcher  # noqa: TID252
 
 CONFORMANCE = Path(__file__).resolve().parents[2] / "conformance"
 # Python twins that call a JS child, so they need Node as well.
-PY_NEEDS_NODE = {"workflow"}
+PY_NEEDS_NODE = {"workflow", "workflow_sources"}
 
 
 def _param(path: Path) -> Any:
@@ -87,7 +93,12 @@ def _options(
         max_agents=spec.get("max_agents", MAX_AGENTS_PER_RUN),
         budget_total=spec.get("budget_total"),
         timeout=spec.get("timeout", 60),
-        workflow_dirs=tuple(CONFORMANCE / d for d in spec.get("workflow_dirs", [])),
+        workflow_dirs=tuple(
+            WorkflowDir(d["source"], CONFORMANCE / d["path"])
+            if isinstance(d, dict)
+            else CONFORMANCE / d
+            for d in spec.get("workflow_dirs", [])
+        ),
         run_root=CONFORMANCE,
     )
 

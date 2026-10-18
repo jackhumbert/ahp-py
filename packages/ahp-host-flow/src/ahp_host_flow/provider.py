@@ -13,6 +13,8 @@ from pathlib import Path
 from typing import Any, Final
 
 from ahp_host import TurnSink
+from ahp_host.core.watches import PollingResourceWatcher, WatchRequest
+from ahp_host.node import Roots
 from ahp_host.provider.base import (
     AgentInfo,
     AgentProvider,
@@ -28,6 +30,7 @@ from ahp_host.provider.base import (
     SteersTurns,
     UserMessage,
 )
+from ahp_host.provider.changes import OperationHandler
 from ahp_protocol.ext import flow
 from ahp_protocol.transport import Transport
 
@@ -61,11 +64,14 @@ from ahp_host_flow.engine import (
     RUN_ID,
     AbortSignal,
     ClientDispatcher,
+    ClientWorkflow,
     Dispatcher,
     JournalError,
     RemoteSpec,
     RunOptions,
+    WorkflowDir,
     load_journal,
+    preamble_text,
 )
 from ahp_host_flow.fleet import FleetClients, FleetDispatcher
 from ahp_host_flow.gates import MainChatGates
@@ -79,7 +85,7 @@ from ahp_host_flow.sandbox import (
     language_of,
     run_script,
 )
-from ahp_host_flow.worktree import WorktreeChangesets
+from ahp_host_flow.worktree import APPLY_OPERATION, DISCARD_OPERATION, WorktreeChangesets
 
 _log = logging.getLogger(__name__)
 
@@ -262,6 +268,22 @@ def _parse_runs(state: Mapping[str, Any] | None) -> dict[str, RunEntry]:
     return found
 
 
+def _parse_worktrees(state: Mapping[str, Any] | None) -> list[dict[str, Any]]:
+    """The kept worktrees a persisted resume state names; non-mapping items are dropped."""
+    if state is None or state.get("flow") != RESUME_STATE_VERSION:
+        return []
+    items = state.get("worktrees")
+    if not isinstance(items, list):
+        return []
+    found: list[dict[str, Any]] = []
+    for item in items:
+        if isinstance(item, Mapping):
+            found.append(dict(item))
+        else:
+            _log.warning("ignoring a malformed kept worktree entry in the flow resume state")
+    return found
+
+
 class FlowProvider:
     """Runs Claude Code workflow scripts; each `agent()` call is a worker chat."""
 
@@ -270,11 +292,14 @@ class FlowProvider:
         config: FlowConfig,
         *,
         providers: Mapping[str, AgentProvider] | None = None,
+        roots: Roots | None = None,
         user_workflows_dir: Path | None = None,
         fleet_client_wait: float = 10.0,
         remote_dialer: Callable[[ProviderConfig], Callable[[], Awaitable[Transport]]] | None = None,
     ) -> None:
         self.config = config
+        #: The folders the host serves; inner providers get them plus the runs folder.
+        self.roots = roots
         #: Dials a remote provider's host; tests inject an in-memory one, production dials `url`.
         self.remote_dialer = remote_dialer
         #: Seconds a continued run waits for the gateway to rejoin before a fleet call fails
@@ -282,10 +307,10 @@ class FlowProvider:
         #: fleet tool call whose gateway left waits for it to come back to try once more.
         self.fleet_client_wait = fleet_client_wait
         self.redactor = make_redactor(config.redact)
-        #: Kept worktrees published as changesets; a host registers its operations.
+        #: Kept worktrees published as changesets; the provider declares their operations.
         self.worktree_changesets = WorktreeChangesets()
         self.providers: Mapping[str, AgentProvider] = (
-            providers if providers is not None else LazyProviders(config)
+            providers if providers is not None else LazyProviders(config, roots=roots)
         )
         self.user_workflows_dir = (
             user_workflows_dir
@@ -300,6 +325,14 @@ class FlowProvider:
         return frozenset(
             entry.run_id for session in list(self._sessions) for entry in session._runs.values()
         )
+
+    def changeset_operations(self) -> Mapping[str, OperationHandler]:
+        """Apply and Discard for kept worktrees (`ProvidesOperations`); called once by a Host."""
+        self.worktree_changesets.operations_registered = True
+        return {
+            APPLY_OPERATION: lambda uri, _op, _target: self.worktree_changesets.apply(uri),
+            DISCARD_OPERATION: lambda uri, _op, _target: self.worktree_changesets.discard(uri),
+        }
 
     @property
     def agent(self) -> AgentInfo:
@@ -325,12 +358,19 @@ class FlowProvider:
     async def create_session(self, context: AgentSessionContext) -> FlowSession:
         session = FlowSession(self, context)
         self._sessions.add(session)
+        await session.start_watching()
         return session
 
     async def resume_session(self, context: AgentSessionContext) -> FlowSession:
         session = FlowSession(self, context)
         self._sessions.add(session)
+        await session.start_watching()
+        await session.restore_worktrees()
         return session
+
+    def resume_on_restore(self, resume_state: Mapping[str, Any]) -> bool:
+        """`ResumesOnRestore`: only a session holding kept worktrees must resume eagerly."""
+        return bool(_parse_worktrees(resume_state))
 
     async def resume_state_of(self, session: AgentSession) -> Mapping[str, Any] | None:
         return session.resume_state() if isinstance(session, FlowSession) else None
@@ -353,6 +393,8 @@ class FlowSession:
         #: Runs the last host process left active, until their turn is resumed
         #: (`resume_turn`) or the chat moves on to another turn.
         self._restored: dict[str, RunEntry] = _parse_runs(context.resume_state)
+        #: Kept worktrees the last host process held, until `restore_worktrees` republishes them.
+        self._restored_worktrees: list[dict[str, Any]] = _parse_worktrees(context.resume_state)
         #: The customizations last published (or described), to see when a source changes.
         self._published: list[dict[str, Any]] | None = None
         #: Client plugins' workflows already read, by (plugin id, uri, nonce): a plugin
@@ -362,6 +404,10 @@ class FlowSession:
         self._client_plugins_seen: list[catalog.ClientPlugin] = []
         self._refresh: asyncio.Task[None] | None = None
         self._refresh_again = False
+        #: A pending refresh that must read the clients (a watch-triggered one never does).
+        self._refresh_reads_clients = False
+        self._watcher: PollingResourceWatcher | None = None
+        self._watched: list[WatchRequest] = []
         #: The active clients that offer the fleet tools (a gateway joined to this session).
         self._fleet = FleetClients(
             [{"clientId": context.active_client_id, "tools": list(context.client_tools)}]
@@ -374,21 +420,45 @@ class FlowSession:
         if "client" in self.provider.config.workflows.sources:
             # Never read inline: this runs in the publishing client's notification handler,
             # and a read back to that client would deadlock.
-            if self._refresh is not None and not self._refresh.done():
-                self._refresh_again = True
-            else:
-                self._refresh = asyncio.create_task(self._refresh_loop())
+            self._schedule_refresh(read_clients=True)
+
+    def _schedule_refresh(self, read_clients: bool) -> None:
+        """Coalesce a refresh; one that reads the clients is never downgraded."""
+        self._refresh_reads_clients = self._refresh_reads_clients or read_clients
+        if self._refresh is not None and not self._refresh.done():
+            self._refresh_again = True
+        else:
+            self._refresh = asyncio.create_task(self._refresh_loop())
 
     async def _refresh_loop(self) -> None:
         self._refresh_again = True
         while self._refresh_again:
             self._refresh_again = False
-            await self._republish()
+            read_clients = self._refresh_reads_clients
+            self._refresh_reads_clients = False
+            await self._republish(read_clients=read_clients)
 
-    async def _republish(self) -> None:
-        """Re-read the clients' plugins and publish the customizations if they changed."""
+    async def start_watching(self) -> None:
+        """Watch the local source dirs, so a change republishes the customizations."""
+        interval = self.provider.config.workflows.watch_interval
+        if interval <= 0:
+            return
+        self._watcher = PollingResourceWatcher(interval=interval)
+        paths = {s.path.resolve() for s in self._dirs()}
+        # A missing dir scans as empty and reports `added` when it appears.
+        for path in sorted(paths):
+            request = WatchRequest(root=path.as_uri(), recursive=False, includes=("*.js", "*.py"))
+            self._watched.append(request)
+            await self._watcher.start(request, self._on_source_change)
+
+    def _on_source_change(self, changes: Sequence[Any]) -> None:
+        # Local sources only: never read a client from here.
+        self._schedule_refresh(read_clients=False)
+
+    async def _republish(self, *, read_clients: bool) -> None:
+        """Re-read the sources and publish the customizations if they changed."""
         try:
-            _, current = await self._catalog(self._node(), read_clients=True)
+            _, current = await self._catalog(self._node(), read_clients=read_clients)
             publisher = self.context.publisher
             if current != self._published and publisher is not None:
                 await publisher.customizations_changed(current)
@@ -464,10 +534,24 @@ class FlowSession:
     def resume_state(self) -> dict[str, Any]:
         """The runs to carry across a restart; restored ones not yet resumed are kept."""
         entries = {**self._restored, **self._runs}
-        return {
+        state: dict[str, Any] = {
             "flow": RESUME_STATE_VERSION,
             "runs": [e.to_json() for _, e in sorted(entries.items())],
         }
+        worktrees = self.provider.worktree_changesets.kept_for(self.context.session_uri)
+        if worktrees:
+            state["worktrees"] = worktrees
+        return state
+
+    async def restore_worktrees(self) -> None:
+        """Republish the kept worktrees the last host process held (once)."""
+        publisher = self.context.publisher
+        entries, self._restored_worktrees = self._restored_worktrees, []
+        if publisher is None:
+            return
+        await self.provider.worktree_changesets.restore(
+            entries, publisher, session=self.context.session_uri
+        )
 
     async def resume_turn(self, chat_uri: str, turn_id: str, sink: TurnSink) -> None:
         """Resume a run's main turn that a host restart failed: relaunch it from its journal.
@@ -511,6 +595,8 @@ class FlowSession:
         # the continued run in `_runs`. Without this the run was in neither.
         self._runs[chat_uri] = resumed
         try:
+            # The cached client workflows: a resume never reads a client.
+            entries, _ = await self._catalog(node, read_clients=False)
             # The calls the restart cut off were closed (cancelled) when the
             # host failed the turn; the re-dispatched ones get ids of their own.
             await self._run_workflow(
@@ -523,6 +609,7 @@ class FlowSession:
                 model=resumed.model,
                 node=node,
                 dirs=self._dirs(),
+                client_entries=[e for e in entries if e.source == "client"],
                 resume_from=resumed.run_id,
                 resumed=resumed,
             )
@@ -579,6 +666,7 @@ class FlowSession:
             model=message.model.id if message.model else None,
             node=node,
             dirs=dirs,
+            client_entries=[e for e in entries if e.source == "client"],
         )
 
     async def _run_workflow(
@@ -593,6 +681,7 @@ class FlowSession:
         model: str | None,
         node: str | None,
         dirs: list[catalog.SourceDir],
+        client_entries: Sequence[catalog.WorkflowEntry] = (),
         resume_from: str | None = None,
         resumed: RunEntry | None = None,
     ) -> None:
@@ -621,7 +710,12 @@ class FlowSession:
         try:
             options = RunOptions(
                 state_dir=config.state_dir,
-                workflow_dirs=tuple(d.path for d in dirs if d.path.is_dir()),
+                workflow_dirs=tuple(WorkflowDir(d.source, d.path) for d in dirs if d.path.is_dir()),
+                client_workflows=tuple(
+                    ClientWorkflow(e.name, e.source_text(), e.filename())
+                    for e in client_entries
+                    if e.source == "client" and e.language == "js"
+                ),
                 python_dirs=python_dirs,
                 run_root=workspace,
                 redact=redactor.mask_value,
@@ -717,6 +811,7 @@ class FlowSession:
                     idle_timeout=(
                         spec.idle_timeout if spec.idle_timeout is not None else IDLE_TIMEOUT
                     ),
+                    preamble=preamble_text(spec.preamble),
                 ),
                 workers=remote_workers,
                 on_log=on_log,
@@ -902,6 +997,9 @@ class FlowSession:
             abort.abort()
 
     async def aclose(self) -> None:
+        if self._watcher is not None:
+            for request in self._watched:
+                await self._watcher.stop(request)
         if self._refresh is not None and not self._refresh.done():
             self._refresh.cancel()
         for inner in list(self._workers.values()):

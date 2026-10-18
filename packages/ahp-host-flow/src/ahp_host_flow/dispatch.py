@@ -51,8 +51,10 @@ from ahp_host_flow.engine import (
     DispatchHandle,
     Redactor,
     RemoteOut,
+    preamble_text,
     report_dispatch,
     schema_error,
+    with_preamble,
 )
 from ahp_host_flow.routing import route, x_opts
 from ahp_host_flow.worktree import (
@@ -539,7 +541,13 @@ class ProviderDispatcher(StepDispatcher):
                 if chat and self.changesets:
                     try:
                         published = await self.changesets.publish(
-                            wt, self.publisher, chat=chat, title=title, ordinal=call.ordinal
+                            wt,
+                            self.publisher,
+                            chat=chat,
+                            title=title,
+                            ordinal=call.ordinal,
+                            session=self.session_uri,
+                            run_id=self.run_id,
                         )
                     except Exception as exc:
                         failed = True
@@ -610,7 +618,15 @@ class ProviderDispatcher(StepDispatcher):
 
         raw_schema = opts.get("schema")
         schema = raw_schema if isinstance(raw_schema, Mapping) else None
-        raw: dict[str, Any] = {"text": call.prompt, "origin": {"kind": "agent"}}
+        # Only what the inner agent is sent: the worker chat, the journal key and the main
+        # chat keep the bare prompt. A follow-up in a named chat (`existing`) goes to a session
+        # that already has the preamble from the chat's first message, so it is sent bare.
+        text = (
+            call.prompt
+            if existing is not None
+            else with_preamble(call.prompt, preamble_text(spec.preamble))
+        )
+        raw: dict[str, Any] = {"text": text, "origin": {"kind": "agent"}}
         if schema:
             raw["_meta"] = {OUTPUT_SCHEMA_META_KEY: dict(schema)}
         if attachments:
@@ -623,7 +639,7 @@ class ProviderDispatcher(StepDispatcher):
         # Clients can open the child chat while it runs.
         await self.sink.tool_call_output(call_id, [link_item], meta=flow.meta(flow.step(started)))
         message = UserMessage(
-            text=call.prompt,
+            text=text,
             raw=raw,
             model=ModelSelection(id=model) if model else None,
             chat_uri=worker.resource,

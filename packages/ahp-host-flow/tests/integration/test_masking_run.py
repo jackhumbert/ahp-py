@@ -41,7 +41,7 @@ pytestmark = pytest.mark.node
 
 TOML = """
 [providers.echo]
-load = "ahp_host.provider.echo:EchoProvider"
+load = "tests.flow_fakes:StrippedEchoProvider"
 
 [providers.sec]
 load = "tests.flow_fakes:SecretProvider"
@@ -54,7 +54,7 @@ load = "tests.flow_fakes:StructuredSecretProvider"
 config = { capable = false }
 
 [providers.es]
-load = "ahp_host.provider.echo:EchoProvider"
+load = "tests.flow_fakes:StrippedEchoProvider"
 config = { structured = true }
 
 [providers.ask]

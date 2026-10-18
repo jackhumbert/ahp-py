@@ -25,7 +25,9 @@ from ahp_host.provider.echo import EchoProvider, EchoSession
 from ahp_protocol import Transport, memory_pair
 
 from ahp_host_flow import FlowProvider, load_config
+from tests.flow_fakes import StrippedEchoProvider
 from tests.flow_hosting import store_for, write_toml
+from tests.preamble import strip_preamble, stripped
 
 DEV = frozenset({"dev"})
 TOML = """
@@ -82,7 +84,7 @@ class GatedEchoSession(EchoSession):
 
     async def send_user_message(self, message: UserMessage, sink: TurnSink) -> None:
         await self._gate.wait()
-        await super().send_user_message(message, sink)
+        await super().send_user_message(stripped(message), sink)
 
 
 class GatedEchoProvider(EchoProvider):
@@ -152,7 +154,7 @@ async def boot_fleet(
     providers: dict[str, Any] = {
         "alpha": GatedEchoProvider(provider_id="claude", structured=True),
         "beta": GatedEchoProvider(provider_id="claude", structured=True),
-        "vault": EchoProvider(provider_id="claude"),
+        "vault": StrippedEchoProvider(provider_id="claude"),
         **(node_providers or {}),
     }
     hosts = {name: Host(p, LoopbackSingleUserPolicy()) for name, p in providers.items()}
@@ -269,7 +271,7 @@ def messages_of(host: Host, session: str) -> list[str]:
     """The text of every turn message in *session*'s default chat, running turn included."""
     state = chat_state(host, session)
     turns = [*state.get("turns", []), *([state["activeTurn"]] if state.get("activeTurn") else [])]
-    return [str(turn["message"]["text"]) for turn in turns]
+    return [strip_preamble(str(turn["message"]["text"])) for turn in turns]
 
 
 def active_count(host: Host, scheme: str) -> int:

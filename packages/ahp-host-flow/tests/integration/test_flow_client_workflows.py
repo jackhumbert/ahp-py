@@ -104,6 +104,38 @@ async def test_client_workflows_listed_and_run(tmp_path: Path, node_path: str) -
         await fx.shut()
 
 
+async def test_client_workflows_reach_workflow_call(tmp_path: Path, node_path: str) -> None:
+    fx = await boot(tmp_path, node_path, WITH_CLIENT)
+    try:
+        fx.wire.resources[f"{PLUGIN}/workflows/x.js"] = (
+            "export const meta = {name:'x', description:'client x', phases:[]}\n"
+            "return {from: 'client'}\n"
+        )
+        workflows = fx.workspace / ".claude" / "workflows"
+        (workflows / "x.js").write_text(
+            "export const meta = {name:'x', description:'ws x', phases:[]}\n"
+            "return {from: 'workspace'}\n",
+            encoding="utf-8",
+        )
+        nope = "try { await workflow('nope:x') } catch (e) { return e.message }"
+        (workflows / "parent.js").write_text(
+            "export const meta = {name:'parent', description:'calls x', phases:[]}\n"
+            "return [await workflow('x'), await workflow('workspace:x'),\n"
+            f"  await (async () => {{ {nope} }})()]\n",
+            encoding="utf-8",
+        )
+        await publish(fx, [plugin_entry("n1")])
+        assert await fx.wire.until(lambda: "x" in children(fx, CONTAINER)), containers(fx)
+        turn = await run_turn(fx.wire, fx.chat, "t1", "/workspace:parent")
+        assert final_json(turn) == [
+            {"from": "client"},
+            {"from": "workspace"},
+            "unknown workflow source 'nope' in 'nope:x': use one of client, workspace, user, host",
+        ]
+    finally:
+        await fx.shut()
+
+
 async def test_client_workflows_off_by_default(tmp_path: Path, node_path: str) -> None:
     fx = await boot(tmp_path, node_path, TOML)
     try:

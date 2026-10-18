@@ -8,7 +8,7 @@ from typing import Any
 
 import pytest
 
-from ahp_host_flow.engine import AbortSignal, RunOptions
+from ahp_host_flow.engine import AbortSignal, ClientWorkflow, RunOptions
 from ahp_host_flow.sandbox import run_script
 
 from ..fakes import FakeDispatcher  # noqa: TID252
@@ -32,7 +32,7 @@ def _setup(tmp_path: Path, **files: str) -> tuple[Path, RunOptions]:
 
 
 async def _run(
-    source: str,
+    source: str | None,
     node: str,
     dispatcher: FakeDispatcher,
     options: RunOptions,
@@ -234,3 +234,27 @@ async def test_workflow_call_child_cannot_reach_host(
 async def test_workflow_call_child_bans_apply(node_path: str, tmp_path: Path) -> None:
     message = await _catch("workflow('clock')", node_path, tmp_path, clock="return Date.now()")
     assert "Date.now() is not allowed" in message
+
+
+async def test_workflow_call_client_child_replays_from_snapshot(
+    node_path: str, tmp_path: Path
+) -> None:
+    st = tmp_path / "st"
+    client = ClientWorkflow("x", "return await agent('client child')", "virtual://c/workflows/x.js")
+    first = await _run(
+        "return await workflow('x')",
+        node_path,
+        FakeDispatcher(),
+        RunOptions(state_dir=st, run_id="first", client_workflows=(client,)),
+    )
+    assert first == "client child"
+    # The client is gone on resume: the journal's snapshot serves the child.
+    dispatcher = FakeDispatcher()
+    second = await _run(
+        None,
+        node_path,
+        dispatcher,
+        RunOptions(state_dir=st, run_id="second", resume_from="first"),
+    )
+    assert second == "client child"
+    assert dispatcher.calls == []

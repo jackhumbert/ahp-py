@@ -64,6 +64,15 @@ result = await session.prompt("Summarise README.md", approvals="reads")
 print(result.text)
 ```
 
+### Starting a session on another's behalf
+
+`create_session(origin=delegation_origin(session, chat, tool_call_id))`
+(`ahp_protocol.ext.delegation`) names the session, chat and tool call the new
+session is started for. It is an ahp-py extension ahead of the spec, sent in
+`createSession` `_meta["ahp-py/origin"]`; an `ahp-py` host puts it in the
+session's `origin`, and a stock host ignores it. Anything that is not a
+delegation origin is a `ValueError`, before any request.
+
 ### Structured results
 
 A turn can ask for a result that conforms to a JSON Schema. This is an ahp-py

@@ -24,14 +24,14 @@ pytestmark = pytest.mark.node
 
 TOML = """
 [providers.echo]
-load = "ahp_host.provider.echo:EchoProvider"
+load = "tests.flow_fakes:StrippedEchoProvider"
 
 [providers.echo_c]
-load = "ahp_host.provider.echo:EchoProvider"
+load = "tests.flow_fakes:StrippedEchoProvider"
 config = { confirm_tools = true }
 
 [providers.echo_s]
-load = "ahp_host.provider.echo:EchoProvider"
+load = "tests.flow_fakes:StrippedEchoProvider"
 config = { structured = true }
 
 [providers.hang]

@@ -6,7 +6,14 @@ from pathlib import Path
 
 import pytest
 
-from ahp_host_flow.engine import Registry, RunOptions, WorkflowRefError, resolve_workflow
+from ahp_host_flow.engine import (
+    ClientWorkflow,
+    Registry,
+    RunOptions,
+    WorkflowDir,
+    WorkflowRefError,
+    resolve_workflow,
+)
 
 
 def _write(path: Path, text: str = "x") -> Path:
@@ -160,3 +167,77 @@ def test_run_options_python_dirs_validated(tmp_path: Path) -> None:
     for bad in ([tmp_path], (str(tmp_path),)):
         with pytest.raises(ValueError, match="python_dirs must be a tuple of paths or None"):
             RunOptions(python_dirs=bad)  # type: ignore[arg-type]
+
+
+def _qualified(tmp_path: Path) -> Registry:
+    _write(tmp_path / "ws" / "x.js", "workspace")
+    _write(tmp_path / "host" / "x.js", "host")
+    _write(tmp_path / "plain" / "y.js", "plain")
+    return Registry(
+        [
+            WorkflowDir("workspace", tmp_path / "ws"),
+            WorkflowDir("host", tmp_path / "host"),
+            tmp_path / "plain",
+        ]
+    )
+
+
+def test_registry_qualified_picks_labeled_dir(tmp_path: Path) -> None:
+    reg = _qualified(tmp_path)
+    assert resolve_workflow("host:x", registry=reg, run_root=None).source == "host"
+    assert resolve_workflow("workspace:x", registry=reg, run_root=None).source == "workspace"
+    assert resolve_workflow("x", registry=reg, run_root=None).source == "workspace"
+    assert reg.dirs == (tmp_path / "ws", tmp_path / "host", tmp_path / "plain")
+
+
+def test_registry_qualified_unlabeled_dirs_serve_bare_names(tmp_path: Path) -> None:
+    reg = _qualified(tmp_path)
+    assert reg.find("y") == tmp_path / "plain" / "y.js"
+    for source in ("client", "workspace", "user", "host"):
+        assert reg.find(f"{source}:y") is None
+
+
+def _client(name: str, source: str, filename: str | None = None) -> ClientWorkflow:
+    return ClientWorkflow(name, source, filename or f"virtual://c/workflows/{name}.js")
+
+
+def test_registry_qualified_bare_name_prefers_client(tmp_path: Path) -> None:
+    _write(tmp_path / "x.js", "ws")
+    reg = Registry([WorkflowDir("workspace", tmp_path)], client=(_client("x", "client"),))
+    got = resolve_workflow("x", registry=reg, run_root=None)
+    assert (got.source, got.filename) == ("client", "virtual://c/workflows/x.js")
+    assert resolve_workflow("workspace:x", registry=reg, run_root=None).source == "ws"
+    assert reg.names() == ["x"]
+
+
+def test_registry_qualified_client_reaches_only_client_entries(tmp_path: Path) -> None:
+    _write(tmp_path / "x.js", "ws")
+    reg = Registry([WorkflowDir("workspace", tmp_path)], client=(_client("c", "client"),))
+    assert resolve_workflow("client:c", registry=reg, run_root=None).source == "client"
+    with pytest.raises(WorkflowRefError) as info:
+        resolve_workflow("client:x", registry=reg, run_root=None)
+    assert str(info.value) == "unknown workflow: 'client:x'"
+    with pytest.raises(WorkflowRefError):
+        resolve_workflow("workspace:c", registry=reg, run_root=None)
+
+
+def test_registry_qualified_drops_python_client_entry() -> None:
+    reg = Registry([], client=(_client("p", "return 1", "virtual://c/workflows/p.py"),))
+    assert reg.find_client("p") is None
+    assert reg.names() == []
+
+
+def test_registry_qualified_unknown_source_message(tmp_path: Path) -> None:
+    for registry in (Registry([tmp_path]), None):
+        with pytest.raises(WorkflowRefError) as info:
+            resolve_workflow("bogus:x", registry=registry, run_root=None)
+        assert str(info.value) == (
+            "unknown workflow source 'bogus' in 'bogus:x': use one of client, workspace, user, host"
+        )
+
+
+def test_registry_qualified_invalid_name(tmp_path: Path) -> None:
+    for registry in (Registry([tmp_path]), None):
+        with pytest.raises(WorkflowRefError) as info:
+            resolve_workflow("host:../x", registry=registry, run_root=None)
+        assert str(info.value) == "invalid workflow name: 'host:../x'"

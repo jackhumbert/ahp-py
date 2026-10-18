@@ -1,8 +1,10 @@
 """`python -m ahp_host_flow`: building the host and reporting config errors."""
 
 from pathlib import Path
+from typing import Any
 
 import pytest
+from ahp_host.core.store import FileSessionStore
 
 from ahp_host_flow.__main__ import build_host, main
 from ahp_host_flow.config import load_config
@@ -92,3 +94,41 @@ def test_non_loopback_bind_with_a_token_file_serves(
     token.write_text("s3cret\n", encoding="utf-8")
     main(["--config", str(toml), "--bind", "0.0.0.0", "--token-file", str(token)])
     assert served == [("0.0.0.0", "s3cret")]
+
+
+def test_flow_main_root_flag(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    hosts: list[Any] = []
+
+    async def fake_serve(host: Any, *, bind: str, port: int, token: str | None) -> None:
+        hosts.append(host)
+
+    monkeypatch.setattr("ahp_host_flow.__main__._serve", fake_serve)
+    toml = tmp_path / "flow.toml"
+    toml.write_text(ECHO_TOML, encoding="utf-8")
+    a, b = tmp_path / "a", tmp_path / "b"
+    main(["--config", str(toml), "--root", str(a), "--root", str(b)])
+    (host,) = hosts
+    assert host.provider.roots.paths == (a.resolve(), b.resolve())
+
+
+def test_flow_main_store_is_a_file_store_under_the_state_dir(tmp_path: Path) -> None:
+    toml = tmp_path / "flow.toml"
+    toml.write_text(ECHO_TOML, encoding="utf-8")
+    config = load_config(toml)
+    host = build_host(config)
+    assert isinstance(host.store, FileSessionStore)
+    assert host.store.directory == config.state_dir / "sessions"
+
+
+def test_flow_main_store_no_store_flag(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    hosts: list[Any] = []
+
+    async def fake_serve(host: Any, *, bind: str, port: int, token: str | None) -> None:
+        hosts.append(host)
+
+    monkeypatch.setattr("ahp_host_flow.__main__._serve", fake_serve)
+    toml = tmp_path / "flow.toml"
+    toml.write_text(ECHO_TOML, encoding="utf-8")
+    main(["--config", str(toml), "--no-store"])
+    (host,) = hosts
+    assert not isinstance(host.store, FileSessionStore)

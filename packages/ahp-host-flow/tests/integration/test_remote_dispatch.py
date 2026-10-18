@@ -7,11 +7,11 @@ from collections.abc import Awaitable, Callable
 from pathlib import Path
 
 from ahp_host import Host, LoopbackSingleUserPolicy
-from ahp_host.provider.echo import EchoProvider
 from ahp_protocol.transport import Transport, memory_pair
 
 from ahp_host_flow.config import ProviderConfig
 from ahp_host_flow.engine import load_journal
+from tests.flow_fakes import StrippedEchoProvider
 from tests.flow_hosting import SESSION, boot_flow, final_json
 from tests.hosting import all_channels, run_turn, state, text_of, worker_chats
 
@@ -34,7 +34,9 @@ async def test_remote_dispatch_runs_a_call_on_another_host(tmp_path: Path) -> No
     user.mkdir()
     (user / "far.py").write_text(WORKFLOW, encoding="utf-8")
     far = Host(
-        EchoProvider(provider_id="claude", structured=True, capabilities={"multipleChats": {}}),
+        StrippedEchoProvider(
+            provider_id="claude", structured=True, capabilities={"multipleChats": {}}
+        ),
         LoopbackSingleUserPolicy(),
     )
     serving: set[asyncio.Task[None]] = set()

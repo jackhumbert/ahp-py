@@ -52,6 +52,7 @@ from ahp_host_flow.engine.options import (
     RunOptions,
     default_concurrency,
 )
+from ahp_host_flow.engine.preamble import DEFAULT_PREAMBLE, preamble_text, with_preamble
 from ahp_host_flow.engine.redact import (
     BUILTIN_PATTERNS,
     MASK,
@@ -61,8 +62,11 @@ from ahp_host_flow.engine.redact import (
 )
 from ahp_host_flow.engine.registry import (
     WORKFLOW_NAME,
+    WORKFLOW_SOURCES,
+    ClientWorkflow,
     Registry,
     ResolvedScript,
+    WorkflowDir,
     WorkflowRefError,
     resolve_workflow,
 )
@@ -87,6 +91,7 @@ __all__ = [
     "BUILTIN_PATTERNS",
     "CPU_RESERVE",
     "DEFAULT_MAX_CONCURRENCY",
+    "DEFAULT_PREAMBLE",
     "GATE_KINDS",
     "IDLE_TIMEOUT",
     "JOURNAL_FILE",
@@ -100,6 +105,7 @@ __all__ = [
     "RUNS_DIR",
     "RUN_ID",
     "WORKFLOW_NAME",
+    "WORKFLOW_SOURCES",
     "AbortSignal",
     "AgentCall",
     "AgentLimitError",
@@ -108,6 +114,7 @@ __all__ = [
     "Budget",
     "BudgetExhaustedError",
     "ClientDispatcher",
+    "ClientWorkflow",
     "DispatchHandle",
     "Dispatcher",
     "EchoDispatcher",
@@ -139,6 +146,7 @@ __all__ = [
     "SchedulerRefusal",
     "StartRecord",
     "StreamMasker",
+    "WorkflowDir",
     "WorkflowRefError",
     "WorkflowSnapshot",
     "call_key",
@@ -148,10 +156,12 @@ __all__ = [
     "load_journal",
     "new_run_id",
     "no_answer_path",
+    "preamble_text",
     "reattach_handle",
     "redact_agent_record",
     "report_dispatch",
     "resolve_workflow",
     "run_dir",
     "schema_error",
+    "with_preamble",
 ]

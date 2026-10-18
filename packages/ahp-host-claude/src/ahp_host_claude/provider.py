@@ -3240,7 +3240,7 @@ class ClaudeProvider:
         models: Sequence[ModelInfo] = (),
         provider_id: str = PROVIDER_ID,
         sessions: ClaudeCodeSessions | None = None,
-        remote_control: bool = False,
+        remote_control: bool | None = False,
         claude_ai: Api | None = None,
         claude_ai_scope: str = LOCAL,
         state_dir: Path | None = None,
@@ -3252,6 +3252,7 @@ class ClaudeProvider:
         chat_tools: Sequence[str] = CHAT_TOOLS,
         commands: Sequence[Mapping[str, Any]] = (),
         rediscover: bool = False,
+        lazy_discovery: bool = False,
     ) -> None:
         if not is_valid_provider_id(provider_id):
             raise ValueError(f"invalid provider id: {provider_id!r}")
@@ -3263,7 +3264,9 @@ class ClaudeProvider:
         self._models = tuple(models)
         self.sessions = sessions if sessions is not None else ClaudeCodeSessions(self.roots)
         #: Whether a new session is on claude.ai unless its creator says not.
-        self.remote_control = remote_control
+        #: None: Claude Code's own default, learned at discovery.
+        self.remote_control = bool(remote_control)
+        self._remote_control_unset = remote_control is None
         #: Set to list the account's other Remote Control sessions here too.
         self._claude_ai = claude_ai
         self._claude_ai_status: Api | None = None
@@ -3310,9 +3313,45 @@ class ClaudeProvider:
         #: Ask Claude Code for the models again, if start-up could not.
         self._rediscover = rediscover
         self._rediscovery: asyncio.Task[None] | None = None
+        #: Discover on the first session instead of at start-up (`from_config`).
+        self._lazy_discovery = lazy_discovery
+        self._discovered = False
+        self._discovery_lock = asyncio.Lock()
         #: The host's notifier (`UpdatesAgentInfo`), once it has given it.
         self._agent_changed: AgentInfoChanged | None = None
         self._announcing: set[asyncio.Task[Any]] = set()
+
+    async def _ensure_discovered(self) -> None:
+        """Ask Claude Code on first use, if this provider was built to wait.
+
+        Done once it has named models. A failed or empty answer (not signed in
+        yet, Claude Code not installed) leaves the picker empty and is asked
+        again at the next session's first use, so a provider no host ever
+        attaches to (`from_config` under flow) still recovers. The lock is
+        shared with `_discover_again`, so the two never ask at the same time.
+        """
+        if not self._lazy_discovery or self._discovered:
+            return
+        async with self._discovery_lock:
+            if self._discovered:
+                return
+            found = await discover(self.root, self._client_factory, state_dir=self._state_dir)
+            if not found.models:
+                if (
+                    self._rediscover
+                    and self._agent_changed is not None
+                    and self._rediscovery is None
+                ):
+                    self._rediscovery = asyncio.create_task(self._discover_again())
+                return
+            self._discovered = True
+            if self._remote_control_unset:
+                self.remote_control = found.remote_control
+            log.info("models: %s", ", ".join(m.id for m in found.models))
+            self._models = found.models
+            if not self._commands:
+                self._commands = found.commands
+            self._announce_agent()
 
     async def attach_agent_updates(self, changed: AgentInfoChanged) -> None:
         """The host's notifier for a changed picker (`UpdatesAgentInfo`).
@@ -3353,14 +3392,20 @@ class ClaudeProvider:
     async def _discover_again(self) -> None:
         for delay in _REDISCOVERY:
             await asyncio.sleep(delay)
-            found = await discover(self.root, self._client_factory, state_dir=self._state_dir)
-            if found.models:
-                log.info("models: %s", ", ".join(m.id for m in found.models))
-                self._models = found.models
-                if not self._commands:
-                    self._commands = found.commands
-                self._announce_agent()
-                return
+            # Under the lock `_ensure_discovered` takes: a first session that is already
+            # asking is waited for, and what it found is not asked for again.
+            async with self._discovery_lock:
+                if self._discovered:
+                    return
+                found = await discover(self.root, self._client_factory, state_dir=self._state_dir)
+                if found.models:
+                    self._discovered = True
+                    log.info("models: %s", ", ".join(m.id for m in found.models))
+                    self._models = found.models
+                    if not self._commands:
+                        self._commands = found.commands
+                    self._announce_agent()
+                    return
         log.warning("Claude Code still names no models; the picker stays empty")
 
     #: What a host should advertise as `completionTriggerCharacters` for this
@@ -3467,6 +3512,7 @@ class ClaudeProvider:
         return session
 
     async def create_session(self, context: AgentSessionContext) -> ClaudeSession:
+        await self._ensure_discovered()
         chosen = context.config.get(CONTINUE_KEY)
         remote_control = self._remote_control(context.config.get(RC_CONFIG_KEY))
         if not is_session_id(chosen):
@@ -3506,6 +3552,7 @@ class ClaudeProvider:
         return None
 
     async def resume_session(self, context: AgentSessionContext) -> ClaudeSession:
+        await self._ensure_discovered()
         state = context.resume_state or {}
         mirrored = state.get(MIRROR_KEY)
         if isinstance(mirrored, str):

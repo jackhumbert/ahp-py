@@ -39,5 +39,5 @@ def create(options: Mapping[str, Any], node: NodeContext) -> FlowProvider:
         cfg = dataclasses.replace(cfg, state_dir=node.state_dir)
     workflows = options.get("user_workflows_dir")
     if workflows is None:
-        return FlowProvider(cfg)
-    return FlowProvider(cfg, user_workflows_dir=Path(str(workflows)).expanduser())
+        return FlowProvider(cfg, roots=node.roots)
+    return FlowProvider(cfg, roots=node.roots, user_workflows_dir=Path(str(workflows)).expanduser())

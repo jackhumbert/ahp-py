@@ -6,6 +6,7 @@ import asyncio
 from pathlib import Path
 
 from ahp_client import TurnCompleted, TurnFailed
+from ahp_protocol.channels import ROOT_URI
 
 from tests.fleet_hosting import (
     FleetFixture,
@@ -17,7 +18,7 @@ from tests.fleet_hosting import (
     session_uris,
     start_run,
 )
-from tests.hosting import notifications
+from tests.hosting import connect, notifications, worker_chats
 
 RUN = "flow:/run-1"
 SCHEMA = "{'type': 'object', 'properties': {'n': {'type': 'integer'}}, 'required': ['n']}"
@@ -85,6 +86,32 @@ async def test_fleet_e2e_run_fans_out_to_two_nodes(tmp_path: Path) -> None:
         adopted = orchestrator._adopted[RUN]
         assert adopted.kind == "flow"
         assert set(adopted.children) == {on_alpha, on_beta}
+    finally:
+        await fx.aclose()
+
+
+async def test_fleet_e2e_run_node_session_names_its_delegation_origin(tmp_path: Path) -> None:
+    fx = await boot(tmp_path)
+    try:
+        async with fx.surface() as surface:
+            end = await start_run(surface, RUN, "/fan")
+            assert isinstance(end, TurnCompleted), end
+        (chat_a,) = [c for c in worker_chats(fx.hosts["flow"], RUN) if c.get("title") == "A"]
+        wire, serving = await connect(fx.hosts["alpha"])
+        try:
+            listed = (await wire.request("listSessions", {"channel": ROOT_URI}))["result"]["items"]
+        finally:
+            await wire.close()
+            serving.cancel()
+        (on_alpha,) = [
+            i for i in listed if i["resource"] in session_uris(fx.hosts["alpha"], "claude")
+        ]
+        assert on_alpha["origin"] == {
+            "kind": "ahp-py/delegation",
+            "session": RUN,
+            "chat": chat_a["resource"],
+            "toolCallId": "agent-0",
+        }
     finally:
         await fx.aclose()
 

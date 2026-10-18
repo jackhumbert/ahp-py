@@ -691,7 +691,11 @@ class Sandbox:
             state = RunState(
                 scheduler=scheduler,
                 options=options,
-                registry=Registry(options.workflow_dirs, python_dirs=options.python_dirs),
+                registry=Registry(
+                    options.workflow_dirs,
+                    python_dirs=options.python_dirs,
+                    client=options.client_workflows,
+                ),
                 journal=jr,
                 node=self._node,
                 on_log=on_log,

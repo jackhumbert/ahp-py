@@ -183,9 +183,12 @@ class _Builder:
             if isinstance(plugin, Mapping) and isinstance(plugin.get("name"), str):
                 path = plugin.get("path")
                 version = plugin.get("version")
+                # Claude Code can report a plugin's path relative to its own
+                # working directory (a plugin loaded from a relative dir), and
+                # `as_uri` refuses a relative path, which failed the whole tree.
                 self._plugin(
                     plugin["name"],
-                    Path(path) if isinstance(path, str) and path else None,
+                    cwd / path if isinstance(path, str) and path else None,
                     version if isinstance(version, str) else None,
                 )
         self.descriptions: dict[str, str] = {}

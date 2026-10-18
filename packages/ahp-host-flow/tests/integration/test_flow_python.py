@@ -15,7 +15,7 @@ from tests.hosting import found, notifications, run_turn, state, text_of
 
 pytestmark = pytest.mark.node
 
-TOML = '[providers.echo]\nload = "ahp_host.provider.echo:EchoProvider"\n'
+TOML = '[providers.echo]\nload = "tests.flow_fakes:StrippedEchoProvider"\n'
 REVIEW = (
     "meta = {'name': 'review', 'description': 'd', 'phases': [{'title': 'Find'}]}\n"
     "\n"

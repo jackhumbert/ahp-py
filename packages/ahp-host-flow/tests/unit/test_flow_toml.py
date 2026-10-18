@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import tomllib
 from pathlib import Path
 from typing import Any
 
@@ -208,6 +209,26 @@ def test_python_sources_rejected(value: Any, match: str, tmp_path: Path) -> None
         parse_config(data, base=tmp_path)
 
 
+def test_watch_interval_default(tmp_path: Path) -> None:
+    cfg = parse_config({"providers": _providers()}, base=tmp_path)
+    assert cfg.workflows.watch_interval == 2.0
+
+
+@pytest.mark.parametrize("value", [0, 0.5])
+def test_watch_interval_accepted(value: float, tmp_path: Path) -> None:
+    data = {"providers": _providers(), "workflows": {"watch_interval": value}}
+    cfg = parse_config(data, base=tmp_path)
+    assert cfg.workflows.watch_interval == float(value)
+    assert isinstance(cfg.workflows.watch_interval, float)
+
+
+@pytest.mark.parametrize("value", [-1, True, "2", float("inf")])
+def test_watch_interval_refused(value: Any, tmp_path: Path) -> None:
+    data = {"providers": _providers(), "workflows": {"watch_interval": value}}
+    with pytest.raises(ConfigError, match=r"workflows\.watch_interval must be a number"):
+        parse_config(data, base=tmp_path)
+
+
 def test_workflows_sources_default_excludes_client(tmp_path: Path) -> None:
     assert WorkflowsConfig().sources == ("workspace", "user", "host")
     cfg = parse_config({"providers": _providers()}, base=tmp_path)
@@ -255,6 +276,22 @@ def test_bad_toml(tmp_path: Path) -> None:
 
 _FLEET = {"via": "fleet", "node": "build-box", "agent": "claude"}
 _REMOTE = {"url": "wss://my-mac-mini.example.com", "token_file": "tok", "agent": "claude"}
+
+
+def test_preamble_config_values(tmp_path: Path) -> None:
+    for base in ({"load": "m:C"}, _FLEET, _REMOTE):
+        for value in (True, False, "Be terse."):
+            cfg = parse_config({"providers": {"a": {**base, "preamble": value}}}, base=tmp_path)
+            assert cfg.providers["a"].preamble == value
+        for bad in ("", "  ", 3):
+            with pytest.raises(ConfigError, match=r"providers\.a\.preamble must be true, false"):
+                parse_config({"providers": {"a": {**base, "preamble": bad}}}, base=tmp_path)
+
+
+def test_preamble_default_is_on(tmp_path: Path) -> None:
+    for base in ({"load": "m:C"}, _FLEET, _REMOTE):
+        cfg = parse_config({"providers": {"a": dict(base)}}, base=tmp_path)
+        assert cfg.providers["a"].preamble is True
 
 
 def test_provider_kinds_parse(tmp_path: Path) -> None:
@@ -326,3 +363,16 @@ def test_provider_kinds_lazy_providers_list_in_process_only(tmp_path: Path) -> N
     assert list(providers) == ["inproc"]
     assert len(providers) == 1
     assert providers.get("fleetname") is None
+
+
+def test_readme_live_sample_parses(tmp_path: Path) -> None:
+    readme = (Path(__file__).resolve().parents[2] / "README.md").read_text("utf-8")
+    after = readme.split("## Tests against real models", 1)[1]
+    block = after.split("```toml\n", 1)[1].split("```", 1)[0]
+    cfg = parse_config(tomllib.loads(block), base=tmp_path)
+    assert cfg.providers["claude"].load == "ahp_host_claude:from_config"
+    assert cfg.providers["glm"].load == "ahp_host_acp:from_config"
+    glm_config = cfg.providers["glm"].config
+    assert isinstance(glm_config, Path)
+    assert glm_config.name == "opencode.toml"
+    assert RoutingRule("glm", phase="Review") in cfg.routing.rules

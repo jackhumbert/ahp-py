@@ -14,7 +14,6 @@ from ahp_host_flow import FlowProvider
 from ahp_host_flow.worktree import (
     APPLY_OPERATION,
     DISCARD_OPERATION,
-    register_worktree_operations,
     worktree_path,
 )
 from tests.flow_fakes import reset_fakes
@@ -70,10 +69,7 @@ def init_repo(ws: Path) -> None:
 
 async def boot(tmp_path: Path, node_path: str) -> FlowFixture:
     init_repo(tmp_path / "ws")
-    fx = await boot_flow(tmp_path, node_path, TOML)
-    provider = cast(FlowProvider, fx.host.providers["flow"])
-    register_worktree_operations(fx.host, provider.worktree_changesets)
-    return fx
+    return await boot_flow(tmp_path, node_path, TOML)
 
 
 def script(prompt: str, label: str = "fw-1") -> str:

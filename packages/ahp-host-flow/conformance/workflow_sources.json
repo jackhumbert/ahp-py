@@ -1,0 +1,9 @@
+{
+  "options": { "workflow_dirs": [{ "source": "host", "path": "workflows" }] },
+  "result": {
+    "host": { "reply": "child host", "sawArgs": { "who": "host" } },
+    "workspace": "unknown workflow: 'workspace:child'",
+    "bogus": "unknown workflow source 'bogus' in 'bogus:child': use one of client, workspace, user, host"
+  },
+  "calls": [[0, "child host", null, null]]
+}

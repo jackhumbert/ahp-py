@@ -1,7 +1,7 @@
 # Agent guide
 
 An `ahp-host` provider that runs Claude Code workflow scripts. `docs/plan.md`
-is the design; milestones M0–M10 there say what exists and what's next.
+is the design; milestones M0–M11 there say what exists and what's next.
 
 - `engine/` and `sandbox/` never import `ahp_host` (an import-linter
   contract), so the engine can move into its own distribution later. They
@@ -109,6 +109,11 @@ is the design; milestones M0–M10 there say what exists and what's next.
   main run chats only; it declines worker chats (fails them, not resumable).
   Whatever it needs about the run is in the resume state, because it gets only
   the chat and turn id.
+- Kept worktrees live in the resume state (`"worktrees"`, from
+  `WorktreeChangesets.kept_for`; `RESUME_STATE_VERSION` stays 1) and
+  `FlowSession.restore_worktrees` republishes them from `resume_session`.
+  `FlowProvider` is `ResumesOnRestore` only for a session holding any, so the
+  host resumes it eagerly and the changesets reappear without a client opening it.
 - Continuing a run uses `RunOptions.continue_run`, never the `--resume` prefix
   rule (plan §3 is unchanged).
 - Journal readers know run/workflow/agent/started/gate records and still
@@ -128,6 +133,13 @@ is the design; milestones M0–M10 there say what exists and what's next.
 - A continued run's tool-call ids use the prefix `agent-r<k>`.
 - A `.py` workflow from a client is never read or loaded (plan §4.10 trust);
   `python_sources` refuses `client`.
+- Client workflows reach the engine as plain data: `RunOptions.client_workflows`
+  (`ClientWorkflow(name, source, filename)`, `.js` only; the registry drops any other) and
+  the labeled `WorkflowDir`s in `workflow_dirs`. The engine never imports the catalog, and
+  `workflow('source:name')` is resolved by `engine/registry._split`.
+- A watched-dir change (`FlowSession.start_watching`, `[workflows] watch_interval`) schedules
+  the same coalescing refresh with `read_clients=False`: watch refreshes never read a client,
+  they use the cached client entries.
 - Never read from a client inside `active_clients_changed` or `describe`: the
   client's reply arrives on the connection that is delivering the notification,
   so it deadlocks. `active_clients_changed` only schedules a (coalescing)
@@ -139,8 +151,16 @@ is the design; milestones M0–M10 there say what exists and what's next.
   set, else read-only. Steering is forwarded only if the inner session
   `SteersTurns`, otherwise rejected with a reason.
 - The changeset operation ids are `APPLY_OPERATION` and `DISCARD_OPERATION`
-  (`worktree.py`); keep them stable, clients and `register_worktree_operations`
+  (`worktree.py`); keep them stable, clients and `FlowProvider.changeset_operations`
   share them.
+- The subagent preamble (`ProviderConfig.preamble`, on by default) reaches only
+  the inner agent: the in-process `UserMessage` text and `raw["text"]`, the fleet
+  `start_session` prompt and the remote `chat.prompt`. Never `AgentCall.prompt`
+  (journal keys), the main chat's `agent` tool-call input or the worker turn's
+  published message. A follow-up in a named chat (`opts.x.chat`) is sent bare: only the
+  chat's first message carries it. Test fakes that script by prompt strip it through
+  `tests/preamble.py`; a flow.toml that loads the echo provider loads
+  `tests.flow_fakes:StrippedEchoProvider`.
 - The corpus scripts (`conformance/corpus`) run unmodified on
   `tests/corpus_fakes.py` and have no `.py` twins.
 - Conventional commits, scope `ahp-host-flow`; `CHANGELOG.md` under

@@ -13,7 +13,12 @@ from ahp_host.provider.base import (
 
 from ahp_host_flow.config import load_config
 from ahp_host_flow.engine import JournalWriter, RunHeader
-from ahp_host_flow.provider import NOTHING_TO_RESUME, FlowProvider, FlowSession
+from ahp_host_flow.provider import (
+    NOTHING_TO_RESUME,
+    FlowProvider,
+    FlowSession,
+    _parse_worktrees,
+)
 
 
 def _provider(tmp_path: Path) -> FlowProvider:
@@ -22,7 +27,7 @@ def _provider(tmp_path: Path) -> FlowProvider:
     # load_config insists on one provider entry; these tests never dispatch to it.
     toml.write_text(
         f'state_dir = "{state}"\nnode = "{node}"\n\n'
-        '[providers.echo]\nload = "ahp_host.provider.echo:EchoProvider"\n',
+        '[providers.echo]\nload = "tests.flow_fakes:StrippedEchoProvider"\n',
         encoding="utf-8",
     )
     return FlowProvider(load_config(toml), providers={}, user_workflows_dir=tmp_path / "user")
@@ -184,3 +189,36 @@ async def test_flow_resume_state_a_new_turn_forgets_the_restored_run(tmp_path: P
         _Quiet("t2"),  # type: ignore[arg-type]
     )
     assert await provider.resume_state_of(session) == {"flow": 1, "runs": []}
+
+
+def _worktree(ordinal: int = 0) -> dict[str, Any]:
+    return {
+        "chat": "ahp-chat:/w",
+        "runId": "abc",
+        "ordinal": ordinal,
+        "repo": "/repo",
+        "path": "/repo-wt",
+        "cwd": "/repo-wt",
+        "base": "deadbeef",
+        "label": "fw-1",
+    }
+
+
+def test_flow_resume_state_worktrees_parse_keeps_well_formed_entries_only(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    state = {"flow": 1, "runs": [], "worktrees": [_worktree(0), "nope", _worktree(1)]}
+    with caplog.at_level("WARNING"):
+        assert _parse_worktrees(state) == [_worktree(0), _worktree(1)]
+    assert any("malformed kept worktree" in r.getMessage() for r in caplog.records)
+    assert _parse_worktrees(None) == []
+    assert _parse_worktrees({"flow": 1, "runs": []}) == []
+    assert _parse_worktrees({"flow": 2, "worktrees": [_worktree()]}) == []
+    assert _parse_worktrees({"flow": 1, "worktrees": "x"}) == []
+
+
+def test_flow_resume_state_worktrees_resume_on_restore_only_with_entries(tmp_path: Path) -> None:
+    provider = _provider(tmp_path)
+    assert provider.resume_on_restore({"flow": 1, "runs": [_run()]}) is False
+    assert provider.resume_on_restore({"flow": 1, "runs": [], "worktrees": []}) is False
+    assert provider.resume_on_restore({"flow": 1, "runs": [], "worktrees": [_worktree()]}) is True

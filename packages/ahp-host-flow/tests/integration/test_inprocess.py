@@ -12,7 +12,7 @@ from ahp_host_flow.inprocess import FlowRunFailed, run_in_process
 
 pytestmark = pytest.mark.node
 
-ECHO = "ahp_host.provider.echo:EchoProvider"
+ECHO = "tests.flow_fakes:StrippedEchoProvider"
 
 
 def config(

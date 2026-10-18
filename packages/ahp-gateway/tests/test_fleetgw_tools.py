@@ -78,6 +78,46 @@ async def test_fleetgw_tools_start_session_runs_on_the_node(tmp_path: Path) -> N
         await _close(fleet)
 
 
+async def test_fleetgw_tools_start_session_passes_the_delegation_origin(tmp_path: Path) -> None:
+    fleet = flow_fleet(tmp_path)
+    try:
+        await start_flow(fleet)
+        named = await run_tool(
+            fleet,
+            "flow:/r1",
+            "start_session",
+            node="alpha",
+            agent="claude",
+            prompt="hi",
+            originChat="ahp-chat:/w",
+            originToolCall="agent-0",
+        )
+        plain = await run_tool(
+            fleet, "flow:/r1", "start_session", node="alpha", agent="claude", prompt="hi"
+        )
+        half = await run_tool(
+            fleet,
+            "flow:/r1",
+            "start_session",
+            node="alpha",
+            agent="claude",
+            prompt="hi",
+            originChat="ahp-chat:/w",
+        )
+        alpha = fleet.hosts["alpha"].sequencer
+        state = alpha.state_of(named["structuredContent"]["session"])
+        assert state["origin"] == {
+            "kind": "ahp-py/delegation",
+            "session": "flow:/r1",
+            "chat": "ahp-chat:/w",
+            "toolCallId": "agent-0",
+        }
+        for result in (plain, half):
+            assert "origin" not in alpha.state_of(result["structuredContent"]["session"])
+    finally:
+        await _close(fleet)
+
+
 async def test_fleetgw_tools_a_node_the_principal_is_not_admitted_to_is_refused(
     tmp_path: Path,
 ) -> None:

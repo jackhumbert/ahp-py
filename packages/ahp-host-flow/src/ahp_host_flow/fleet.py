@@ -20,9 +20,11 @@ from ahp_host_flow.engine import (
     AgentResult,
     DispatchHandle,
     Redactor,
+    preamble_text,
     reattach_handle,
     report_dispatch,
     schema_error,
+    with_preamble,
 )
 
 #: The gateway's flow tool names (ahp-gateway `FLOW_TOOLS`); duplicated because neither package
@@ -426,8 +428,11 @@ class FleetDispatcher(StepDispatcher):
                     args: dict[str, Any] = {
                         "node": spec.node,
                         "agent": spec.agent,
-                        "prompt": call.prompt,
+                        "prompt": with_preamble(call.prompt, preamble_text(spec.preamble)),
                         "title": title,
+                        # The node session names this call as its origin (a delegation).
+                        "originChat": worker.resource,
+                        "originToolCall": call_id,
                     }
                     model = self._model(spec, opts)
                     if model is not None:

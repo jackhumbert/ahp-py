@@ -19,6 +19,7 @@ from ahp_host import Host
 from ahp_protocol.transport import memory_pair
 
 from ahp_host_flow.fleet import FLEET_TOOLS
+from tests.preamble import strip_preamble
 
 _DONE = ("done", "stopped", "failed", "gone")
 _SERVING: set[asyncio.Task[None]] = set()
@@ -39,7 +40,11 @@ class FakeFleet:
 
     def start(self, args: Mapping[str, Any]) -> dict[str, Any]:
         self.starts.append(dict(args))
-        node, agent, prompt = str(args["node"]), str(args["agent"]), str(args["prompt"])
+        node, agent, prompt = (
+            str(args["node"]),
+            str(args["agent"]),
+            strip_preamble(str(args["prompt"])),
+        )
         uri = f"{agent}:/fake-{len(self.sessions)}"
         schema = args.get("output_schema")
         entry: dict[str, Any] = {

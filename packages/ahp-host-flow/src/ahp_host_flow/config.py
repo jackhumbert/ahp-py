@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import re
 import tomllib
 from collections.abc import Mapping
@@ -10,6 +11,7 @@ from pathlib import Path
 from typing import Any, Final, Literal
 
 from ahp_host_flow.engine.redact import Redactor
+from ahp_host_flow.engine.registry import WORKFLOW_SOURCES
 
 # The names VS Code recognises; copied from ahp-host-claude, which a provider package cannot be
 # imported sideways for.
@@ -18,7 +20,7 @@ EFFORT_KEY: Final = "effort"
 APPROVAL_MODES: Final = ("default", "acceptEdits", "auto", "plan")
 EFFORT_LEVELS: Final = ("low", "medium", "high", "xhigh", "max")
 # Precedence order, highest first (plan §4.3).
-SOURCES: Final = ("client", "workspace", "user", "host")
+SOURCES: Final = WORKFLOW_SOURCES
 # Client-published workflows are opt-in: a shared host does not run what a connecting client sends
 # unless the operator lists `client` (plan §4.3 Policy).
 SOURCES_DEFAULT: Final = ("workspace", "user", "host")
@@ -77,6 +79,9 @@ class ProviderConfig:
     idle_timeout: float | None = None
     # In-process: worker chats of this provider take steering (plan §4.5).
     interactive: bool = False
+    # Text put before every prompt the inner agent is sent: True for the default, a string for
+    # one of your own.
+    preamble: bool | str = True
 
     @property
     def kind(self) -> Literal["inprocess", "fleet", "remote"]:
@@ -90,6 +95,8 @@ class WorkflowsConfig:
     dirs: tuple[Path, ...] = ()
     sources: tuple[str, ...] = SOURCES_DEFAULT
     python_sources: tuple[str, ...] = PYTHON_SOURCES_DEFAULT
+    # Seconds between scans of the local source dirs; 0 turns watching off.
+    watch_interval: float = 2.0
 
 
 @dataclass(frozen=True)
@@ -168,13 +175,23 @@ def _parse_provider(name: str, raw: Any, base: Path) -> ProviderConfig:
             "approval_mode",
             "effort",
             "interactive",
+            "preamble",
         )
     elif "via" in table:
         kind = "fleet"
-        allowed = ("via", "node", "agent", "models", "approval_mode", "effort", "reply_timeout")
+        allowed = (
+            "via",
+            "node",
+            "agent",
+            "models",
+            "approval_mode",
+            "effort",
+            "reply_timeout",
+            "preamble",
+        )
     else:
         kind = "remote"
-        allowed = ("url", "token_file", "agent", "models", "idle_timeout")
+        allowed = ("url", "token_file", "agent", "models", "idle_timeout", "preamble")
     _check_keys(table, allowed, where)
     load = via = node = agent = url = None
     token_file: Path | None = None
@@ -226,6 +243,9 @@ def _parse_provider(name: str, raw: Any, base: Path) -> ProviderConfig:
     interactive = table.get("interactive", False)
     if not isinstance(interactive, bool):
         raise ConfigError(f"{where}.interactive must be true or false")
+    preamble = table.get("preamble", True)
+    if not isinstance(preamble, bool) and (not isinstance(preamble, str) or not preamble.strip()):
+        raise ConfigError(f"{where}.preamble must be true, false or a non-empty string")
     return ProviderConfig(
         name,
         load,
@@ -241,6 +261,7 @@ def _parse_provider(name: str, raw: Any, base: Path) -> ProviderConfig:
         reply_timeout=_seconds(table, "reply_timeout", where),
         idle_timeout=_seconds(table, "idle_timeout", where),
         interactive=interactive,
+        preamble=preamble,
     )
 
 
@@ -278,7 +299,7 @@ def _parse_routing(raw: Any, providers: Mapping[str, ProviderConfig]) -> Routing
 
 def _parse_workflows(raw: Any, base: Path) -> WorkflowsConfig:
     table = _table(raw, "workflows")
-    _check_keys(table, ("dirs", "sources", "python_sources"), "workflows")
+    _check_keys(table, ("dirs", "sources", "python_sources", "watch_interval"), "workflows")
     dirs = tuple(_path(d, base) for d in _str_list(table.get("dirs", []), "workflows.dirs"))
     sources = tuple(_str_list(table.get("sources", list(SOURCES_DEFAULT)), "workflows.sources"))
     for source in sources:
@@ -303,7 +324,17 @@ def _parse_workflows(raw: Any, base: Path) -> WorkflowsConfig:
             )
     if len(set(python_sources)) != len(python_sources):
         raise ConfigError("workflows.python_sources has duplicates")
-    return WorkflowsConfig(dirs, sources, python_sources)
+    interval = table.get("watch_interval", WorkflowsConfig.watch_interval)
+    if (
+        isinstance(interval, bool)
+        or not isinstance(interval, int | float)
+        or not math.isfinite(interval)
+        or interval < 0
+    ):
+        raise ConfigError(
+            "workflows.watch_interval must be a number of seconds >= 0 (0 turns watching off)"
+        )
+    return WorkflowsConfig(dirs, sources, python_sources, float(interval))
 
 
 def _parse_redact(raw: Any) -> RedactConfig:

@@ -10,6 +10,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Final
 
+from ahp_host_flow.engine.registry import ClientWorkflow, WorkflowDir
+
 # plan §3 caps
 DEFAULT_MAX_CONCURRENCY: Final = 16
 # plan §3 caps
@@ -40,7 +42,9 @@ class RunOptions:
     max_agents: int = MAX_AGENTS_PER_RUN
     budget_total: int | None = None
     timeout: float | None = None
-    workflow_dirs: tuple[Path, ...] = ()
+    workflow_dirs: tuple[Path | WorkflowDir, ...] = ()
+    # Workflows a client published, as plain data; `.js` only (plan §4.3).
+    client_workflows: tuple[ClientWorkflow, ...] = ()
     run_root: Path | None = None
     # Directories `.py` workflows may load from, by name or {scriptPath}. None means a trusted
     # caller (the CLI and the library) and allows any `.py`; every path that runs a workflow on
@@ -93,6 +97,16 @@ class RunOptions:
             and all(isinstance(d, Path) for d in self.python_dirs)
         ):
             raise ValueError("python_dirs must be a tuple of paths or None")
+        if not (
+            isinstance(self.workflow_dirs, tuple)
+            and all(isinstance(d, Path | WorkflowDir) for d in self.workflow_dirs)
+        ):
+            raise ValueError("workflow_dirs must be a tuple of paths or WorkflowDir")
+        if not (
+            isinstance(self.client_workflows, tuple)
+            and all(isinstance(c, ClientWorkflow) for c in self.client_workflows)
+        ):
+            raise ValueError("client_workflows must be a tuple of ClientWorkflow")
         if self.redact is not None and not callable(self.redact):
             raise ValueError("redact must be callable")
 

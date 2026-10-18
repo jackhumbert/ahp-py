@@ -26,6 +26,11 @@ dependencies = [
   "jsonschema>=4.18",
 ]
 
+# Inner providers a flow.toml loads by import path (`ahp_host_claude:from_config`).
+[project.optional-dependencies]
+claude = ["ahp-host-claude"]
+acp = ["ahp-host-acp"]
+
 [project.scripts]
 flow = "ahp_host_flow.cli:main"
 

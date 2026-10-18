@@ -658,6 +658,55 @@ assert isinstance(late, UpdatesAgentInfo) and isinstance(late, DeclaresCompletio
 assert Host(late, LoopbackSingleUserPolicy()).completion_triggers() == ("/",)
 ```
 
+## Operations and eager resume
+
+Two capabilities that used to be the embedder's job:
+
+- **`ProvidesOperations`** — `changeset_operations()` returns `{operation id:
+  handler}`. The host registers each when it is built, once, so a provider served
+  by any host (`ahp-node` included) has its operations. An id two providers
+  declare is a `ValueError` at `Host(...)`, and `Host.register_operation` refuses
+  an id a provider already declared (an embedder re-registering its own id still
+  overwrites). Publish the changeset with `publisher.changes_published`, listing
+  the operation in `Changeset.operations`.
+- **`ResumesOnRestore`** — restored sessions get their agent lazily, on the first
+  turn. `resume_on_restore(resume_state)` says which ones need it at once (state
+  the provider must republish), from the resume state it persisted. `restore()`
+  then resumes those sessions without a turn; raising is logged and counts as
+  `False`.
+
+Changesets themselves are not restored: their channels are never stored, so a
+restored chat or session lists none, and the provider republishes what it still has.
+
+```python
+from ahp_host.core.changesets import Changeset, ChangesetOperation
+from ahp_host.provider.base import ProvidesOperations, ResumesOnRestore
+
+
+class OperatingProvider(ShoutProvider):
+    async def _publish(self, changeset, operation, target):
+        pass  # what "Publish" does is yours
+
+    def changeset_operations(self):
+        return {"shout.publish": self._publish}
+
+    def resume_on_restore(self, resume_state):
+        return bool(resume_state.get("watching"))
+
+
+operating = OperatingProvider()
+assert isinstance(operating, ProvidesOperations) and isinstance(operating, ResumesOnRestore)
+assert operating.resume_on_restore({"watching": True})
+assert Changeset(label="c", operations=(ChangesetOperation("shout.publish", "Publish"),))
+operating_host = Host(operating, LoopbackSingleUserPolicy())
+try:
+    operating_host.register_operation("shout.publish", operating._publish)
+except ValueError as refused:
+    assert "shout.publish" in str(refused)
+else:
+    raise AssertionError("a provider's operation id must not be registered again")
+```
+
 ## Truncation, and the one thing you must not fake
 
 `chat/truncated` is how edit-and-resend works: a client drops the turns after a

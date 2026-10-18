@@ -2,6 +2,47 @@
 
 ## [Unreleased]
 
+### Added — live tests and a sample live flow.toml (M11)
+
+- `test_triage_corpus_live` and `test_review_routed_to_glm_live` (a Review phase routed to a `glm` provider; skipped without one) beside the fan-out live test, all under `AHP_FLOW_LIVE_CONFIG`; `run_corpus` takes a script and args.
+- The README's "Tests against real models" gives a sample live `flow.toml` using both `from_config` factories; `test_readme_live_sample_parses` keeps it valid.
+- The live tests give the flow provider `roots=` covering the test's working folder (an inner `from_config` provider refuses a folder outside its roots), and the README says plainly that inner providers reach only working directories inside the flow host's roots, so `python -m ahp_host_flow` needs `--root` covering the projects.
+
+### Added — delegation origin on fleet calls (M11)
+
+- A fleet call's node session is created with a delegation `origin` (`{kind: "ahp-py/delegation", session, chat, toolCallId}`) naming the run session, the call's worker chat and its `agent` tool call, sent as `start_session`'s `originChat` and `originToolCall`; node listings carry it, so a client can nest the session under its call.
+
+### Added — `workflow()` reaches client workflows and source-qualified names (M11)
+
+- `workflow('host:child')` (also `client:`, `workspace:`, `user:`) reaches one source only; an unknown source throws `unknown workflow source 'x' in 'x:child': use one of client, workspace, user, host`. A bare name tries client, workspace, user, host in that order, as for a top-level run.
+- The engine takes client workflows as data: `RunOptions.client_workflows` (`ClientWorkflow`, `.js` only) and labeled `WorkflowDir` entries in `workflow_dirs`; `Registry` gained `client=`, `find_client` and `_split`. `config.SOURCES` is now `engine.WORKFLOW_SOURCES`.
+
+### Added — kept worktree changesets survive a restart (M11)
+
+- A kept worktree is stored in the session's resume state and republished as a new changeset (Apply and Discard working) after a host restart; one whose directory is gone is dropped with a log line. `FlowProvider` implements ahp-host's `ResumesOnRestore` for sessions holding kept worktrees.
+- `python -m ahp_host_flow` now stores sessions under `state_dir` and calls `host.restore()` before serving; `--no-store` keeps the old in-memory behaviour. `build_host` takes `store=`.
+
+### Changed — worktree operations declared by the provider (M11)
+
+- `FlowProvider` implements ahp-host's `ProvidesOperations` (`changeset_operations`) and declares Apply and Discard itself, so a kept worktree's changeset is actionable under ahp-node as well as in `python -m ahp_host_flow`, `flow run` and any embedder's `Host`. The operation ids are unchanged.
+
+### Removed — `register_worktree_operations` (M11)
+
+- `ahp_host_flow.worktree.register_worktree_operations` is gone; nothing needs to register the operations on a host any more.
+
+### Added — watched workflow dirs (M11)
+
+- A flow session watches its local workflow dirs (workspace `.claude/workflows`, user, host) and re-publishes the customizations when a `*.js` or `*.py` is added, edited or deleted, with no message sent. `[workflows] watch_interval` in flow.toml sets the scan interval in seconds (default `2.0`; `0` turns watching off). A watch-triggered refresh never reads a client.
+
+### Added — subagent preamble (M11)
+
+- A line of context goes before the prompt an in-process, fleet or remote provider's inner agent is sent (`engine/preamble.py`: `DEFAULT_PREAMBLE`, `preamble_text`, `with_preamble`). It is on by default; `preamble = false` in a provider's flow.toml table sends the bare prompt, and a string replaces the text. The default text tells the agent its final message is the step's return value. Worker chats, the main chat's `agent` tool call and journal keys keep the bare prompt. In a named chat (`opts.x.chat`) only the first message carries it, since the inner session already has it. The test fakes strip it through `tests/preamble.py`.
+
+### Added — `from_config` loading (M11)
+
+- The loader gives an inner provider's factory `roots` and `state_dir` when it has a parameter of that name (not a bare `**kwargs`) and the table does not set it: the host's roots plus `<state_dir>/runs` (named `flow-runs`, `flow-runs-2`, ... among named roots), and `<state_dir>/providers/<name>`. `FlowProvider(roots=)`, the `flow` node agent (`node.roots`), `flow run --config` (the working folder) and `python -m ahp_host_flow --root PATH` (repeatable) supply the host's roots.
+- `[claude]` and `[acp]` extras install `ahp-host-claude` and `ahp-host-acp`, so a flow.toml can name `ahp_host_claude:from_config` and `ahp_host_acp:from_config` directly. README and plan §5 use them instead of wrapper factories.
+
 ### Added — extensions (M10)
 
 - `ask()`, `approve()` and `canvas()` verbs in both the JS and the Python runner, with identical argument errors. They reach the host as a `gate` request (`{kind, question, options}` -> `{value}`) and a `canvas` notification (`{url, title}`); `protocol.GATE_ERROR` (-32007) is the error for a gate no client can answer, whose message the verb throws. Gates take their ordinal from a counter separate from `agent()` ordinals, assigned when the request line arrives and shared with `workflow()` children. The engine (`GateRunner`, `engine/gates.py`) re-validates an `ask()` answer against `choices`/`schema`, masks it once, and returns `null`/`false` for a gate aborted mid-wait. Without a `Gates` implementation `ask()`/`approve()` fail clearly and `canvas()` is ignored with a log line.

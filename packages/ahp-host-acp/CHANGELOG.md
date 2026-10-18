@@ -4,6 +4,13 @@
 
 ### Added
 
+- `from_config(config=None, *, roots=None, state_dir=None, **options)`: build an
+  `AcpProvider` from Python, with no node, for a flow.toml
+  `load = "ahp_host_acp:from_config"`. It reads this package's config file
+  (server-only keys like `port` are ignored in the file, and refused as keywords
+  like any unknown option) and keyword options override it.
+  `config.read_config_file`, `config.roots_option`, `config.SERVER_ONLY_KEYS` and
+  `agent.provider_from_options` are public; `agent._OPTIONS` is now `AGENT_OPTIONS`.
 - `ReturnsStructuredOutput`: every ACP session offers the host's per-turn tools,
   so a turn that asks for a structured result gets a `StructuredOutput` tool in
   the relay's list for that turn only (the list is refreshed when the turn

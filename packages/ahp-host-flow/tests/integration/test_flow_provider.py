@@ -15,6 +15,7 @@ from typing import Any
 
 import pytest
 from ahp_host import ROOT_URI, Host, LoopbackSingleUserPolicy
+from ahp_host.node import Roots
 
 from ahp_host_flow import FlowProvider, load_config
 from ahp_host_flow.engine import load_journal
@@ -40,7 +41,7 @@ from tests.hosting import (
 pytestmark = pytest.mark.node
 
 SESSION = "flow:/s1"
-ECHO = "ahp_host.provider.echo:EchoProvider"
+ECHO = "tests.flow_fakes:StrippedEchoProvider"
 SCHEMA = '{type: "object", properties: {n: {type: "integer"}}, required: ["n"]}'
 
 
@@ -491,9 +492,11 @@ async def test_session_config_reaches_inner(tmp_path: Path, node_path: str) -> N
 )
 async def test_live_smoke(tmp_path: Path) -> None:
     config = load_config(Path(os.environ["AHP_FLOW_LIVE_CONFIG"]))
-    host = Host(
-        FlowProvider(config, user_workflows_dir=tmp_path / "user"), LoopbackSingleUserPolicy()
+    # A `from_config` inner provider reaches only the roots, so they must cover the folder.
+    provider = FlowProvider(
+        config, user_workflows_dir=tmp_path / "user", roots=Roots.single(tmp_path.resolve())
     )
+    host = Host(provider, LoopbackSingleUserPolicy())
     wire, serving = await connect(host)
     try:
         chat = await open_session(wire, SESSION, "flow", working_directories=[tmp_path.as_uri()])

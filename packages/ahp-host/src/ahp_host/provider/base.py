@@ -19,7 +19,7 @@ from typing import Any, Final, Protocol, runtime_checkable
 
 from ahp_protocol.reducers.clock import now_iso
 
-from ahp_host.provider.changes import FileChange
+from ahp_host.provider.changes import FileChange, OperationHandler
 
 __all__ = [
     "HOST_CLIENT_ID",
@@ -65,10 +65,12 @@ __all__ = [
     "ModelSelection",
     "OpensSessions",
     "ProviderTerminal",
+    "ProvidesOperations",
     "ReadsClientPlugins",
     "ReconfiguresChats",
     "ResolvesInput",
     "ResumableAgentProvider",
+    "ResumesOnRestore",
     "ResumesTurns",
     "ReturnsStructuredOutput",
     "SessionDescription",
@@ -1261,6 +1263,33 @@ class UpdatesAgentInfo(Protocol):
     """
 
     async def attach_agent_updates(self, changed: AgentInfoChanged) -> None: ...
+
+
+@runtime_checkable
+class ProvidesOperations(Protocol):
+    """A provider that declares the changeset operations it answers.
+
+    The host registers each one when it is built, once, so a provider served
+    by any host (`ahp-node` included) has its operations; the embedder no
+    longer has to call `Host.register_operation` for them. An operation id
+    declared by two providers is a `ValueError` at `Host(...)`, and so is
+    `register_operation` of an id a provider declared, rather than a silent
+    overwrite.
+    """
+
+    def changeset_operations(self) -> Mapping[str, OperationHandler]: ...
+
+
+@runtime_checkable
+class ResumesOnRestore(Protocol):
+    """A provider that says which restored sessions need their agent at once.
+
+    Restored sessions get their agent lazily, on the first turn. A provider
+    says here which ones need it now (state it must republish), from the
+    resume state it persisted. Raising is logged and counts as ``False``.
+    """
+
+    def resume_on_restore(self, resume_state: Mapping[str, Any]) -> bool: ...
 
 
 @runtime_checkable

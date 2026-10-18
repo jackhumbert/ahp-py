@@ -149,6 +149,12 @@ class TestTheTree:
         entries = _by_id(build(sources, cwd=tmp_path, config=tmp_path).customizations)
         assert entries["plugin:tools"]["uri"] == "urn:claude-code:plugin:tools"
 
+    def test_a_relative_plugin_path_is_under_the_working_directory(self, tmp_path: Path) -> None:
+        sources = _sources(tmp_path)
+        sources.init = {"plugins": [{"name": "tools", "path": "plugins/tools"}]}
+        entries = _by_id(build(sources, cwd=tmp_path, config=tmp_path).customizations)
+        assert entries["plugin:tools"]["uri"] == (tmp_path / "plugins" / "tools").as_uri()
+
     def test_needing_a_sign_in_is_an_error_state_not_auth_required(self) -> None:
         state = customizations.mcp_state("needs-auth")
         assert state["kind"] == "error"

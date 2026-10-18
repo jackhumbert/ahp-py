@@ -214,6 +214,27 @@ ollama.com with `OLLAMA_API_KEY`.
 Unknown settings are an error, so a typo cannot silently fall back to a
 default.
 
+## Loading from Python (from_config)
+
+`ahp_host_acp.from_config` builds an `AcpProvider` without a node, for a
+flow.toml `load = "ahp_host_acp:from_config"` entry or any embedder. It is
+synchronous and starts no process (the agent is spawned per session).
+
+```python
+from ahp_host_acp import from_config
+
+provider = from_config("~/.config/ahp/opencode.toml", roots=["~/projects"])
+provider = from_config(roots={"work": "~/work"}, command=["opencode", "acp"])
+```
+
+The file is the config file described under Run it; `port`, `bind`,
+`token_file` and `verbose` are ignored in it (as keywords they are refused, like
+any unknown option). Keyword options (`provider_id`,
+`agent_name`, `description`, `command`, `env`, `models`, `model_command`,
+`config_options`, `mcp_servers`) override the file, `roots=` (a path, a list of
+paths or a name -> path table) overrides its root, and `state_dir=` its
+state directory.
+
 ## Client tools
 
 Tools a client publishes on its session (`activeClient.tools`) reach the agent

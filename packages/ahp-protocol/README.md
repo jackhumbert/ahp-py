@@ -179,6 +179,14 @@ assert view.status == "ok"
 assert view.steps[0].result == "hi"
 ```
 
+`ahp_protocol.ext.delegation` is the origin of a session started on another
+session's behalf: `delegation_origin(session, chat, tool_call_id)` builds
+`{kind: "ahp-py/delegation", session, chat, toolCallId}` (`SessionOrigin.kind` is
+nonexhaustive, and clients keep unknown kinds), a client sends it under
+`createSession` `_meta["ahp-py/origin"]`, and `parse_delegation` reads it back
+(`None` for any other kind or an incomplete one). A host seeds it into the
+session's `origin`; it is the client's claim, not verified.
+
 `ahp_protocol.ext.redaction` is the extension for redacting content after it was
 published. A host rewrites a response part (or a turn's user message) to a marker
 that uses only existing part kinds, `[redacted]` plus a reason and time under

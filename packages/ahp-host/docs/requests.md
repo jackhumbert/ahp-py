@@ -364,6 +364,16 @@ tool call on whose behalf the session was started (possibly on another host),
 set at `createSession` by the client that starts it, so a client can render it
 as the child of that call, as it does a `tool`-origin chat.
 
+**What ahp-py does.** An interim kind and key, until upstream names one:
+`createSession` `_meta["ahp-py/origin"]` carries `{kind: "ahp-py/delegation",
+session, chat, toolCallId}` (`ahp_protocol.ext.delegation`; `ahp-client`'s
+`create_session(origin=)` sends it, and `ahp-gateway`'s fleet `start_session`
+tool takes `originChat` and `originToolCall` for it). The host seeds it into the
+session's immutable `origin`, so it is in the session summary and persisted
+with the session. Only this kind is accepted from a client; `automation` stays
+host-only and any other kind is ignored. Clients keep unknown kinds verbatim,
+so a stock client lists the session as before.
+
 Why upstream: the link has to be on the session itself, where every client
 reads it; a private `_meta` key would only be understood by ahp-py's own
 clients, and the shape mirrors `ChatOrigin`'s `tool` kind, which clients

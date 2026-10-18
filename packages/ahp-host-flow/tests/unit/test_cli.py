@@ -228,7 +228,7 @@ def _flow_toml(tmp_path: Path, node: str | None = None) -> Path:
 state_dir = {json.dumps(str(tmp_path / "state"))}
 {node_line}
 [providers.echo]
-load = "ahp_host.provider.echo:EchoProvider"
+load = "tests.flow_fakes:StrippedEchoProvider"
 
 [workflows]
 sources = ["workspace"]

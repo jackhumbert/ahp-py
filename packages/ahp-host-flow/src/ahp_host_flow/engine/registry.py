@@ -10,6 +10,8 @@ from typing import Final
 
 # No dots, slashes or leading dash: a name can never traverse directories.
 WORKFLOW_NAME: Final = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]*")
+# Precedence order, highest first (plan §4.3); `config.SOURCES` is this tuple.
+WORKFLOW_SOURCES: Final = ("client", "workspace", "user", "host")
 # JS first: it wins a tie within one directory.
 WORKFLOW_SUFFIXES: Final = (".js", ".py")
 
@@ -24,6 +26,23 @@ class ResolvedScript:
     filename: str  # str(path), used for stack traces
 
 
+@dataclass(frozen=True)
+class WorkflowDir:
+    """A workflow directory labeled with the source it came from (`workflow('host:x')`)."""
+
+    source: str
+    path: Path
+
+
+@dataclass(frozen=True)
+class ClientWorkflow:
+    """A workflow a client published: its script text and the URI it lives at."""
+
+    name: str
+    source: str
+    filename: str
+
+
 def _invalid_name(name: str) -> WorkflowRefError:
     return WorkflowRefError(f"invalid workflow name: {name!r}")
 
@@ -36,27 +55,61 @@ def python_allowed(path: Path, python_dirs: Sequence[Path] | None) -> bool:
     return any(resolved.is_relative_to(d.resolve()) for d in python_dirs)
 
 
-class Registry:
-    """Ordered directories holding `<name>.js` or `<name>.py` workflows.
+def _split(ref: str) -> tuple[str | None, str]:
+    """`(source, name)` of a reference; the source is None for a bare name."""
+    source, sep, name = ref.partition(":")
+    if not sep:
+        if not WORKFLOW_NAME.fullmatch(ref):
+            raise _invalid_name(ref)
+        return None, ref
+    if source not in WORKFLOW_SOURCES:
+        raise WorkflowRefError(
+            f"unknown workflow source {source!r} in {ref!r}: use one of "
+            + ", ".join(WORKFLOW_SOURCES)
+        )
+    if not WORKFLOW_NAME.fullmatch(name):
+        raise _invalid_name(ref)
+    return source, name
 
-    The first directory with either wins, and `.js` wins a tie within one directory (Claude
-    Code's behaviour does not change). `.py` files load only from `python_dirs` (None: any).
+
+class Registry:
+    """Ordered directories holding `<name>.js` or `<name>.py` workflows, and client workflows.
+
+    A client workflow wins over any directory for a bare name; then the first directory with
+    either file wins, and `.js` wins a tie within one directory (Claude Code's behaviour does
+    not change). `source:name` reaches only that source's entries; an unlabeled directory (a
+    bare Path) serves bare names only. `.py` files load only from `python_dirs` (None: any),
+    and a client never supplies one.
     """
 
-    def __init__(self, dirs: Sequence[Path], *, python_dirs: Sequence[Path] | None = None) -> None:
-        self._dirs = tuple(dirs)
+    def __init__(
+        self,
+        dirs: Sequence[Path | WorkflowDir],
+        *,
+        python_dirs: Sequence[Path] | None = None,
+        client: Sequence[ClientWorkflow] = (),
+    ) -> None:
+        self._entries = tuple(d if isinstance(d, WorkflowDir) else WorkflowDir("", d) for d in dirs)
         self._python_dirs = None if python_dirs is None else tuple(python_dirs)
+        self._client = tuple(c for c in client if c.filename.endswith(".js"))
 
     @property
     def dirs(self) -> tuple[Path, ...]:
-        return self._dirs
+        return tuple(d.path for d in self._entries)
 
-    def find(self, name: str) -> Path | None:
-        if not WORKFLOW_NAME.fullmatch(name):
-            raise _invalid_name(name)
-        for d in self._dirs:
+    def find_client(self, ref: str) -> ClientWorkflow | None:
+        source, name = _split(ref)
+        if source not in (None, "client"):
+            return None
+        return next((c for c in self._client if c.name == name), None)
+
+    def find(self, ref: str) -> Path | None:
+        source, name = _split(ref)
+        for d in self._entries:
+            if source is not None and d.source != source:
+                continue
             for suffix in WORKFLOW_SUFFIXES:
-                path = d / f"{name}{suffix}"
+                path = d.path / f"{name}{suffix}"
                 if suffix == ".py" and not python_allowed(path, self._python_dirs):
                     continue
                 if path.is_file():
@@ -64,12 +117,12 @@ class Registry:
         return None
 
     def names(self) -> list[str]:
-        found: set[str] = set()
-        for d in self._dirs:
-            if not d.is_dir():
+        found: set[str] = {c.name for c in self._client}
+        for d in self._entries:
+            if not d.path.is_dir():
                 continue
             for suffix in WORKFLOW_SUFFIXES:
-                for path in d.glob(f"*{suffix}"):
+                for path in d.path.glob(f"*{suffix}"):
                     if not WORKFLOW_NAME.fullmatch(path.stem):
                         continue
                     if suffix == ".py" and not python_allowed(path, self._python_dirs):
@@ -91,10 +144,12 @@ def resolve_workflow(
     if isinstance(ref, str):
         display = ref
         if registry is None:
-            if not WORKFLOW_NAME.fullmatch(ref):
-                raise _invalid_name(ref)
+            _split(ref)
             path = None
         else:
+            entry = registry.find_client(ref)
+            if entry is not None:
+                return ResolvedScript(entry.source, entry.filename)
             path = registry.find(ref)
         if path is None:
             raise WorkflowRefError(f"unknown workflow: {ref!r}")

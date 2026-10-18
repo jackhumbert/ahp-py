@@ -10,8 +10,35 @@ versions each release speaks.
 
 ## [Unreleased]
 
+### Added
+
+- **A delegation session origin**: `createSession` `_meta["ahp-py/origin"]` with
+  `{kind: "ahp-py/delegation", session, chat, toolCallId}`
+  (`ahp_protocol.ext.delegation`) is seeded into the session's immutable
+  `origin`, so it is in the summary and persisted with the session. A client's
+  claim, not verified; `automation` stays host-only and other kinds are ignored
+  (`docs/requests.md` entry 12).
+- **`ProvidesOperations`** (`changeset_operations()`): a provider declares the
+  changeset operations it answers and the host registers them when it is built,
+  so a provider served by any host has them. A duplicate id between providers is a
+  `ValueError` at `Host(...)`, and `register_operation` refuses an id a provider
+  declared.
+- **`ResumesOnRestore`** (`resume_on_restore(resume_state)`): a provider names the
+  restored sessions that need their agent at once; `Host.restore()` resumes them
+  without a turn.
+
+### Changed
+
+- A restored chat or session no longer lists changesets: their channels are not
+  restored, so the links pointed at nothing. A provider republishes what it still has.
+
 ### Fixed
 
+- `PollingResourceWatcher` reported nothing on Windows: it walked
+  `path_from_file_uri("file:///C:/x")`, which is `/C:/x` there. It now walks
+  **`native_path_from_file_uri`** (new; same refusals), which maps the drive.
+  `path_from_file_uri` is unchanged, since the POSIX jail reads it as a
+  `PurePosixPath`.
 - Request ids (`input-…`, `confirm-…`) carry a token unique to the host
   process. A turn restored after a restart still holds the request parts the
   previous process published, and the chat reducer resolves a request by the

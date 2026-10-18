@@ -300,6 +300,40 @@ error, so a typo cannot silently fall back to a default.
 Authentication is Claude Code's own: the SDK uses whatever login `claude` has
 on this machine (or `ANTHROPIC_API_KEY` if set).
 
+## From Python: `from_config`
+
+A provider with no node, for a flow.toml or any embedder:
+
+```toml
+[providers.claude]
+load = "ahp_host_claude:from_config"
+config = "~/.config/ahp/node.toml"   # passed as config=Path(...)
+```
+
+or, with the options inline (each key becomes a keyword argument):
+
+```toml
+[providers.claude]
+load = "ahp_host_claude:from_config"
+
+[providers.claude.config]
+roots = ["~/projects"]
+```
+
+flow.toml's loader also hands `from_config` the host's `roots` (plus the runs
+folder) and a `state_dir`, unless the table sets them. Setting `roots` in the
+table stops that injection, so a worktree's working directory (under the runs
+folder) then falls outside the roots.
+
+`from_config` is synchronous. The file is this package's own config file;
+server-only keys (`port`, `bind`, `token_file`, `verbose`) are ignored in it (as
+keywords they are refused, like any unknown option). The
+`roots` and `state_dir` keywords override the file, as do the other keyword
+options (`agent_name`, `provider_id`, `remote_control`, `claude_ai_sessions`,
+`chat_tools`). Nothing starts Claude Code up front: the models (and Remote
+Control's default, if `remote_control` is unset) are discovered on the first
+session, once.
+
 ## Security
 
 The agent runs as the host's OS user, so whatever that user can touch, an

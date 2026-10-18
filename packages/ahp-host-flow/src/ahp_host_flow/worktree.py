@@ -11,18 +11,19 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import logging
 from asyncio.subprocess import DEVNULL, PIPE
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Final
+from typing import Any, Final
 
 from ahp_host.provider.base import SessionPublisher
 from ahp_host.provider.changes import Changeset, ChangesetOperation, FileChange
 
 from ahp_host_flow.engine import run_dir
 
-if TYPE_CHECKING:
-    from ahp_host.core import Host
+_log = logging.getLogger(__name__)
 
 WORKTREES_DIR: Final = "worktrees"
 APPLY_OPERATION: Final = "ahp-host-flow.worktree.apply"
@@ -189,6 +190,10 @@ class KeptWorktree:
     publisher: SessionPublisher
     chat: str
     changeset: Changeset
+    session: str
+    run_id: str | None
+    ordinal: int
+    title: str
 
 
 class WorktreeChangesets:
@@ -196,12 +201,15 @@ class WorktreeChangesets:
 
     The worktree stays until the changeset is resolved: it is the agent's work, so neither
     the end of the run nor the session closing removes it. The held state is in memory, so
-    a host restart leaves the worktree on disk and its changeset unresolvable.
+    a host restart drops the changeset; `kept_for` hands the entries to the session's resume
+    state and `restore` republishes them afterwards. The operations are declared by
+    `FlowProvider.changeset_operations`, which sets `operations_registered`
+    when a host is built from the provider.
     """
 
     def __init__(self) -> None:
-        #: Whether the host can invoke the operations (`register_worktree_operations`); a
-        #: host without that hook (the `flow` agent of ahp-node) gets a changeset with none.
+        #: Whether a host was built from the provider, which declares the operations
+        #: (`FlowProvider.changeset_operations` sets this); before that a changeset has none.
         self.operations_registered = False
         self._kept: dict[str, KeptWorktree] = {}
 
@@ -213,6 +221,8 @@ class WorktreeChangesets:
         chat: str,
         title: str,
         ordinal: int,
+        session: str = "",
+        run_id: str | None = None,
     ) -> str | None:
         """Publish *wt*'s changes on *chat*; the changeset's URI, or None when there are none."""
         changes = await worktree_changes(wt)
@@ -248,8 +258,91 @@ class WorktreeChangesets:
             operations=operations,
         )
         uri = await publisher.changes_published(changeset, changes, chat=chat)
-        self._kept[uri] = KeptWorktree(wt, publisher, chat, changeset)
+        self._kept[uri] = KeptWorktree(
+            wt, publisher, chat, changeset, session, run_id, ordinal, title
+        )
         return uri
+
+    def kept_for(self, session: str) -> list[dict[str, Any]]:
+        """The kept worktrees of *session* as resume-state entries, by (chat, ordinal)."""
+        kept = sorted(
+            (k for k in self._kept.values() if k.session == session),
+            key=lambda k: (k.chat, k.ordinal),
+        )
+        return [
+            {
+                "chat": k.chat,
+                "runId": k.run_id,
+                "ordinal": k.ordinal,
+                "repo": str(k.worktree.repo),
+                "path": str(k.worktree.path),
+                "cwd": str(k.worktree.cwd),
+                "base": k.worktree.base,
+                "label": k.title,
+            }
+            for k in kept
+        ]
+
+    async def restore(
+        self,
+        entries: Sequence[Mapping[str, Any]],
+        publisher: SessionPublisher,
+        *,
+        session: str,
+    ) -> int:
+        """Republish the kept worktrees *entries* name; how many came back.
+
+        The changeset URI is new and its operations work. An entry whose directory is gone
+        (or that has no reviewable changes left) is dropped with a log line.
+        """
+        restored = 0
+        for entry in entries:
+            chat, run_id, ordinal = entry.get("chat"), entry.get("runId"), entry.get("ordinal")
+            repo, path, cwd = entry.get("repo"), entry.get("path"), entry.get("cwd")
+            base, label = entry.get("base"), entry.get("label")
+            if not (
+                isinstance(chat, str)
+                and (run_id is None or isinstance(run_id, str))
+                and isinstance(ordinal, int)
+                and not isinstance(ordinal, bool)
+                and isinstance(repo, str)
+                and isinstance(path, str)
+                and isinstance(cwd, str)
+                and isinstance(base, str)
+                and isinstance(label, str)
+            ):
+                _log.warning("ignoring a malformed kept worktree entry")
+                continue
+            if not Path(path).is_dir():
+                _log.warning(
+                    "dropping kept worktree %s of agent() #%s: its directory is gone",
+                    path,
+                    ordinal,
+                )
+                continue
+            try:
+                uri = await self.publish(
+                    Worktree(Path(repo), Path(path), Path(cwd), base),
+                    publisher,
+                    chat=chat,
+                    title=label,
+                    ordinal=ordinal,
+                    session=session,
+                    run_id=run_id,
+                )
+            except Exception as exc:
+                _log.warning("dropping kept worktree %s of agent() #%s: %s", path, ordinal, exc)
+                continue
+            if uri is None:
+                _log.warning(
+                    "dropping kept worktree %s of agent() #%s: %s",
+                    path,
+                    ordinal,
+                    "no reviewable changes",
+                )
+                continue
+            restored += 1
+        return restored
 
     def _lookup(self, uri: str) -> KeptWorktree:
         kept = self._kept.get(uri)
@@ -272,10 +365,3 @@ class WorktreeChangesets:
         self._kept.pop(uri, None)
         resolved = dataclasses.replace(kept.changeset, operations=(), description=text)
         await kept.publisher.changes_published(resolved, [], chat=kept.chat)
-
-
-def register_worktree_operations(host: Host, changesets: WorktreeChangesets) -> None:
-    """Make Apply and Discard invocable on *host*; operations are the embedder's to register."""
-    host.register_operation(APPLY_OPERATION, lambda uri, _op, _target: changesets.apply(uri))
-    host.register_operation(DISCARD_OPERATION, lambda uri, _op, _target: changesets.discard(uri))
-    changesets.operations_registered = True

@@ -16,6 +16,7 @@ from tests.fleet_fakes import FakeFleet, join_fake_gateway
 from tests.flow_hosting import SESSION, FlowFixture, boot_flow, final_json, restart_flow, store_for
 from tests.hosting import notifications, start_turn, state, wait_turn
 from tests.integration.test_flow_durability import wait_resumed
+from tests.preamble import strip_preamble
 
 TOML = """
 [providers.alpha]
@@ -82,7 +83,7 @@ async def test_fleet_reattach_keeps_the_running_node_session(tmp_path: Path) -> 
         fleet.release(uri, "done one")
         turn = await wait_turn(fx.wire, fx.chat, "t1")
         assert final_json(turn) == {"a": "done one", "b": "alpha: two"}
-        assert [s["prompt"] for s in fleet.starts] == ["hold one", "two"]
+        assert [strip_preamble(s["prompt"]) for s in fleet.starts] == ["hold one", "two"]
         notes = notifications(turn)
         assert any(f"reattached to node session {uri}" in note for note in notes), notes
     finally:
@@ -99,7 +100,11 @@ async def test_fleet_reattach_dispatches_again_when_the_session_is_gone(tmp_path
         fleet.release(list(fleet.sessions)[1], "done one")
         turn = await wait_turn(fx.wire, fx.chat, "t1")
         assert final_json(turn) == {"a": "done one", "b": "alpha: two"}
-        assert [s["prompt"] for s in fleet.starts] == ["hold one", "hold one", "two"]
+        assert [strip_preamble(s["prompt"]) for s in fleet.starts] == [
+            "hold one",
+            "hold one",
+            "two",
+        ]
         assert any("is gone; dispatching it again" in note for note in notifications(turn))
     finally:
         await client.aclose()
@@ -114,12 +119,12 @@ async def test_fleet_reattach_after_a_crash_on_the_clients_resume(tmp_path: Path
     try:
         failed = state(fx.host, fx.chat)["turns"][-1]
         assert (failed["id"], failed["state"]) == ("t1", "error")
-        assert [s["prompt"] for s in fleet.starts] == ["hold one"]
+        assert [strip_preamble(s["prompt"]) for s in fleet.starts] == ["hold one"]
         await fx.wire.dispatch(fx.chat, {"type": "chat/turnResume", "turnId": "t1"})
         fleet.release(uri, "done one")
         turn = await wait_resumed(fx)
         assert final_json(turn) == {"a": "done one", "b": "alpha: two"}
-        assert [s["prompt"] for s in fleet.starts] == ["hold one", "two"]
+        assert [strip_preamble(s["prompt"]) for s in fleet.starts] == ["hold one", "two"]
     finally:
         await client.aclose()
         await fx.shut()

@@ -50,3 +50,9 @@ def test_flow_node_agent_refuses_an_unknown_option(tmp_path: Path) -> None:
 def test_flow_node_agent_requires_a_config(tmp_path: Path) -> None:
     with pytest.raises(ConfigError, match="config"):
         create({}, _node(tmp_path))
+
+
+def test_flow_node_agent_passes_roots(tmp_path: Path) -> None:
+    node = _node(tmp_path)
+    provider = create({"config": _config(tmp_path)}, node)
+    assert provider.roots is node.roots

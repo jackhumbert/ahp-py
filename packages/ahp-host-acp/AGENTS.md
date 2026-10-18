@@ -53,7 +53,12 @@ server's AGENTS.md requires ("Adding a provider adapter"). It is the ACP
 - `roots.py` and `paths.py` re-export `ahp_host.node`'s; fix bugs
   there.
 - `agent.py` is the `acp` agent type for `ahp-node`; keep its options
-  in step with `config.py`'s per-agent keys.
+  in step with `config.py`'s per-agent keys. Its `from_config` (a synchronous
+  factory for `load = "ahp_host_acp:from_config"`) shares `provider_from_options`
+  and `config.read_config_file`, so agent.py, config.py and `from_config` stay
+  in step: a new per-agent key goes in `AGENT_OPTIONS`; a new server-only file
+  key in `config.SERVER_ONLY_KEYS`, which `from_config` ignores in the file and
+  refuses as a keyword (like any unknown option).
 - Tests run `tests/fake_agent.py` as a real subprocess; no network, no real
   agent. `tests/test_host.py` drives it through a real `Host` over an
   in-memory transport (`tests/hosting.py`).

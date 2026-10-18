@@ -15,6 +15,7 @@ from typing import Any, ClassVar
 from ahp_host.provider.base import (
     HOST_CLIENT_ID,
     AgentInfo,
+    AgentSession,
     AgentSessionContext,
     ClientToolCall,
     InputOutcome,
@@ -26,8 +27,10 @@ from ahp_host.provider.base import (
     TurnSink,
     UserMessage,
 )
+from ahp_host.provider.echo import EchoProvider
 
 from ahp_host_flow.catalog import directory_of
+from tests.preamble import stripped
 
 
 @dataclass
@@ -35,6 +38,8 @@ class RecordingSession:
     context: AgentSessionContext
     output_tokens: int = 5
     messages: list[UserMessage] = field(default_factory=list)
+    # Every message exactly as sent.
+    received: list[UserMessage] = field(default_factory=list)
     overlays: list[tuple[str, dict[str, Any]]] = field(default_factory=list)
     config_changes: list[dict[str, Any]] = field(default_factory=list)
     cancelled: list[str | None] = field(default_factory=list)
@@ -43,6 +48,8 @@ class RecordingSession:
     released: asyncio.Event = field(default_factory=asyncio.Event)
 
     async def send_user_message(self, message: UserMessage, sink: TurnSink) -> None:
+        self.received.append(message)
+        message = stripped(message)
         self.messages.append(message)
         if message.text.startswith("wait-overlay"):
             await self.overlay_seen.wait()
@@ -231,6 +238,7 @@ class RestartHoldSession:
     context: AgentSessionContext
 
     async def send_user_message(self, message: UserMessage, sink: TurnSink) -> None:
+        message = stripped(message)
         RestartHoldProvider.prompts.append(message.text)
         if message.text.startswith("hold") and RestartHoldProvider.holding:
             await asyncio.Event().wait()
@@ -284,6 +292,7 @@ class SecretSession:
     closed: bool = False
 
     async def send_user_message(self, message: UserMessage, sink: TurnSink) -> None:
+        message = stripped(message)
         self.messages.append(message)
         if message.text.startswith("fail"):
             await sink.turn_failed(f"boom {AWS}")
@@ -335,6 +344,7 @@ class FileWriterSession:
     closed: bool = False
 
     async def send_user_message(self, message: UserMessage, sink: TurnSink) -> None:
+        message = stripped(message)
         cwd = directory_of(self.context.working_directories[0])
         assert cwd is not None
         if message.text.startswith("write "):
@@ -407,6 +417,7 @@ class StructuredSecretSession:
         return self.capable
 
     async def send_user_message(self, message: UserMessage, sink: TurnSink) -> None:
+        message = stripped(message)
         self.messages.append(message)
         result = {"k": "x " + AWS, "password": PASSWORD}
         if message.host_tools:
@@ -521,6 +532,39 @@ class AskingProvider:
         return session
 
 
+class StrippingSession:
+    """Wraps an agent session so it is sent the prompt without the subagent preamble.
+
+    Every other attribute is the wrapped session's, so a capability check sees exactly the
+    methods the wrapped session has. A runtime-checkable protocol check looks attributes up
+    statically, past `__getattr__`, so the wrapped session's public methods are also set on
+    the instance.
+    """
+
+    def __init__(self, session: AgentSession) -> None:
+        self._session = session
+        for name in dir(session):
+            member = getattr(session, name, None)
+            if name != "send_user_message" and not name.startswith("_") and callable(member):
+                setattr(self, name, member)
+
+    async def send_user_message(self, message: UserMessage, sink: TurnSink) -> None:
+        await self._session.send_user_message(stripped(message), sink)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._session, name)
+
+
+class StrippedEchoProvider(EchoProvider):
+    """The echo provider, its sessions sent the prompt without the subagent preamble."""
+
+    async def create_session(self, context: AgentSessionContext) -> Any:
+        return StrippingSession(await super().create_session(context))
+
+    async def resume_session(self, context: AgentSessionContext) -> Any:
+        return StrippingSession(await super().resume_session(context))
+
+
 def not_a_provider() -> object:
     return object()
 
@@ -556,3 +600,26 @@ class BrokenSessionProvider:
 
     async def create_session(self, context: AgentSessionContext) -> HangingSession:
         raise RuntimeError("no session for you")
+
+
+class RootedProvider:
+    """Records the `roots` and `state_dir` a loader injected (raw, whatever they are)."""
+
+    def __init__(
+        self, *, roots: Any = None, state_dir: Any = None, provider_id: str = "rooted"
+    ) -> None:
+        self.roots = roots
+        self.state_dir = state_dir
+        self.provider_id = provider_id
+
+    @property
+    def agent(self) -> AgentInfo:
+        return AgentInfo(
+            provider=self.provider_id,
+            display_name="Rooted",
+            description="Records the roots and state dir it is given.",
+            models=(ModelInfo(id="rooted-model", name="Rooted"),),
+        )
+
+    async def create_session(self, context: AgentSessionContext) -> RecordingSession:
+        return RecordingSession(context)

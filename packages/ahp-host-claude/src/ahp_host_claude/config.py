@@ -18,8 +18,9 @@ kept as written. `~` is expanded everywhere a path is expected.
 from __future__ import annotations
 
 import argparse
+import os
 import tomllib
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -49,6 +50,9 @@ _KEYS = frozenset(
         "verbose",
     }
 )
+
+#: Settings of the standalone server, meaningless to a provider built in Python.
+SERVER_ONLY_KEYS = frozenset({"port", "bind", "token_file", "verbose"})
 
 
 class ConfigError(ValueError):
@@ -131,21 +135,49 @@ def _chat_tools(flag: str | None, value: Any) -> tuple[str, ...] | None:
         raise ConfigError(str(exc)) from exc
 
 
+def read_config_file(path: Path) -> dict[str, Any]:
+    """A config file's top-level table; unknown settings are refused."""
+    try:
+        # utf-8-sig: Notepad and Windows PowerShell write a byte-order mark.
+        data = tomllib.loads(path.read_text(encoding="utf-8-sig"))
+    except FileNotFoundError as exc:
+        raise ConfigError(f"no config file at {path}") from exc
+    except tomllib.TOMLDecodeError as exc:
+        raise ConfigError(f"{path}: {exc}") from exc
+    unknown = sorted(set(data) - _KEYS)
+    if unknown:
+        raise ConfigError(f"{path}: unknown setting(s): {', '.join(unknown)}")
+    return data
+
+
+def roots_option(value: object) -> Roots:
+    """Roots given from Python: a `Roots`, a path, a list of paths or a name -> path table."""
+    if isinstance(value, Roots):
+        return value
+    if isinstance(value, str | os.PathLike):
+        return Roots.single(Path(value).expanduser())
+    if isinstance(value, Mapping):
+        if value and all(isinstance(v, str | os.PathLike) for v in value.values()):
+            return _named({str(k): Path(v).expanduser() for k, v in value.items()})
+        if value:
+            raise ConfigError("roots must map names to paths")
+    elif (
+        isinstance(value, Sequence)
+        and value
+        and all(isinstance(p, str | os.PathLike) for p in value)
+    ):
+        if len(value) == 1:
+            return Roots.single(Path(value[0]).expanduser())
+        # Unnamed: each real path is its own URI, and `contains` checks them all.
+        return Roots(tuple(Path(p).expanduser().resolve() for p in value))
+    raise ConfigError("roots must be a path, a list of paths or a table of name = path")
+
+
 def load(args: argparse.Namespace) -> Settings:
     """Merge the config file (if any) and the flags; flags win."""
     data: dict[str, Any] = {}
     if args.config is not None:
-        config_path = Path(args.config).expanduser()
-        try:
-            # utf-8-sig: Notepad and Windows PowerShell write a byte-order mark.
-            data = tomllib.loads(config_path.read_text(encoding="utf-8-sig"))
-        except FileNotFoundError as exc:
-            raise ConfigError(f"no config file at {config_path}") from exc
-        except tomllib.TOMLDecodeError as exc:
-            raise ConfigError(f"{config_path}: {exc}") from exc
-        unknown = sorted(set(data) - _KEYS)
-        if unknown:
-            raise ConfigError(f"{config_path}: unknown setting(s): {', '.join(unknown)}")
+        data = read_config_file(Path(args.config).expanduser())
 
     roots = _roots_from_flags(args.root) if args.root else _roots_from_file(data)
     if roots is None:

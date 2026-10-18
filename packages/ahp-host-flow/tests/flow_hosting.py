@@ -18,7 +18,7 @@ from ahp_host_flow import FlowProvider, load_config
 from tests.hosting import Wire, connect, found, open_session, shut, state, text_of
 
 SESSION = "flow:/s1"
-ECHO = "ahp_host.provider.echo:EchoProvider"
+ECHO = "tests.flow_fakes:StrippedEchoProvider"
 
 
 @dataclass

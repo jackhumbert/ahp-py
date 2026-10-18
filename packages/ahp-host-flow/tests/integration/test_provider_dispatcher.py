@@ -47,7 +47,7 @@ from tests.hosting import (
 )
 
 SESSION = "flow-dispatch:/run-1"
-ECHO = "ahp_host.provider.echo:EchoProvider"
+ECHO = "tests.flow_fakes:StrippedEchoProvider"
 REC = "tests.flow_fakes:RecordingProvider"
 HANG = "tests.flow_fakes:HangingProvider"
 SCHEMA = {"type": "object", "properties": {"n": {"type": "integer"}}, "required": ["n"]}

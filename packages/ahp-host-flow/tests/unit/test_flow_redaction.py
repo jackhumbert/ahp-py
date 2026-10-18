@@ -38,7 +38,7 @@ ECHO_TOML = """\
 state_dir = "state"
 
 [providers.echo]
-load = "ahp_host.provider.echo:EchoProvider"
+load = "tests.flow_fakes:StrippedEchoProvider"
 """
 
 

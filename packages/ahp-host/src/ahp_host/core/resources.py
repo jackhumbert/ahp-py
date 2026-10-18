@@ -45,6 +45,7 @@ from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import Any, Literal, Protocol, runtime_checkable
 from urllib.parse import unquote, urlparse
+from urllib.request import url2pathname
 
 from ahp_protocol import errors
 
@@ -58,6 +59,7 @@ __all__ = [
     "RootedFilesystemResourceProvider",
     "WritableResourceProvider",
     "is_writable",
+    "native_path_from_file_uri",
     "path_from_file_uri",
     "uri_from_path",
 ]
@@ -228,6 +230,19 @@ def path_from_file_uri(uri: str) -> Path:
         # this provider does not mediate.
         raise errors.invalid_params(f"remote file URIs are not supported: {uri}")
     return Path(unquote(parsed.path))
+
+
+def native_path_from_file_uri(uri: str) -> Path:
+    """A `file:` URI as a path this machine's filesystem calls can open.
+
+    :func:`path_from_file_uri` keeps the URI's path verbatim because the POSIX
+    jail reads it as a `PurePosixPath`; on Windows that turns `file:///C:/x`
+    into `/C:/x`, which names nothing. Code that walks the real filesystem (the
+    polling watcher) uses this instead, which maps the drive the way
+    `Path.as_uri` wrote it. The same schemes and authorities are refused.
+    """
+    path_from_file_uri(uri)
+    return Path(url2pathname(urlparse(uri).path))
 
 
 def uri_from_path(path: Path) -> str:

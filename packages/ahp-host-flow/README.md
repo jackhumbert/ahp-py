@@ -27,6 +27,8 @@ This serves the provider over WebSocket, bound to loopback (`127.0.0.1`) on port
 `--token-file PATH` requires the connection token held in that file (a file,
 never a command-line value, so it stays out of process listings). A `--bind`
 address that is not loopback is refused unless `--token-file` is given.
+`--root PATH` (repeatable) names a folder the inner providers may work in; see
+[flow.toml](#flowtoml).
 
 ## Running a script from the command line
 
@@ -78,6 +80,9 @@ Four sources are searched, and the first match wins:
 3. **user**: `~/.claude/workflows/*.js` and `*.py`.
 4. **host**: the directories in `[workflows] dirs` of `flow.toml` (`*.js` and `*.py`).
 
+Inside a script, `workflow('name')` searches the same sources in the same order, and
+`workflow('host:name')` (or `client:`, `workspace:`, `user:`) reaches one source only.
+
 A `.py` workflow is arbitrary code on the host, so by default it loads only from
 the host and user sources; see Python workflows. A `.py` file in a client's
 plugin is never read, and `python_sources` can never include `client`.
@@ -88,6 +93,12 @@ workflow only when the operator opts in. Each source is published to clients as
 a customization container, with one `prompt` child per workflow, so clients list
 them as slash commands. A shadowed name is still listed, marked in its
 `_meta["ahp-py/flow"]`. The directories are re-read at the start of each run.
+
+The local directories (workspace, user, host) are also watched: adding, editing
+or deleting a `*.js` or `*.py` there re-publishes the customizations without a
+message. `[workflows] watch_interval` in flow.toml is the scan interval in
+seconds (default `2.0`; `0` turns watching off). Client sources are not polled;
+they follow the client's own republish.
 
 Precedence is client, workspace, user, host. A client workflow runs as `/name`
 or, to pick it explicitly, `/client:name`. It is listed in a container of the
@@ -187,6 +198,11 @@ async with ahp_host_flow.run(dispatcher, RunOptions(budget_total=50_000)) as r:
   approximation of the session's `inputNeeded`. The shapes belong to `ahp_protocol.ext.flow`, whose
   `run_view` folds a chat's state into phases, steps and their status;
   `ahp-client` gives it as `session.flow_view()` (and `chat.flow_view()`).
+- A run's main chat is quiet while a step runs; the step's work is on its
+  worker chat. `ahp-client`'s `prompt()` gives up on a turn that produces
+  nothing for `idle_timeout` (300 s by default), so a client driving a run
+  passes `idle_timeout=None` (and bounds the run itself) or a value longer
+  than its slowest step.
 - `agent()` accepts `isolation: 'worktree'`. When the run's working directory is
   a git repository, the inner session runs in a new git worktree under
   `<state_dir>/runs/<runId>/worktrees/<ordinal>`. It is removed afterwards if it
@@ -200,8 +216,9 @@ async with ahp_host_flow.run(dispatcher, RunOptions(budget_total=50_000)) as r:
 
 A run continues after the host restarts when the host has a session store:
 `FileSessionStore` plus `host.restore()`, which `python -m ahp_host_flow` or an
-embedder sets up. Without a store nothing is kept and a restored chat is only
-transcript.
+embedder sets up. `python -m ahp_host_flow` stores sessions under `state_dir`
+(`sessions/`, plus the `sequence` file) unless you pass `--no-store`. Without a
+store nothing is kept and a restored chat is only transcript.
 
 The host fails a run's main turn that a restart cut off (`errorType`
 `host.restart`, resumable) and resumes it through `chat/turnResume`: by itself,
@@ -347,6 +364,12 @@ How a fleet call behaves:
   `default`); a refused one fails the call (`null`) with a log line naming the
   provider and what to change. An `effort` is dropped, not refused, when the
   gateway's `child_config` sets one.
+- The node session names its caller. It is created with a delegation `origin`,
+  `{kind: "ahp-py/delegation", session: <the run session>, chat: <the call's
+  worker chat>, toolCallId: <the main chat's agent tool call, e.g. "agent-0">}`
+  (sent as `start_session`'s `originChat` and `originToolCall`), so a client can
+  nest the session under the call that started it. It is ahp-py's interim kind
+  until upstream names one (plan §10 item 5).
 - Skip and abort stop the node session. The host stopping does not: a run
   resumed after the restart reattaches to it (see "Runs survive a restart").
 - Each fleet tool call is watched. If the gateway that offered the tools
@@ -378,7 +401,7 @@ Limits of a remote call, which a gateway's fleet dispatch does not have:
 sources = ["client", "workspace", "user", "host"]
 
 [providers.claude]
-load = "ahp_host_claude:ClaudeProvider"
+load = "ahp_host_claude:from_config"
 interactive = true
 ```
 
@@ -396,12 +419,15 @@ the automation; see [Extensions](#extensions-ahp-py-only).
 
 An `agent()` call with `isolation: 'worktree'` that leaves changes publishes the
 worktree's diff as a reviewable changeset on its worker chat, with Apply (to the
-working tree) and Discard. `python -m ahp_host_flow` and `flow run` register the
-operations; an embedder calls `register_worktree_operations(host,
-provider.worktree_changesets)` on its own host. Under ahp-node no operations are
-registered, so the changeset is view-only. The worktree is kept until the
-changeset is resolved. After a host restart the in-memory link is lost: remove
-the worktree with `git worktree remove` / `git worktree prune`.
+working tree) and Discard. The provider declares the operations itself
+(`FlowProvider.changeset_operations`, ahp-host's `ProvidesOperations`), so
+ahp-node, `python -m ahp_host_flow`, `flow run` and any embedder's `Host` get
+them with no registration call. The worktree is kept until the
+changeset is resolved. Kept worktrees are part of the session's resume state, so
+after a host restart each one is republished as a new changeset (a new URI) on
+its worker chat, with Apply and Discard working. One whose directory is gone
+(removed with `git worktree remove` / `git worktree prune`, say) is dropped with
+a log line, and no changeset link is left behind.
 
 ### Steering
 
@@ -418,13 +444,13 @@ state_dir = "~/.local/state/ahp-host-flow"
 node = "node"
 
 [providers.claude]
-load = "my_flow_providers:claude"   # a factory returning an AgentProvider
+load = "ahp_host_claude:from_config"   # a factory returning an AgentProvider
 models = { sonnet = "claude-sonnet-5-5" }
 approval_mode = "acceptEdits"
 effort = "medium"
 
 [providers.glm]
-load = "my_flow_providers:glm"
+load = "ahp_host_acp:from_config"
 config = "~/.config/ahp/opencode.toml"   # passed as config=Path(...)
 models = { glm = "ollama/glm-5.3-flash:cloud" }
 
@@ -452,12 +478,32 @@ The loader calls the factory by what `config` holds:
 - a table: its keys as keyword arguments, `factory(**table)`;
 - a string: a path to the provider's own config file, `factory(config=Path(...))`.
 
+`ahp_host_claude:from_config` and `ahp_host_acp:from_config` (the `[claude]` and
+`[acp]` extras install them) build a provider from that file or table, so no
+wrapper factory is needed. On top of that call the loader injects two keywords
+when the factory has a parameter of that name (a bare `**kwargs` does not count)
+and the table does not set it:
+
+- `roots`: the host's roots (`--root`, or the `ahp-node` roots) plus
+  `<state_dir>/runs`, so a worktree's working directory is inside them. With
+  named roots the runs folder is named `flow-runs` (`flow-runs-2`, ... if taken);
+  with none, it is the only root;
+- `state_dir`: `<state_dir>/providers/<name>`, created if missing.
+
 A provider has exactly one of `load` (in-process), `via = "fleet"` (with `node`
 and `agent`) or `url` (with `agent`, and optional `token_file`); see "Fleet and
 remote providers" for their keys. `models`, `approval_mode` and `effort` apply
 to in-process and fleet providers, `models` to remote ones too. `interactive =
 true` (in-process providers, default `false`) makes the provider's worker chats
-take steering; see Operations. `[workflows] sources` defaults to `["workspace",
+take steering; see Operations. `preamble` (all three kinds, default `true`)
+puts a line of context before every prompt the inner agent is sent: `true` for
+the default text (the step's final message is its return value, so reply with
+the result alone), `false` (`preamble = false`) for none, or a string of your own.
+Only what the inner
+agent receives changes: worker chats, the main chat's `agent` call and the
+journal keys keep the bare prompt. In a named chat (`opts.x.chat`) the preamble
+goes with the chat's first message only; its follow-ups are sent bare, since the
+inner session already has it. `[workflows] sources` defaults to `["workspace",
 "user", "host"]`; `"client"` is opt-in.
 
 The result must be an `AgentProvider`. `approval_mode` and `effort` are passed to
@@ -574,7 +620,34 @@ ordinal=..., reason=..., actor=...)`.
 
 ## Tests against real models
 
-Two opt-in tests make real model calls: set `AHP_FLOW_LIVE_CONFIG` to a
-`flow.toml` and run `tests/integration/test_flow_live.py` (a smoke test) or
-`tests/integration/test_corpus.py` (a small fan-out script, which also runs on
-fakes without the variable).
+Three opt-in tests make real model calls: set `AHP_FLOW_LIVE_CONFIG` to a
+`flow.toml` and run `tests/integration/test_flow_live.py` (a smoke test), or
+`tests/integration/test_corpus.py`, whose `test_fanout_corpus_live` and
+`test_triage_corpus_live` run two corpus scripts and whose
+`test_review_routed_to_glm_live` routes a Review phase to a provider named
+`glm` (skipped when the config has none). The corpus tests also run on fakes
+without the variable. A sample live `flow.toml`, using both `from_config`
+factories:
+
+```toml
+[providers.claude]
+load = "ahp_host_claude:from_config"
+models = { sonnet = "claude-sonnet-5-5" }
+approval_mode = "acceptEdits"
+
+[providers.glm]
+load = "ahp_host_acp:from_config"
+config = "~/.config/ahp/opencode.toml"
+models = { glm = "ollama/glm-5.3-flash:cloud" }
+approval_mode = "acceptEdits"
+
+[routing]
+default = "claude"
+rules = [ { phase = "Review", provider = "glm" } ]
+```
+
+An inner provider reaches only working directories inside the flow host's roots
+(plus the runs folder the loader adds). The live tests pass the test's folder as
+the root; `python -m ahp_host_flow` needs `--root` covering the projects a
+session will work in, or the inner provider refuses the session's folder with a
+`PermissionError`.

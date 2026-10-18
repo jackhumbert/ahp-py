@@ -31,6 +31,7 @@ from types import TracebackType
 from typing import Any, Self
 
 from ahp_protocol.channels import ROOT_URI
+from ahp_protocol.ext.delegation import ORIGIN_META_KEY, parse_delegation
 from ahp_protocol.ext.flow import EMPTY_RUN, RunView, run_view
 from ahp_protocol.ext.structured import (
     OUTPUT_SCHEMA_META_KEY,
@@ -327,6 +328,7 @@ class Client:
         tools: ClientToolHost | Sequence[Mapping[str, Any]] | None = None,
         progress: bool = False,
         ready_timeout: float = 30.0,
+        origin: Mapping[str, Any] | None = None,
     ) -> Session:
         """Create a session and subscribe to it.
 
@@ -344,9 +346,23 @@ class Client:
         may not simply be a list. Advertising without either is worse than not
         advertising at all: the agent asks for a tool, nothing ever answers, and
         the host parks the turn on a future that cannot be resolved.
+
+        *origin* names the session, chat and tool call this session is started
+        on behalf of -- an :func:`~ahp_protocol.ext.delegation.delegation_origin`.
+        It is an ahp-py extension ahead of the spec, sent in
+        ``_meta["ahp-py/origin"]``; a host that does not know it ignores it.
         """
         from ahp_client.serve.resources import file_uri
 
+        extra: dict[str, Any] = {}
+        if origin is not None:
+            parsed = parse_delegation(origin)
+            if parsed is None:
+                raise ValueError(
+                    "origin must be a delegation origin "
+                    "(ahp_protocol.ext.delegation.delegation_origin)"
+                )
+            extra["_meta"] = {ORIGIN_META_KEY: parsed}
         session_uri = uri or f"{provider}:/{uuid.uuid4()}"
         directories = (
             list(working_directories)
@@ -383,6 +399,7 @@ class Client:
             config=config,
             active_client=active_client,
             progress_token=token,
+            **extra,
         )
         await self._runtime.subscribe(session_uri, "session")
         session = Session(self, session_uri, provider, owned=True)

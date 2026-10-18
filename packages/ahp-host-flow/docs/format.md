@@ -93,6 +93,19 @@ unreadable path or a child syntax error also throws in the parent. Nesting is
 one level: a `workflow()` call inside a child throws `workflow() can only nest
 one level: a child workflow cannot call workflow()`.
 
+## workflow sources
+
+Script: `conformance/workflow_sources.js`; Python twin: `conformance/workflow_sources.py`.
+
+`workflow()` also takes a source-qualified name, `source:name`, where `source` is
+one of `client`, `workspace`, `user` or `host`: it reaches only that source's
+entries. A bare name tries the sources in that order, so a client-published
+workflow wins over a workspace one, then user, then host. An unknown source
+throws `unknown workflow source 'bogus' in 'bogus:child': use one of client,
+workspace, user, host`; a qualified name with no entry throws `unknown workflow:
+'workspace:child'`; a malformed name part throws `invalid workflow name`. A
+client supplies `.js` workflows only.
+
 ## determinism
 
 Script: `conformance/determinism.js`; Python twin: `conformance/determinism.py`.

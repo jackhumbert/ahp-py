@@ -8,6 +8,15 @@ the spec revision it targets.
 
 ## [Unreleased]
 
+### Added — ahp-py extension: delegation session origin
+
+- **`ahp_protocol.ext.delegation`**, a dependency-free module: `ORIGIN_META_KEY`
+  (`ahp-py/origin`, the `createSession` `_meta` key), `DELEGATION_KIND`
+  (`ahp-py/delegation`), `delegation_origin(session, chat, tool_call_id)` and
+  `parse_delegation(value)`, for a session started on another session's behalf
+  (`ahp-host` `docs/requests.md` entry 12). `parse_delegation` returns a fresh
+  four-key dict, or `None` for any other kind, an empty field or a non-mapping.
+
 ### Added — ahp-py extension: workflow schedules
 
 - **`flow.offered_schedule`**, **`flow.with_offered_schedule`** and

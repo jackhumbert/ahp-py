@@ -29,7 +29,7 @@ pytestmark = pytest.mark.node
 SECRET = "PLAINLEAK-4242"
 TOML = """
 [providers.echo]
-load = "ahp_host.provider.echo:EchoProvider"
+load = "tests.flow_fakes:StrippedEchoProvider"
 
 [routing]
 default = "echo"
