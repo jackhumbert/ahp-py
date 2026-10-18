@@ -41,6 +41,11 @@ Every release states the protocol versions it speaks.
   `activeClients`, because the host removes a client that disconnects. Every
   later call to its tools then failed as addressed to nobody. A session with
   tools now offers them again on every reconnect.
+- A session's tools answered calls on the connection they were set up on, even
+  after a reconnect had replaced it: the result went to a closed `AhpClient`,
+  the executor's `ClientClosed` was swallowed, and the call was never answered,
+  so the agent waited forever. A session now rebinds its `ClientToolHost` to the
+  new connection whenever it comes back up (`ClientToolHost.rebind`).
 - A `toolClientExecution` entry in `SessionState.inputNeeded` whose call
   carries no `contributor` is recognised by the entry's own `clientId`. Before
   this, a client not subscribed to the chat never ran such a call.

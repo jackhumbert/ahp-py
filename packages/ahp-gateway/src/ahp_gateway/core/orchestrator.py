@@ -55,19 +55,39 @@ from ahp_client.client import actions
 from ahp_client.serve import ClientToolHost
 from ahp_protocol import AhpError, Transport
 from ahp_protocol.errors import invalid_params
+from ahp_protocol.ext.structured import (
+    OUTPUT_SCHEMA_META_KEY,
+    STRUCTURED_OUTPUT_TOOL,
+    STRUCTURED_OUTPUT_TOOL_META_KEY,
+    unwrap,
+)
 
 from ahp_gateway.registry import NodeRecord, Principal
 
 if TYPE_CHECKING:
     from ahp_gateway.core.gateway import Gateway
 
-__all__ = ["FLEET_TOOLS", "Orchestrator", "OrchestratorConfig"]
+__all__ = ["FLEET_TOOLS", "FLOW_TOOLS", "Orchestrator", "OrchestratorConfig"]
 
 _log = logging.getLogger(__name__)
 
 #: `_meta` key on a spawned session's summary and on each fleet tool call's
 #: result, naming the orchestrator session that started it.
 SPAWNED_BY_META_KEY: Final = "ahp-gateway/spawnedBy"
+
+#: Permission modes, strictest first (Claude Code's names, the ones a workflow
+#: engine sends). A flow session may ask for a mode no looser than `child_config`'s.
+PERMISSION_ORDER: Final = ("plan", "default", "acceptEdits", "auto", "bypassPermissions")
+
+#: Effort levels a flow session may name; the same set a workflow's config takes.
+EFFORT_LEVELS: Final = ("low", "medium", "high", "xhigh", "max")
+
+#: Seconds `max_running` waits to open a flow child it has not seen finished.
+FLOW_OPEN_TIMEOUT: Final = 5.0
+
+#: Seconds between looks at the mirror while a flow call waits. In-memory turns
+#: settle in milliseconds, and 50 ms keeps a 600 s wait to 12000 reads at most.
+FLOW_POLL: Final = 0.05
 
 
 @dataclass(frozen=True)
@@ -92,6 +112,15 @@ class OrchestratorConfig:
     #: JSON file holding which orchestrators exist and what each started. None:
     #: in memory only, so a restart forgets them.
     state_path: Path | None = None
+    #: Agent ids whose sessions get the engine-facing flow tools, not the
+    #: orchestrator's. Their sessions are created as asked, not rewritten.
+    flow_agents: tuple[str, ...] = ("flow",)
+    #: Seconds a flow `start_session` waits for a free slot under `max_running`.
+    slot_wait: float = 600.0
+
+    def __post_init__(self) -> None:
+        if self.agent in self.flow_agents:
+            raise ValueError(f"{self.agent!r} cannot be both the orchestrator and a flow agent")
 
 
 #: The tools, as `ToolDefinition`s. Descriptions are the agent's only manual.
@@ -208,6 +237,84 @@ FLEET_TOOLS: Final[tuple[dict[str, Any], ...]] = (
 )
 
 
+#: The tools a flow session is offered: for a workflow engine, not a model. The
+#: engine calls them deterministically, so each takes and returns plain data.
+FLOW_TOOLS: Final[tuple[dict[str, Any], ...]] = (
+    {
+        "name": "start_session",
+        "title": "Start session",
+        "description": (
+            "For a workflow engine, not a model: start a session of an agent on a node, as the "
+            "principal who started this run, and send it its prompt. Returns the session and "
+            "chat ids. Deterministic: it never chooses a node, agent or mode itself."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "node": {"type": "string"},
+                "agent": {"type": "string"},
+                "prompt": {"type": "string"},
+                "folder": {"type": "string"},
+                "model": {"type": "string"},
+                "config": {
+                    "type": "object",
+                    "properties": {
+                        "effort": {"type": "string"},
+                        "permissionMode": {"type": "string"},
+                    },
+                    "additionalProperties": False,
+                },
+                "output_schema": {"type": "object"},
+                "title": {"type": "string"},
+            },
+            "required": ["node", "agent", "prompt"],
+        },
+    },
+    {
+        "name": "wait_for_sessions",
+        "title": "Wait for sessions",
+        "description": (
+            "For a workflow engine, not a model: wait until sessions this run started stop "
+            "working. Returns each one's status and whether it is done."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "sessions": {"type": "array", "items": {"type": "string"}},
+                "timeout": {"type": "number"},
+            },
+            "required": ["sessions"],
+        },
+    },
+    {
+        "name": "read_session",
+        "title": "Read session",
+        "description": (
+            "For a workflow engine, not a model: read a session this run started: its final "
+            "message, its structured result if the turn produced one, usage and status."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {"session": {"type": "string"}},
+            "required": ["session"],
+        },
+    },
+    {
+        "name": "stop_session",
+        "title": "Stop session",
+        "description": (
+            "For a workflow engine, not a model: stop the turn a session this run started is "
+            "running."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {"session": {"type": "string"}},
+            "required": ["session"],
+        },
+    },
+)
+
+
 @dataclass
 class _Spawned:
     """A session an orchestrator started."""
@@ -217,6 +324,12 @@ class _Spawned:
     parent: str
     title: str
     tool_call_id: str | None = None
+    #: Its default chat, when known (a flow child's, recorded at start): what a
+    #: surface prompts, so another principal can be refused it by URI alone.
+    chat: str | None = None
+    #: Seen finished (done, stopped, failed or gone). Persisted, so a restarted
+    #: gateway counts toward `max_running` only the children that may still run.
+    finished: bool = False
 
 
 @dataclass
@@ -228,6 +341,10 @@ class _Adopted:
     principal: Principal
     tools: ClientToolHost | None = None
     children: dict[str, _Spawned] = field(default_factory=dict)
+    #: "orchestrator" or "flow": which tool set the session is offered.
+    kind: str = "orchestrator"
+    #: Serialises a flow session's starts, so `max_running` is checked and taken atomically.
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
 
 class ToolError(Exception):
@@ -276,7 +393,11 @@ class Orchestrator:
         while True:
             try:
                 client = await self._client(adopted.principal, adopted.node)
-                adopted.tools = self._tool_host(client, adopted)
+                adopted.tools = (
+                    self._flow_tool_host(client, adopted)
+                    if adopted.kind == "flow"
+                    else self._tool_host(client, adopted)
+                )
                 await client.open_session(adopted.uri, tools=adopted.tools)
                 return
             except Exception as exc:
@@ -306,6 +427,9 @@ class Orchestrator:
     def is_orchestrator(self, provider: Any) -> bool:
         return isinstance(provider, str) and provider == self.config.agent
 
+    def is_flow(self, provider: Any) -> bool:
+        return isinstance(provider, str) and provider in self.config.flow_agents
+
     async def create(self, principal: Principal, node_id: str, params: Mapping[str, Any]) -> None:
         """Start an orchestrator session where the surface asked for one.
 
@@ -313,14 +437,43 @@ class Orchestrator:
         session URI, so the surface subscribes to it as it would to any session
         it created, and the fleet tools are there from the first turn.
         """
+        await self._create_adopted(
+            principal, node_id, params, provider=self.config.provider, kind="orchestrator"
+        )
+
+    async def create_flow(
+        self, principal: Principal, node_id: str, params: Mapping[str, Any]
+    ) -> None:
+        """Start a flow session the same way, on the agent the surface named.
+
+        The principal is recorded with it: the sessions its tools start are
+        started as that principal, whoever later connects.
+        """
+        await self._create_adopted(
+            principal, node_id, params, provider=str(params["provider"]), kind="flow"
+        )
+
+    async def _create_adopted(
+        self,
+        principal: Principal,
+        node_id: str,
+        params: Mapping[str, Any],
+        *,
+        provider: str,
+        kind: str,
+    ) -> None:
         channel = str(params["channel"])
         client = await self._client(principal, node_id)
-        adopted = _Adopted(uri=channel, node=node_id, principal=principal)
-        adopted.tools = self._tool_host(client, adopted)
+        adopted = _Adopted(uri=channel, node=node_id, principal=principal, kind=kind)
+        adopted.tools = (
+            self._flow_tool_host(client, adopted)
+            if kind == "flow"
+            else self._tool_host(client, adopted)
+        )
         directories = params.get("workingDirectories")
         config = params.get("config")
         await client.create_session(
-            provider=self.config.provider,
+            provider=provider,
             uri=channel,
             working_directories=list(directories) if isinstance(directories, list) else None,
             config=config if isinstance(config, Mapping) else None,
@@ -647,6 +800,343 @@ class Orchestrator:
                 )
         return listed
 
+    # ─── the flow tools ──────────────────────────────────────────────────
+
+    def _flow_tool_host(self, client: Client, adopted: _Adopted) -> ClientToolHost:
+        host = ClientToolHost(client.protocol, client_id=client.client_id)
+        runners: dict[str, Callable[[_Adopted, dict[str, Any], Mapping[str, Any]], Awaitable[Any]]]
+        runners = {
+            "start_session": self._flow_start,
+            "wait_for_sessions": self._flow_wait,
+            "read_session": self._flow_read,
+            "stop_session": self._flow_stop,
+        }
+        for definition in FLOW_TOOLS:
+            host.register(definition, self._flow_executor(adopted, runners[definition["name"]]))
+        return host
+
+    def _flow_executor(
+        self,
+        adopted: _Adopted,
+        runner: Callable[[_Adopted, dict[str, Any], Mapping[str, Any]], Awaitable[Any]],
+    ) -> Callable[[Mapping[str, Any]], Awaitable[dict[str, Any]]]:
+        async def execute(action: Mapping[str, Any]) -> dict[str, Any]:
+            try:
+                arguments = _arguments(action.get("toolInput"))
+                result = await runner(adopted, arguments, action)
+            except (ToolError, AhpError) as exc:
+                message = exc.message if isinstance(exc, AhpError) else str(exc)
+                return actions.tool_failure_result(message)
+            return {
+                "success": True,
+                "content": [{"type": "text", "text": json.dumps(result)}],
+                "structuredContent": result,
+            }
+
+        return execute
+
+    def _flow_config(self, requested: Any) -> dict[str, Any]:
+        """The config for a started session: `child_config`, tightened never loosened."""
+        base_config = self.config.child_config
+        if requested is None:
+            return dict(base_config)
+        if not isinstance(requested, Mapping):
+            raise ToolError("config must be an object")
+        for key in requested:
+            if key not in ("effort", "permissionMode"):
+                raise ToolError(f"config key {key!r} is not allowed")
+        out = dict(base_config)
+        if "permissionMode" in requested:
+            req = requested["permissionMode"]
+            if not isinstance(req, str) or req not in PERMISSION_ORDER:
+                raise ToolError(f"unknown permissionMode {req!r}")
+            base = base_config.get("permissionMode")
+            if isinstance(base, str) and base in PERMISSION_ORDER:
+                allowed = PERMISSION_ORDER.index(req) <= PERMISSION_ORDER.index(base)
+            elif base is None:
+                allowed = req in ("plan", "default")
+            else:
+                allowed = req == base
+            if not allowed:
+                raise ToolError(
+                    f"permissionMode {req!r} is looser than this gateway allows "
+                    f"({base or 'default'})"
+                )
+            out["permissionMode"] = req
+        if "effort" in requested:
+            level = requested["effort"]
+            if not isinstance(level, str) or level not in EFFORT_LEVELS:
+                raise ToolError(f"unknown effort {level!r}")
+            if "effort" not in base_config:
+                out["effort"] = level
+        return out
+
+    async def _flow_start(
+        self, adopted: _Adopted, arguments: dict[str, Any], action: Mapping[str, Any]
+    ) -> Any:
+        node_id = _string(arguments, "node")
+        agent = _string(arguments, "agent")
+        prompt = _string(arguments, "prompt")
+        if self.is_orchestrator(agent) or self.is_flow(agent):
+            raise ToolError("a fleet call cannot start an orchestrator or flow session")
+        config = self._flow_config(arguments.get("config"))
+        schema = arguments.get("output_schema")
+        if schema is not None and not isinstance(schema, Mapping):
+            raise ToolError("output_schema must be an object")
+        model = arguments.get("model")
+        model = model if isinstance(model, str) and model else None
+        folder = arguments.get("folder")
+        folder = folder if isinstance(folder, str) and folder else None
+        async with adopted.lock:
+            # An engine, not a model, is calling: wait for a free slot, don't refuse.
+            # The limit is this flow session's, as `max_running` is one orchestrator
+            # session's: it bounds one run session (all its runs), alongside the
+            # engine's own concurrency cap (ahp-host-flow plan §2), not everything
+            # the principal runs.
+            loop = asyncio.get_running_loop()
+            deadline = loop.time() + self.config.slot_wait
+            while True:
+                running = [
+                    c
+                    for c in list(adopted.children.values())
+                    if await self._flow_running(adopted, c)
+                ]
+                if len(running) < self.config.max_running:
+                    break
+                if loop.time() >= deadline:
+                    raise ToolError(
+                        f"{len(running)} of your sessions are still running after waiting "
+                        f"{self.config.slot_wait:g}s"
+                    )
+                await asyncio.sleep(FLOW_POLL)
+            # The principal recorded with the flow session: the node is dialed and
+            # admitted as whoever started the run.
+            client = await self._client(adopted.principal, node_id)
+            session = await client.create_session(
+                provider=agent,
+                uri=f"{agent}:/{uuid.uuid4()}",
+                working_directories=[_folder_uri(folder)] if folder else None,
+                config=config,
+            )
+            title = arguments.get("title")
+            title = title if isinstance(title, str) and title else prompt.splitlines()[0][:60]
+            spawned = _Spawned(
+                uri=session.uri,
+                node=node_id,
+                parent=adopted.uri,
+                title=title,
+                tool_call_id=str(action.get("toolCallId") or "") or None,
+            )
+            adopted.children[session.uri] = spawned
+            self._save()
+            chat = await session.chat()
+            spawned.chat = chat.uri
+            self._save()
+            self._sessions[session.uri] = (client, session)
+            client.protocol.dispatch(
+                chat.uri,
+                actions.turn_started(
+                    str(uuid.uuid4()),
+                    text=prompt,
+                    model=model,
+                    meta={OUTPUT_SCHEMA_META_KEY: dict(schema)} if schema else None,
+                ),
+            )
+            with contextlib.suppress(Exception):
+                client.protocol.dispatch(
+                    session.uri, {"type": "session/titleChanged", "title": title}
+                )
+        return {"session": session.uri, "chat": chat.uri}
+
+    def _flow_status(self, client: Client, child: _Spawned) -> dict[str, Any]:
+        """A flow child's status for the engine: `done` says it will not change by itself.
+
+        `waiting` (an approval or question for a person) and `starting` are not
+        done: the engine keeps waiting, and the person answers in any client.
+        """
+        session = client.mirror.state(child.uri)
+        if not isinstance(session, Mapping):
+            status = "gone"
+        else:
+            chat = self._chat_state(client, child.uri)
+            turns = chat.get("turns") or []
+            last = turns[-1] if turns and isinstance(turns[-1], Mapping) else {}
+            if session.get("lifecycle") == "creationFailed":
+                status = "failed"
+            elif session.get("inputNeeded"):
+                status = "waiting"
+            elif chat.get("activeTurn") is not None:
+                status = "working"
+            elif not turns:
+                status = "starting"
+            else:
+                status = {"complete": "done", "cancelled": "stopped", "error": "failed"}.get(
+                    str(last.get("state")), "starting"
+                )
+        return {
+            "session": child.uri,
+            "status": status,
+            "done": status in ("done", "stopped", "failed", "gone"),
+        }
+
+    async def _flow_running(self, adopted: _Adopted, child: _Spawned) -> bool:
+        """Whether a flow child may still be running, for `max_running`.
+
+        Read from the node, not from what this process happens to have open: a
+        restarted gateway has opened none of the children its state file names,
+        and counting only open ones let a run start `max_running` more beside
+        the ones still running. A child not seen finished is opened (once, then
+        mirrored) and asked; one whose node cannot be reached within
+        `FLOW_OPEN_TIMEOUT`, or that is gone, cannot hold a slot and is not
+        counted. One seen finished is remembered as such (and saved), so it is
+        never opened again.
+        """
+        if child.finished:
+            return False
+        try:
+            client, _ = await asyncio.wait_for(self._worker(adopted, child), FLOW_OPEN_TIMEOUT)
+        except Exception:
+            return False
+        if self._flow_status(client, child)["done"]:
+            child.finished = True
+            self._save()
+            return False
+        return True
+
+    async def _flow_wait(
+        self, adopted: _Adopted, arguments: dict[str, Any], action: Mapping[str, Any]
+    ) -> Any:
+        uris = arguments.get("sessions")
+        if (
+            not isinstance(uris, list)
+            or not uris
+            or not all(isinstance(u, str) and u for u in uris)
+        ):
+            raise ToolError("name at least one session")
+        children = [self._child(adopted, {"session": uri}) for uri in uris]
+        clients: dict[str, Client] = {}
+        for child in children:
+            with contextlib.suppress(Exception):
+                clients[child.uri], _ = await self._worker(adopted, child)
+        timeout = arguments.get("timeout")
+        timeout = float(timeout) if isinstance(timeout, int | float) and timeout > 0 else 600.0
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
+        while True:
+            statuses = [
+                self._flow_status(clients[c.uri], c)
+                if c.uri in clients
+                else {"session": c.uri, "status": "gone", "done": True}
+                for c in children
+            ]
+            finished = all(s["done"] for s in statuses)
+            if finished or loop.time() >= deadline:
+                return {"sessions": statuses, "timed_out": not finished}
+            await asyncio.sleep(FLOW_POLL)
+
+    async def _flow_read(
+        self, adopted: _Adopted, arguments: dict[str, Any], action: Mapping[str, Any]
+    ) -> Any:
+        child = self._child(adopted, arguments)
+        try:
+            client, _ = await self._worker(adopted, child)
+        except Exception as exc:
+            raise ToolError(f"{child.uri} is gone: {exc}") from exc
+        chat = self._chat_state(client, child.uri)
+        active = chat.get("activeTurn")
+        turns = [t for t in chat.get("turns") or [] if isinstance(t, Mapping)]
+        turn: Mapping[str, Any] = (
+            active if isinstance(active, Mapping) else (turns[-1] if turns else {})
+        )
+        parts = [p for p in turn.get("responseParts") or [] if isinstance(p, Mapping)]
+        text = "".join(
+            p["content"]
+            for p in parts
+            if p.get("kind") == "markdown" and isinstance(p.get("content"), str)
+        )
+        structured: Any = None
+        message = turn.get("message")
+        meta = message.get("_meta") if isinstance(message, Mapping) else None
+        schema = meta.get(OUTPUT_SCHEMA_META_KEY) if isinstance(meta, Mapping) else None
+        if isinstance(schema, Mapping):
+            for part in reversed(parts):
+                call = part.get("toolCall") if part.get("kind") == "toolCall" else None
+                if not isinstance(call, Mapping):
+                    continue
+                call_meta = call.get("_meta")
+                content = call.get("structuredContent")
+                if (
+                    call.get("toolName") == STRUCTURED_OUTPUT_TOOL
+                    and call.get("status") == "completed"
+                    and call.get("success") is True
+                    and isinstance(call_meta, Mapping)
+                    and call_meta.get(STRUCTURED_OUTPUT_TOOL_META_KEY) is True
+                    and isinstance(content, Mapping)
+                ):
+                    structured = unwrap(content, schema)
+                    break
+        raw_usage = turn.get("usage")
+        usage = raw_usage if isinstance(raw_usage, Mapping) else {}
+        out: dict[str, Any] = {
+            "session": child.uri,
+            "status": self._flow_status(client, child)["status"],
+            "text": text,
+            "structured": structured,
+            "usage": {
+                "input_tokens": int(usage.get("inputTokens") or 0),
+                "output_tokens": int(usage.get("outputTokens") or 0),
+            },
+        }
+        if turn.get("state") == "error":
+            error = turn.get("error")
+            reason = error.get("message") if isinstance(error, Mapping) else None
+            if not reason:
+                reason = next(
+                    (p.get("message") for p in reversed(parts) if p.get("kind") == "error"), None
+                )
+            out["error"] = str(reason or "the turn failed")
+        return out
+
+    async def _flow_stop(
+        self, adopted: _Adopted, arguments: dict[str, Any], action: Mapping[str, Any]
+    ) -> Any:
+        child = self._child(adopted, arguments)
+        client, session = await self._worker(adopted, child)
+        if self._chat_state(client, child.uri).get("activeTurn") is None:
+            return {"session": child.uri, "stopped": False}
+        await (await session.chat()).cancel()
+        return {"session": child.uri, "stopped": True}
+
+    def flow_child_owner(self, channel: str) -> Principal | None:
+        """Whose run started a session, when *channel* is one a flow run started or its chat."""
+        for adopted in self._adopted.values():
+            if adopted.kind != "flow":
+                continue
+            for child in adopted.children.values():
+                if channel in (child.uri, child.chat):
+                    return adopted.principal
+        return None
+
+    def flow_owner(self, channel: str) -> Principal | None:
+        """Whose run a channel belongs to, when it is a flow session or one of its chats.
+
+        A flow session runs as the principal who started it; anyone else
+        prompting it would be driving that principal's fleet access.
+        """
+        for adopted in self._adopted.values():
+            if adopted.kind != "flow":
+                continue
+            if channel == adopted.uri:
+                return adopted.principal
+            client = self._clients.get((adopted.principal.subject, adopted.node))
+            state = client.mirror.state(adopted.uri) if client is not None else None
+            if not isinstance(state, Mapping):
+                continue
+            chats = {c.get("resource") for c in state.get("chats") or [] if isinstance(c, Mapping)}
+            if channel == state.get("defaultChat") or channel in chats:
+                return adopted.principal
+        return None
+
     # ─── what it started ─────────────────────────────────────────────────
 
     def spawned_by(self, session_uri: str) -> _Spawned | None:
@@ -667,6 +1157,7 @@ class Orchestrator:
             "orchestrators": [
                 {
                     "uri": a.uri,
+                    "kind": a.kind,
                     "node": a.node,
                     "subject": a.principal.subject,
                     "groups": sorted(a.principal.groups),
@@ -676,6 +1167,8 @@ class Orchestrator:
                             "node": c.node,
                             "title": c.title,
                             "toolCallId": c.tool_call_id,
+                            "chat": c.chat,
+                            "finished": c.finished,
                         }
                         for c in a.children.values()
                     ],
@@ -700,7 +1193,12 @@ class Orchestrator:
         loaded: list[_Adopted] = []
         for entry in data.get("orchestrators") or []:
             principal = Principal(entry["subject"], frozenset(entry.get("groups") or ()))
-            adopted = _Adopted(uri=entry["uri"], node=entry["node"], principal=principal)
+            adopted = _Adopted(
+                uri=entry["uri"],
+                node=entry["node"],
+                principal=principal,
+                kind=entry.get("kind") or "orchestrator",
+            )
             for child in entry.get("children") or []:
                 adopted.children[child["uri"]] = _Spawned(
                     uri=child["uri"],
@@ -708,6 +1206,8 @@ class Orchestrator:
                     parent=adopted.uri,
                     title=child.get("title") or child["uri"],
                     tool_call_id=child.get("toolCallId"),
+                    chat=child.get("chat"),
+                    finished=child.get("finished") is True,
                 )
             loaded.append(adopted)
         return loaded

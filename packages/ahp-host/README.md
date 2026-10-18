@@ -385,7 +385,11 @@ naming it is added to the interrupted turn, just before the error. Nothing
 vanishes silently, and the session is not left showing "input needed" with
 nobody listening. The notice's `_meta['ahp-py/restart']` is
 `{"event": "inputWithdrawn", "requests": [<ids>]}`; a client that does not know
-the key still shows the text. Shutdown persists every session before cancelling
+the key still shows the text. A restored session lists no active clients:
+every connection ended with the previous process, so none of them can run a
+tool, and each one that comes back joins again (`session/activeClientSet`) as
+after a disconnect; what they published stays in `customizations`. Shutdown
+persists every session before cancelling
 its turns, so the store keeps what was open; a hard kill loses at most the store
 debounce (1 s by default). See
 [ADR 0006](docs/decisions/0006-restoring-interrupted-turns.md).

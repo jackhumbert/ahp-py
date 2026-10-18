@@ -689,6 +689,49 @@ async def test_a_call_the_tap_never_delivered_is_executed_from_state() -> None:
     await host.stop()
 
 
+async def test_a_call_after_a_reconnect_is_answered_on_the_new_connection() -> None:
+    """A supervised client gets a new connection on every reconnect, and the
+    tool host was built with the first one's `client.protocol`. Results went
+    out on that closed connection: the executor's `ClientClosed` was swallowed,
+    so the call was never answered and the agent waited forever (an
+    ahp-gateway rejoining a restarted node hung exactly so). The session
+    rebinds its tool host when the connection comes back up."""
+    hosts: list[FakeHost] = []
+
+    async def dial() -> Any:
+        host = _session_host()
+        await host.start()
+        hosts.append(host)
+        return host.transport()
+
+    client = await connect(transport_factory=dial, client_id="me")
+    try:
+        tools = ClientToolHost(client.protocol, client_id=client.client_id)
+        tools.register({"name": "usages"}, lambda _a: _ok())
+        session = await client.open_session("echo:/theirs", tools=tools)
+        chat = await session.chat()
+        await _settle(lambda: _dispatched(hosts[0], "session/activeClientSet"))
+
+        await hosts[0].stop()  # the link drops; the client dials again
+        await _settle(lambda: len(hosts) == 2, timeout=10.0)
+        second = hosts[1]
+        await _settle(lambda: _dispatched(second, "session/activeClientSet"), timeout=10.0)
+
+        await second.push(chat.uri, {"type": "chat/turnStarted", "turnId": "t1"})
+        await second._emit_tool(
+            chat.uri,
+            "t1",
+            FakeToolCall("tc1", "usages", contributor={"kind": "client", "clientId": "me"}),
+        )
+        await _settle(lambda: _dispatched(second, "chat/toolCallComplete"))
+        assert _dispatched(second, "chat/toolCallComplete")[-1]["toolCallId"] == "tc1"
+        await session._stop_tools()
+    finally:
+        await client.aclose()
+        for host in hosts:
+            await host.stop()
+
+
 async def test_work_already_handed_over_in_the_snapshot_is_picked_up_on_attach() -> None:
     """A snapshot-arm reconnect replays no actions, so a call handed over
     while this client was away produces no event, ever. The designed recovery

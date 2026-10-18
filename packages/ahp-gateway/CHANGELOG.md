@@ -8,6 +8,38 @@ Every release states the protocol versions it speaks.
 
 Under construction. `docs/plan.md` is the design and its §7 is the build order.
 
+### Added
+
+- **Fleet tools for flow sessions.** Sessions of the agents in
+  `OrchestratorConfig.flow_agents` (default `["flow"]`) are joined by the
+  gateway as an active client offering `start_session`, `wait_for_sessions`,
+  `read_session` and `stop_session`, for a workflow engine rather than a model.
+  Sessions are started as the principal who started the run, only on nodes the
+  registry admits them to, and a run can only drive sessions it started. The
+  requested config is never looser than `child_config`. Flow sessions and what
+  they started are kept in `state_path` and rejoined after a restart.
+
+- **Waiting and reading for flow sessions.** `wait_for_sessions` and
+  `read_session` return each session's status, final text, validated
+  structured result and usage. A flow `start_session` waits for a free slot
+  under `max_running` (up to `slot_wait`) instead of refusing, and the gateway
+  refuses a `chat/turnStarted` from any user other than the one the flow
+  session runs as.
+- **What a run started is its principal's.** A subscribe or dispatch from
+  another principal on a session a flow run started, or on its chat, is
+  refused (`-32009`, or the action echoed back rejected); such sessions are
+  still listed. Each flow child's chat is recorded for this, in `state_path`
+  too.
+- **`max_running` across a gateway restart.** It is counted per flow session
+  from the nodes: a restarted gateway opens each recorded child it has not
+  seen finish and asks, instead of counting only the sessions it happened to
+  have open, which let a run start `max_running` more beside the ones still
+  running. Children seen finished are recorded as such in `state_path`.
+- Docs: README "Fleet tools: the orchestrator and flow sessions" and
+  `docs/plan.md` §10 "Fleet tools for flow sessions" (the principal rule,
+  config, effort dropped under a `child_config` effort, `max_running` per flow
+  session, restarts and limits).
+
 ### Changed — AHP 1.1.0 (upstream `main`, unreleased)
 
 - **A surface's `flowControl` is not passed to a node.** Windowed delivery is

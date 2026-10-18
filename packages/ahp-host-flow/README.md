@@ -5,7 +5,9 @@ Run Claude Code workflow scripts (`agent()`, `parallel()`, `pipeline()`,
 any provider the host can load: Claude through `ahp-host-claude`, or any ACP
 agent through `ahp-host-acp`.
 
-Status: pre-alpha. M4a is in: the provider core. M5 is in: Python workflows. `flow.toml` configures
+Status: pre-alpha. M4a is in: the provider core. M5 is in: Python workflows. M6
+is in: runs survive a restart. M7 is in: fleet dispatch (calls run as sessions
+on gateway nodes) and remote providers. `flow.toml` configures
 providers, routing and workflow sources; a run is a session, and each `agent()`
 call is a worker chat on a routed provider. Most of M4b is in too: typed
 progress, credential masking, git worktrees, journal start records and the
@@ -208,7 +210,20 @@ What does not continue:
 - Approvals and questions an in-process inner session had open are withdrawn
   by the host with a notice naming them, because the inner session is gone;
   the call runs again live and asks again.
-- Fleet calls reattach only in M7.
+- Remote calls (`url` providers) are not reattached: the dispatcher stops the
+  remote turn the restart left behind, with a log line, and dispatches the call
+  again.
+
+Fleet calls do continue: a cut-off fleet call whose `started` record names its
+node session is **reattached**, waiting on that session again
+(`wait_for_sessions`, then `read_session`), since the node session kept running
+while the flow host restarted (the host stopping never stops a node session;
+only an abort does). A log line says so (`agent() #N: reattached to node
+session ...`). If the session is gone, the call is dispatched again, with a log
+line. A restored session lists no active clients (no connection outlives a
+restart), so a continued run waits for the gateway to rejoin and offer its
+tools, up to `FlowProvider(fleet_client_wait=...)` (default 10 s), before its
+first fleet call fails.
 
 Typed progress stays consistent: a continued run emits one `runStarted` (no
 second one), a plain "Run <old> resumed after a host restart as run <new>"
@@ -225,6 +240,82 @@ Limits:
   be resumable.
 - A second interruption before already-finished later calls are reached runs
   them again, because the new journal holds only the calls it has reached.
+
+## Fleet and remote providers
+
+Two more kinds of provider run a call somewhere else than this process
+(plan §2):
+
+- **Fleet** (`via = "fleet"`): behind an `ahp-gateway`, each `agent()` call is
+  an ordinary session on a node, listed in every surface connected to the
+  gateway. The run session lives on a node that runs this package as an agent
+  type (`[[agents]] type = "flow"; config = ".../flow.toml"` in an `ahp-node`
+  config; registered as the `flow` entry point of `ahp_host.agents`, with runs
+  kept in the node's state directory unless flow.toml sets `state_dir`). The
+  gateway joins the run session and offers it fleet tools (`start_session`,
+  `wait_for_sessions`, `read_session`, `stop_session`), which the engine calls
+  through the main turn, with no model in between. The session is started as
+  the principal who started the run, under the gateway's `child_config` and
+  `max_running`; nodes need no fleet credentials. The worker chat is thin: a
+  link to the node session, the status, the result and its usage. The node
+  session holds the transcript and its approvals.
+- **Remote** (`url`): without a gateway, the engine dials another host with
+  `ahp-client` (`ClientDispatcher`) and runs the call as a session there.
+
+```toml
+[providers.build-box]                 # fleet: a session on the gateway node `build-box`
+via = "fleet"
+node = "build-box"
+agent = "claude"
+approval_mode = "default"             # must be one the gateway's child_config allows
+effort = "high"                       # dropped by the gateway if child_config sets effort
+models = { sonnet = "claude-sonnet-5-5" }
+reply_timeout = 900                   # seconds a fleet tool may take to answer (default 900)
+
+[providers.mac]                       # remote: a host dialled directly
+url = "wss://my-mac-mini.example.com"
+token_file = "~/.config/ahp/mac.token"
+agent = "claude"
+idle_timeout = 600                    # seconds the remote turn may go quiet (default 600)
+
+[routing]
+default = "claude"
+rules = [ { label = "Build*", provider = "build-box" }, { phase = "Review", provider = "mac" } ]
+```
+
+How a fleet call behaves:
+
+- The model is `opts.model` through `models`, else the run's own model (the main
+  chat's selection) when `models` names it or is empty.
+- `approval_mode` (or the run's Approvals setting) and `effort` are sent as the
+  session's `permissionMode` and `effort`. The gateway allows a mode only as
+  strict as its `child_config` (with the default `{}` there, only `plan` and
+  `default`); a refused one fails the call (`null`) with a log line naming the
+  provider and what to change. An `effort` is dropped, not refused, when the
+  gateway's `child_config` sets one.
+- Skip and abort stop the node session. The host stopping does not: a run
+  resumed after the restart reattaches to it (see "Runs survive a restart").
+- Each fleet tool call is watched. If the gateway that offered the tools
+  leaves (the host reports it gone), or no answer arrives within
+  `reply_timeout` seconds (plus the 60 s a `wait_for_sessions` slice may take),
+  the call is tried once more when the gateway offers the tools again, within
+  `fleet_client_wait` seconds; otherwise, or if it is lost again, `agent()`
+  returns `null` with a log line saying why. `start_session` is never retried,
+  since the first may have started a session.
+- A call fails clearly (`null` plus a log line) when no gateway offers the
+  fleet tools to the run session.
+
+Limits of a remote call, which a gateway's fleet dispatch does not have:
+
+- The worker chat mirrors the remote turn's text only when the turn completes;
+  the remote session holds the transcript, tool calls and approvals.
+- An approval or question the remote agent raises cannot be answered from here
+  (the dispatcher is a bare client). Someone must answer it in a client of
+  that host; if the remote turn produces nothing for `idle_timeout` seconds,
+  the call stops it and fails.
+- It is not reattached after a restart (above).
+- A run's skip or abort stops the remote turn, and so does the flow host
+  stopping.
 
 ## flow.toml
 
@@ -266,6 +357,11 @@ The loader calls the factory by what `config` holds:
 - no `config`: `factory()`;
 - a table: its keys as keyword arguments, `factory(**table)`;
 - a string: a path to the provider's own config file, `factory(config=Path(...))`.
+
+A provider has exactly one of `load` (in-process), `via = "fleet"` (with `node`
+and `agent`) or `url` (with `agent`, and optional `token_file`); see "Fleet and
+remote providers" for their keys. `models`, `approval_mode` and `effort` apply
+to in-process and fleet providers, `models` to remote ones too.
 
 The result must be an `AgentProvider`. `approval_mode` and `effort` are passed to
 each inner session as `permissionMode` and `effort`. Routing rules are tried in

@@ -7,12 +7,13 @@ from collections import deque
 from collections.abc import Callable, Sequence
 from typing import Any, Final
 
-from ahp_host_flow.engine.dispatcher import AgentCall
+from ahp_host_flow.engine.dispatcher import AgentCall, DispatchHandle
 from ahp_host_flow.engine.journal import (
     AgentRecord,
     JournalError,
     JournalWriter,
     RunHeader,
+    StartRecord,
     WorkflowSnapshot,
     call_key,
     canonical_json,
@@ -47,6 +48,7 @@ class Replay:
         *,
         on_log: Callable[[str], None] | None = None,
         prefix_only: bool = True,
+        unfinished: Sequence[StartRecord] = (),
     ) -> None:
         # With prefix_only False (continuing an interrupted run) a miss does not end the
         # cache: that call runs live and later calls still look up.
@@ -54,6 +56,14 @@ class Replay:
         self._by_key: dict[str, deque[AgentRecord]] = {}
         for rec in sorted(records, key=lambda r: r.ordinal):
             self._by_key.setdefault(rec.key, deque()).append(rec)
+        # Cut-off calls that recorded a session, per call key in ordinal order: a
+        # continued run hands the handle to the dispatcher so it can reattach.
+        self._reattach: dict[str, deque[DispatchHandle]] = {}
+        for start in sorted(unfinished, key=lambda r: r.ordinal):
+            if start.session is not None:
+                self._reattach.setdefault(start.key, deque()).append(
+                    DispatchHandle(start.provider, start.chat, start.session)
+                )
         self._on_log = on_log
         self._live = False
         self._served: list[int] = []
@@ -89,6 +99,11 @@ class Replay:
                 f"{len(self._served)} calls replayed, this call and later ones run live"
             )
         return None
+
+    def reattach(self, call: AgentCall) -> DispatchHandle | None:
+        """The handle a cut-off earlier call with this key recorded, else None."""
+        queue = self._reattach.get(call_key(call))
+        return queue.popleft() if queue else None
 
 
 class JournalRun:
@@ -162,7 +177,16 @@ class JournalRun:
                         where = f"started on {rec.provider} ({rec.chat or '-'})"
                     else:
                         where = "started"
-                    if options.continue_run:
+                    if options.continue_run and rec.session is not None:
+                        # The engine cannot tell what the provider does with the session
+                        # (a fleet call reattaches, a remote one is stopped and run
+                        # again), so the dispatcher says so in a line of its own.
+                        on_log(
+                            f"resume: agent() #{rec.ordinal} {where} in session {rec.session} "
+                            "but was cut off by a host restart; its dispatcher reattaches or "
+                            "dispatches it again"
+                        )
+                    elif options.continue_run:
                         on_log(
                             f"resume: agent() #{rec.ordinal} {where} but was cut off by a host "
                             "restart; dispatching it again"
@@ -172,7 +196,12 @@ class JournalRun:
                             f"resume: agent() #{rec.ordinal} {where} but never finished; "
                             "not replayed"
                         )
-            replay = Replay(old.agents, on_log=on_log, prefix_only=not options.continue_run)
+            replay = Replay(
+                old.agents,
+                on_log=on_log,
+                prefix_only=not options.continue_run,
+                unfinished=old.unfinished if options.continue_run else (),
+            )
             inherited = dict(old.workflows)
         elif source is None and not scriptless:
             raise ValueError("a script source is needed unless resuming")

@@ -2225,6 +2225,7 @@ class Host:
                 session.terminals[uri] = claim.chat
             elif uri == stored.uri:
                 await self._refresh_config_schema(stored.provider, restored_state)
+                self._forget_restored_clients(session, restored_state)
             await self.sequencer.register_channel(uri, restored_state, reducer)
 
         for request in withdrawn:
@@ -2248,6 +2249,34 @@ class Host:
         )
         session.published_summary = self._project_summary(session)
         return session
+
+    @staticmethod
+    def _forget_restored_clients(session: _Session, state: dict[str, Any]) -> None:
+        """Empty a restored session's `activeClients`: no connection outlives the process.
+
+        Every client the store lists was connected to the previous process, and
+        a restart closed each of those connections. Left in state, they were
+        handed to the agent as live (`FollowsActiveClients` on its first
+        turn), and a turn resumed after the restart sent its first client tool
+        call to a client that was gone -- a call nobody could ever answer, so
+        it waited forever (measured with ahp-host-flow's fleet calls through a
+        gateway). Emptied, the session looks as it would after each of those
+        clients disconnected cleanly (`_retire_active_client`); a client that
+        comes back joins again with `session/activeClientSet` and its tools.
+
+        What they had published stays in `customizations`, as a disconnect
+        leaves it; their ids are recorded as host-contributed, as they were
+        when published, so a provider's republished tree does not drop them.
+        """
+        clients = state.get("activeClients")
+        if not isinstance(clients, list) or not clients:
+            return
+        for client in clients:
+            published = client.get("customizations") if isinstance(client, Mapping) else None
+            for entry in published if isinstance(published, list) else []:
+                if isinstance(entry, Mapping) and isinstance(entry.get("id"), str):
+                    session.contributed_customizations.add(entry["id"])
+        state["activeClients"] = []
 
     def _turn_is_resumable(self, stored: StoredSession, active: Any) -> bool:
         """Whether a turn found active in storage can be offered for resuming.

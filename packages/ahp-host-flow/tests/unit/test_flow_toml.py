@@ -215,3 +215,78 @@ def test_bad_toml(tmp_path: Path) -> None:
     path.write_text("providers = [", encoding="utf-8")
     with pytest.raises(ConfigError, match=r"flow.toml"):
         load_config(path)
+
+
+_FLEET = {"via": "fleet", "node": "build-box", "agent": "claude"}
+_REMOTE = {"url": "wss://my-mac-mini.example.com", "token_file": "tok", "agent": "claude"}
+
+
+def test_provider_kinds_parse(tmp_path: Path) -> None:
+    cfg = parse_config(
+        {
+            "providers": {"a": {"load": "m:C"}, "f": _FLEET, "r": _REMOTE},
+            "routing": {"default": "a"},
+        },
+        base=tmp_path,
+    )
+    a, f, r = cfg.providers["a"], cfg.providers["f"], cfg.providers["r"]
+    assert (a.kind, f.kind, r.kind) == ("inprocess", "fleet", "remote")
+    assert (f.via, f.node, f.agent, f.load) == ("fleet", "build-box", "claude", None)
+    assert (r.url, r.agent, r.load) == ("wss://my-mac-mini.example.com", "claude", None)
+    assert r.token_file == tmp_path / "tok"
+
+
+@pytest.mark.parametrize(
+    ("provider", "match"),
+    [
+        ({"via": "fleet", "agent": "claude"}, r"providers.a.node is required"),
+        ({**_FLEET, "via": "gateway"}, r"providers.a.via must be 'fleet', got 'gateway'"),
+        ({**_FLEET, "config": {}}, r"unknown key\(s\) in providers.a: config"),
+        ({**_REMOTE, "url": "http://x"}, r"providers.a.url must be a ws:// or wss:// URL"),
+        ({"agent": "claude"}, r"providers.a needs one of load, via, url"),
+        ({**_FLEET, "load": "m:C"}, r"providers.a: load, via and url are exclusive"),
+        ({**_FLEET, "reply_timeout": 0}, r"providers.a.reply_timeout must be a positive"),
+        ({**_FLEET, "idle_timeout": 5}, r"unknown key\(s\) in providers.a: idle_timeout"),
+        ({**_REMOTE, "idle_timeout": "1"}, r"providers.a.idle_timeout must be a positive"),
+        ({**_REMOTE, "reply_timeout": 5}, r"unknown key\(s\) in providers.a: reply_timeout"),
+    ],
+)
+def test_provider_kinds_rejected(provider: dict[str, Any], match: str, tmp_path: Path) -> None:
+    with pytest.raises(ConfigError, match=match):
+        parse_config({"providers": {"a": provider}}, base=tmp_path)
+
+
+def test_provider_kinds_timeouts(tmp_path: Path) -> None:
+    cfg = parse_config(
+        {
+            "providers": {
+                "f": {**_FLEET, "reply_timeout": 30},
+                "r": {**_REMOTE, "idle_timeout": 1.5},
+                "plain": _FLEET,
+            },
+            "routing": {"default": "f"},
+        },
+        base=tmp_path,
+    )
+    assert cfg.providers["f"].reply_timeout == 30.0
+    assert cfg.providers["r"].idle_timeout == 1.5
+    assert (cfg.providers["plain"].reply_timeout, cfg.providers["plain"].idle_timeout) == (
+        None,
+        None,
+    )
+
+
+def test_provider_kinds_lazy_providers_list_in_process_only(tmp_path: Path) -> None:
+    from ahp_host_flow.loading import LazyProviders
+
+    cfg = parse_config(
+        {
+            "providers": {"inproc": {"load": "m:C"}, "fleetname": _FLEET},
+            "routing": {"default": "inproc"},
+        },
+        base=tmp_path,
+    )
+    providers = LazyProviders(cfg)
+    assert list(providers) == ["inproc"]
+    assert len(providers) == 1
+    assert providers.get("fleetname") is None

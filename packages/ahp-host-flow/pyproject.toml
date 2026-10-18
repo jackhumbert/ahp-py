@@ -29,6 +29,9 @@ dependencies = [
 [project.scripts]
 flow = "ahp_host_flow.cli:main"
 
+[project.entry-points."ahp_host.agents"]
+flow = "ahp_host_flow.agent:create"
+
 [dependency-groups]
 dev = [
   "pytest>=8",
@@ -37,6 +40,7 @@ dev = [
   "ruff>=0.6",
   "import-linter>=2",
   "types-jsonschema",
+  "ahp-gateway",
 ]
 
 [tool.hatch.version]
@@ -67,6 +71,13 @@ select = ["E", "F", "W", "I", "N", "UP", "B", "A", "C4", "PT", "RET", "SIM", "TI
 [tool.importlinter]
 root_package = "ahp_host_flow"
 include_external_packages = true
+
+# ahp-gateway is a test-only dependency (AGENTS.md): the package never imports it.
+[[tool.importlinter.contracts]]
+name = "the package never imports the gateway"
+type = "forbidden"
+source_modules = ["ahp_host_flow"]
+forbidden_modules = ["ahp_gateway"]
 
 # The engine must stay liftable into its own distribution (docs/plan.md §7).
 [[tool.importlinter.contracts]]

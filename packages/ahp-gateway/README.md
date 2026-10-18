@@ -31,6 +31,46 @@ diff content route back to the machine they live on.
 [`docs/plan.md`](docs/plan.md) is the design; §9 records what is built and
 what is not.
 
+## Fleet tools: the orchestrator and flow sessions
+
+With an `OrchestratorConfig` (`Gateway(orchestrator=...)`), the gateway joins
+two kinds of session as an active client offering **fleet tools**, and runs
+them over supervised links of its own, one per (principal, node), so they keep
+working after the surface that started the session goes away
+([`docs/plan.md`](docs/plan.md) §10):
+
+- **Orchestrator sessions** (the `orchestrator` agent it adds to the merged
+  list) get tools for a model: list machines and folders, start, message, read,
+  wait for and stop sessions.
+- **Flow sessions** (agents named in `flow_agents`, default `["flow"]`, such as
+  `ahp-host-flow`'s workflow runs) get four tools for a workflow engine rather
+  than a model: `start_session`, `wait_for_sessions`, `read_session` and
+  `stop_session`, each taking and returning plain data.
+
+What holds for a flow session, whatever the engine asks:
+
+- **The principal who started it.** Every session its tools start is started
+  as that principal, only on nodes the registry admits them to. A run can only
+  wait on, read or stop the sessions it started. Another principal can neither
+  prompt the flow session nor read or drive (prompt, cancel, answer) a session
+  its run started: they are listed like any session, and refused.
+- **Config.** A started session gets `child_config` (by default
+  `{"permissionMode": "auto"}`). A requested `permissionMode` may only be
+  stricter (`plan` < `default` < `acceptEdits` < `auto` < `bypassPermissions`);
+  a looser one fails the call. With `child_config` holding no `permissionMode`,
+  only `plan` and `default` pass. A requested `effort` (`low` to `max`) is
+  passed on unless `child_config` sets `effort`, in which case the request is
+  dropped silently and `child_config`'s applies. No other key is accepted.
+- **Limits.** At most `max_running` of one flow session's sessions run at
+  once, counted per flow session (all its runs), as an orchestrator session's
+  are, not per principal. A `start_session` over the limit waits for a slot, up
+  to `slot_wait` seconds (default 600), then fails. The count is read from the
+  nodes, so it holds across a gateway restart. Nothing answers an approval: a
+  prompt raised in a started session waits for a person, in any client.
+- **Restarts.** Flow sessions and what they started are kept in `state_path`;
+  a restarted gateway rejoins each flow session with its tools, and a link that
+  drops rejoins too.
+
 ## Install
 
 The family is distributed from GitHub, not from an index. The protocol package

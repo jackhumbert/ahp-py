@@ -9,6 +9,7 @@ from ahp_host_flow.engine.dispatcher import (
     DispatchHandle,
     EchoDispatcher,
     ReportsDispatch,
+    reattach_handle,
     report_dispatch,
 )
 from ahp_host_flow.engine.journal import (
@@ -52,6 +53,14 @@ from ahp_host_flow.engine.registry import (
     WorkflowRefError,
     resolve_workflow,
 )
+from ahp_host_flow.engine.remote import (
+    IDLE_TIMEOUT,
+    ClientDispatcher,
+    RemoteAgentError,
+    RemoteOut,
+    RemoteSpec,
+    RemoteWorkers,
+)
 from ahp_host_flow.engine.resume import LIBRARY_FILENAME, JournalRun, Replay
 from ahp_host_flow.engine.scheduler import (
     AgentLimitError,
@@ -65,6 +74,7 @@ __all__ = [
     "BUILTIN_PATTERNS",
     "CPU_RESERVE",
     "DEFAULT_MAX_CONCURRENCY",
+    "IDLE_TIMEOUT",
     "JOURNAL_FILE",
     "JOURNAL_VERSION",
     "LIBRARY_FILENAME",
@@ -83,6 +93,7 @@ __all__ = [
     "AgentResult",
     "Budget",
     "BudgetExhaustedError",
+    "ClientDispatcher",
     "DispatchHandle",
     "Dispatcher",
     "EchoDispatcher",
@@ -93,6 +104,10 @@ __all__ = [
     "LoadedJournal",
     "Redactor",
     "Registry",
+    "RemoteAgentError",
+    "RemoteOut",
+    "RemoteSpec",
+    "RemoteWorkers",
     "Replay",
     "ReportsDispatch",
     "ResolvedScript",
@@ -109,6 +124,7 @@ __all__ = [
     "default_concurrency",
     "load_journal",
     "new_run_id",
+    "reattach_handle",
     "report_dispatch",
     "resolve_workflow",
     "run_dir",

@@ -389,3 +389,51 @@ the embedder calls `Gateway.start()` and `Gateway.aclose()` around serving.
 to nest them (`ChatOrigin` `kind: tool` on the worker's chat). `start_session`
 already returns `ToolResultSubagentContent` naming the worker's chat, which is
 the parent's side of that link.
+
+### Fleet tools for flow sessions
+
+A workflow engine on a node (`ahp-host-flow`, its plan §2) runs each `agent()`
+call as a session on some node. Its run is a session of a **flow agent**: one
+of `OrchestratorConfig.flow_agents` (default `("flow",)`; an id cannot be both
+the orchestrator and a flow agent). The gateway creates it on the agent asked
+for, unrewritten, and joins it as an active client offering four tools for an
+engine, not a model, each taking and returning plain data
+(`FLOW_TOOLS`): `start_session` (node, agent, prompt, folder, model, config,
+output schema, title), `wait_for_sessions` (sessions, timeout: each one's
+status and whether it is done, and `timed_out`), `read_session` (final text,
+validated structured result, usage, status, error) and `stop_session`.
+
+- **The principal rule.** The flow session records the principal who created
+  it, and every session its tools start is started as that principal, over the
+  orchestrator's own (principal, node) links, only on nodes the registry admits
+  them to. A run can only wait on, read or stop the sessions it started. The
+  gateway refuses, from any other principal, a `chat/turnStarted` on the flow
+  session, and any subscribe or dispatch on a session a flow run started or its
+  chat (`flow_child_owner`): those are listed in the flat session list like
+  any other, but readable and drivable only by the run's principal
+  (`ahp-host-flow` plan §9, "Fleet identity").
+- **Config.** `child_config` is the base. `permissionMode` may be asked
+  stricter only (`plan` < `default` < `acceptEdits` < `auto` <
+  `bypassPermissions`; a looser one fails the call, and with no
+  `permissionMode` in `child_config` only `plan` and `default` pass).
+  `effort` (`low`..`max`) is passed on when `child_config` has none; when it
+  sets one, a requested effort is **dropped** and `child_config`'s applies.
+  Any other key fails the call. `ahp-host-flow` reports a refused approval mode
+  as such, naming the provider and the setting to change.
+- **`max_running`.** Per flow session, all its runs together, as it is per
+  orchestrator session: it bounds a run alongside the engine's own concurrency
+  cap. Not per principal: one principal's runs are independent, and a
+  principal-wide count would let one run starve another. An engine is calling,
+  so a `start_session` over the limit waits for a slot (up to `slot_wait`,
+  default 600 s) instead of failing at once. Running children are read from
+  the nodes, not from what this process has open: a restarted gateway opens
+  each recorded child not yet seen finished and asks; one seen finished is
+  remembered in `state_path` and never opened again; one whose node does not
+  answer within 5 s, or that is gone, is not counted.
+- **Restarts.** Flow sessions and their children (with each child's chat and
+  whether it finished) are kept in `state_path` and rejoined like
+  orchestrators. A run that was waiting when the gateway went retries its call
+  once on the rejoined gateway (`ahp-host-flow`).
+- **Limits.** No tool answers an approval or a question: a started session
+  that asks waits for a person, in any client, and `wait_for_sessions` reports
+  it `waiting`, not done. Started sessions get no fleet tools.

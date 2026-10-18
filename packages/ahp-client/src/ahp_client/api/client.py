@@ -1009,6 +1009,9 @@ class Session:
         """
         async for state in states:
             if getattr(state, "status", "") == "connected":
+                # The connection is a new one: results go out on it, not on the
+                # closed one the tool host was built with (`rebind`).
+                tools.rebind(self._client.protocol)
                 with contextlib.suppress(Exception):
                     self._client.protocol.dispatch(self.uri, tools.attach_action())
                 with contextlib.suppress(Exception):

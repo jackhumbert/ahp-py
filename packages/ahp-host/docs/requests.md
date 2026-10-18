@@ -343,6 +343,32 @@ Why upstream: every client otherwise has to learn a private `_meta` key and an
 `errorType` string, and cannot tell a request still being waited on from one
 that was withdrawn, except by trying to answer it.
 
+## 12. A session started on another session's behalf has no origin (upstream)
+
+**What the spec says today.** `SessionOrigin` has one kind, `automation`. A
+chat spawned by a tool call can point back to it (`ChatOrigin` `{kind: "tool",
+chat, toolCallId}`, with `ToolResultSubagentContent` on the parent's side), but
+only within one session.
+
+**What ahp-py does.** `ahp-host-flow` (plan §2) runs a workflow's `agent()`
+calls, through `ahp-gateway`'s fleet tools, as ordinary sessions on other
+nodes, so every surface lists them. The parent side is covered: the run's
+worker chat links the node session. The child side is not: the node session
+cannot say which run, chat and tool call started it, so a client lists it as
+one more top-level session, unrelated to the run, and cannot nest or group it
+under its workflow.
+
+**Request.** A `SessionOrigin` kind for delegated sessions:
+`{kind: "delegation", session, chat, toolCallId}`, naming the session, chat and
+tool call on whose behalf the session was started (possibly on another host),
+set at `createSession` by the client that starts it, so a client can render it
+as the child of that call, as it does a `tool`-origin chat.
+
+Why upstream: the link has to be on the session itself, where every client
+reads it; a private `_meta` key would only be understood by ahp-py's own
+clients, and the shape mirrors `ChatOrigin`'s `tool` kind, which clients
+already render.
+
 ## Still deliberately not requested
 
 The list above holds, and one addition:

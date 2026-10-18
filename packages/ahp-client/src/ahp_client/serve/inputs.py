@@ -261,6 +261,17 @@ class ClientToolHost:
         #: ``None`` for a tool that is advertised but has no executor.
         self._tools: dict[str, tuple[JsonObject, ToolExecutor | None]] = {}
 
+    def rebind(self, client: AhpClient) -> None:
+        """Answer from now on over *client*: the connection a reconnect brought up.
+
+        A supervised `Client` gets a new `AhpClient` on every reconnect, and the
+        one this host was built with is closed for good. Results reported on it
+        raise `ClientClosed`, which the executor's task swallows, so the call is
+        never answered and the agent that made it waits forever. `Session`
+        rebinds its tool host whenever the connection comes back up.
+        """
+        self._client = client
+
     def register(self, definition: Mapping[str, Any], executor: ToolExecutor) -> None:
         self._tools[str(definition["name"])] = (dict(definition), executor)
 

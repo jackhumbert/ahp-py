@@ -7,7 +7,7 @@ import tomllib
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Final
+from typing import Any, Final, Literal
 
 from ahp_host_flow.engine.redact import Redactor
 
@@ -23,6 +23,7 @@ PYTHON_SOURCES_DEFAULT: Final = ("user", "host")
 DEFAULT_STATE_DIR: Final = Path("~/.local/state/ahp-host-flow")
 PROVIDER_NAME: Final = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]*")
 LOAD_SPEC: Final = re.compile(r"[A-Za-z_][\w.]*:[A-Za-z_][\w.]*")
+REMOTE_URL: Final = re.compile(r"wss?://\S+")
 
 
 class ConfigError(ValueError):
@@ -46,8 +47,9 @@ class Routing:
 @dataclass(frozen=True)
 class ProviderConfig:
     name: str
-    # 'module:Class', imported and constructed on first use, not at startup.
-    load: str
+    # 'module:Class', imported and constructed on first use, not at startup. None for a fleet or
+    # remote provider.
+    load: str | None
     # Handed to the provider: a path to its own config file, or a table.
     config: Mapping[str, Any] | Path | None = None
     # Alias -> model id.
@@ -55,6 +57,26 @@ class ProviderConfig:
     # Passed verbatim to the inner session.
     approval_mode: str | None = None
     effort: str | None = None
+    # Fleet: `via = "fleet"` runs the call on a gateway node (`node` is the gateway's node id).
+    via: str | None = None
+    node: str | None = None
+    # Fleet and remote: the agent id to start there.
+    agent: str | None = None
+    # Remote: dial another host directly.
+    url: str | None = None
+    token_file: Path | None = None
+    # Fleet: seconds a fleet tool may take to answer before the call is retried once on the
+    # rejoined gateway, then failed. None: `fleet.REPLY_TIMEOUT`.
+    reply_timeout: float | None = None
+    # Remote: seconds the remote turn may go without an event (a question or an approval
+    # nobody can answer from here) before the call fails. None: `remote.IDLE_TIMEOUT`.
+    idle_timeout: float | None = None
+
+    @property
+    def kind(self) -> Literal["inprocess", "fleet", "remote"]:
+        if self.load is not None:
+            return "inprocess"
+        return "fleet" if self.via is not None else "remote"
 
 
 @dataclass(frozen=True)
@@ -101,6 +123,15 @@ def _str(table: Mapping[str, Any], key: str, where: str) -> str | None:
     return value
 
 
+def _seconds(table: Mapping[str, Any], key: str, where: str) -> float | None:
+    value = table.get(key)
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int | float) or value <= 0:
+        raise ConfigError(f"{where}.{key} must be a positive number of seconds")
+    return float(value)
+
+
 def _path(value: str, base: Path) -> Path:
     path = Path(value).expanduser()
     return path if path.is_absolute() else base / path
@@ -117,34 +148,83 @@ def _parse_provider(name: str, raw: Any, base: Path) -> ProviderConfig:
     if not PROVIDER_NAME.fullmatch(name):
         raise ConfigError(f"provider name {name!r} must match {PROVIDER_NAME.pattern}")
     table = _table(raw, where)
-    _check_keys(table, ("load", "config", "models", "approval_mode", "effort"), where)
-    load = _str(table, "load", where)
-    if load is None:
-        raise ConfigError(f"{where}.load is required")
-    if not LOAD_SPEC.fullmatch(load):
-        raise ConfigError(f"{where}.load must be 'module:Class', got {load!r}")
+    present = [key for key in ("load", "via", "url") if key in table]
+    if not present:
+        raise ConfigError(f"{where} needs one of load, via, url")
+    if len(present) > 1:
+        raise ConfigError(f"{where}: load, via and url are exclusive")
+    if "load" in table:
+        kind = "inprocess"
+        allowed: tuple[str, ...] = ("load", "config", "models", "approval_mode", "effort")
+    elif "via" in table:
+        kind = "fleet"
+        allowed = ("via", "node", "agent", "models", "approval_mode", "effort", "reply_timeout")
+    else:
+        kind = "remote"
+        allowed = ("url", "token_file", "agent", "models", "idle_timeout")
+    _check_keys(table, allowed, where)
+    load = via = node = agent = url = None
+    token_file: Path | None = None
     config: Mapping[str, Any] | Path | None = None
-    raw_config = table.get("config")
-    if isinstance(raw_config, str):
-        config = _path(raw_config, base)
-    elif isinstance(raw_config, Mapping):
-        config = dict(raw_config)
-    elif raw_config is not None:
-        raise ConfigError(f"{where}.config must be a path or a table")
+    if kind == "inprocess":
+        load = _str(table, "load", where)
+        if load is None or not LOAD_SPEC.fullmatch(load):
+            raise ConfigError(f"{where}.load must be 'module:Class', got {load!r}")
+        raw_config = table.get("config")
+        if isinstance(raw_config, str):
+            config = _path(raw_config, base)
+        elif isinstance(raw_config, Mapping):
+            config = dict(raw_config)
+        elif raw_config is not None:
+            raise ConfigError(f"{where}.config must be a path or a table")
+    elif kind == "fleet":
+        via = _str(table, "via", where)
+        if via != "fleet":
+            raise ConfigError(f"{where}.via must be 'fleet', got {via!r}")
+        node = _str(table, "node", where)
+        if not node:
+            raise ConfigError(f"{where}.node is required")
+    else:
+        url = _str(table, "url", where)
+        if url is None or not REMOTE_URL.fullmatch(url):
+            raise ConfigError(f"{where}.url must be a ws:// or wss:// URL")
+        raw_token = _str(table, "token_file", where)
+        if raw_token is not None:
+            token_file = _path(raw_token, base)
+    if kind != "inprocess":
+        agent = _str(table, "agent", where)
+        if not agent:
+            raise ConfigError(f"{where}.agent is required")
     models: dict[str, str] = {}
     for alias, model_id in _table(table.get("models", {}), f"{where}.models").items():
         if not isinstance(model_id, str):
             raise ConfigError(f"{where}.models.{alias} must be a string")
         models[alias] = model_id
-    approval_mode = _str(table, "approval_mode", where)
-    if approval_mode is not None and not approval_mode:
-        raise ConfigError(f"{where}.approval_mode must not be empty")
-    effort = _str(table, "effort", where)
-    if effort is not None and effort not in EFFORT_LEVELS:
-        raise ConfigError(
-            f"{where}.effort must be one of {', '.join(EFFORT_LEVELS)}, got {effort!r}"
-        )
-    return ProviderConfig(name, load, config, models, approval_mode, effort)
+    approval_mode = effort = None
+    if kind != "remote":
+        approval_mode = _str(table, "approval_mode", where)
+        if approval_mode is not None and not approval_mode:
+            raise ConfigError(f"{where}.approval_mode must not be empty")
+        effort = _str(table, "effort", where)
+        if effort is not None and effort not in EFFORT_LEVELS:
+            raise ConfigError(
+                f"{where}.effort must be one of {', '.join(EFFORT_LEVELS)}, got {effort!r}"
+            )
+    return ProviderConfig(
+        name,
+        load,
+        config,
+        models,
+        approval_mode,
+        effort,
+        via,
+        node,
+        agent,
+        url,
+        token_file,
+        reply_timeout=_seconds(table, "reply_timeout", where),
+        idle_timeout=_seconds(table, "idle_timeout", where),
+    )
 
 
 def _parse_routing(raw: Any, providers: Mapping[str, ProviderConfig]) -> Routing:

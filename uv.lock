@@ -211,6 +211,7 @@ dependencies = [
 
 [package.dev-dependencies]
 dev = [
+    { name = "ahp-gateway" },
     { name = "import-linter" },
     { name = "mypy" },
     { name = "pytest" },
@@ -228,6 +229,7 @@ requires-dist = [
 
 [package.metadata.requires-dev]
 dev = [
+    { name = "ahp-gateway", editable = "packages/ahp-gateway" },
     { name = "import-linter", specifier = ">=2" },
     { name = "mypy", specifier = ">=1.11" },
     { name = "pytest", specifier = ">=8" },

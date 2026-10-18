@@ -6,7 +6,7 @@ import asyncio
 import contextlib
 import json
 import logging
-from collections.abc import Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Final
@@ -26,6 +26,7 @@ from ahp_host.provider.base import (
     UserMessage,
 )
 from ahp_protocol.ext import flow
+from ahp_protocol.transport import Transport
 
 from ahp_host_flow import __version__, catalog
 from ahp_host_flow.commands import (
@@ -42,16 +43,28 @@ from ahp_host_flow.config import (
     EFFORT_LEVELS,
     ConfigError,
     FlowConfig,
+    ProviderConfig,
     make_redactor,
 )
-from ahp_host_flow.dispatch import ProviderDispatcher, forward_overlay
+from ahp_host_flow.dispatch import (
+    FlowAgentError,
+    ProviderDispatcher,
+    RemoteWorkerChats,
+    RoutingDispatcher,
+    forward_overlay,
+)
 from ahp_host_flow.engine import (
+    IDLE_TIMEOUT,
     RUN_ID,
     AbortSignal,
+    ClientDispatcher,
+    Dispatcher,
     JournalError,
+    RemoteSpec,
     RunOptions,
     load_journal,
 )
+from ahp_host_flow.fleet import FleetClients, FleetDispatcher
 from ahp_host_flow.loading import LazyProviders
 from ahp_host_flow.sandbox import (
     NO_ARGS,
@@ -245,8 +258,16 @@ class FlowProvider:
         *,
         providers: Mapping[str, AgentProvider] | None = None,
         user_workflows_dir: Path | None = None,
+        fleet_client_wait: float = 10.0,
+        remote_dialer: Callable[[ProviderConfig], Callable[[], Awaitable[Transport]]] | None = None,
     ) -> None:
         self.config = config
+        #: Dials a remote provider's host; tests inject an in-memory one, production dials `url`.
+        self.remote_dialer = remote_dialer
+        #: Seconds a continued run waits for the gateway to rejoin before a fleet call fails
+        #: (the gateway's redial backoff, 0.5 s doubling, reaches 4 redials in 7.5 s), and a
+        #: fleet tool call whose gateway left waits for it to come back to try once more.
+        self.fleet_client_wait = fleet_client_wait
         self.redactor = make_redactor(config.redact)
         self.providers: Mapping[str, AgentProvider] = (
             providers if providers is not None else LazyProviders(config)
@@ -305,6 +326,15 @@ class FlowSession:
         self._restored: dict[str, RunEntry] = _parse_runs(context.resume_state)
         #: The customizations last published (or described), to see when a source changes.
         self._published: list[dict[str, Any]] | None = None
+        #: The active clients that offer the fleet tools (a gateway joined to this session).
+        self._fleet = FleetClients(
+            [{"clientId": context.active_client_id, "tools": list(context.client_tools)}]
+            if context.active_client_id
+            else []
+        )
+
+    async def active_clients_changed(self, clients: Sequence[Mapping[str, Any]]) -> None:
+        self._fleet.update(clients)
 
     def _dirs(self) -> list[catalog.SourceDir]:
         config = self.provider.config
@@ -534,22 +564,84 @@ class FlowSession:
 
         drainer = asyncio.create_task(drain())
 
-        dispatcher = ProviderDispatcher(
+        def on_log(text: str) -> None:
+            notes.put_nowait((redactor.mask(text), None))
+
+        # A continued run's calls get ids of their own: the cut-off ones stay in the turn.
+        call_id_prefix = f"agent-r{resumes}" if resumes else "agent"
+
+        remote_workers = RemoteWorkerChats(
             config=config,
-            providers=self.provider.providers,
             sink=sink,
             publisher=publisher,
             chat=chat,
-            session_uri=context.session_uri,
-            working_directories=context.working_directories,
             run_values=lambda: {**self._values, **self._chat_overlays.get(chat, {})},
-            run_model=model,
-            workers=self._workers,
-            pending_overlays=self._chat_overlays,
             redactor=redactor,
-            on_log=lambda text: notes.put_nowait((redactor.mask(text), None)),
-            # A continued run's calls get ids of their own: the cut-off ones stay in the turn.
-            call_id_prefix=f"agent-r{resumes}" if resumes else "agent",
+            on_log=on_log,
+            call_id_prefix=call_id_prefix,
+        )
+
+        def remote_for(name: str, spec: ProviderConfig) -> Dispatcher:
+            token: str | None = None
+            if spec.token_file is not None:
+                try:
+                    token = spec.token_file.read_text(encoding="utf-8").strip()
+                except OSError as exc:
+                    raise FlowAgentError(
+                        f"provider {name!r}: cannot read token_file: {exc}"
+                    ) from exc
+            dialer = self.provider.remote_dialer
+            return ClientDispatcher(
+                RemoteSpec(
+                    name,
+                    str(spec.agent),
+                    spec.url,
+                    token,
+                    transport_factory=dialer(spec) if dialer is not None else None,
+                    models=spec.models,
+                    run_model=model,
+                    idle_timeout=(
+                        spec.idle_timeout if spec.idle_timeout is not None else IDLE_TIMEOUT
+                    ),
+                ),
+                workers=remote_workers,
+                on_log=on_log,
+            )
+
+        dispatcher = RoutingDispatcher(
+            config,
+            inprocess=ProviderDispatcher(
+                config=config,
+                providers=self.provider.providers,
+                sink=sink,
+                publisher=publisher,
+                chat=chat,
+                session_uri=context.session_uri,
+                working_directories=context.working_directories,
+                run_values=lambda: {**self._values, **self._chat_overlays.get(chat, {})},
+                run_model=model,
+                workers=self._workers,
+                pending_overlays=self._chat_overlays,
+                redactor=redactor,
+                on_log=on_log,
+                call_id_prefix=call_id_prefix,
+            ),
+            fleet=FleetDispatcher(
+                config=config,
+                sink=sink,
+                publisher=publisher,
+                chat=chat,
+                clients=self._fleet,
+                client_wait=self.provider.fleet_client_wait if resume_from is not None else 0.0,
+                rejoin_wait=self.provider.fleet_client_wait,
+                run_values=lambda: {**self._values, **self._chat_overlays.get(chat, {})},
+                run_model=model,
+                aborted=lambda: abort.aborted,
+                redactor=redactor,
+                on_log=on_log,
+                call_id_prefix=call_id_prefix,
+            ),
+            remote=remote_for,
         )
 
         def on_run_start(run_id: str) -> None:
@@ -619,7 +711,7 @@ class FlowSession:
                     filename=filename,
                     options=options,
                     abort=abort,
-                    on_log=lambda text: notes.put_nowait((redactor.mask(text), None)),
+                    on_log=on_log,
                     on_phase=on_phase,
                     on_run_start=on_run_start,
                 )
@@ -640,6 +732,8 @@ class FlowSession:
             self._runs.pop(chat, None)
             if not drainer.done():
                 drainer.cancel()
+            with contextlib.suppress(Exception):
+                await dispatcher.aclose()
 
     async def config_changed(self, values: Mapping[str, Any]) -> None:
         self._values.update(_own(values))

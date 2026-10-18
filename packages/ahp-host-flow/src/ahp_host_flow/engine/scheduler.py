@@ -11,6 +11,7 @@ from ahp_host_flow.engine.abort import AbortSignal
 from ahp_host_flow.engine.budget import OUTPUT_TOKENS, Budget
 from ahp_host_flow.engine.dispatcher import (
     _DISPATCH_REPORT,
+    _REATTACH,
     AgentCall,
     AgentResult,
     Dispatcher,
@@ -71,6 +72,7 @@ class Scheduler:
         self._on_agent_end = on_agent_end
         self._journal = journal
         self._replay = replay
+        self._reattach: dict[int, DispatchHandle] = {}
         self._unsubscribe: Callable[[], None] | None = None
         if abort is not None:
             self._unsubscribe = abort.subscribe(self.abort)
@@ -149,6 +151,9 @@ class Scheduler:
             if rec is not None:
                 # The record proves the original run admitted it; no budget re-check.
                 return rec
+            handle = self._replay.reattach(call)
+            if handle is not None:
+                self._reattach[call.ordinal] = handle
         self._check_budget()
         return None
 
@@ -194,7 +199,7 @@ class Scheduler:
             reported = True
             if self._journal is not None:
                 h = handle if handle is not None else DispatchHandle()
-                self._journal.append_started(StartRecord(n, key, h.provider, h.chat))
+                self._journal.append_started(StartRecord(n, key, h.provider, h.chat, h.session))
 
         reports = (
             isinstance(self._dispatcher, ReportsDispatch) and self._dispatcher.reports_dispatch
@@ -202,10 +207,13 @@ class Scheduler:
         if not reports:
             report(None)
         # Set around create_task only, so just the task's copied context sees it.
+        handle = self._reattach.pop(n, None)
         token = _DISPATCH_REPORT.set(report)
+        reattach_token = _REATTACH.set(handle)
         try:
             task = asyncio.create_task(self._dispatcher.run_agent(call))
         finally:
+            _REATTACH.reset(reattach_token)
             _DISPATCH_REPORT.reset(token)
         self._inflight.add(task)
         try:

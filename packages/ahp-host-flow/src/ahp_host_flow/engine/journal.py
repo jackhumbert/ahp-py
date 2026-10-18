@@ -101,6 +101,8 @@ class StartRecord:
     # The dispatch handle: provider name and worker chat URI, both None when unknown.
     provider: str | None = None
     chat: str | None = None
+    # The node session (fleet) or remote session the call ran on, None when unknown.
+    session: str | None = None
 
 
 @dataclass(frozen=True)
@@ -202,8 +204,10 @@ class JournalWriter:
 
     def append_started(self, record: StartRecord) -> None:
         handle: dict[str, Any] | None = None
-        if record.provider is not None or record.chat is not None:
+        if record.provider is not None or record.chat is not None or record.session is not None:
             handle = {"provider": record.provider, "chat": record.chat}
+            if record.session is not None:
+                handle["session"] = record.session
         self._write(
             {"type": "started", "ordinal": record.ordinal, "key": record.key, "handle": handle}
         )
@@ -306,18 +310,20 @@ def load_journal(state_dir: Path, run_id: str) -> LoadedJournal:
             )
         elif kind == "started":
             ordinal, key, handle = rec.get("ordinal"), rec.get("key"), rec.get("handle")
-            provider = chat = None
+            provider = chat = session = None
             if isinstance(handle, dict):
                 provider, chat = handle.get("provider"), handle.get("chat")
+                session = handle.get("session")
             if (
                 not _is_count(ordinal)
                 or not isinstance(key, str)
                 or (handle is not None and not isinstance(handle, dict))
                 or (provider is not None and not isinstance(provider, str))
                 or (chat is not None and not isinstance(chat, str))
+                or (session is not None and not isinstance(session, str))
             ):
                 raise JournalError(f"journal line {n}: bad started record")
-            started.setdefault(ordinal, StartRecord(ordinal, key, provider, chat))
+            started.setdefault(ordinal, StartRecord(ordinal, key, provider, chat, session))
     if header is None:
         raise JournalError(f"journal for run {run_id!r} does not start with a run header")
     return LoadedJournal(

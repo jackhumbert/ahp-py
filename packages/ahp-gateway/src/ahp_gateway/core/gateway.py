@@ -874,6 +874,8 @@ class _SurfaceConnection:
         if channel.startswith(TELEMETRY_SCHEME):
             await self._subscribe_telemetry(channel, options)
             return {}
+        if self._not_this_runs(channel):
+            raise AhpError(_REFUSED, "this session belongs to another user's flow run")
         snapshot = await self._subscribe_channel(channel, after, options)
         return {"snapshot": snapshot} if snapshot is not None else {}
 
@@ -1057,6 +1059,8 @@ class _SurfaceConnection:
         orchestrator = self.gateway.orchestrator
         if orchestrator is not None and orchestrator.is_orchestrator(params.get("provider")):
             return await self._create_orchestrator(orchestrator, channel, params)
+        if orchestrator is not None and orchestrator.is_flow(params.get("provider")):
+            return await self._create_flow(orchestrator, channel, params)
         node_id = self._node_for_new_session(params)
         # Claimed before the request, so an action the node publishes for the
         # new session ahead of its reply already has somewhere to go.
@@ -1084,6 +1088,21 @@ class _SurfaceConnection:
             raise invalid_params(str(exc)) from exc
         assert self.principal is not None, "admission sets the principal"
         await orchestrator.create(self.principal, node_id, outgoing)
+        # `createSession` answers null.
+        return
+
+    async def _create_flow(
+        self, orchestrator: Orchestrator, channel: str, params: Mapping[str, Any]
+    ) -> None:
+        """A flow session: created like an orchestrator's, on the agent asked for."""
+        node_id = self._node_for_new_session(params)
+        self.owners.claim(node_id, {channel})
+        try:
+            outgoing = unqualify_file_uris(params, node_id, self._path_root(node_id))
+        except ForeignUriError as exc:
+            raise invalid_params(str(exc)) from exc
+        assert self.principal is not None, "admission sets the principal"
+        await orchestrator.create_flow(self.principal, node_id, outgoing)
         # `createSession` answers null.
         return
 
@@ -1302,6 +1321,23 @@ class _SurfaceConnection:
                 _log.debug("dispatchAction naming another node's file rejected: %s", exc)
                 self._reject(params, str(exc))
                 return
+            action = params.get("action")
+            orchestrator = self.gateway.orchestrator
+            if (
+                orchestrator is not None
+                and isinstance(action, Mapping)
+                and action.get("type") == "chat/turnStarted"
+                and isinstance(channel, str)
+            ):
+                owner = orchestrator.flow_owner(channel)
+                if owner is not None and (
+                    self.principal is None or owner.subject != self.principal.subject
+                ):
+                    self._reject(params, "this flow session runs as another user")
+                    return
+            if isinstance(channel, str) and self._not_this_runs(channel):
+                self._reject(params, "this session belongs to another user's flow run")
+                return
             target.link.notify("dispatchAction", outgoing)
         # Unknown notifications are ignored, per the additive-change guarantee.
 
@@ -1434,6 +1470,25 @@ class _SurfaceConnection:
         reduced = REDUCERS["automation"](node.automations, action)
         if isinstance(reduced, dict):
             node.automations = reduced
+
+    def _not_this_runs(self, channel: str) -> bool:
+        """Whether *channel* is a session a flow run started as someone other than this surface.
+
+        A flow run's calls are started as the principal who started the run, and
+        the engine reads their results back as its `agent()` returns. Another
+        principal reading one would see that user's work, and driving one
+        (prompting, cancelling, answering its approvals) would steer what their
+        run gets back (plan §9 of ahp-host-flow: one principal's run never drives
+        another's sessions, nor another principal a run's). Listed like every
+        session, but neither readable nor drivable by anyone else.
+        """
+        orchestrator = self.gateway.orchestrator
+        if orchestrator is None:
+            return False
+        owner = orchestrator.flow_child_owner(channel)
+        return owner is not None and (
+            self.principal is None or owner.subject != self.principal.subject
+        )
 
     def _reject(self, dispatch: Mapping[str, Any], reason: str) -> None:
         """Echo a surface's own dispatch back to it, refused.

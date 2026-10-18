@@ -37,6 +37,8 @@ class DispatchHandle:
 
     provider: str | None = None
     chat: str | None = None
+    # The node session URI of a fleet call, or the remote session of a remote call.
+    session: str | None = None
 
 
 @runtime_checkable
@@ -61,6 +63,14 @@ def report_dispatch(handle: DispatchHandle) -> None:
     report = _DISPATCH_REPORT.get()
     if report is not None:
         report(handle)
+
+
+_REATTACH: ContextVar[DispatchHandle | None] = ContextVar("_REATTACH", default=None)
+
+
+def reattach_handle() -> DispatchHandle | None:
+    """The handle a continued run recorded for this call when it was cut off, else None."""
+    return _REATTACH.get()
 
 
 class EchoDispatcher:

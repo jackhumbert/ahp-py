@@ -51,12 +51,13 @@ async def boot_flow(
     workspace: Path | None = None,
     session_config: Mapping[str, Any] | None = None,
     store: SessionStore | None = None,
+    provider_options: Mapping[str, Any] | None = None,
 ) -> FlowFixture:
     workspace = workspace if workspace is not None else base / "ws"
     (workspace / ".claude" / "workflows").mkdir(parents=True, exist_ok=True)
     config = load_config(write_toml(base, node, body))
     host = Host(
-        FlowProvider(config, user_workflows_dir=base / "user"),
+        FlowProvider(config, user_workflows_dir=base / "user", **(provider_options or {})),
         LoopbackSingleUserPolicy(),
         store=store,
     )
@@ -77,13 +78,18 @@ def store_for(base: Path) -> FileSessionStore:
 
 
 async def restart_flow(
-    base: Path, node: str, body: str, *, workspace: Path | None = None
+    base: Path,
+    node: str,
+    body: str,
+    *,
+    workspace: Path | None = None,
+    provider_options: Mapping[str, Any] | None = None,
 ) -> FlowFixture:
     """A new host on the same store and state dir, restored: the session as the old host left it."""
     workspace = workspace if workspace is not None else base / "ws"
     config = load_config(write_toml(base, node, body))
     host = Host(
-        FlowProvider(config, user_workflows_dir=base / "user"),
+        FlowProvider(config, user_workflows_dir=base / "user", **(provider_options or {})),
         LoopbackSingleUserPolicy(),
         store=store_for(base),
     )

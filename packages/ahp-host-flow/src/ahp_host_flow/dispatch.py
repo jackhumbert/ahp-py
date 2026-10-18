@@ -5,7 +5,8 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
-from collections.abc import Callable, Mapping, MutableMapping, Sequence
+from abc import ABC, abstractmethod
+from collections.abc import Awaitable, Callable, Mapping, MutableMapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Final, cast
 
@@ -41,8 +42,10 @@ from ahp_host_flow.config import (
 from ahp_host_flow.engine import (
     AgentCall,
     AgentResult,
+    Dispatcher,
     DispatchHandle,
     Redactor,
+    RemoteOut,
     report_dispatch,
     schema_error,
 )
@@ -163,8 +166,8 @@ class _TeeSession:
         return isinstance(self.inner, ReturnsStructuredOutput) and self.inner.offers_host_tools()
 
 
-class ProviderDispatcher:
-    """Runs each `agent()` call as a turn of an inner provider session in its own worker chat."""
+class StepDispatcher(ABC):
+    """The part of a dispatcher every `agent()` call shares: the main chat's `agent` tool call."""
 
     reports_dispatch: bool = True
 
@@ -172,32 +175,19 @@ class ProviderDispatcher:
         self,
         *,
         config: FlowConfig,
-        providers: Mapping[str, AgentProvider],
         sink: TurnSink,
         publisher: SessionPublisher,
         chat: str,
-        session_uri: str,
-        working_directories: Sequence[str] = (),
         run_values: Callable[[], Mapping[str, Any]] = lambda: {},
-        run_model: str | None = None,
-        workers: MutableMapping[str, AgentSession] | None = None,
-        pending_overlays: MutableMapping[str, dict[str, Any]] | None = None,
         redactor: Redactor | None = None,
         on_log: Callable[[str], None] | None = None,
         call_id_prefix: str = "agent",
     ) -> None:
         self.config = config
-        self.providers = providers
         self.sink = sink
         self.publisher = publisher
         self.chat = chat
-        self.session_uri = session_uri
-        self.working_directories = tuple(working_directories)
         self.run_values = run_values
-        self.run_model = run_model
-        self.workers: MutableMapping[str, AgentSession] = workers if workers is not None else {}
-        #: Overlays that arrived for a worker chat before its inner session existed.
-        self.pending_overlays = pending_overlays
         self.redactor = redactor if redactor is not None else make_redactor(config.redact)
         self.on_log = on_log
         #: Prefixes each call's tool call id; a continued run uses a fresh one so its ids
@@ -286,12 +276,59 @@ class ProviderDispatcher:
             call_id, result, success=success, past_tense_message=message
         )
 
+    @abstractmethod
+    async def _run_call(
+        self, call: AgentCall, name: str, title: str, call_id: str
+    ) -> AgentResult: ...
+
+
+class ProviderDispatcher(StepDispatcher):
+    """Runs each `agent()` call as a turn of an inner provider session in its own worker chat."""
+
+    def __init__(
+        self,
+        *,
+        config: FlowConfig,
+        providers: Mapping[str, AgentProvider],
+        sink: TurnSink,
+        publisher: SessionPublisher,
+        chat: str,
+        session_uri: str,
+        working_directories: Sequence[str] = (),
+        run_values: Callable[[], Mapping[str, Any]] = lambda: {},
+        run_model: str | None = None,
+        workers: MutableMapping[str, AgentSession] | None = None,
+        pending_overlays: MutableMapping[str, dict[str, Any]] | None = None,
+        redactor: Redactor | None = None,
+        on_log: Callable[[str], None] | None = None,
+        call_id_prefix: str = "agent",
+    ) -> None:
+        super().__init__(
+            config=config,
+            sink=sink,
+            publisher=publisher,
+            chat=chat,
+            run_values=run_values,
+            redactor=redactor,
+            on_log=on_log,
+            call_id_prefix=call_id_prefix,
+        )
+        self.providers = providers
+        self.session_uri = session_uri
+        self.working_directories = tuple(working_directories)
+        self.run_model = run_model
+        self.workers: MutableMapping[str, AgentSession] = workers if workers is not None else {}
+        #: Overlays that arrived for a worker chat before its inner session existed.
+        self.pending_overlays = pending_overlays
+
     async def _run_call(self, call: AgentCall, name: str, title: str, call_id: str) -> AgentResult:
         try:
             provider = self.providers[name]
         except ConfigError as exc:
             _log.warning("agent() #%s: provider %r is unavailable: %s", call.ordinal, name, exc)
             raise FlowAgentError(f"provider {name!r} is unavailable: {exc}") from exc
+        except KeyError:
+            raise FlowAgentError(f"provider {name!r} is not an in-process provider") from None
         opts = call.opts
         effort = opts.get("effort")
         if effort is not None and not (isinstance(effort, str) and effort in EFFORT_LEVELS):
@@ -526,3 +563,209 @@ class ProviderDispatcher:
             call_id, link, success=True, message="agent() returned", finished=finished
         )
         return AgentResult(value, usage=usage)
+
+
+class _WorkerOut:
+    """A remote call's output, written to its worker chat."""
+
+    def __init__(self, sink: TurnSink, provider: str, chat: str, redactor: Redactor) -> None:
+        self.sink = sink
+        self.provider = provider
+        self.chat = chat
+        self.redactor = redactor
+
+    async def linked(self, session_uri: str) -> None:
+        await self.sink.text_delta(f"Remote session: {session_uri}\n")
+        report_dispatch(DispatchHandle(provider=self.provider, chat=self.chat, session=session_uri))
+
+    async def text(self, delta: str) -> None:
+        await self.sink.text_delta(self.redactor.mask(delta))
+
+
+class RemoteWorkerChats(StepDispatcher):
+    """Shows each remote `agent()` call as a thin worker chat: the remote session and its text."""
+
+    def __init__(self, **options: Any) -> None:
+        super().__init__(**options)
+        #: The body of each call in flight, by ordinal; `run` hands it to `_run_call`.
+        self._bodies: dict[int, Callable[[RemoteOut, str], Awaitable[AgentResult]]] = {}
+
+    async def run(
+        self,
+        call: AgentCall,
+        provider: str,
+        body: Callable[[RemoteOut, str], Awaitable[AgentResult]],
+    ) -> AgentResult:
+        self._bodies[call.ordinal] = body
+        try:
+            return await self.run_agent(call)
+        finally:
+            self._bodies.pop(call.ordinal, None)
+
+    async def _run_call(self, call: AgentCall, name: str, title: str, call_id: str) -> AgentResult:
+        body = self._bodies[call.ordinal]
+        worker = await self.publisher.open_tool_chat(title, tool_call_id=call_id, chat=self.chat)
+        raw_schema = call.opts.get("schema")
+        started = self._steps[call_id]
+        started["chat"] = worker.resource
+        link_item = {"type": "subagent", "resource": worker.resource, "title": title}
+        # Clients can open the worker chat while it runs.
+        await self.sink.tool_call_output(call_id, [link_item], meta=flow.meta(flow.step(started)))
+
+        state = _Worker()
+        usage = {"input_tokens": 0, "output_tokens": 0}
+        value: Any = None
+
+        async def run(sink: TurnSink) -> None:
+            nonlocal value
+            state.started = True
+            state.task = asyncio.current_task()
+
+            try:
+                result = await body(_WorkerOut(sink, name, worker.resource, self.redactor), title)
+                for key in usage:
+                    count = result.usage.get(key)
+                    usage[key] = count if isinstance(count, int) else 0
+                await sink.usage(
+                    input_tokens=usage["input_tokens"], output_tokens=usage["output_tokens"]
+                )
+                value = self.redactor.mask_value(result.value)
+            except asyncio.CancelledError:
+                if not state.aborting:
+                    state.skipped = True
+                raise
+            except Exception as exc:
+                state.error = self.redactor.mask(str(exc))
+                raise
+            finally:
+                state.done.set()
+
+        def turn_ended() -> None:
+            # If `run` never started, the turn was cancelled before its first step: a skip.
+            if not state.started:
+                state.skipped = True
+            state.done.set()
+
+        try:
+            if not await worker.run_turn(call.prompt, run, on_end=turn_ended):
+                raise FlowAgentError("could not start a turn in the worker chat")
+            await state.done.wait()
+        except asyncio.CancelledError:
+            # The run was aborted (a worker skip cancels only the callback).
+            state.aborting = True
+            if state.task is not None and not state.task.done():
+                state.task.cancel()
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(state.done.wait(), ABORT_GRACE)
+            raise
+
+        link = {"content": [link_item]}
+        in_tok, out_tok = usage["input_tokens"], usage["output_tokens"]
+        if state.skipped:
+            finished = flow.step_finished(
+                status="skipped", result=None, input_tokens=in_tok, output_tokens=out_tok
+            )
+            await self._complete(
+                call_id, link, success=False, message="agent() skipped", finished=finished
+            )
+            raise asyncio.CancelledError
+        if state.error is not None:
+            finished = flow.step_finished(
+                status="error",
+                result=None,
+                error=state.error,
+                input_tokens=in_tok,
+                output_tokens=out_tok,
+            )
+            await self._complete(
+                call_id, link, success=False, message="agent() failed", finished=finished
+            )
+            raise FlowAgentError(state.error)
+        result = AgentResult(value, usage=usage)
+        if value is None:
+            finished = flow.step_finished(
+                status="null", result=None, input_tokens=in_tok, output_tokens=out_tok
+            )
+        elif isinstance(raw_schema, Mapping) and (bad := schema_error(raw_schema, value)):
+            # The engine re-validates identically, so this is what agent() returns.
+            finished = flow.step_finished(
+                status="error",
+                result=None,
+                error=bad,
+                input_tokens=in_tok,
+                output_tokens=out_tok,
+            )
+            await self._complete(
+                call_id, link, success=False, message="agent() failed", finished=finished
+            )
+            return result
+        else:
+            finished = flow.step_finished(
+                status="ok", result=value, input_tokens=in_tok, output_tokens=out_tok
+            )
+        await self._complete(
+            call_id, link, success=True, message="agent() returned", finished=finished
+        )
+        return result
+
+
+class RoutingDispatcher:
+    """Routes each `agent()` call to the dispatcher for its provider's kind."""
+
+    reports_dispatch: bool = True
+
+    def __init__(
+        self,
+        config: FlowConfig,
+        *,
+        inprocess: Dispatcher,
+        fleet: Dispatcher | None = None,
+        remote: Callable[[str, ProviderConfig], Dispatcher] | None = None,
+    ) -> None:
+        self.config = config
+        self._by_kind: dict[str, Dispatcher | None] = {"inprocess": inprocess, "fleet": fleet}
+        #: Makes the dispatcher of a remote provider, on its first call.
+        self._remote = remote
+        self._remotes: dict[str, Dispatcher] = {}
+        self._run_id: str | None = None
+
+    def _inner(self) -> list[Dispatcher]:
+        return [
+            *(d for d in self._by_kind.values() if d is not None),
+            *self._remotes.values(),
+        ]
+
+    @property
+    def run_id(self) -> str | None:
+        return self._run_id
+
+    @run_id.setter
+    def run_id(self, value: str | None) -> None:
+        self._run_id = value
+        for dispatcher in self._inner():
+            if hasattr(dispatcher, "run_id"):
+                dispatcher.run_id = value
+
+    async def run_agent(self, call: AgentCall) -> AgentResult:
+        name = route(self.config.routing, call)
+        spec = self.config.providers.get(name)
+        # An unknown name is the in-process dispatcher's to report.
+        kind = spec.kind if spec is not None else "inprocess"
+        dispatcher: Dispatcher | None
+        if kind == "remote" and spec is not None and self._remote is not None:
+            dispatcher = self._remotes.get(name)
+            if dispatcher is None:
+                dispatcher = self._remotes[name] = self._remote(name, spec)
+                if hasattr(dispatcher, "run_id"):
+                    dispatcher.run_id = self._run_id
+        else:
+            dispatcher = self._by_kind.get(kind)
+        if dispatcher is None:
+            raise FlowAgentError(f"provider {name!r}: {kind} dispatch is not available here")
+        return await dispatcher.run_agent(call)
+
+    async def aclose(self) -> None:
+        for dispatcher in self._inner():
+            close = getattr(dispatcher, "aclose", None)
+            if close is not None:
+                await close()

@@ -7,7 +7,7 @@ an AHP session, and each `agent()` call is a **child chat** of it, so any AHP
 client can watch and steer the whole run. Extensions to the format are opt-in,
 and a script written for Claude Code runs unchanged.
 
-Status: M0, M1, M2, M3, M4a, M5 and M6 done, and most of M4b (typed progress, credential masking, worktrees, journal start records, the fan-out corpus run). The rest of M4b (from_config factories in ahp-host-claude and ahp-host-acp, the subagent prompt preamble, live watching of workflow dirs) is next. Milestones are in §8.
+Status: M0, M1, M2, M3, M4a, M5, M6 and M7 done, and most of M4b (typed progress, credential masking, worktrees, journal start records, the fan-out corpus run). The rest of M4b (from_config factories in ahp-host-claude and ahp-host-acp, the subagent prompt preamble, live watching of workflow dirs) is next. Milestones are in §8.
 
 ## 1. Where it sits
 
@@ -81,8 +81,11 @@ gives three ways to dispatch, chosen per call by routing (§5):
     (`{kind: "delegation", session, chat, toolCallId}`, §10) would let the node
     session point back to the run.
 - **Remote (direct).** Without a gateway, the engine dials another host with
-  `ahp-client` and mirrors the remote session's events into the worker chat.
-  The remote session shows in that host's catalog.
+  `ahp-client` and shows the call in a thin worker chat: a link to the remote
+  session and its text once the turn completes. The remote session shows in
+  that host's catalog. An approval or question raised there cannot be answered
+  from the run (it is a bare client); a remote turn idle for `idle_timeout`
+  seconds is stopped and the call fails, so it never hangs the run.
 
 The main chat shows each `agent()` call as a tool call. Its label is the
 `label` option and it is grouped by `phase`. The call's result is the
@@ -353,8 +356,9 @@ answerable.
   run emits a plain "resumed" notification instead of a second one, phases
   already announced are not announced again, and the re-dispatched step
   supersedes the one the restart cancelled.
-- **Later milestones.** Started fleet calls reattach in M7. Gates (`ask`,
-  `approve`) are journaled in M10, on the journal's extensible record format
+- **Later milestones.** Started fleet calls reattach since M7 (remote calls do
+  not: the remote turn left behind is stopped and the call dispatched again).
+  Gates (`ask`, `approve`) are journaled in M10, on the journal's extensible record format
   (readers ignore unknown record types).
 - **Upstream:** what a host must do with open input requests across a restart,
   and how a client learns they were withdrawn (§10; `ahp-host`
@@ -473,7 +477,7 @@ rules = [ { model = "glm", provider = "glm" },
           { phase = "Review", provider = "glm" } ]   # first match wins
 ```
 
-In M4a, `load` is called as a factory: with no arguments, with the `config` table as keyword arguments, or with `config=Path(...)` when `config` is a string. `[redact]` is accepted (`patterns`, `builtin`); `via` and `url` are M7 keys and are rejected as unknown until then.
+In M4a, `load` is called as a factory: with no arguments, with the `config` table as keyword arguments, or with `config=Path(...)` when `config` is a string. `[redact]` is accepted (`patterns`, `builtin`). Since M7 a provider has exactly one of `load` (in-process), `via = "fleet"` (with `node`, `agent`, and optionally `models`, `approval_mode`, `effort`, `reply_timeout`) or `url` (with `agent`, and optionally `token_file`, `models`, `idle_timeout`).
 
 Routing lives in config, so a script needs no changes to send a phase to GLM.
 A script can also pin one call with `opts.x.provider`.
@@ -589,6 +593,8 @@ Open for M4 (structured turns):
 
 **M6 result.** Built on `ahp-host`'s graceful restarts, which landed first and are the restart model: a turn the restart cut off is failed with `errorType` `host.restart` (resumable for a resumable provider) and resumed through the standard `chat/turnResume` path, once and automatically after a drain-restart, by the user after a crash. (A first version added a provider capability that kept the turn open at restore and continued it; it was dropped for that one path.) `ahp-host`: `StoredSession` persists the open input requests as `inputRequests` beside `interruptedByRestart` (JSON only, old files still load, format version 1); on restore each is withdrawn, its `inputNeeded` entry removed and a system notification naming it added to the interrupted turn, never silently; a resumed turn asks again under new ids. Shutdown persists every session first, then stops persisting, so the store keeps the active turns and their requests. Notices carry `_meta['ahp-py/restart']`. Decision in ADR 0006; the upstream request is `docs/requests.md` entry 11. `ahp-host-flow`: `FlowProvider` is a `ResumableAgentProvider` (resume state `{flow: 1, runs: [{chat, turnId, runId, workflow, model, resumes, phasesStarted, phasesFinished}]}`) and `FlowSession` implements `ResumesTurns`: `resume_turn` on a run's main chat relaunches the run from its journal with `RunOptions.continue_run` (finished calls replay by key, cut-off calls are logged and dispatched again; the cut-off steps were cancelled when the host failed the turn), under tool-call ids with the prefix `agent-r<k>`; no second `runStarted`, a plain "resumed" line instead, and phases already announced are not announced again. A worker chat, another turn, or a run whose journal is gone is declined (the entry dropped with a log line). Tests run over a `FileSessionStore` in a tmp dir, simulating a drain-restart (`Host.drain` past its deadline) and a crash with a new host on the same store, for a `.js` and a `.py` run, twice in a row too: finished calls are not re-dispatched, the in-flight call is, and the result equals an uninterrupted run's. Open: fleet reattach (M7); gates (M10); known limits: a crash loses the store debounce window, so a run started within it may not be resumable, and a second interruption before already-finished later calls are reached runs them again, since the new journal holds only calls it has reached.
 
+**M7 result.** Fleet dispatch, remote providers and reattach, across five packages. `ahp-gateway` joins sessions of `OrchestratorConfig.flow_agents` (default `flow`) as an active client offering `start_session`, `wait_for_sessions`, `read_session` and `stop_session` (its plan §10): sessions start as the principal who created the flow session, under `child_config` (a requested `permissionMode` only stricter; a requested `effort` dropped when `child_config` sets one), at most `max_running` per flow session (a start over it waits up to `slot_wait`; the count is read from the nodes, so it holds across a gateway restart), and another principal can neither prompt the flow session nor subscribe to or dispatch on a session its run started. `ahp-host-flow`: `ProviderConfig.kind` (`via = "fleet"`, `url`), `RoutingDispatcher` over `ProviderDispatcher`, `FleetDispatcher` and `ClientDispatcher` (engine) with `RemoteWorkerChats`, sharing `StepDispatcher`; the `flow` agent type for `ahp-node` (`agent.create`, entry point `ahp_host.agents`). A fleet call is driven from the main turn with no model in between; its thin worker chat links the node session, shows the status, result and usage; the call passes the run's model when the provider's `models` names it (or has none); a refused approval mode fails it with a line naming the provider and the setting. Each fleet tool call is watched: the offering client leaving or no answer within `reply_timeout` (default 900 s) loses it, and it is retried once on the rejoined gateway (`start_session` never), else `agent()` is `null` with a log line. Start records carry the session (`DispatchHandle.session`), and a continued run hands it to the dispatcher (`reattach_handle()`): fleet calls reattach (`wait_for_sessions` on the recorded session, re-dispatched with a log line if it is gone); remote calls stop the turn left behind and run again; the engine's log line says only that the call was cut off in that session. Only an abort or a skip stops a node session: the host stopping leaves it running (`FleetDispatcher(aborted=)`), which is what makes reattach possible. Found and fixed underneath, each with its own test: `ahp-host` restored a session's `activeClients` from the store, so after a restart the agent was told a client of the previous process could run its tools and a resumed run's first fleet call went to a client that was gone and hung (now emptied at restore, as if each had disconnected); `ahp-client`'s `ClientToolHost` kept answering on the connection it was built with after a reconnect replaced it, so a rejoined gateway ran a tool and its answer was lost (now rebound on reconnect). Remote limits: text mirrored at completion only, no answering approvals or questions (bounded by `idle_timeout`, default 600 s), no reattach. Tests: a real in-memory gateway with worker nodes and a flow node (`tests/fleet_hosting.py`; `ahp-gateway` is a test-only dependency, AGENTS.md) covers fan-out, structured results, `max_running`, skip, abort, a flow-host drain-restart and crash (reattached), a mid-call gateway restart (retried) and a refused approval mode; fake-gateway tests cover reattach, liveness and the reply deadline; the gateway's own tests drive each tool through a real client tool call from the flow node. Open: the delegation `SessionOrigin` (§10, `ahp-host` `docs/requests.md` entry 12) to point a node session back to its run; disposing a flow session mid-run leaves its node sessions running (no turn is left to stop them from).
+
 ## 9. Risks
 
 - **Format drift:** Claude's workflow format is internal. Mitigation:
@@ -629,4 +635,5 @@ upstream:
    semantics and the rule that only the shared view is redacted (§4.9).
 5. **Delegated sessions:** a `SessionOrigin` kind,
    `{kind: "delegation", session, chat, toolCallId}`, so a session started on
-   another host's behalf can point back to the chat that started it (§2).
+   another host's behalf can point back to the chat that started it (§2;
+   `ahp-host` `docs/requests.md` entry 12).

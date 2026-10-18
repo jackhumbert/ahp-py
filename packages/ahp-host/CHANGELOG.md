@@ -97,6 +97,13 @@ asked the user.
 - A turn that `restore()` reopens for an automatic resume and then cannot start
   is failed again (`host.restart`, still resumable) instead of staying active;
   one session failing to carry on no longer stops `restore()` for the others.
+- **Fixed:** a restored session's `activeClients` is emptied. Every client it
+  listed was connected to the previous process, so none is live; kept, they were
+  handed to the agent as able to run its tools, and a turn resumed after the
+  restart sent its first client tool call to a client that was gone, where it
+  waited forever. The session now comes back as if each had disconnected: what
+  they published stays in `customizations` (still known as client-contributed),
+  and a client that returns joins again with `session/activeClientSet`.
 - Docs: README 'Sessions can survive a restart',
   [ADR 0006](docs/decisions/0006-restoring-interrupted-turns.md), and
   `docs/requests.md` entry 11 (upstream: restart semantics).

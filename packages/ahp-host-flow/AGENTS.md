@@ -18,8 +18,39 @@ is the design; milestones M0–M10 there say what exists and what's next.
   in-memory host for `flow run --config`) and `__main__` (the server). They may
   import `ahp_host`; `engine/` and `sandbox/` may not. `library` (`run`, `FlowRun`) and `verbs`
   are top-level modules too; `library` may not import `ahp_host`.
+- Dispatch is split by provider kind (`ProviderConfig.kind`: `inprocess`,
+  `fleet`, `remote`). `dispatch.StepDispatcher` is the shared base (the main
+  chat's `agent` tool call and its typed progress); `ProviderDispatcher`
+  (in-process worker chats) and `RemoteWorkerChats` (the thin worker chat of a
+  remote call) live in `dispatch`, `FleetDispatcher` and `FleetClients` in
+  `fleet` (fleet calls through a gateway's fleet tools, called from the main
+  turn's `run_client_tool`), and `RoutingDispatcher` picks one per call.
+  `engine/remote.py` holds `ClientDispatcher`, which dials another host with
+  `ahp_client` (so it is engine code: no `ahp_host`). `agent` is the `flow`
+  agent type for `ahp-node` (the `ahp_host.agents` entry point).
+- Only an abort (`cancel_chat`/`cancel`, the run's `AbortSignal`) or a skip
+  stops a fleet call's node session. A cancellation without an abort is the
+  host stopping, and the node session is left running for the resumed run to
+  reattach to (`FleetDispatcher(aborted=...)`). Keep it so: a stop sent at
+  shutdown makes reattach impossible.
+- Every fleet tool call goes through `FleetDispatcher._call`, which watches it
+  (the offering client leaving, `reply_timeout`) and retries once on the
+  rejoined gateway. `start_session` is never retried.
+- **`ahp-gateway` is a test-only dependency**, a deliberate exception to the
+  layering rule (a provider may not import the gateway, which sits beside the
+  host): `tests/fleet_hosting.py` boots a real in-memory gateway so the fleet
+  tests run end to end. It is in the `dev` dependency group only, never in
+  `dependencies`, and nothing under `src/` imports it (the import-linter
+  contract "the package never imports the gateway"). The import-linter
+  contracts cover `src` only (`root_package = ahp_host_flow`), never `tests`;
+  keep them so. The fleet tool names are duplicated in
+  `fleet.FLEET_TOOLS` for that reason.
 - Inner providers come only from `load` by import path. Tests use
-  `tests/flow_fakes.py` and `EchoProvider`, never a live model.
+  `tests/flow_fakes.py` and `EchoProvider`, never a live model. Fleet tests use
+  `tests/fleet_fakes.py` (a fake gateway offering the fleet tools) or
+  `tests/fleet_hosting.py` (a real in-memory gateway, worker nodes and a flow
+  node); remote tests dial a second in-memory host (`remote_dialer`). No
+  sockets.
 - `_meta["ahp-py/flow"]` is both the customization marker on a workflow's
   `prompt` child and the typed-progress descriptor on notifications and `agent`
   tool calls. The descriptor shapes are owned by `ahp_protocol.ext.flow`; build

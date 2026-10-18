@@ -540,3 +540,110 @@ class TestRestoredDefaultChat:
             assert [c["resource"] for c in summary["chats"]] == ["ahp-chat:/main", "ahp-chat:/side"]
         finally:
             await host.aclose()
+
+
+class _HeardClients(EchoProvider):
+    """Echo whose sessions note every `active_clients_changed` they are told."""
+
+    def __init__(self) -> None:
+        super().__init__(client_tools=True)
+        self.heard: list[list[str]] = []
+
+    async def create_session(self, context: Any) -> EchoSession:
+        session = await super().create_session(context)
+        heard = self.heard
+
+        async def active_clients_changed(clients: Any) -> None:
+            heard.append([str(c.get("clientId")) for c in clients])
+
+        session.active_clients_changed = active_clients_changed  # type: ignore[attr-defined]
+        return session
+
+
+class TestRestoredActiveClients:
+    async def test_no_active_client_survives_a_restart(self, tmp_path: Path) -> None:
+        """A restart closed every connection, so no stored client is live.
+
+        Left in state, the agent was told on its first turn that a client of
+        the previous process could run its tools, and a resumed turn's first
+        client tool call went to it and was never answered (ahp-host-flow's
+        fleet calls through a gateway hung on exactly this). A client that
+        comes back joins again like any other.
+        """
+        from ahp_host.core.store import StoredSession
+
+        tool = {"name": "lookup", "description": "d", "inputSchema": {"type": "object"}}
+        plugin = {"id": "plugin-gone", "uri": "file:///plugins/gone", "displayName": "Gone"}
+        store = FileSessionStore(tmp_path / "sessions")
+        await store.save(
+            StoredSession(
+                uri="echo:/joined",
+                provider="echo",
+                created_at="1970-01-01T00:00:00.000Z",
+                channels={
+                    "ahp-chat:/main": {
+                        "resource": "ahp-chat:/main",
+                        "title": "Main",
+                        "status": 1,
+                        "modifiedAt": "1970-01-01T00:00:00.000Z",
+                        "turns": [],
+                    },
+                    "echo:/joined": {
+                        "provider": "echo",
+                        "title": "T",
+                        "status": 1,
+                        "lifecycle": "ready",
+                        "activeClients": [
+                            {"clientId": "gone", "tools": [tool], "customizations": [plugin]}
+                        ],
+                        "customizations": [plugin],
+                        "chats": [{"resource": "ahp-chat:/main", "title": "Main"}],
+                        "defaultChat": "ahp-chat:/main",
+                    },
+                },
+            )
+        )
+        provider = _HeardClients()
+        host = Host(provider, LoopbackSingleUserPolicy(), store=store)
+        try:
+            assert await host.restore() == 1
+            state = host.sequencer.state_of("echo:/joined")
+            assert state["activeClients"] == []
+            # Kept, as a disconnect keeps it, and still known as a client's.
+            assert [c["id"] for c in state["customizations"]] == ["plugin-gone"]
+            assert "plugin-gone" in host._sessions["echo:/joined"].contributed_customizations
+
+            client = await _client(host)
+            await client.request("subscribe", {"channel": "echo:/joined"})
+            await client.request("subscribe", {"channel": "ahp-chat:/main"})
+            await client.notify(
+                "dispatchAction",
+                {
+                    "channel": "ahp-chat:/main",
+                    "clientSeq": 1,
+                    "action": {
+                        "type": "chat/turnStarted",
+                        "turnId": "t1",
+                        "startedAt": "1970-01-01T00:00:01.000Z",
+                        "message": {"text": "hello", "origin": {"kind": "user"}},
+                    },
+                },
+            )
+            await client.collect_until(lambda: bool(provider.heard), timeout=10.0)
+            assert provider.heard[0] == []
+
+            await client.notify(
+                "dispatchAction",
+                {
+                    "channel": "echo:/joined",
+                    "clientSeq": 2,
+                    "action": {
+                        "type": "session/activeClientSet",
+                        "activeClient": {"clientId": "c1", "tools": [tool]},
+                    },
+                },
+            )
+            await client.collect_until(lambda: ["c1"] in provider.heard, timeout=10.0)
+            assert ["gone"] not in provider.heard
+        finally:
+            await host.aclose()
