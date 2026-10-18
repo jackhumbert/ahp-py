@@ -44,7 +44,8 @@ def test_workflow_command_needs_a_name() -> None:
 
 
 def test_bad_names() -> None:
-    assert parse_message("/client:greet") == BadRequest("Not a workflow name: 'client:greet'")
+    # 'client' is a source since step 4 (see test_client_qualified_name); use an unknown prefix.
+    assert parse_message("/nosuch:greet") == BadRequest("Not a workflow name: 'nosuch:greet'")
     assert parse_message("/a.b") == BadRequest("Not a workflow name: 'a.b'")
 
 
@@ -82,3 +83,9 @@ def test_help_text() -> None:
 def test_unknown_text() -> None:
     assert unknown_text("x", ["a"]).startswith("Unknown workflow: /x.")
     assert unknown_text("x", ["a"]).endswith("Workflows: /a")
+
+
+def test_client_qualified_name() -> None:
+    assert parse_message('/client:nightly {"a": 1}') == StartRun(
+        "nightly", "client", None, {"a": 1}
+    )

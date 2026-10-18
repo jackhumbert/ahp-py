@@ -14,7 +14,7 @@ Script: `conformance/meta.js`; Python twin: `conformance/meta.py`.
 `export const meta = {...}` must be a pure literal: `name`, `description`,
 optional `whenToUse`, and `phases`, a list of `{title, detail?, model?}`. It is
 read with a parser, without running the script. Unknown keys, at the top level
-and inside `phases[]`, are accepted and ignored.
+and inside `phases[]`, are accepted and ignored. `meta.x.schedule` is reserved for M10 (a default cron for the workflow) and has no effect yet.
 
 ## agent
 

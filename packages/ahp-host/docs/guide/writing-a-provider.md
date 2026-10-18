@@ -266,6 +266,15 @@ you:
   several); one you do not take runs as the next turn, ahead of the queue. The
   host refuses a client's edit or removal of a message once it has gone to
   you, so you never have to un-hear one.
+- **Worker chats take steering only.** A chat you open with `open_tool_chat`
+  runs turns through `ProviderChat.run_turn`, never `send_user_message`, so the
+  host refuses a client's `chat/turnStarted` or `queued` message there, refuses
+  steering on a `read-only` or `hidden` chat or when no turn is running in it,
+  and refuses it when your session does not implement `SteersTurns`. A steering
+  message you never took is withdrawn once the chat is idle, not run. Implement
+  `GatesSteering.steering_rejection(chat_uri)` to refuse steering yourself, on
+  any chat: the string you return becomes the `rejectionReason` the client
+  sees, `None` leaves the decision to the host.
 - **`!command`**, when a terminal backend is installed. A message starting with
   `!` never reaches you: the host runs the rest in a one-shot terminal and
   reports it as a tool call. Without a backend the prefix is not advertised and
@@ -366,6 +375,29 @@ Point a tool result's `{"type": "terminal", "resource": terminal.resource,
 too, until its chat or session is disposed — 1.0.0 requires that of a terminal
 a tool result references. It is not in the root terminal catalogue, which is
 for interactive shells a client re-attaches to.
+
+### Reading plugins published into the session
+
+A client can publish a plugin (`SessionState.activeClients[].customizations`),
+and an automation run starts with its captured copy of one. Neither is on a
+filesystem you can open: the first lives in the client's memory, the second in
+the host. The publisher implements the optional `ReadsClientPlugins` protocol
+for this, so check `isinstance(publisher, ReadsClientPlugins)` before using it.
+
+`session_plugins()` lists what is published into this session: one dict per
+plugin with `id`, `uri` and `name`, plus `nonce` and `clientId` for a client's
+plugin. A copy has no `clientId`, because it no longer depends on a client.
+`await list_plugin_resource(uri)` and `await read_plugin_resource(uri)` then
+list a directory or read a file inside one. A client's plugin is read from that
+client, so it fails with `AhpError` -32008 when the client is not connected; a
+copy is served from the host whether or not anyone is connected. A URI that is
+not inside a plugin published to *this* session is refused with the same code:
+a provider cannot read another session's client or another automation's copy.
+
+Do not call these from inside `FollowsActiveClients.active_clients_changed`.
+That runs in the publishing client's notification handler, and a read back to
+the same client would wait on a reply that handler is blocking. Schedule a task
+and read from there.
 
 ## Chats that move
 

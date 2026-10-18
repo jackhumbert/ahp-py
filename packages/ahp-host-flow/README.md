@@ -68,21 +68,34 @@ Anything else gets a short help reply listing the workflows found.
 
 ## Where workflows come from
 
-Three sources are searched, and the first match wins:
+Four sources are searched, and the first match wins:
 
-1. **workspace**: `.claude/workflows/*.js` (and `*.py`, see below) in each of the session's working
+1. **client**: `workflows/*.js` inside an Open Plugins plugin a connected client
+   publishes (`activeClients[].customizations`), read from the client with
+   `resourceList` / `resourceRead`. Opt-in: add `"client"` to `[workflows] sources`.
+2. **workspace**: `.claude/workflows/*.js` (and `*.py`, see below) in each of the session's working
    directories.
-2. **user**: `~/.claude/workflows/*.js` and `*.py`.
-3. **host**: the directories in `[workflows] dirs` of `flow.toml` (`*.js` and `*.py`).
+3. **user**: `~/.claude/workflows/*.js` and `*.py`.
+4. **host**: the directories in `[workflows] dirs` of `flow.toml` (`*.js` and `*.py`).
 
 A `.py` workflow is arbitrary code on the host, so by default it loads only from
-the host and user sources; see Python workflows.
+the host and user sources; see Python workflows. A `.py` file in a client's
+plugin is never read, and `python_sources` can never include `client`.
 
-`[workflows] sources` selects which of the three are used and their order. Each
-source is published to clients as a customization container, with one `prompt`
-child per workflow, so clients list them as slash commands. A shadowed name is
-still listed, marked in its `_meta["ahp-py/flow"]`. The directories are re-read
-at the start of each run.
+`[workflows] sources` selects which are used and their order; the default is
+`["workspace", "user", "host"]`, so a shared host runs a client-published
+workflow only when the operator opts in. Each source is published to clients as
+a customization container, with one `prompt` child per workflow, so clients list
+them as slash commands. A shadowed name is still listed, marked in its
+`_meta["ahp-py/flow"]`. The directories are re-read at the start of each run.
+
+Precedence is client, workspace, user, host. A client workflow runs as `/name`
+or, to pick it explicitly, `/client:name`. It is listed in a container of the
+provider's own, "Workflows (<plugin>)" with id `ahp-host-flow.client.<plugin id>`,
+beside the client's plugin (the host owns and re-expands it). It is re-published
+when the client republishes its plugin. The run snapshots the script text the
+client served, so resume never needs the client. `workflow('name')` inside a
+script does not reach client workflows yet.
 
 ## Python workflows
 
@@ -317,6 +330,45 @@ Limits of a remote call, which a gateway's fleet dispatch does not have:
 - A run's skip or abort stops the remote turn, and so does the flow host
   stopping.
 
+## Operations
+
+```toml
+[workflows]
+sources = ["client", "workspace", "user", "host"]
+
+[providers.claude]
+load = "ahp_host_claude:ClaudeProvider"
+interactive = true
+```
+
+### Automations
+
+A saved automation whose message is `/<workflow> <json args>` runs the workflow
+unattended through ahp-host's automations, started manually or by cron. The run
+is an ordinary flow run, with a journal and typed progress. If the template names
+a client workflow, the host captures the client's plugin when the automation is
+saved, so the unattended run never reads the client. A workflow's own default
+cron (`meta.x.schedule`) is M10; for now the schedule is the automation's.
+
+### Worktree changesets
+
+An `agent()` call with `isolation: 'worktree'` that leaves changes publishes the
+worktree's diff as a reviewable changeset on its worker chat, with Apply (to the
+working tree) and Discard. `python -m ahp_host_flow` and `flow run` register the
+operations; an embedder calls `register_worktree_operations(host,
+provider.worktree_changesets)` on its own host. Under ahp-node no operations are
+registered, so the changeset is view-only. The worktree is kept until the
+changeset is resolved. After a host restart the in-memory link is lost: remove
+the worktree with `git worktree remove` / `git worktree prune`.
+
+### Steering
+
+`interactive = true` on a provider makes its worker chats `full` instead of
+read-only. A steering message on a running worker chat is forwarded to the inner
+session when it takes steering mid-turn (`SteersTurns`), and otherwise rejected
+with the reason. Worker chats of a provider that is not interactive stay
+read-only.
+
 ## flow.toml
 
 ```toml
@@ -340,7 +392,7 @@ rules = [ { model = "glm", provider = "glm" }, { phase = "Review", provider = "g
 
 [workflows]
 dirs = ["~/flows"]
-sources = ["workspace", "user", "host"]
+sources = ["workspace", "user", "host"]   # the default; add "client" to opt in
 
 [redact]
 patterns = ['sekrit-[0-9]+']
@@ -361,7 +413,10 @@ The loader calls the factory by what `config` holds:
 A provider has exactly one of `load` (in-process), `via = "fleet"` (with `node`
 and `agent`) or `url` (with `agent`, and optional `token_file`); see "Fleet and
 remote providers" for their keys. `models`, `approval_mode` and `effort` apply
-to in-process and fleet providers, `models` to remote ones too.
+to in-process and fleet providers, `models` to remote ones too. `interactive =
+true` (in-process providers, default `false`) makes the provider's worker chats
+take steering; see Operations. `[workflows] sources` defaults to `["workspace",
+"user", "host"]`; `"client"` is opt-in.
 
 The result must be an `AgentProvider`. `approval_mode` and `effort` are passed to
 each inner session as `permissionMode` and `effort`. Routing rules are tried in
@@ -406,6 +461,8 @@ Known gaps (not covered):
 - A secret split across a tool-call boundary mid-stream (the first half in one
   chunk, the rest after a tool call started) is not joined; the same
   after-publishing layer (section 4.9, M9) is the answer.
+- Changeset file contents (per-child worktree changesets) are published
+  verbatim: masking them would corrupt the diff.
 - The built-in list is best effort, not a guarantee. It does not match, for
   example, `key=value` values shorter than 8 characters, URL userinfo
   (`https://user:pass@host`) or `sk-` style API keys. Add `[redact] patterns`

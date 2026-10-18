@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any, Final
+from typing import Any, Final, Protocol
 from urllib.parse import urlparse
 from urllib.request import url2pathname
 
@@ -18,6 +18,10 @@ from ahp_host_flow.sandbox import Sandbox, SandboxError, pyrunner
 
 PLUGIN_ID: Final = "ahp-host-flow.host"
 USER_ID: Final = "ahp-host-flow.user"
+CLIENT_PREFIX: Final = "ahp-host-flow.client."
+# A client is untrusted: bound what it can make the host read (as ahp_host's plugin copies do).
+MAX_CLIENT_WORKFLOWS: Final = 200
+MAX_CLIENT_WORKFLOW_BYTES: Final = 1024 * 1024
 
 _logger = logging.getLogger(__name__)
 
@@ -89,6 +93,152 @@ class WorkflowEntry:
     shadowed_by: str | None
     # 'js' or 'python'.
     language: str = "js"
+    # A client workflow lives at `uri` and is held in `text`; `path` is only its file name.
+    uri: str | None = None
+    text: str | None = None
+
+    def location(self) -> str:
+        return self.uri if self.uri is not None else self.path.as_uri()
+
+    def filename(self) -> str:
+        return self.uri if self.uri is not None else str(self.path)
+
+    def source_text(self) -> str:
+        if self.text is not None:
+            return self.text
+        return self.path.read_text(encoding="utf-8")
+
+
+class PluginReader(Protocol):
+    """Reads a plugin published into the session (ahp_host's `ReadsClientPlugins` satisfies it)."""
+
+    async def list_plugin_resource(self, uri: str) -> Sequence[Mapping[str, Any]]: ...
+
+    async def read_plugin_resource(self, uri: str) -> bytes: ...
+
+
+@dataclass(frozen=True)
+class ClientPlugin:
+    plugin_id: str
+    uri: str
+    name: str
+    nonce: str | None = None
+    client_id: str | None = None
+
+    @property
+    def container_id(self) -> str:
+        return f"{CLIENT_PREFIX}{self.plugin_id}"
+
+    @property
+    def workflows_uri(self) -> str:
+        return f"{self.uri.rstrip('/')}/workflows"
+
+
+def client_plugins(published: Sequence[Mapping[str, Any]]) -> list[ClientPlugin]:
+    """The plugins a client published, from `ReadsClientPlugins.session_plugins()`."""
+    result: list[ClientPlugin] = []
+    seen: set[str] = set()
+    for item in published:
+        plugin_id, uri, name = item.get("id"), item.get("uri"), item.get("name")
+        if not (isinstance(plugin_id, str) and isinstance(uri, str) and isinstance(name, str)):
+            continue
+        if plugin_id in seen:
+            continue
+        seen.add(plugin_id)
+        nonce, client_id = item.get("nonce"), item.get("clientId")
+        result.append(
+            ClientPlugin(
+                plugin_id,
+                uri,
+                name,
+                nonce if isinstance(nonce, str) else None,
+                client_id if isinstance(client_id, str) else None,
+            )
+        )
+    return result
+
+
+async def read_client_workflows(
+    plugin: ClientPlugin, reader: PluginReader, *, node: str | None
+) -> list[WorkflowEntry]:
+    """The `.js` workflows in a client plugin's `workflows/`; a `.py` is never read (plan §4.10).
+
+    `ReadsClientPlugins.read_plugin_resource` returns the whole file, so
+    `MAX_CLIENT_WORKFLOW_BYTES` bounds what is kept, not what the client sends; the file count is
+    bounded before any read.
+    """
+    try:
+        listing = await reader.list_plugin_resource(plugin.workflows_uri)
+    except Exception:
+        _logger.debug("cannot list %s", plugin.workflows_uri, exc_info=True)
+        return []
+    names = sorted(
+        item["name"]
+        for item in listing
+        if isinstance(item, Mapping)
+        and isinstance(item.get("name"), str)
+        and item.get("type") != "directory"
+    )
+    texts: dict[str, str] = {}
+    for name in names:
+        if name.endswith(".py"):
+            _logger.info("%s: %s skipped: a client cannot supply a .py workflow", plugin.name, name)
+            continue
+        # A listed name is one file directly under `workflows/`: a separator or `..` would
+        # make the read URI point somewhere else in (or out of) the client's plugin.
+        if "/" in name or "\\" in name or name != Path(name).name or name in {".", ".."}:
+            _logger.warning("%s: %r skipped: not a plain file name", plugin.name, name)
+            continue
+        path = Path(name)
+        if path.suffix != ".js" or not WORKFLOW_NAME.fullmatch(path.stem):
+            continue
+        if len(texts) >= MAX_CLIENT_WORKFLOWS:
+            _logger.warning(
+                "%s: more than %d workflows, %s skipped", plugin.name, MAX_CLIENT_WORKFLOWS, name
+            )
+            continue
+        uri = f"{plugin.workflows_uri}/{name}"
+        try:
+            data = await reader.read_plugin_resource(uri)
+        except Exception:
+            _logger.debug("cannot read %s", uri, exc_info=True)
+            continue
+        if len(data) > MAX_CLIENT_WORKFLOW_BYTES:
+            _logger.warning(
+                "%s: %s skipped: over %d bytes", plugin.name, name, MAX_CLIENT_WORKFLOW_BYTES
+            )
+            continue
+        try:
+            texts[name] = data.decode("utf-8")
+        except UnicodeDecodeError:
+            continue
+
+    metas: dict[str, Mapping[str, Any] | None] = {}
+    if node is not None and texts:
+        try:
+            async with Sandbox(node) as sandbox:
+                for name, text in texts.items():
+                    uri = f"{plugin.workflows_uri}/{name}"
+                    try:
+                        metas[name] = await sandbox.meta(text, filename=uri)
+                    except SandboxError as exc:
+                        _logger.warning("cannot read meta of %s: %s", uri, exc)
+        except SandboxError as exc:
+            _logger.warning("cannot read client workflow meta: %s", exc)
+    return [
+        WorkflowEntry(
+            name=Path(name).stem,
+            path=Path(name),
+            source="client",
+            container_id=plugin.container_id,
+            meta=metas.get(name),
+            shadowed_by=None,
+            language="js",
+            uri=f"{plugin.workflows_uri}/{name}",
+            text=text,
+        )
+        for name, text in texts.items()
+    ]
 
 
 async def discover(
@@ -96,8 +246,9 @@ async def discover(
     *,
     node: str | None,
     python_sources: Sequence[str] = PYTHON_SOURCES_DEFAULT,
+    client: Sequence[WorkflowEntry] = (),
 ) -> list[WorkflowEntry]:
-    """Every workflow in `dirs`, in order; `meta` is parsed from the source, never run.
+    """Every workflow in `client`, then `dirs`, in order; `meta` is read from source, never run.
 
     `.py` files count only in directories whose source is in `python_sources`, and a `.js` file
     of the same name in the same directory wins (as in the Registry).
@@ -141,6 +292,9 @@ async def discover(
 
     entries: list[WorkflowEntry] = []
     first_source: dict[str, str] = {}
+    for entry in client:
+        entries.append(replace(entry, shadowed_by=first_source.get(entry.name)))
+        first_source.setdefault(entry.name, entry.source)
     for source_dir, path, _ in found:
         name = path.stem
         entries.append(
@@ -194,7 +348,7 @@ def _child(entry: WorkflowEntry) -> dict[str, Any]:
     return {
         "type": "prompt",
         "id": f"{entry.container_id}.{entry.name}",
-        "uri": entry.path.as_uri(),
+        "uri": entry.location(),
         "name": entry.name,
         "description": _description(entry.meta),
         "enabled": True,
@@ -203,10 +357,36 @@ def _child(entry: WorkflowEntry) -> dict[str, Any]:
 
 
 def customizations(
-    entries: Sequence[WorkflowEntry], dirs: Sequence[SourceDir], *, version: str
+    entries: Sequence[WorkflowEntry],
+    dirs: Sequence[SourceDir],
+    *,
+    version: str,
+    plugins: Sequence[ClientPlugin] = (),
 ) -> list[dict[str, Any]]:
-    """One container per existing source directory; host directories share one plugin."""
+    """One container per existing source directory; host directories share one plugin.
+
+    A client plugin with workflows gets the provider's own container beside it, never the
+    client's plugin id: the host owns that entry and re-expands it on every republish.
+    """
     result: list[dict[str, Any]] = []
+    for client_plugin in plugins:
+        client_children = [
+            _child(e) for e in entries if e.container_id == client_plugin.container_id
+        ]
+        if not client_children:
+            continue
+        result.append(
+            {
+                "type": "directory",
+                "id": client_plugin.container_id,
+                "uri": client_plugin.workflows_uri,
+                "name": f"Workflows ({client_plugin.name})",
+                "contents": "prompt",
+                "writable": False,
+                "enabled": True,
+                "children": client_children,
+            }
+        )
     plugin: dict[str, Any] | None = None
     plugin_names: set[str] = set()
     for source_dir in dirs:

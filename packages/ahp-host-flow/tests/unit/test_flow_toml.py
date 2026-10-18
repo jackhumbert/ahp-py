@@ -154,7 +154,10 @@ def test_masking_config_parsed(tmp_path: Path) -> None:
         ({"providers": {"a": {"load": "nocolon"}}}, "load"),
         ({"providers": {"bad name": {"load": "m:C"}}}, "bad name"),
         ({"providers": _providers(effort="huge")}, "effort"),
-        ({"providers": _providers(), "workflows": {"sources": ["client"]}}, "client"),
+        (
+            {"providers": _providers(), "workflows": {"sources": ["x"]}},
+            "'x' is not one of client, workspace, user, host",
+        ),
         (
             {"providers": _providers(), "workflows": {"sources": ["user", "user"]}},
             "duplicate",
@@ -194,7 +197,7 @@ def test_python_sources_parsed(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     ("value", "match"),
     [
-        (["client"], "is not one of"),
+        (["x"], "is not one of client, workspace, user, host"),
         (["user", "user"], "has duplicates"),
         ("user", "must be an array of strings"),
     ],
@@ -203,6 +206,39 @@ def test_python_sources_rejected(value: Any, match: str, tmp_path: Path) -> None
     data = {"providers": _providers(), "workflows": {"python_sources": value}}
     with pytest.raises(ConfigError, match=match):
         parse_config(data, base=tmp_path)
+
+
+def test_workflows_sources_default_excludes_client(tmp_path: Path) -> None:
+    assert WorkflowsConfig().sources == ("workspace", "user", "host")
+    cfg = parse_config({"providers": _providers()}, base=tmp_path)
+    assert cfg.workflows.sources == ("workspace", "user", "host")
+
+
+def test_workflows_sources_client_opt_in(tmp_path: Path) -> None:
+    data = {"providers": _providers(), "workflows": {"sources": ["client", "workspace"]}}
+    cfg = parse_config(data, base=tmp_path)
+    assert cfg.workflows.sources == ("client", "workspace")
+
+
+def test_python_sources_rejects_client(tmp_path: Path) -> None:
+    data = {"providers": _providers(), "workflows": {"python_sources": ["user", "client"]}}
+    with pytest.raises(ConfigError) as info:
+        parse_config(data, base=tmp_path)
+    assert str(info.value) == (
+        "workflows.python_sources: 'client' is never allowed: a client cannot supply a .py workflow"
+    )
+
+
+def test_provider_interactive(tmp_path: Path) -> None:
+    on = parse_config({"providers": _providers(interactive=True)}, base=tmp_path)
+    assert on.providers["a"].interactive is True
+    off = parse_config({"providers": _providers()}, base=tmp_path)
+    assert off.providers["a"].interactive is False
+    with pytest.raises(ConfigError, match=r"providers\.a\.interactive must be true or false"):
+        parse_config({"providers": _providers(interactive="yes")}, base=tmp_path)
+    fleet = {"f": {**_FLEET, "interactive": True}}
+    with pytest.raises(ConfigError, match=r"unknown key.*interactive"):
+        parse_config({"providers": fleet}, base=tmp_path)
 
 
 def test_missing_file(tmp_path: Path) -> None:

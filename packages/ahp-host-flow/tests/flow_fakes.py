@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, ClassVar
@@ -123,6 +124,58 @@ class GatedProvider:
         self.creating.set()
         await self.release.wait()
         session = RecordingSession(context)
+        self.sessions.append(session)
+        return session
+
+
+@dataclass
+class SteerableSession:
+    """Waits for a steering message, then answers with what it was steered to."""
+
+    context: AgentSessionContext
+    texts: list[str] = field(default_factory=list)
+    steered: asyncio.Event = field(default_factory=asyncio.Event)
+    cancelled: list[str | None] = field(default_factory=list)
+    closed: bool = False
+
+    async def send_user_message(self, message: UserMessage, sink: TurnSink) -> None:
+        await asyncio.wait_for(self.steered.wait(), 10)
+        await sink.text_delta("steered: " + "; ".join(self.texts))
+        await sink.usage(input_tokens=1, output_tokens=1)
+
+    async def steer(self, chat_uri: str, message: UserMessage) -> bool:
+        self.texts.append(message.text)
+        self.steered.set()
+        return True
+
+    async def cancel(self, reason: str | None = None) -> None:
+        self.cancelled.append(reason)
+
+    async def aclose(self) -> None:
+        self.closed = True
+
+
+class SteerableProvider:
+    """Sessions that take steering mid-turn."""
+
+    instances: ClassVar[list[SteerableProvider]] = []
+
+    def __init__(self, *, provider_id: str = "steer") -> None:
+        self.provider_id = provider_id
+        self.sessions: list[SteerableSession] = []
+        SteerableProvider.instances.append(self)
+
+    @property
+    def agent(self) -> AgentInfo:
+        return AgentInfo(
+            provider=self.provider_id,
+            display_name="Steerable",
+            description="Answers once steered.",
+            models=(),
+        )
+
+    async def create_session(self, context: AgentSessionContext) -> SteerableSession:
+        session = SteerableSession(context)
         self.sessions.append(session)
         return session
 
@@ -284,6 +337,25 @@ class FileWriterSession:
         assert cwd is not None
         if message.text.startswith("write "):
             (cwd / message.text.removeprefix("write ").strip()).write_text("x", encoding="utf-8")
+        if message.text.strip() == "commit-empty":
+            # HEAD moves but the tree does not: kept as changed, yet nothing to review.
+            subprocess.run(
+                [
+                    "git",
+                    "-c",
+                    "user.name=flow-test",
+                    "-c",
+                    "user.email=flow-test@example.com",
+                    "commit",
+                    "-q",
+                    "--allow-empty",
+                    "-m",
+                    "empty",
+                ],
+                cwd=cwd,
+                check=True,
+                capture_output=True,
+            )
         await sink.text_delta(str(cwd))
         await sink.usage(input_tokens=1, output_tokens=1)
 
@@ -455,6 +527,7 @@ def reset_fakes() -> None:
     RecordingProvider.instances.clear()
     HangingProvider.instances.clear()
     GatedProvider.instances.clear()
+    SteerableProvider.instances.clear()
     SecretProvider.instances.clear()
     StructuredSecretProvider.instances.clear()
     AskingProvider.instances.clear()

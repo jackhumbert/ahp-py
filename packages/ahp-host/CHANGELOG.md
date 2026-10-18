@@ -10,6 +10,31 @@ versions each release speaks.
 
 ## [Unreleased]
 
+### Added — gating steering
+
+- **`GatesSteering`** (`ahp_host.provider`): an optional protocol on an agent
+  session. `steering_rejection(chat_uri)` is asked when a client sets a steering
+  message on any chat; a string rejects it with that reason, `None` lets the
+  host decide.
+
+### Changed — worker chats
+
+- Worker chats (`open_tool_chat`) accept only steering messages, and only while
+  their turn runs: `chat/turnStarted`, `queued` messages, and steering on a
+  `read-only` / `hidden` chat or to an agent without `SteersTurns` are rejected
+  with a reason. A message the agent never took is withdrawn when the chat is
+  idle instead of being started as a turn.
+
+### Added — reading plugins published into a session
+
+- **`ReadsClientPlugins`** (`ahp_host.provider`): an optional protocol the host's
+  `SessionPublisher` implements. `session_plugins()` lists the plugins published
+  into the session -- each connected client's (`activeClients[].customizations`)
+  and each automation run's captured copy -- and `list_plugin_resource(uri)` /
+  `read_plugin_resource(uri)` read their files, from the client with
+  `resourceList` / `resourceRead` or from the host's copy (which needs no
+  client). A URI outside this session's plugins raises `AhpError` -32008.
+
 ### Added — graceful restarts for `ahp-node`
 
 - **Restarts drain.** SIGTERM / SIGINT and `ahp-node restart` no longer cut

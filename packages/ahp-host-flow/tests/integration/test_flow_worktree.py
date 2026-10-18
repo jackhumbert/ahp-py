@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import shutil
 import subprocess
 from collections.abc import Iterator
@@ -105,8 +106,13 @@ async def test_worktree_changed_is_kept_and_logged(tmp_path: Path, node_path: st
         assert not (fx.workspace / "out.txt").exists()
         prefix = "agent() #0: worktree kept at "
         (kept,) = [n for n in notifications(turn) if n.startswith(prefix)]
-        text = kept.removeprefix(prefix).removesuffix(" (it has changes)")
-        assert Path(text).resolve() == path.resolve()
+        match = re.fullmatch(
+            re.escape(prefix) + r"(?P<path>.+?) \(it has changes\)(?P<rest>.*)", kept
+        )
+        assert match is not None, kept
+        assert Path(match["path"]).resolve() == path.resolve()
+        # The changeset was published on the worker chat, and the line says so.
+        assert match["rest"] == "; its changeset is on the worker chat"
     finally:
         await fx.shut()
 

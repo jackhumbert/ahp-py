@@ -17,7 +17,11 @@ APPROVAL_KEY: Final = "permissionMode"
 EFFORT_KEY: Final = "effort"
 APPROVAL_MODES: Final = ("default", "acceptEdits", "auto", "plan")
 EFFORT_LEVELS: Final = ("low", "medium", "high", "xhigh", "max")
-SOURCES: Final = ("workspace", "user", "host")
+# Precedence order, highest first (plan §4.3).
+SOURCES: Final = ("client", "workspace", "user", "host")
+# Client-published workflows are opt-in: a shared host does not run what a connecting client sends
+# unless the operator lists `client` (plan §4.3 Policy).
+SOURCES_DEFAULT: Final = ("workspace", "user", "host")
 # A .py workflow is arbitrary code on the host: only these sources supply one (plan §4.10).
 PYTHON_SOURCES_DEFAULT: Final = ("user", "host")
 DEFAULT_STATE_DIR: Final = Path("~/.local/state/ahp-host-flow")
@@ -71,6 +75,8 @@ class ProviderConfig:
     # Remote: seconds the remote turn may go without an event (a question or an approval
     # nobody can answer from here) before the call fails. None: `remote.IDLE_TIMEOUT`.
     idle_timeout: float | None = None
+    # In-process: worker chats of this provider take steering (plan §4.5).
+    interactive: bool = False
 
     @property
     def kind(self) -> Literal["inprocess", "fleet", "remote"]:
@@ -82,7 +88,7 @@ class ProviderConfig:
 @dataclass(frozen=True)
 class WorkflowsConfig:
     dirs: tuple[Path, ...] = ()
-    sources: tuple[str, ...] = SOURCES
+    sources: tuple[str, ...] = SOURCES_DEFAULT
     python_sources: tuple[str, ...] = PYTHON_SOURCES_DEFAULT
 
 
@@ -155,7 +161,14 @@ def _parse_provider(name: str, raw: Any, base: Path) -> ProviderConfig:
         raise ConfigError(f"{where}: load, via and url are exclusive")
     if "load" in table:
         kind = "inprocess"
-        allowed: tuple[str, ...] = ("load", "config", "models", "approval_mode", "effort")
+        allowed: tuple[str, ...] = (
+            "load",
+            "config",
+            "models",
+            "approval_mode",
+            "effort",
+            "interactive",
+        )
     elif "via" in table:
         kind = "fleet"
         allowed = ("via", "node", "agent", "models", "approval_mode", "effort", "reply_timeout")
@@ -210,6 +223,9 @@ def _parse_provider(name: str, raw: Any, base: Path) -> ProviderConfig:
             raise ConfigError(
                 f"{where}.effort must be one of {', '.join(EFFORT_LEVELS)}, got {effort!r}"
             )
+    interactive = table.get("interactive", False)
+    if not isinstance(interactive, bool):
+        raise ConfigError(f"{where}.interactive must be true or false")
     return ProviderConfig(
         name,
         load,
@@ -224,6 +240,7 @@ def _parse_provider(name: str, raw: Any, base: Path) -> ProviderConfig:
         token_file,
         reply_timeout=_seconds(table, "reply_timeout", where),
         idle_timeout=_seconds(table, "idle_timeout", where),
+        interactive=interactive,
     )
 
 
@@ -263,7 +280,7 @@ def _parse_workflows(raw: Any, base: Path) -> WorkflowsConfig:
     table = _table(raw, "workflows")
     _check_keys(table, ("dirs", "sources", "python_sources"), "workflows")
     dirs = tuple(_path(d, base) for d in _str_list(table.get("dirs", []), "workflows.dirs"))
-    sources = tuple(_str_list(table.get("sources", list(SOURCES)), "workflows.sources"))
+    sources = tuple(_str_list(table.get("sources", list(SOURCES_DEFAULT)), "workflows.sources"))
     for source in sources:
         if source not in SOURCES:
             raise ConfigError(f"workflows.sources: {source!r} is not one of {', '.join(SOURCES)}")
@@ -275,6 +292,11 @@ def _parse_workflows(raw: Any, base: Path) -> WorkflowsConfig:
         )
     )
     for source in python_sources:
+        if source == "client":
+            raise ConfigError(
+                "workflows.python_sources: 'client' is never allowed: "
+                "a client cannot supply a .py workflow"
+            )
         if source not in SOURCES:
             raise ConfigError(
                 f"workflows.python_sources: {source!r} is not one of {', '.join(SOURCES)}"

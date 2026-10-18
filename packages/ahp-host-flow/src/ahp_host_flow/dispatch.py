@@ -52,6 +52,7 @@ from ahp_host_flow.engine import (
 from ahp_host_flow.routing import route
 from ahp_host_flow.worktree import (
     Worktree,
+    WorktreeChangesets,
     WorktreeError,
     create_worktree,
     release_worktree,
@@ -302,6 +303,8 @@ class ProviderDispatcher(StepDispatcher):
         redactor: Redactor | None = None,
         on_log: Callable[[str], None] | None = None,
         call_id_prefix: str = "agent",
+        changesets: WorktreeChangesets | None = None,
+        worker_providers: MutableMapping[str, str] | None = None,
     ) -> None:
         super().__init__(
             config=config,
@@ -313,6 +316,8 @@ class ProviderDispatcher(StepDispatcher):
             on_log=on_log,
             call_id_prefix=call_id_prefix,
         )
+        #: Publishes a kept worktree as a changeset on its worker chat; None leaves it unpublished.
+        self.changesets = changesets
         self.providers = providers
         self.session_uri = session_uri
         self.working_directories = tuple(working_directories)
@@ -320,6 +325,10 @@ class ProviderDispatcher(StepDispatcher):
         self.workers: MutableMapping[str, AgentSession] = workers if workers is not None else {}
         #: Overlays that arrived for a worker chat before its inner session existed.
         self.pending_overlays = pending_overlays
+        #: The provider name of each live worker chat (steering needs its profile).
+        self.worker_providers: MutableMapping[str, str] = (
+            worker_providers if worker_providers is not None else {}
+        )
 
     async def _run_call(self, call: AgentCall, name: str, title: str, call_id: str) -> AgentResult:
         try:
@@ -352,16 +361,20 @@ class ProviderDispatcher(StepDispatcher):
                 )
             except WorktreeError as exc:
                 raise FlowAgentError(str(exc)) from exc
+        #: The worker chat, once opened (empty when setup failed before it).
+        opened: list[str] = []
         try:
-            return await self._run_worker(call, name, title, call_id, provider, wt)
+            return await self._run_worker(call, name, title, call_id, provider, wt, opened)
         finally:
             # Every exit after the worktree exists (a failed or cancelled setup too) releases it.
             if wt is not None:
-                await self._release_through_cancel(wt, call)
+                await self._release_through_cancel(wt, call, opened[0] if opened else None, title)
 
-    async def _release_through_cancel(self, wt: Worktree, call: AgentCall) -> None:
+    async def _release_through_cancel(
+        self, wt: Worktree, call: AgentCall, chat: str | None, title: str
+    ) -> None:
         """Release *wt* to the end even if this task is cancelled again meanwhile."""
-        releasing = asyncio.ensure_future(self._release(wt, call))
+        releasing = asyncio.ensure_future(self._release(wt, call, chat, title))
         cancelled = False
         while not releasing.done():
             try:
@@ -373,10 +386,38 @@ class ProviderDispatcher(StepDispatcher):
         if cancelled:
             raise asyncio.CancelledError
 
-    async def _release(self, wt: Worktree, call: AgentCall) -> None:
+    async def _release(self, wt: Worktree, call: AgentCall, chat: str | None, title: str) -> None:
         try:
             if await release_worktree(wt):
-                self._note(f"agent() #{call.ordinal}: worktree kept at {wt.path} (it has changes)")
+                published: str | None = None
+                attempted = bool(chat and self.changesets)
+                failed = False
+                if chat and self.changesets:
+                    try:
+                        published = await self.changesets.publish(
+                            wt, self.publisher, chat=chat, title=title, ordinal=call.ordinal
+                        )
+                    except Exception as exc:
+                        failed = True
+                        self._note(
+                            f"agent() #{call.ordinal}: could not publish the worktree changeset: "
+                            f"{exc}"
+                        )
+                if published:
+                    suffix = "; its changeset is on the worker chat"
+                elif attempted and not failed:
+                    # Changed (a commit that leaves the tree as it was, a mode flip), yet
+                    # nothing to review, so no changeset can resolve it. Removing it could
+                    # lose a commit, so it stays and the line says how to drop it.
+                    suffix = (
+                        ", but no reviewable changes; "
+                        f"remove with `git worktree remove --force {wt.path}`"
+                    )
+                else:
+                    suffix = ""
+                self._note(
+                    f"agent() #{call.ordinal}: worktree kept at {wt.path} (it has changes){suffix}"
+                )
         except (WorktreeError, OSError) as exc:
             self._note(f"agent() #{call.ordinal}: could not remove worktree {wt.path}: {exc}")
 
@@ -388,10 +429,18 @@ class ProviderDispatcher(StepDispatcher):
         call_id: str,
         provider: AgentProvider,
         wt: Worktree | None,
+        opened: list[str],
     ) -> AgentResult:
         spec = self.config.providers[name]
         opts = call.opts
-        worker = await self.publisher.open_tool_chat(title, tool_call_id=call_id, chat=self.chat)
+        worker = await self.publisher.open_tool_chat(
+            title,
+            tool_call_id=call_id,
+            chat=self.chat,
+            interactivity="full" if spec.interactive else "read-only",
+        )
+        opened.append(worker.resource)
+        self.worker_providers[worker.resource] = name
         report_dispatch(DispatchHandle(provider=name, chat=worker.resource))
 
         raw_schema = opts.get("schema")
@@ -508,6 +557,7 @@ class ProviderDispatcher(StepDispatcher):
             raise
         finally:
             self.workers.pop(worker.resource, None)
+            self.worker_providers.pop(worker.resource, None)
             if self.pending_overlays is not None:
                 self.pending_overlays.pop(worker.resource, None)
             if state.skipped and not state.started:

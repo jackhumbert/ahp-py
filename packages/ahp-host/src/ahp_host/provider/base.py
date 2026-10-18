@@ -52,6 +52,7 @@ __all__ = [
     "FollowsChatWorkingDirectories",
     "FollowsWorkingDirectories",
     "ForkedFrom",
+    "GatesSteering",
     "HandlesCustomizations",
     "HostTool",
     "HostsChats",
@@ -64,6 +65,7 @@ __all__ = [
     "ModelSelection",
     "OpensSessions",
     "ProviderTerminal",
+    "ReadsClientPlugins",
     "ReconfiguresChats",
     "ResolvesInput",
     "ResumableAgentProvider",
@@ -1087,6 +1089,20 @@ class SteersTurns(Protocol):
 
 
 @runtime_checkable
+class GatesSteering(Protocol):
+    """An agent session that can refuse a client's steering message up front.
+
+    Asked synchronously when a client sets a steering message
+    (`chat/pendingMessageSet` kind `steering`), on any chat. A string rejects
+    the action with that `rejectionReason`, so the client reverts its optimistic
+    entry and shows why; ``None`` lets the host's own rules decide. For a
+    worker chat that is the only way to say "not this one, not now".
+    """
+
+    def steering_rejection(self, chat_uri: str) -> str | None: ...
+
+
+@runtime_checkable
 class ArchivesSessions(Protocol):
     """An agent session that follows a client archiving or unarchiving it.
 
@@ -1266,6 +1282,28 @@ class FollowsActiveClients(Protocol):
     """
 
     async def active_clients_changed(self, clients: Sequence[Mapping[str, Any]]) -> None: ...
+
+
+@runtime_checkable
+class ReadsClientPlugins(Protocol):
+    """A `SessionPublisher` that reads plugins published into its session.
+
+    Two kinds: a client's (`SessionState.activeClients[].customizations`), read
+    from that client with server->client `resourceList` / `resourceRead`, and
+    an automation run's captured copy (`plugin_copies`), read from the host.
+    Only plugins published into *this* session can be read; any other URI
+    raises `AhpError` -32008.
+
+    Never call these from inside `FollowsActiveClients.active_clients_changed`
+    itself: that runs in the publishing client's notification handler, and a
+    read back to the same client would deadlock. Schedule a task.
+    """
+
+    def session_plugins(self) -> Sequence[Mapping[str, Any]]: ...
+
+    async def list_plugin_resource(self, uri: str) -> Sequence[Mapping[str, Any]]: ...
+
+    async def read_plugin_resource(self, uri: str) -> bytes: ...
 
 
 @runtime_checkable

@@ -30,6 +30,10 @@ class Wire:
         self._next_id = 0
         self._client_seq = 0
         self.initialized: dict[str, Any] = {}
+        #: What this client serves to the host's `resourceList` / `resourceRead`: uri -> text.
+        self.resources: dict[str, str] = {}
+        #: '<method> <uri>' of every resource request the host made.
+        self.served: list[str] = []
         self._reader = asyncio.create_task(self._read())
 
     async def _read(self) -> None:
@@ -37,12 +41,35 @@ class Wire:
             request_id = message.get("id")
             if "method" in message and request_id is not None:
                 await self._transport.send(
-                    {"jsonrpc": "2.0", "id": request_id, "error": {"code": -32008, "message": "no"}}
+                    {"jsonrpc": "2.0", "id": request_id, **self._answer(message)}
                 )
             elif isinstance(request_id, int) and request_id in self._waiting:
                 self._waiting.pop(request_id).set_result(dict(message))
             else:
                 self.frames.append(dict(message))
+
+    def _answer(self, message: Mapping[str, Any]) -> dict[str, Any]:
+        """The result or error for a server->client request."""
+        method, params = message["method"], message.get("params") or {}
+        uri = params.get("uri")
+        if method in ("resourceList", "resourceRead") and isinstance(uri, str):
+            self.served.append(f"{method} {uri}")
+            if method == "resourceRead" and uri in self.resources:
+                return {"result": {"data": self.resources[uri], "encoding": "utf-8"}}
+            prefix = uri.rstrip("/") + "/"
+            if method == "resourceList":
+                entries: dict[str, str] = {}
+                for key in self.resources:
+                    if key.startswith(prefix):
+                        head, sep, _ = key[len(prefix) :].partition("/")
+                        entries[head] = "directory" if sep else entries.get(head, "file")
+                if entries:
+                    return {
+                        "result": {
+                            "entries": [{"name": n, "type": t} for n, t in sorted(entries.items())]
+                        }
+                    }
+        return {"error": {"code": -32008, "message": "no"}}
 
     async def request(self, method: str, params: Mapping[str, Any]) -> dict[str, Any]:
         self._next_id += 1

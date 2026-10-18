@@ -103,6 +103,23 @@ is the design; milestones M0–M10 there say what exists and what's next.
 - Journal readers ignore unknown record types, so M10 gate records stay
   readable. Keep it so.
 - A continued run's tool-call ids use the prefix `agent-r<k>`.
+- A `.py` workflow from a client is never read or loaded (plan §4.10 trust);
+  `python_sources` refuses `client`.
+- Never read from a client inside `active_clients_changed` or `describe`: the
+  client's reply arrives on the connection that is delivering the notification,
+  so it deadlocks. `active_clients_changed` only schedules a (coalescing)
+  refresh task; `describe` reads the cache.
+- Client workflows are listed in the provider's own container
+  (`ahp-host-flow.client.<plugin id>`), never under the client's plugin id,
+  which the client owns.
+- Worker chat interactivity follows `ProviderConfig.interactive`: `full` when
+  set, else read-only. Steering is forwarded only if the inner session
+  `SteersTurns`, otherwise rejected with a reason.
+- The changeset operation ids are `APPLY_OPERATION` and `DISCARD_OPERATION`
+  (`worktree.py`); keep them stable, clients and `register_worktree_operations`
+  share them.
+- The corpus scripts (`conformance/corpus`) run unmodified on
+  `tests/corpus_fakes.py` and have no `.py` twins.
 - Conventional commits, scope `ahp-host-flow`; `CHANGELOG.md` under
   `[Unreleased]`.
 

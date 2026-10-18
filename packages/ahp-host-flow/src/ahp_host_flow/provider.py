@@ -22,7 +22,9 @@ from ahp_host.provider.base import (
     ConfigValue,
     IdentifiesTurn,
     ModelInfo,
+    ReadsClientPlugins,
     SessionDescription,
+    SteersTurns,
     UserMessage,
 )
 from ahp_protocol.ext import flow
@@ -75,6 +77,7 @@ from ahp_host_flow.sandbox import (
     language_of,
     run_script,
 )
+from ahp_host_flow.worktree import WorktreeChangesets
 
 _log = logging.getLogger(__name__)
 
@@ -88,6 +91,14 @@ NOTHING_TO_RESUME: Final = (
     "nothing to resume on this chat: a flow run is resumed on its main chat, "
     "and a call cut off in a worker chat is dispatched again by its run"
 )
+
+#: Why a steering message to a worker chat is refused (plan §4.5).
+STEER_READ_ONLY: Final = (
+    "worker chats of provider {name!r} are read-only; "
+    "set interactive = true under [providers.{name}] in flow.toml to steer them"
+)
+STEER_NOT_RUNNING: Final = "this worker chat's agent() call is not running"
+STEER_UNSUPPORTED: Final = "provider {name!r} cannot take steering mid-turn"
 
 APPROVAL_PROPERTY: Final[Mapping[str, Any]] = {
     "type": "string",
@@ -269,6 +280,8 @@ class FlowProvider:
         #: fleet tool call whose gateway left waits for it to come back to try once more.
         self.fleet_client_wait = fleet_client_wait
         self.redactor = make_redactor(config.redact)
+        #: Kept worktrees published as changesets; a host registers its operations.
+        self.worktree_changesets = WorktreeChangesets()
         self.providers: Mapping[str, AgentProvider] = (
             providers if providers is not None else LazyProviders(config)
         )
@@ -318,6 +331,8 @@ class FlowSession:
         self._values: dict[str, Any] = _own(context.config)
         self._chat_overlays: dict[str, dict[str, Any]] = {}
         self._workers: dict[str, AgentSession] = {}
+        #: The provider name of each live worker chat (shared with the dispatcher).
+        self._worker_providers: dict[str, str] = {}
         self._aborts: dict[str, AbortSignal] = {}
         #: Live runs by main chat.
         self._runs: dict[str, RunEntry] = {}
@@ -326,6 +341,13 @@ class FlowSession:
         self._restored: dict[str, RunEntry] = _parse_runs(context.resume_state)
         #: The customizations last published (or described), to see when a source changes.
         self._published: list[dict[str, Any]] | None = None
+        #: Client plugins' workflows already read, by (plugin id, uri, nonce): a plugin
+        #: republished with a new nonce is read again.
+        self._client_cache: dict[tuple[str, str, str | None], list[catalog.WorkflowEntry]] = {}
+        #: The client plugins the last read saw (`describe` lists from these, never reads).
+        self._client_plugins_seen: list[catalog.ClientPlugin] = []
+        self._refresh: asyncio.Task[None] | None = None
+        self._refresh_again = False
         #: The active clients that offer the fleet tools (a gateway joined to this session).
         self._fleet = FleetClients(
             [{"clientId": context.active_client_id, "tools": list(context.client_tools)}]
@@ -335,6 +357,81 @@ class FlowSession:
 
     async def active_clients_changed(self, clients: Sequence[Mapping[str, Any]]) -> None:
         self._fleet.update(clients)
+        if "client" in self.provider.config.workflows.sources:
+            # Never read inline: this runs in the publishing client's notification handler,
+            # and a read back to that client would deadlock.
+            if self._refresh is not None and not self._refresh.done():
+                self._refresh_again = True
+            else:
+                self._refresh = asyncio.create_task(self._refresh_loop())
+
+    async def _refresh_loop(self) -> None:
+        self._refresh_again = True
+        while self._refresh_again:
+            self._refresh_again = False
+            await self._republish()
+
+    async def _republish(self) -> None:
+        """Re-read the clients' plugins and publish the customizations if they changed."""
+        try:
+            _, current = await self._catalog(self._node(), read_clients=True)
+            publisher = self.context.publisher
+            if current != self._published and publisher is not None:
+                await publisher.customizations_changed(current)
+                self._published = current
+        except Exception:
+            _log.exception("cannot re-publish the workflow customizations")
+
+    async def _client_workflows(
+        self, node: str | None
+    ) -> tuple[list[catalog.ClientPlugin], list[catalog.WorkflowEntry]]:
+        """The client plugins published into this session and their workflows (read or cached)."""
+        publisher = self.context.publisher
+        if "client" not in self.provider.config.workflows.sources or not isinstance(
+            publisher, ReadsClientPlugins
+        ):
+            return [], []
+        plugins = catalog.client_plugins(publisher.session_plugins())
+        keys = {(p.plugin_id, p.uri, p.nonce) for p in plugins}
+        for key in [k for k in self._client_cache if k not in keys]:
+            del self._client_cache[key]
+        entries: list[catalog.WorkflowEntry] = []
+        for plugin in plugins:
+            key = (plugin.plugin_id, plugin.uri, plugin.nonce)
+            # A live plugin without a nonce cannot tell when it changed; a captured copy
+            # (no clientId) never changes.
+            cached = key in self._client_cache and (
+                plugin.nonce is not None or plugin.client_id is None
+            )
+            if not cached:
+                self._client_cache[key] = await catalog.read_client_workflows(
+                    plugin, publisher, node=node
+                )
+            entries.extend(self._client_cache[key])
+        self._client_plugins_seen = plugins
+        return plugins, entries
+
+    async def _catalog(
+        self, node: str | None, *, read_clients: bool
+    ) -> tuple[list[catalog.WorkflowEntry], list[dict[str, Any]]]:
+        """Every workflow entry and the customizations that list them."""
+        dirs = self._dirs()
+        if read_clients:
+            plugins, client_entries = await self._client_workflows(node)
+        else:
+            plugins = self._client_plugins_seen
+            client_entries = [
+                e
+                for p in plugins
+                for e in self._client_cache.get((p.plugin_id, p.uri, p.nonce), [])
+            ]
+        entries = await catalog.discover(
+            dirs,
+            node=node,
+            python_sources=self.provider.config.workflows.python_sources,
+            client=client_entries,
+        )
+        return entries, catalog.customizations(entries, dirs, version=__version__, plugins=plugins)
 
     def _dirs(self) -> list[catalog.SourceDir]:
         config = self.provider.config
@@ -419,11 +516,8 @@ class FlowSession:
             self._runs.pop(chat_uri, None)
 
     async def describe(self) -> SessionDescription:
-        dirs = self._dirs()
-        entries = await catalog.discover(
-            dirs, node=self._node(), python_sources=self.provider.config.workflows.python_sources
-        )
-        self._published = catalog.customizations(entries, dirs, version=__version__)
+        # Describe runs during session bring-up: never read back from a client here.
+        _, self._published = await self._catalog(self._node(), read_clients=False)
         return SessionDescription(customizations=self._published)
 
     async def send_user_message(self, message: UserMessage, sink: TurnSink) -> None:
@@ -438,11 +532,7 @@ class FlowSession:
             return
         dirs = self._dirs()
         node = self._node()
-        config = self.provider.config
-        entries = await catalog.discover(
-            dirs, node=node, python_sources=config.workflows.python_sources
-        )
-        current = catalog.customizations(entries, dirs, version=__version__)
+        entries, current = await self._catalog(node, read_clients=True)
         if current != self._published and context.publisher is not None:
             await context.publisher.customizations_changed(current)
             self._published = current
@@ -457,7 +547,7 @@ class FlowSession:
             if entry is None:
                 await sink.text_delta(unknown_text(ref, catalog.visible_names(entries)))
                 return
-            source, filename = entry.path.read_text(encoding="utf-8"), str(entry.path)
+            source, filename = entry.source_text(), entry.filename()
         if node is None and language_of(filename) == "js":
             await sink.turn_failed(str(NodeNotFoundError()), "flow.node")
             return
@@ -625,6 +715,8 @@ class FlowSession:
                 redactor=redactor,
                 on_log=on_log,
                 call_id_prefix=call_id_prefix,
+                changesets=self.provider.worktree_changesets,
+                worker_providers=self._worker_providers,
             ),
             fleet=FleetDispatcher(
                 config=config,
@@ -747,6 +839,34 @@ class FlowSession:
         else:
             await forward_overlay(inner, chat, mapped)
 
+    def steering_rejection(self, chat_uri: str) -> str | None:
+        """Why steering *chat_uri* is refused; None for the main chat and a steerable worker."""
+        name = self._worker_providers.get(chat_uri)
+        if name is None:
+            return None
+        spec = self.provider.config.providers.get(name)
+        if spec is None or not spec.interactive:
+            return STEER_READ_ONLY.format(name=name)
+        inner = self._workers.get(chat_uri)
+        if inner is None:
+            return STEER_NOT_RUNNING
+        if not isinstance(inner, SteersTurns):
+            return STEER_UNSUPPORTED.format(name=name)
+        return None
+
+    async def steer(self, chat_uri: str, message: UserMessage) -> bool:
+        """Forward a steering message for a worker chat to its inner session."""
+        if chat_uri not in self._worker_providers or self.steering_rejection(chat_uri) is not None:
+            return False
+        inner = self._workers.get(chat_uri)
+        if not isinstance(inner, SteersTurns):
+            return False
+        try:
+            return await inner.steer(chat_uri, message)
+        except Exception:
+            _log.warning("steering worker chat %s failed", chat_uri, exc_info=True)
+            return False
+
     async def cancel_chat(self, chat_uri: str, reason: str | None = None) -> None:
         abort = self._aborts.get(chat_uri)
         if abort is not None:
@@ -757,6 +877,8 @@ class FlowSession:
             abort.abort()
 
     async def aclose(self) -> None:
+        if self._refresh is not None and not self._refresh.done():
+            self._refresh.cancel()
         for inner in list(self._workers.values()):
             with contextlib.suppress(Exception):
                 await inner.aclose()

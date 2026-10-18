@@ -7,15 +7,21 @@ from pathlib import Path
 import pytest
 
 from ahp_host_flow.catalog import (
+    CLIENT_PREFIX,
     FLOW_META_KEY,
+    MAX_CLIENT_WORKFLOW_BYTES,
+    MAX_CLIENT_WORKFLOWS,
     PLUGIN_ID,
     USER_ID,
+    ClientPlugin,
     SourceDir,
     WorkflowEntry,
+    client_plugins,
     customizations,
     directory_of,
     discover,
     python_dirs,
+    read_client_workflows,
     resolve,
     source_dirs,
     visible_names,
@@ -261,3 +267,159 @@ async def test_customizations_python_marker(tmp_path: Path) -> None:
         "language": "python",
     }
     assert child["description"] == "when"
+
+
+class _FakeReader:
+    """An in-memory plugin: uri -> bytes; the listing is the keys directly under a uri."""
+
+    def __init__(self, files: dict[str, bytes], *, fail: bool = False) -> None:
+        self.files = files
+        self.fail = fail
+        self.reads: list[str] = []
+
+    async def list_plugin_resource(self, uri: str) -> list[dict[str, str]]:
+        if self.fail:
+            raise RuntimeError("client gone")
+        prefix = uri.rstrip("/") + "/"
+        return [
+            {"name": key[len(prefix) :], "type": "file"}
+            for key in sorted(self.files)
+            if key.startswith(prefix) and "/" not in key[len(prefix) :]
+        ]
+
+    async def read_plugin_resource(self, uri: str) -> bytes:
+        self.reads.append(uri)
+        return self.files[uri]
+
+
+_PLUGIN = ClientPlugin("house", "plugin://client/house/", "House")
+_WF = "plugin://client/house/workflows"
+
+
+def _client_files() -> dict[str, bytes]:
+    return {
+        f"{_WF}/nightly.js": b"return 1\n",
+        f"{_WF}/other.js": b"return 2\n",
+        "plugin://client/house/skills/x.md": b"x",
+    }
+
+
+def test_client_plugins_parse_published_entries() -> None:
+    plugins = client_plugins(
+        [
+            {"id": "a", "uri": "plugin://c/a", "name": "A", "nonce": "n", "clientId": "c1"},
+            {"id": "a", "uri": "plugin://c/dup", "name": "Dup"},
+            {"id": "b", "uri": 3, "name": "B"},
+            {"uri": "plugin://c/x", "name": "X"},
+        ]
+    )
+    assert plugins == [ClientPlugin("a", "plugin://c/a", "A", "n", "c1")]
+    assert plugins[0].container_id == f"{CLIENT_PREFIX}a"
+    assert plugins[0].workflows_uri == "plugin://c/a/workflows"
+
+
+@pytest.mark.node
+async def test_client_workflows_read_and_listed_first(node_path: str) -> None:
+    reader = _FakeReader(_client_files())
+    reader.files[f"{_WF}/nightly.js"] = b"export const meta = { whenToUse: 'nightly' }\n"
+    entries = await read_client_workflows(_PLUGIN, reader, node=node_path)
+    assert [(e.name, e.source, e.container_id) for e in entries] == [
+        ("nightly", "client", f"{CLIENT_PREFIX}house"),
+        ("other", "client", f"{CLIENT_PREFIX}house"),
+    ]
+    assert entries[0].meta is not None
+    assert entries[0].location() == f"{_WF}/nightly.js"
+    assert entries[0].source_text().startswith("export const meta")
+    assert reader.reads == [f"{_WF}/nightly.js", f"{_WF}/other.js"]
+
+
+async def test_client_workflows_without_node_have_no_meta() -> None:
+    entries = await read_client_workflows(_PLUGIN, _FakeReader(_client_files()), node=None)
+    assert [e.name for e in entries] == ["nightly", "other"]
+    assert all(e.meta is None for e in entries)
+
+
+async def test_client_py_never_read() -> None:
+    files = _client_files()
+    files[f"{_WF}/evil.py"] = b"meta = {}\n"
+    reader = _FakeReader(files)
+    entries = await read_client_workflows(_PLUGIN, reader, node=None)
+    assert [e.name for e in entries] == ["nightly", "other"]
+    assert f"{_WF}/evil.py" not in reader.reads
+
+
+async def test_client_shadows_workspace(tmp_path: Path) -> None:
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    (ws / "nightly.js").write_text("return 3\n", encoding="utf-8")
+    dirs = [SourceDir("workspace", ws, "ahp-host-flow.workspace.0", "Workflows (ws)")]
+    client = await read_client_workflows(_PLUGIN, _FakeReader(_client_files()), node=None)
+    entries = await discover(dirs, node=None, client=client)
+    assert [(e.source, e.name, e.shadowed_by) for e in entries] == [
+        ("client", "nightly", None),
+        ("client", "other", None),
+        ("workspace", "nightly", "client"),
+    ]
+    assert _source(resolve(entries, "nightly")) == "client"
+    workspace = resolve(entries, "workspace:nightly")
+    assert workspace is not None
+    assert workspace.path == ws / "nightly.js"
+    assert workspace.location() == (ws / "nightly.js").as_uri()
+    assert workspace.filename() == str(ws / "nightly.js")
+
+
+async def test_client_container() -> None:
+    client = await read_client_workflows(_PLUGIN, _FakeReader(_client_files()), node=None)
+    empty = ClientPlugin("empty", "plugin://client/empty", "Empty")
+    entries = await discover([], node=None, client=client)
+    containers = customizations(entries, [], version="1", plugins=[empty, _PLUGIN])
+    assert [c["id"] for c in containers] == [f"{CLIENT_PREFIX}house"]
+    container = containers[0]
+    assert container["type"] == "directory"
+    assert container["uri"] == _WF
+    assert container["name"] == "Workflows (House)"
+    assert [c["id"] for c in container["children"]] == [
+        f"{CLIENT_PREFIX}house.nightly",
+        f"{CLIENT_PREFIX}house.other",
+    ]
+    assert container["children"][0]["uri"] == f"{_WF}/nightly.js"
+    assert container["children"][0]["_meta"][FLOW_META_KEY]["source"] == "client"
+
+
+async def test_client_bounds() -> None:
+    files = _client_files()
+    files[f"{_WF}/big.js"] = b"x" * (MAX_CLIENT_WORKFLOW_BYTES + 1)
+    entries = await read_client_workflows(_PLUGIN, _FakeReader(files), node=None)
+    assert [e.name for e in entries] == ["nightly", "other"]
+
+
+async def test_client_workflow_count_bound() -> None:
+    files = {f"{_WF}/w{i:04}.js": b"return 1\n" for i in range(MAX_CLIENT_WORKFLOWS + 5)}
+    entries = await read_client_workflows(_PLUGIN, _FakeReader(files), node=None)
+    assert len(entries) == MAX_CLIENT_WORKFLOWS
+
+
+async def test_client_listing_failure() -> None:
+    assert await read_client_workflows(_PLUGIN, _FakeReader({}, fail=True), node=None) == []
+
+
+class _ListingReader(_FakeReader):
+    """A client that lists names of its own choosing, whatever its files are."""
+
+    def __init__(self, files: dict[str, bytes], names: list[str]) -> None:
+        super().__init__(files)
+        self.names = names
+
+    async def list_plugin_resource(self, uri: str) -> list[dict[str, str]]:
+        return [{"name": name, "type": "file"} for name in self.names]
+
+
+async def test_client_listed_names_must_be_plain_file_names() -> None:
+    files = _client_files()
+    files["plugin://client/house/x.js"] = b"return 'escaped'\n"
+    files[f"{_WF}/sub/y.js"] = b"return 'nested'\n"
+    names = ["../x.js", "sub/y.js", "..\\x.js", "..", "nightly.js"]
+    reader = _ListingReader(files, names)
+    entries = await read_client_workflows(_PLUGIN, reader, node=None)
+    assert [e.name for e in entries] == ["nightly"]
+    assert reader.reads == [f"{_WF}/nightly.js"]

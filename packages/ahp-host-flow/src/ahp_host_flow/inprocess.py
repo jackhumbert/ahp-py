@@ -24,6 +24,7 @@ from ahp_host_flow.config import FlowConfig
 from ahp_host_flow.engine import WORKFLOW_NAME
 from ahp_host_flow.provider import FlowProvider
 from ahp_host_flow.sandbox import NO_ARGS, language_of
+from ahp_host_flow.worktree import register_worktree_operations
 
 _JSON_OPEN = "```json\n"
 _FENCE_CLOSE = "\n```"
@@ -134,7 +135,9 @@ async def run_in_process(
 async def _run_message(
     config: FlowConfig, text: str, root: Path, on_note: Callable[[str], None] | None
 ) -> Any:
-    host = Host(FlowProvider(config), LoopbackSingleUserPolicy())
+    provider = FlowProvider(config)
+    host = Host(provider, LoopbackSingleUserPolicy())
+    register_worktree_operations(host, provider.worktree_changesets)
     client_t, server_t = memory_pair()
     serving = asyncio.create_task(host.serve(server_t))
     try:

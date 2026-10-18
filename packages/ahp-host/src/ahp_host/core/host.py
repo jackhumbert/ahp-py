@@ -161,6 +161,7 @@ from ahp_host.provider.base import (
     FollowsChatWorkingDirectories,
     FollowsWorkingDirectories,
     ForkedFrom,
+    GatesSteering,
     HandlesCustomizations,
     HostsChats,
     ManagesMcpServers,
@@ -1044,6 +1045,79 @@ class _Publisher:
         self, changeset: Any, changes: Sequence[Any], *, chat: str | None = None
     ) -> str:
         return await self._host.publish_changeset(self._session.uri, changeset, changes, chat=chat)
+
+    def session_plugins(self) -> list[dict[str, Any]]:
+        """`ReadsClientPlugins`: the plugins published into this session."""
+        state = self._host.sequencer.state_of(self._session.uri)
+        if not isinstance(state, Mapping):
+            return []
+        found: list[dict[str, Any]] = []
+        for client in state.get("activeClients") or []:
+            if not isinstance(client, Mapping) or not isinstance(client.get("clientId"), str):
+                continue
+            for item in client.get("customizations") or []:
+                if (
+                    isinstance(item, Mapping)
+                    and item.get("type") == "plugin"
+                    and isinstance(item.get("id"), str)
+                    and isinstance(item.get("uri"), str)
+                    and isinstance(item.get("name"), str)
+                ):
+                    plugin = {
+                        "id": item["id"],
+                        "uri": item["uri"],
+                        "name": item["name"],
+                        "clientId": client["clientId"],
+                    }
+                    if isinstance(item.get("nonce"), str):
+                        plugin["nonce"] = item["nonce"]
+                    found.append(plugin)
+        for item in state.get("customizations") or []:
+            if (
+                isinstance(item, Mapping)
+                and item.get("type") == "plugin"
+                and isinstance(item.get("id"), str)
+                and isinstance(item.get("name"), str)
+                and isinstance(item.get("uri"), str)
+                and item["uri"].startswith(COPY_SCHEME)
+            ):
+                found.append({"id": item["id"], "uri": item["uri"], "name": item["name"]})
+        return found
+
+    def _plugin_for(self, uri: str) -> dict[str, Any]:
+        for plugin in self.session_plugins():
+            if uri == plugin["uri"] or uri.startswith(plugin["uri"].rstrip("/") + "/"):
+                return plugin
+        raise errors.AhpError(-32008, f"{uri} is not inside a plugin published to this session")
+
+    def _plugin_connection(self, plugin: Mapping[str, Any]) -> Connection:
+        client_id = plugin["clientId"]
+        for connection in self._host._connections:
+            if connection.client_id == client_id:
+                return connection
+        raise errors.AhpError(-32008, f"client {client_id!r} is not connected")
+
+    async def list_plugin_resource(self, uri: str) -> list[Any]:
+        plugin = self._plugin_for(uri)
+        if "clientId" not in plugin:
+            parts = self._host._plugin_copy_at(uri)
+            if parts is None:
+                raise errors.AhpError(-32008, f"No such resource: {uri}")
+            entries = parts[0].entries(parts[1])
+            if entries is None:
+                raise errors.AhpError(-32008, f"No such directory: {uri}")
+            return entries
+        return await self._host.list_client_resource(self._plugin_connection(plugin), uri)
+
+    async def read_plugin_resource(self, uri: str) -> bytes:
+        plugin = self._plugin_for(uri)
+        if "clientId" not in plugin:
+            parts = self._host._plugin_copy_at(uri)
+            content = parts[0].files.get(parts[1]) if parts is not None else None
+            if content is None:
+                raise errors.AhpError(-32008, f"No such resource: {uri}")
+            return content
+        return await self._host.read_client_resource(self._plugin_connection(plugin), uri)
 
     async def activity_changed(self, activity: str | None) -> None:
         action: dict[str, Any] = {"type": "session/activityChanged"}
@@ -5912,6 +5986,46 @@ class Host:
             return "no pending message with that id and kind"
         return None
 
+    def _worker_chat_rejection(
+        self, channel: str, state: Mapping[str, Any], action: Mapping[str, Any]
+    ) -> str | None:
+        """Gate client input on a worker chat; ask the agent about steering anywhere.
+
+        A worker chat (`session.provider_chats`) only ever runs
+        `ProviderChat.run_turn`: the agent starts its turns, and the one thing a
+        client can add is steering for the turn that is running. Anything else
+        would reach the provider's `send_user_message`, which knows nothing of
+        the chat. `interactivity` ('read-only' means "user can watch but not send
+        messages") is honoured, and a provider that implements `GatesSteering`
+        may refuse a steering message for any chat.
+        """
+        action_type = action.get("type")
+        session = self._session_for(channel)
+        if session is None:
+            return None
+        agent = session.agent_session
+        worker = channel in session.provider_chats
+        steering = (
+            action_type == "chat/pendingMessageSet" and action.get("kind") == _PENDING_STEERING
+        )
+        if worker:
+            if action_type == "chat/turnStarted":
+                return "a worker chat's turns are started by its agent"
+            if action_type == "chat/pendingMessageSet" and not steering:
+                return "a worker chat takes only steering messages"
+            if steering:
+                if state.get("interactivity") in ("read-only", "hidden"):
+                    return "this worker chat is read-only"
+                if state.get("activeTurn") is None:
+                    return "no turn is running in this worker chat to steer"
+        if steering and isinstance(agent, GatesSteering):
+            reason = agent.steering_rejection(channel)
+            if reason:
+                return reason
+        if steering and worker and not isinstance(agent, SteersTurns):
+            return "this agent cannot take steering"
+        return None
+
     def _validate_review(self, channel: str) -> str | None:
         """Reject review on a changeset that never advertised it.
 
@@ -7263,6 +7377,9 @@ class Host:
                     return "no active turn to cancel"
                 if not js.strict_equal(active_id, action.get("turnId")):
                     return "turnId does not name the active turn"
+            worker_refused = self._worker_chat_rejection(channel, state, action)
+            if worker_refused is not None:
+                return worker_refused
             if action_type == "chat/turnStarted" and state.get("activeTurn") is not None:
                 return "a turn is already active"
             if action_type in ("chat/pendingMessageSet", "chat/pendingMessageRemoved"):
@@ -7996,6 +8113,16 @@ class Host:
             # Idle, with something waiting -- and the host is on its way out.
             # Starting it now would only be cut off again; it stays in the
             # list, which the chat persists, and the next process runs it.
+            return
+        if channel in session.provider_chats:
+            # A worker chat's turns are the agent's; a message it never took is
+            # withdrawn rather than run as a turn `send_user_message` would
+            # receive for a chat that only ever runs `ProviderChat.run_turn`.
+            for kind, entry in entries:
+                await self.sequencer.publish(
+                    channel,
+                    {"type": "chat/pendingMessageRemoved", "kind": kind, "id": entry.get("id")},
+                )
             return
         picked = next(
             (pair for pair in entries if pair[0] == _PENDING_STEERING),

@@ -24,6 +24,7 @@ from ahp_host.ws import serve_websocket
 from ahp_host_flow import __version__
 from ahp_host_flow.config import ConfigError, FlowConfig, load_config
 from ahp_host_flow.provider import FlowProvider
+from ahp_host_flow.worktree import register_worktree_operations
 
 DEFAULT_PORT = 4323
 
@@ -50,11 +51,14 @@ def _is_loopback(bind: str) -> bool:
 
 def build_host(config: FlowConfig) -> Host:
     # No session store: durability is M6.
-    return Host(
-        FlowProvider(config),
+    provider = FlowProvider(config)
+    host = Host(
+        provider,
         LoopbackSingleUserPolicy(),
         info=HostInfo(name="ahp-host-flow", version=__version__),
     )
+    register_worktree_operations(host, provider.worktree_changesets)
+    return host
 
 
 async def _serve(host: Host, *, bind: str, port: int, token: str | None) -> None:
