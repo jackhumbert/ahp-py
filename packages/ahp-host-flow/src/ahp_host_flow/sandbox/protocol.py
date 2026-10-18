@@ -20,8 +20,10 @@ Python -> Node methods:
   absent the script sees `args === undefined`; if `limits` is absent the runner
   uses 1000 / null / 4096. One run at a time per process: a second concurrent
   `run` gets RUN_ACTIVE. `run` also takes `child?: bool` (the run is a child:
-  its `workflow()` always throws NEST_MESSAGE) and `spent?: int` (the initial
-  budget mirror).
+  its `workflow()` always throws NEST_MESSAGE), `spent?: int` (the initial
+  budget mirror) and `verbs?: [str]` (the run's custom verb names; the runner
+  defines one global per name after the built-ins, so ask/approve/canvas may be
+  replaced; a child run gets the same list).
 
 A Python runner (`pyrunner`, standard library only) speaks this same protocol.
 
@@ -54,6 +56,11 @@ Node -> Python methods, only while a `run` is active:
   (separate from the agent ordinals), when the line arrives. Error GATE_ERROR
   (no client can answer here), whose message the verb throws, or INVALID_PARAMS
   for a malformed request.
+- request `verb` {name: str, args: array} -> result {value: any}. The host takes
+  the verb ordinal, from a counter of its own (verbs only), when the line arrives
+  and re-checks the name against the run's verbs: INVALID_PARAMS for an undeclared
+  name or a malformed request, VERB_ERROR with the handler's (masked) message when
+  the handler raised, returned non-JSON or was aborted. The verb throws that message.
 - notification `canvas` {url: str, title: str | null}
 - notification `log` {message: str}
 - notification `phase` {title: str}; sets the run's current phase at the host.
@@ -84,6 +91,7 @@ AGENT_LIMIT: Final = -32004  # agent() refused: per-run call cap
 BUDGET_EXHAUSTED: Final = -32005  # agent() refused: output-token budget spent
 WORKFLOW_ERROR: Final = -32006  # workflow() reference could not be resolved
 GATE_ERROR: Final = -32007  # ask()/approve() has no answer path
+VERB_ERROR: Final = -32008  # a custom verb's handler failed
 
 INVALID_REQUEST: Final = -32600
 METHOD_NOT_FOUND: Final = -32601

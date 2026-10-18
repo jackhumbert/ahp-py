@@ -5,12 +5,17 @@ from __future__ import annotations
 import math
 import os
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Final
+from typing import TYPE_CHECKING, Any, Final
 
 from ahp_host_flow.engine.registry import ClientWorkflow, WorkflowDir
+from ahp_host_flow.engine.verbnames import verb_name_error
+
+if TYPE_CHECKING:
+    from ahp_host_flow.engine.dispatcher import AgentCall
+    from ahp_host_flow.engine.verbs import VerbHandler
 
 # plan §3 caps
 DEFAULT_MAX_CONCURRENCY: Final = 16
@@ -61,6 +66,13 @@ class RunOptions:
     continue_run: bool = False
     # Masks every value the journal stores (plan §4.9); None stores values as they are.
     redact: Callable[[Any], Any] | None = field(default=None, compare=False, repr=False)
+    # Custom verbs (plan M12): name -> handler, run by the host with no model.
+    verbs: Mapping[str, VerbHandler] = field(default_factory=dict, compare=False, repr=False)
+    # Resume-key hook (plan M12): the value it returns for a call joins that call's key, so a
+    # cached call replays only for the same value. None keys calls by content alone.
+    key_extra: Callable[[AgentCall], Any] | None = field(default=None, compare=False, repr=False)
+    # Names the hook in the journal header; a resume under another name replays no agent() call.
+    key_mode: str | None = None
 
     def __post_init__(self) -> None:
         if self.concurrency is not None and not (
@@ -109,6 +121,33 @@ class RunOptions:
             raise ValueError("client_workflows must be a tuple of ClientWorkflow")
         if self.redact is not None and not callable(self.redact):
             raise ValueError("redact must be callable")
+        if not isinstance(self.verbs, Mapping):
+            raise ValueError("verbs must be a mapping of verb name to handler")
+        for name, handler in self.verbs.items():
+            reason = verb_name_error(name)
+            if reason is not None:
+                raise ValueError(f"verbs: {reason}")
+            if not callable(handler):
+                raise ValueError(f"verbs.{name} must be callable")
+
+        if self.key_extra is not None and not callable(self.key_extra):
+            raise ValueError("key_extra must be callable")
+        if self.key_mode is not None and not (isinstance(self.key_mode, str) and self.key_mode):
+            raise ValueError("key_mode must be a non-empty string")
+        if self.key_extra is None and self.key_mode not in (None, "default"):
+            raise ValueError("key_mode needs key_extra")
+        if self.key_extra is not None and self.key_mode == "default":
+            raise ValueError("key_mode 'default' means no key_extra")
+
+    def key_mode_name(self) -> str:
+        """The name the journal header records for how this run keys its agent() calls."""
+        fn = self.key_extra
+        if fn is None:
+            return "default"
+        if self.key_mode is not None:
+            return self.key_mode
+        module = getattr(fn, "__module__", "?")
+        return f"{module}:{getattr(fn, '__qualname__', type(fn).__qualname__)}"
 
     def resolved_concurrency(self) -> int:
         return self.concurrency if self.concurrency is not None else default_concurrency()

@@ -8,6 +8,9 @@
     },
     {
       "$ref": "#/$defs/step"
+    },
+    {
+      "$ref": "#/$defs/verb"
     }
   ],
   "$defs": {
@@ -193,6 +196,61 @@
         },
         "awaitingInput": {
           "const": true
+        }
+      },
+      "additionalProperties": false
+    },
+    "verbStarted": {
+      "type": "object",
+      "required": [
+        "name",
+        "ordinal",
+        "phase"
+      ],
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "ordinal": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "phase": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "verbFinished": {
+      "type": "object",
+      "required": [
+        "status"
+      ],
+      "properties": {
+        "status": {
+          "enum": [
+            "ok",
+            "error"
+          ]
+        },
+        "error": {
+          "type": "string"
+        }
+      }
+    },
+    "verb": {
+      "type": "object",
+      "required": [
+        "verbStarted"
+      ],
+      "properties": {
+        "verbStarted": {
+          "$ref": "#/$defs/verbStarted"
+        },
+        "verbFinished": {
+          "$ref": "#/$defs/verbFinished"
         }
       },
       "additionalProperties": false

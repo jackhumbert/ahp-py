@@ -16,6 +16,7 @@ from ahp_host_flow.engine.journal import (
     JournalWriter,
     RunHeader,
     StartRecord,
+    VerbRecord,
     WorkflowSnapshot,
     call_key,
     canonical_json,
@@ -83,11 +84,13 @@ class Replay:
     def ended_at(self) -> int | None:
         return self._ended_at
 
-    def lookup(self, call: AgentCall) -> AgentRecord | None:
-        """Call once per call, as it is issued; None means run this call live."""
+    def lookup(self, call: AgentCall, key: str | None = None) -> AgentRecord | None:
+        """Call once per call, as it is issued; None means run this call live. *key* is the
+        call's key when a resume-key hook shaped it, else it is `call_key(call)`.
+        """
         if self._live:
             return None
-        queue = self._by_key.get(call_key(call))
+        queue = self._by_key.get(key if key is not None else call_key(call))
         if queue:
             self._served.append(call.ordinal)
             return dataclasses.replace(queue.popleft(), ordinal=call.ordinal)
@@ -102,9 +105,9 @@ class Replay:
             )
         return None
 
-    def reattach(self, call: AgentCall) -> DispatchHandle | None:
+    def reattach(self, call: AgentCall, key: str | None = None) -> DispatchHandle | None:
         """The handle a cut-off earlier call with this key recorded, else None."""
-        queue = self._reattach.get(call_key(call))
+        queue = self._reattach.get(key if key is not None else call_key(call))
         return queue.popleft() if queue else None
 
 
@@ -140,6 +143,40 @@ class GateReplay:
         return dataclasses.replace(queue.popleft(), ordinal=call.ordinal)
 
 
+class VerbReplay:
+    """Serves an earlier run's finished custom verb calls by call id and key.
+
+    A call id is derived from the key and its occurrence, so it is stable across a
+    resume; a record is served only when both match, and only once. Like gates, verbs
+    never touch `Replay` and replay in a prefix resume and with `continue_run` alike.
+    A call id that was only ever `open` was cut off mid-call: it runs again, and the
+    caller can ask `was_open` to say so.
+    """
+
+    def __init__(self, records: Sequence[VerbRecord]) -> None:
+        self._finished: dict[str, VerbRecord] = {}
+        self._open: set[str] = set()
+        for rec in sorted(records, key=lambda r: r.ordinal):
+            if rec.status == "open":
+                self._open.add(rec.call_id)
+            else:
+                self._finished.setdefault(rec.call_id, rec)
+        self._open -= self._finished.keys()
+        self.served: list[int] = []
+
+    def lookup(self, call_id: str, key: str, ordinal: int) -> VerbRecord | None:
+        """Call once per verb call, as it is issued; None means run it live."""
+        rec = self._finished.get(call_id)
+        if rec is None or rec.key != key:
+            return None
+        del self._finished[call_id]
+        self.served.append(ordinal)
+        return dataclasses.replace(rec, ordinal=ordinal)
+
+    def was_open(self, call_id: str) -> bool:
+        return call_id in self._open
+
+
 class JournalRun:
     """The journal writer, replay cursor and script snapshots of one run."""
 
@@ -156,11 +193,13 @@ class JournalRun:
         options: RunOptions,
         inherited: dict[str, WorkflowSnapshot],
         gate_replay: GateReplay | None = None,
+        verb_replay: VerbReplay | None = None,
     ) -> None:
         self.run_id = run_id
         self.writer = writer
         self.replay = replay
         self.gate_replay = gate_replay
+        self.verb_replay = verb_replay
         self.source = source
         self.filename = filename
         self.has_args = has_args
@@ -189,6 +228,7 @@ class JournalRun:
             filename = LIBRARY_FILENAME
         replay: Replay | None = None
         gate_replay: GateReplay | None = None
+        verb_replay: VerbReplay | None = None
         inherited: dict[str, WorkflowSnapshot] = {}
         effective = options
         if options.resume_from is not None:
@@ -233,13 +273,25 @@ class JournalRun:
                             f"resume: agent() #{rec.ordinal} {where} but never finished; "
                             "not replayed"
                         )
-            replay = Replay(
-                old.agents,
-                on_log=on_log,
-                prefix_only=not options.continue_run,
-                unfinished=old.unfinished if options.continue_run else (),
-            )
+            new_mode = options.key_mode_name()
+            if old.header.key_mode != new_mode:
+                # Keys made under another hook never match: say so once instead of ending
+                # the cache at the first call. Gate and verb replays still apply.
+                if on_log is not None:
+                    on_log(
+                        f"resume: run {options.resume_from!r} keyed agent() calls by "
+                        f"{old.header.key_mode!r} and this run keys them by {new_mode!r}; "
+                        "no cached call can match, so every agent() call runs live"
+                    )
+            else:
+                replay = Replay(
+                    old.agents,
+                    on_log=on_log,
+                    prefix_only=not options.continue_run,
+                    unfinished=old.unfinished if options.continue_run else (),
+                )
             gate_replay = GateReplay(old.gates, on_log=on_log)
+            verb_replay = VerbReplay(old.verbs)
             if on_log is not None:
                 for gate in old.open_gates:
                     on_log(
@@ -261,6 +313,7 @@ class JournalRun:
                 effective.max_agents,
                 effective.budget_total,
                 resumed_from=options.resume_from,
+                key_mode=effective.key_mode_name(),
             ),
             mask=effective.redact,
         )
@@ -275,6 +328,7 @@ class JournalRun:
             options=effective,
             inherited=inherited,
             gate_replay=gate_replay,
+            verb_replay=verb_replay,
         )
         # Every child snapshot the old run had goes into the new journal now, not
         # when the child is next reached: a resumed run that stops before then

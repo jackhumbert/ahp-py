@@ -1,4 +1,4 @@
-"""`ask()`, `approve()` and `canvas()` on the run's main chat (plan §6).
+"""`ask()`, `approve()`, `canvas()` and custom verbs on the run's main chat (plan §6).
 
 The engine's `GateRunner` numbers and journals the gates; this is the `Gates` it
 asks: an `ask()` is an input request on the main chat (a select, text, number or
@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import hashlib
+import itertools
 import json
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
@@ -29,9 +30,11 @@ from ahp_host.provider.base import (
     ToolConfirmation,
 )
 from ahp_host.provider.changes import FileChange
+from ahp_protocol.ext import flow
 
 from ahp_host_flow import catalog
-from ahp_host_flow.engine import GateCall, Redactor, schema_error
+from ahp_host_flow.engine import GateCall, Redactor, VerbCall, VerbContext, schema_error
+from ahp_host_flow.engine.gates import options_error
 
 #: The same bound as `ahp_host.core.structured.MAX_ATTEMPTS`: invalid answers re-asked.
 ASK_ATTEMPTS: Final = 3
@@ -308,4 +311,95 @@ class MainChatGates:
                 url=mask(url),
             ),
             chat=self.chat,
+        )
+
+
+class MainChatVerbs:
+    """The engine's `VerbHost` on the run's main chat: each custom verb call is a tool call."""
+
+    def __init__(
+        self,
+        *,
+        sink: TurnSink,
+        publisher: SessionPublisher,
+        chat: str,
+        session_uri: str,
+        redactor: Redactor,
+        on_log: Callable[[str], None] | None = None,
+        call_id_prefix: str = "verb",
+        working_directories: Sequence[str] = (),
+    ) -> None:
+        self._sink = sink
+        self._publisher = publisher
+        self.chat = chat
+        self._session_uri = session_uri
+        self._redactor = redactor
+        self._on_log = on_log
+        self._prefix = call_id_prefix
+        self._working_directories = tuple(working_directories)
+
+    def _log(self, message: str) -> None:
+        if self._on_log is not None:
+            self._on_log(message)
+
+    def context(self, ordinal: int, call_id: str) -> VerbContext:
+        # One gate runner per verb call, so its ids (`<prefix>-<ordinal>-<k>`) never meet the
+        # verb's own tool call or the script's gates; these requests are not journaled.
+        gates = MainChatGates(
+            sink=self._sink,
+            publisher=self._publisher,
+            chat=self.chat,
+            redactor=self._redactor,
+            on_log=self._on_log,
+            call_id_prefix=f"{self._prefix}-{ordinal}",
+            working_directories=self._working_directories,
+        )
+        n = itertools.count()
+
+        async def ask(question: str, options: Mapping[str, Any] | None = None) -> Any:
+            opts = dict(options or {})
+            if (reason := options_error("ask", opts)) is not None:
+                raise ValueError(reason)
+            return await gates.ask(GateCall(next(n), "ask", str(question), opts))
+
+        async def confirm(summary: str, options: Mapping[str, Any] | None = None) -> bool:
+            opts = dict(options or {})
+            if (reason := options_error("approve", opts)) is not None:
+                raise ValueError(reason)
+            return await gates.approve(GateCall(next(n), "approve", str(summary), opts))
+
+        # ahp-host hands providers no principal today.
+        return VerbContext(
+            session=self._session_uri,
+            chat=self.chat,
+            principal=None,
+            log=self._log,
+            ask=ask,
+            confirm=confirm,
+        )
+
+    @staticmethod
+    def _started(call: VerbCall) -> dict[str, Any]:
+        return flow.verb_started(name=call.name, ordinal=call.ordinal, phase=call.phase)
+
+    async def started(self, call: VerbCall, args: Sequence[Any]) -> None:
+        await self._sink.tool_call_started(
+            f"{self._prefix}-{call.ordinal}",
+            call.name,
+            {"args": list(args)},
+            display_name=call.name,
+            meta=flow.meta(flow.verb(self._started(call))),
+        )
+
+    async def finished(self, call: VerbCall, *, ok: bool, value: Any, error: str | None) -> None:
+        text = json.dumps(value, ensure_ascii=False) if ok else (error or "")
+        finished = flow.verb_finished(status="ok" if ok else "error", error=None if ok else error)
+        await self._sink.tool_call_completed(
+            f"{self._prefix}-{call.ordinal}",
+            {
+                "content": [{"type": "text", "text": self._redactor.mask(text)}],
+                "_meta": flow.meta(flow.verb(self._started(call), finished)),
+            },
+            success=ok,
+            past_tense_message=f"{call.name}()" if ok else f"{call.name}() failed",
         )

@@ -12,6 +12,7 @@ from typing import Any, Final, Literal
 
 from ahp_host_flow.engine.redact import Redactor
 from ahp_host_flow.engine.registry import WORKFLOW_SOURCES
+from ahp_host_flow.engine.verbnames import verb_name_error
 
 # The names VS Code recognises; copied from ahp-host-claude, which a provider package cannot be
 # imported sideways for.
@@ -107,6 +108,12 @@ class RedactConfig:
 
 
 @dataclass(frozen=True)
+class ResumeConfig:
+    # 'default', 'model' (the routed provider and model join each key) or 'module:function'.
+    key: str = "default"
+
+
+@dataclass(frozen=True)
 class FlowConfig:
     # In TOML order.
     providers: Mapping[str, ProviderConfig]
@@ -115,6 +122,9 @@ class FlowConfig:
     node: str | None = None
     workflows: WorkflowsConfig = WorkflowsConfig()
     redact: RedactConfig = RedactConfig()
+    # Custom verbs: global name -> 'module:function', imported on the first call, in TOML order.
+    verbs: Mapping[str, str] = field(default_factory=dict)
+    resume: ResumeConfig = ResumeConfig()
 
 
 def _table(value: Any, where: str) -> Mapping[str, Any]:
@@ -354,6 +364,30 @@ def _parse_redact(raw: Any) -> RedactConfig:
     return RedactConfig(patterns, builtin)
 
 
+def _parse_verbs(raw: Any) -> dict[str, str]:
+    table = _table(raw, "verbs")
+    verbs: dict[str, str] = {}
+    for name, value in table.items():
+        reason = verb_name_error(name)
+        if reason is not None:
+            raise ConfigError(f"verbs.{name}: {reason}")
+        if not isinstance(value, str) or not LOAD_SPEC.fullmatch(value):
+            raise ConfigError(f"verbs.{name} must be 'module:function', got {value!r}")
+        verbs[name] = value
+    return verbs
+
+
+def _parse_resume(raw: Any) -> ResumeConfig:
+    table = _table(raw, "resume")
+    _check_keys(table, ("key",), "resume")
+    key = table.get("key", "default")
+    if not isinstance(key, str) or not (key in ("default", "model") or LOAD_SPEC.fullmatch(key)):
+        raise ConfigError(
+            f'resume.key must be "default", "model" or \'module:function\', got {key!r}'
+        )
+    return ResumeConfig(key)
+
+
 def make_redactor(redact: RedactConfig) -> Redactor:
     return Redactor(redact.patterns, builtin=redact.builtin)
 
@@ -361,7 +395,9 @@ def make_redactor(redact: RedactConfig) -> Redactor:
 def parse_config(data: Mapping[str, Any], *, base: Path) -> FlowConfig:
     """Validate `data` (a parsed flow.toml); relative paths resolve against `base`."""
     _check_keys(
-        data, ("state_dir", "node", "providers", "routing", "workflows", "redact"), "flow.toml"
+        data,
+        ("state_dir", "node", "providers", "routing", "workflows", "redact", "verbs", "resume"),
+        "flow.toml",
     )
     state_dir_raw = _str(data, "state_dir", "flow.toml")
     state_dir = (
@@ -375,7 +411,9 @@ def parse_config(data: Mapping[str, Any], *, base: Path) -> FlowConfig:
     routing = _parse_routing(data.get("routing", {}), providers)
     workflows = _parse_workflows(data.get("workflows", {}), base)
     redact = _parse_redact(data.get("redact", {}))
-    return FlowConfig(providers, routing, state_dir, node, workflows, redact)
+    verbs = _parse_verbs(data.get("verbs", {}))
+    resume = _parse_resume(data.get("resume", {}))
+    return FlowConfig(providers, routing, state_dir, node, workflows, redact, verbs, resume)
 
 
 def load_config(path: Path) -> FlowConfig:

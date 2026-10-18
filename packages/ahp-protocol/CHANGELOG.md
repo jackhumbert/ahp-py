@@ -8,6 +8,19 @@ the spec revision it targets.
 
 ## [Unreleased]
 
+### Added — ahp-py extension: verb progress
+
+- **`flow.verb_started`**, **`flow.verb_finished`** and **`flow.verb`**: builders for the
+  descriptor a host puts on a custom verb's tool call (`verbStarted` with `name`,
+  `ordinal` and `phase`; `verbFinished` with `status` and an optional `error`).
+  **`flow.VERB_STATUSES`** (`ok`, `error`) and **`flow.STEP_KINDS`** (`agent`, `verb`)
+  name the values. `DESCRIPTOR_SCHEMA` and `flow.schema.json` gain a `verb` branch of the
+  `oneOf`; it stays exclusive with `notification` and `step`.
+- **`StepView.kind`** and **`StepView.name`**, **`PhaseView.verbs`** and
+  **`RunView.verbs`**: `run_view` folds each verb into a `StepView` of kind `verb`
+  (status `running`, `ok`, `error` or `cancelled`, no usage) in its phase's `verbs`.
+  `steps` stays agent-only, so existing consumers are unchanged.
+
 ### Added — ahp-py extension: delegation session origin
 
 - **`ahp_protocol.ext.delegation`**, a dependency-free module: `ORIGIN_META_KEY`

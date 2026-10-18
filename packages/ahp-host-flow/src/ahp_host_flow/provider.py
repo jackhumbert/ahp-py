@@ -69,13 +69,14 @@ from ahp_host_flow.engine import (
     JournalError,
     RemoteSpec,
     RunOptions,
+    VerbHandler,
     WorkflowDir,
     load_journal,
     preamble_text,
 )
 from ahp_host_flow.fleet import FleetClients, FleetDispatcher
-from ahp_host_flow.gates import MainChatGates
-from ahp_host_flow.loading import LazyProviders
+from ahp_host_flow.gates import MainChatGates, MainChatVerbs
+from ahp_host_flow.loading import LazyProviders, lazy_verbs, resume_key_hook
 from ahp_host_flow.sandbox import (
     NO_ARGS,
     NodeNotFoundError,
@@ -312,6 +313,9 @@ class FlowProvider:
         self.providers: Mapping[str, AgentProvider] = (
             providers if providers is not None else LazyProviders(config, roots=roots)
         )
+        #: One `LazyVerb` per `[verbs]` name, shared by every session: a handler module
+        #: is imported once.
+        self.verbs: Mapping[str, VerbHandler] = lazy_verbs(config)
         self.user_workflows_dir = (
             user_workflows_dir
             if user_workflows_dir is not None
@@ -708,6 +712,7 @@ class FlowSession:
         # never a source that `[workflows] sources` leaves out. Always set on a provider run.
         python_dirs = catalog.python_dirs(dirs, config.workflows.python_sources)
         try:
+            key_extra, key_mode = resume_key_hook(config, model)
             options = RunOptions(
                 state_dir=config.state_dir,
                 workflow_dirs=tuple(WorkflowDir(d.source, d.path) for d in dirs if d.path.is_dir()),
@@ -719,6 +724,9 @@ class FlowSession:
                 python_dirs=python_dirs,
                 run_root=workspace,
                 redact=redactor.mask_value,
+                verbs=self.provider.verbs,
+                key_extra=key_extra,
+                key_mode=key_mode,
                 resume_from=resume_from,
                 continue_run=resume_from is not None,
             )
@@ -775,6 +783,18 @@ class FlowSession:
             redactor=redactor,
             on_log=on_log,
             call_id_prefix=f"gate-r{resumes}" if resumes else "gate",
+            working_directories=context.working_directories,
+        )
+
+        # A continued run's verb calls get ids of their own too; replayed verbs are not shown.
+        verb_host = MainChatVerbs(
+            sink=sink,
+            publisher=publisher,
+            chat=chat,
+            session_uri=context.session_uri,
+            redactor=redactor,
+            on_log=on_log,
+            call_id_prefix=f"verb-r{resumes}" if resumes else "verb",
             working_directories=context.working_directories,
         )
 
@@ -926,6 +946,7 @@ class FlowSession:
                     on_phase=on_phase,
                     on_run_start=on_run_start,
                     gates=gates,
+                    verb_host=verb_host,
                 )
             except ScriptError as exc:
                 await fail(exc, "flow.script")

@@ -137,7 +137,8 @@ start record per live call (ordinal, key, and the dispatch handle: the provider
 name and worker chat URI, or null when the dispatcher cannot say), written when
 the call is dispatched and before its agent record; and one
 agent record per completed call (ordinal, key, status `ok`, `null` or `error`,
-value and output tokens). The key is the sha256 of the canonical JSON (sorted
+value and output tokens); ahp-py adds a verb record per custom verb call and
+the header's `keyMode` (see Extensions). The key is the sha256 of the canonical JSON (sorted
 keys, no whitespace) of `{prompt, opts, phase, label}`.
 
 Resume serves `agent()` calls from the journal by content: the n-th call
@@ -253,6 +254,29 @@ checks the argument errors.
   again. Gates never end the `agent()` cache.
 - A run with nobody to answer (a headless `flow run`, the library API) fails an
   `ask()` or `approve()` with an error that says so, and the verb throws it.
+
+### Custom verbs
+
+Scripts: `conformance/extensions/verbs.js` and `conformance/extensions/verbs.py`.
+This is an ahp-py extension outside Claude Code's format: Claude Code has no such
+globals, so a stock script is unaffected.
+A deployment may declare verbs (`RunOptions.verbs`: a name and a handler each).
+The script calls one as a global, `await tool('search', {q})`, with JSON arguments
+and gets the handler's JSON value; no model is involved. A handler that raises, or
+returns something that is not JSON, makes the call throw with its (masked)
+message. A name that is not declared stays undefined. A verb may replace `ask`,
+`approve` or `canvas` for that run; the replaced built-in is then not defined in
+that run. Verbs have a counter of their own, take no agent slot or budget, are
+journaled, and a finished call replays on resume. In Python the same call is
+`ahp_host_flow.verbs.verb(name, *args)`.
+
+### [resume] keys
+
+An ahp-py extension outside Claude Code's format. `[resume] key` in flow.toml
+(`"default"`, `"model"` or an import path) adds a JSON `extra` to each `agent()`
+call's key, so a cached call replays only for the same value. With the default
+the keys are exactly those described under resume above, and a stock script is
+unaffected. The journal header records the mode as `keyMode`.
 
 ### opts.x.provider
 

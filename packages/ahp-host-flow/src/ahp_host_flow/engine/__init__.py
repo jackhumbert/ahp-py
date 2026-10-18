@@ -35,6 +35,8 @@ from ahp_host_flow.engine.journal import (
     LoadedJournal,
     RunHeader,
     StartRecord,
+    VerbRecord,
+    VerbStatus,
     WorkflowSnapshot,
     call_key,
     canonical_json,
@@ -42,6 +44,8 @@ from ahp_host_flow.engine.journal import (
     new_run_id,
     redact_agent_record,
     run_dir,
+    verb_call_id,
+    verb_key,
 )
 from ahp_host_flow.engine.options import (
     CPU_RESERVE,
@@ -78,7 +82,7 @@ from ahp_host_flow.engine.remote import (
     RemoteSpec,
     RemoteWorkers,
 )
-from ahp_host_flow.engine.resume import LIBRARY_FILENAME, GateReplay, JournalRun, Replay
+from ahp_host_flow.engine.resume import LIBRARY_FILENAME, GateReplay, JournalRun, Replay, VerbReplay
 from ahp_host_flow.engine.scheduler import (
     AgentLimitError,
     BudgetExhaustedError,
@@ -86,6 +90,15 @@ from ahp_host_flow.engine.scheduler import (
     SchedulerRefusal,
 )
 from ahp_host_flow.engine.schema import schema_error
+from ahp_host_flow.engine.verbnames import REPLACEABLE_VERBS, RESERVED_VERBS, verb_name_error
+from ahp_host_flow.engine.verbs import (
+    VerbCall,
+    VerbContext,
+    VerbFailedError,
+    VerbHandler,
+    VerbHost,
+    VerbRunner,
+)
 
 __all__ = [
     "BUILTIN_PATTERNS",
@@ -102,6 +115,8 @@ __all__ = [
     "MAX_ITEMS_PER_CALL",
     "NO_REDACTION",
     "OUTPUT_TOKENS",
+    "REPLACEABLE_VERBS",
+    "RESERVED_VERBS",
     "RUNS_DIR",
     "RUN_ID",
     "WORKFLOW_NAME",
@@ -146,6 +161,15 @@ __all__ = [
     "SchedulerRefusal",
     "StartRecord",
     "StreamMasker",
+    "VerbCall",
+    "VerbContext",
+    "VerbFailedError",
+    "VerbHandler",
+    "VerbHost",
+    "VerbRecord",
+    "VerbReplay",
+    "VerbRunner",
+    "VerbStatus",
     "WorkflowDir",
     "WorkflowRefError",
     "WorkflowSnapshot",
@@ -163,5 +187,8 @@ __all__ = [
     "resolve_workflow",
     "run_dir",
     "schema_error",
+    "verb_call_id",
+    "verb_key",
+    "verb_name_error",
     "with_preamble",
 ]

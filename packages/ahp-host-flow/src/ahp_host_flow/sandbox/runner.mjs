@@ -13,6 +13,7 @@ const AGENT_LIMIT = -32004;
 const BUDGET_EXHAUSTED = -32005;
 const WORKFLOW_ERROR = -32006;
 const GATE_ERROR = -32007;
+const VERB_ERROR = -32008;
 const METHOD_NOT_FOUND = -32601;
 const INVALID_PARAMS = -32602;
 const INTERNAL_ERROR = -32603;
@@ -413,6 +414,20 @@ Object.defineProperty(dtfProto, 'formatToParts', {
     }),
   );
   define('args', settings.hasArgs ? settings.args : undefined);
+  // Custom verbs come last, so a verb may replace ask, approve or canvas. Only JSON
+  // crosses: call() clones the arguments and the reply value is parsed in this realm.
+  for (const name of Array.isArray(settings.verbs) ? settings.verbs : []) {
+    define(
+      name,
+      {
+        [name]: async function (...verbArgs) {
+          const reply = await call('verb', { name, args: verbArgs });
+          if (!reply.ok) throw new Error(reply.message);
+          return reply.result?.value ?? null;
+        },
+      }[name],
+    );
+  }
 });
 }`;
 
@@ -486,7 +501,8 @@ async function run(params) {
     budgetTotal: Number.isInteger(l.budgetTotal) ? l.budgetTotal : null,
     maxItems: Number.isInteger(l.maxItems) ? l.maxItems : 4096,
   };
-  const settings = { hasArgs, limits, child: params.child === true };
+  const verbs = Array.isArray(params.verbs) ? params.verbs.filter((v) => typeof v === 'string') : [];
+  const settings = { hasArgs, limits, child: params.child === true, verbs };
   if (hasArgs) settings.args = params.args;
   // Host realm, shared by the run's contexts and held only in their install
   // closures. Every value in or out is a primitive.
@@ -522,7 +538,7 @@ async function run(params) {
     } catch (err) {
       return 'workflow ' + filename + ': ' + String(err && err.message ? err.message : err);
     }
-    const childSettings = { hasArgs: argsJson !== null, limits, child: true };
+    const childSettings = { hasArgs: argsJson !== null, limits, child: true, verbs: settings.verbs };
     if (argsJson !== null) childSettings.args = JSON.parse(argsJson);
     const installChild = vm.runInContext(PRELUDE, child);
     installChild(hostCall, hostNotify, hostStart, hostState, JSON.stringify(childSettings));

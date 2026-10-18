@@ -312,6 +312,81 @@ under Claude Code it falls back to `agent()` (set `FLOW_SHIM.askDefault` or
 `approve()` fails with an error that says so. Attachments and named chats work
 with in-process providers only.
 
+## Custom verbs
+
+A deployment can add its own script verbs that run host code with no model:
+`tool()`, `render()`, `approve(person)`. This is an ahp-py extension (Claude Code
+has no such globals; see [docs/format.md](docs/format.md#custom-verbs)). Declare
+them in flow.toml as `name = "module:function"`:
+
+```toml
+[verbs]
+tool = "my_pkg.verbs:tool"
+render = "my_pkg.verbs:render"
+approve = "my_pkg.verbs:approve"
+```
+
+A handler takes one `VerbCall` and returns JSON:
+
+```python
+from ahp_host_flow.engine import VerbCall
+
+
+async def tool(call: VerbCall):
+    return {"hits": await search(call.args[0]["q"])}
+```
+
+`VerbCall` has `name`, `args` (a tuple of JSON values), `ordinal` (verbs only),
+`call_id` (stable across a resume), `phase`, `run_id` and `context`.
+`context.log(text)`, `context.ask(question, options)` and `context.confirm(summary,
+options)` reach the run's main chat; `context.principal` is `None` until the host
+passes one. A script calls `await tool('search', {q: 'x'})`.
+
+- A handler that raises makes the call throw with its masked message, which the
+  script can catch. Aborting the run cancels a running handler. Verbs take no
+  agent slot and do not count against the `agent()` cap, the budget or the
+  concurrency limit.
+- Arguments, the result and errors are masked; the masked result is what the
+  script gets. A result that is not JSON is an error.
+- Calls are journaled and replayed like gates: a finished call replays on resume
+  without calling the handler, and an open one is called again with the same
+  `call_id`.
+- Reserved names (`agent`, `parallel`, `pipeline`, `phase`, `log`, `args`,
+  `budget`, `workflow`, `meta`) are refused at config load and in `RunOptions`,
+  and so is any name that would shadow a global the sandboxes define or keep
+  absent: JavaScript standard globals (`Object`, `JSON`, `Promise`, `console`,
+  `eval`, ...), `require`, `process`, `fetch`, `setTimeout` and the like, and
+  every Python builtin (`print`, `open`, `type`, ...).
+  `ask`, `approve` and `canvas` may be replaced: the built-in is then not defined
+  in that run (in Python, call it as a global, or through
+  `ahp_host_flow.verbs.verb(name, ...)`).
+- The library takes `run(dispatcher, verbs={'tool': handler})` and calls one with
+  `await r.verb('tool', {...})`.
+- On the main chat a call shows as a tool call titled by the verb name, with
+  `verbStarted` and `verbFinished` progress and a `verbs` list in `run_view`.
+  Verbs replayed from the journal are not published again.
+- For a script that must also run under Claude Code, guard the call:
+  `typeof tool === 'function' ? await tool('search', {q}) : <fallback>`.
+
+## Resume keys
+
+A resumed run replays an `agent()` call only when its key matches. By default the
+key is Claude Code's rule (plan §3: prompt, opts, phase, label), so a run is
+byte-identical to what earlier versions wrote. A flow.toml can add to it:
+
+```toml
+[resume]
+key = "model"
+```
+
+`"model"` adds `{provider, model}` from routing and the `models` alias
+expansion (config only; `null` for the provider's default), so changing a
+model's alias re-runs the calls it touched. An import path
+(`key = "my_pkg.keys:resume_key"`) is called as `fn(call, route)` and returns
+JSON, which joins the key. The journal header records `keyMode`; a resume whose
+mode differs from the old run's logs one line and replays no `agent()` call.
+From the library, pass `key_extra=fn` to `run`.
+
 ## Fleet and remote providers
 
 Two more kinds of provider run a call somewhere else than this process

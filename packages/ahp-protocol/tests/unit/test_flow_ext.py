@@ -415,3 +415,146 @@ def test_flowext_schedule_applied_to_any_sequence() -> None:
     # Not a sequence of triggers: replaced, never iterated.
     for raw in ("schedule", b"xy", {"kind": "schedule"}, None, 5):
         assert flow.with_offered_schedule({"triggers": raw}, child)["triggers"] == [trigger]
+
+
+def vcall(
+    tcid: str,
+    started_: dict[str, Any],
+    finished_: dict[str, Any] | None = None,
+    *,
+    status: str = "running",
+) -> dict[str, Any]:
+    return {
+        "kind": "toolCall",
+        "toolCall": {
+            "toolCallId": tcid,
+            "status": status,
+            "_meta": flow.meta(flow.verb(started_, finished_)),
+        },
+    }
+
+
+def test_flow_ext_verb_builders_exact() -> None:
+    assert flow.VERB_STATUSES == ("ok", "error")
+    assert flow.STEP_KINDS == ("agent", "verb")
+    s = flow.verb_started(name="tool", ordinal=2, phase="A")
+    assert s == {"name": "tool", "ordinal": 2, "phase": "A"}
+    assert flow.verb_started(name="n", ordinal=0, phase=None) == {
+        "name": "n",
+        "ordinal": 0,
+        "phase": None,
+    }
+    assert flow.verb_finished(status="ok") == {"status": "ok"}
+    f = flow.verb_finished(status="error", error="x")
+    assert f == {"status": "error", "error": "x"}
+    assert flow.verb(s) == {"verbStarted": s}
+    assert flow.verb(s, f) == {"verbStarted": s, "verbFinished": f}
+    with pytest.raises(ValueError, match="verb status must be"):
+        flow.verb_finished(status="maybe")
+
+
+def test_flow_ext_verb_schema() -> None:
+    s = flow.verb_started(name="tool", ordinal=0, phase=None)
+    for ok in (
+        flow.verb(s),
+        flow.verb(s, flow.verb_finished(status="ok")),
+        flow.verb(s, flow.verb_finished(status="error", error="x")),
+    ):
+        VALIDATOR.validate(ok)
+    bad: list[dict[str, Any]] = [
+        {"verbStarted": s, "stepStarted": started(0)},
+        {"verbStarted": s, "verbFinished": {"status": "maybe"}},
+        {"verbStarted": {"ordinal": 0, "phase": None}},
+        {"verbFinished": {"status": "ok"}},
+    ]
+    for doc in bad:
+        assert not VALIDATOR.is_valid(doc), doc
+    path = Path(flow.__file__).with_name(flow.SCHEMA_FILE)
+    assert json.loads(path.read_text(encoding="utf-8")) == DESCRIPTOR_SCHEMA
+
+
+def test_flow_ext_verb_fold() -> None:
+    parts = [
+        note(flow.run_started("r1", "demo")),
+        note(flow.phase_started("A")),
+        call("c0", started(0, "A"), finished("x", 1, 2), status="completed"),
+        vcall(
+            "v0",
+            flow.verb_started(name="tool", ordinal=1, phase="A"),
+            flow.verb_finished(status="ok"),
+            status="completed",
+        ),
+        vcall(
+            "v1",
+            flow.verb_started(name="boom", ordinal=2, phase=None),
+            flow.verb_finished(status="error", error="x"),
+            status="completed",
+        ),
+        note(flow.phase_finished("A")),
+        note(flow.run_finished("ok")),
+    ]
+    view = flow.run_view({"turns": [turn(parts)]})
+    v0 = StepView(
+        tool_call_id="v0",
+        ordinal=1,
+        label=None,
+        phase="A",
+        chat=None,
+        model=None,
+        provider=None,
+        status="ok",
+        kind="verb",
+        name="tool",
+    )
+    v1 = StepView(
+        tool_call_id="v1",
+        ordinal=2,
+        label=None,
+        phase=None,
+        chat=None,
+        model=None,
+        provider=None,
+        status="error",
+        error="x",
+        kind="verb",
+        name="boom",
+    )
+    assert [s.ordinal for s in view.steps] == [0]
+    assert view.steps[0].kind == "agent"
+    assert view.steps[0].name is None
+    assert view.verbs == (v0, v1)
+    assert view.phases[0].title == "A"
+    assert view.phases[0].verbs == (v0,)
+    assert view.phases[1].title is None
+    assert view.phases[1].steps == ()
+    assert view.phases[1].verbs == (v1,)
+    assert view.usage == {"inputTokens": 1, "outputTokens": 2}
+
+
+def test_flow_ext_verb_running_and_cancelled() -> None:
+    parts = [
+        note(flow.run_started("r1", None)),
+        note(flow.phase_started("A")),
+        vcall("v0", flow.verb_started(name="tool", ordinal=0, phase="A")),
+    ]
+    active = flow.run_view({"turns": [], "activeTurn": turn(parts, state="active")})
+    assert [v.status for v in active.verbs] == ["running"]
+    done = flow.run_view({"turns": [turn(parts)]})
+    assert [v.status for v in done.verbs] == ["cancelled"]
+
+
+def test_flow_ext_verb_malformed_ignored() -> None:
+    bad_starts: list[Any] = [
+        "x",
+        None,
+        {"name": "t", "ordinal": "x", "phase": None},
+        {"name": "t", "ordinal": True, "phase": None},
+    ]
+    for bad in bad_starts:
+        part = {
+            "kind": "toolCall",
+            "toolCall": {"toolCallId": "v", "_meta": flow.meta({"verbStarted": bad})},
+        }
+        view = flow.run_view({"turns": [turn([note(flow.run_started("r", None)), part])]})
+        assert view.verbs == ()
+        assert view.steps == ()

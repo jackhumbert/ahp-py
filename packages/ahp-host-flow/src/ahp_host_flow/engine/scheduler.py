@@ -24,6 +24,7 @@ from ahp_host_flow.engine.journal import (
     JournalWriter,
     StartRecord,
     call_key,
+    canonical_json,
 )
 from ahp_host_flow.engine.options import RunOptions
 from ahp_host_flow.engine.schema import schema_error
@@ -73,6 +74,9 @@ class Scheduler:
         self._journal = journal
         self._replay = replay
         self._reattach: dict[int, DispatchHandle] = {}
+        self._key_extra = options.key_extra
+        # Keys taken at issue time, by ordinal, until the call is dispatched or served.
+        self._keys: dict[int, str] = {}
         self._unsubscribe: Callable[[], None] | None = None
         if abort is not None:
             self._unsubscribe = abort.subscribe(self.abort)
@@ -123,9 +127,22 @@ class Scheduler:
             phase=phase if phase is not None else self._phase,
             label=label,
         )
-        cached = self.admit(call)
+        # Before dispatch and before the ordinal is taken: a failing hook takes no ordinal.
+        key = self._key(call)
+        cached = self.admit(call, key)
+        self._keys[call.ordinal] = key
         self._next_ordinal += 1
         return call, cached
+
+    def _key(self, call: AgentCall) -> str:
+        if self._key_extra is None:
+            return call_key(call)
+        try:
+            extra = self._key_extra(call)
+            canonical_json(extra)
+        except Exception as exc:
+            raise ValueError(f"resume key hook failed for agent() #{call.ordinal}: {exc}") from exc
+        return call_key(call, extra=extra)
 
     def _log(self, line: str) -> None:
         if self._on_log is not None:
@@ -136,10 +153,11 @@ class Scheduler:
             spent, total = self._budget.spent, self._budget.total
             raise BudgetExhaustedError(f"budget exhausted: {spent} of {total} output tokens spent")
 
-    def admit(self, call: AgentCall) -> AgentRecord | None:
+    def admit(self, call: AgentCall, key: str | None = None) -> AgentRecord | None:
         """Refuse a call past a hard cap; sync, so checks happen in issue order.
 
-        Returns the journal record that serves the call on resume, else None.
+        Returns the journal record that serves the call on resume, else None. *key* is the
+        call's key when the caller already took it, else it is computed here.
         """
         # Ordinals are assigned at issue time, so this cap is deterministic (plan §9).
         if call.ordinal >= self._max_agents:
@@ -147,11 +165,13 @@ class Scheduler:
                 f"agent() limit reached: at most {self._max_agents} agent() calls per run"
             )
         if self._replay is not None:
-            rec = self._replay.lookup(call)
+            if key is None:
+                key = self._key(call)
+            rec = self._replay.lookup(call, key)
             if rec is not None:
                 # The record proves the original run admitted it; no budget re-check.
                 return rec
-            handle = self._replay.reattach(call)
+            handle = self._replay.reattach(call, key)
             if handle is not None:
                 self._reattach[call.ordinal] = handle
         self._check_budget()
@@ -161,6 +181,7 @@ class Scheduler:
         """Dispatch one call under the cap; the JSON value for agent(), None for null."""
         n = call.ordinal
         if cached is not None:
+            self._keys.pop(n, None)
             if self._aborted:
                 self._log(f"agent() #{n} aborted")
                 return None
@@ -189,7 +210,7 @@ class Scheduler:
 
     async def _dispatch(self, call: AgentCall) -> Any:
         n = call.ordinal
-        key = call_key(call)
+        key = self._keys.pop(n, None) or self._key(call)
         reported = False
 
         def report(handle: DispatchHandle | None) -> None:

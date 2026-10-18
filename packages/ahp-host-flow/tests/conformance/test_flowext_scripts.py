@@ -12,6 +12,7 @@ from ahp_host_flow.engine import RunOptions
 from ahp_host_flow.sandbox import MIN_NODE_MAJOR, NODE_ENV, find_node, run_script
 
 from ..fakes import FakeDispatcher, FakeGates  # noqa: TID252
+from ..hook_fakes import FakeVerbs  # noqa: TID252
 
 EXTENSIONS = Path(__file__).resolve().parents[2] / "conformance" / "extensions"
 
@@ -37,6 +38,7 @@ async def test_flowext_scripts_script(script: Path) -> None:
     sidecar = json.loads(script.with_suffix(".json").read_text(encoding="utf-8"))
     dispatcher = FakeDispatcher()
     gates = FakeGates(answers=sidecar.get("answers"), approvals=sidecar.get("approvals"))
+    fake = FakeVerbs(sidecar.get("verbs", {}))
     logs: list[str] = []
     value = await run_script(
         script.read_text(encoding="utf-8"),
@@ -44,7 +46,7 @@ async def test_flowext_scripts_script(script: Path) -> None:
         dispatcher=dispatcher,
         gates=None if sidecar.get("gates_off") else gates,
         filename=str(script),
-        options=RunOptions(timeout=60),
+        options=RunOptions(timeout=60, verbs=fake.handlers),
         on_log=logs.append,
     )
     assert value == sidecar["result"]
@@ -53,6 +55,8 @@ async def test_flowext_scripts_script(script: Path) -> None:
         assert got == sidecar["gates"]
     if "calls" in sidecar:
         assert sorted([c.ordinal, c.prompt] for c in dispatcher.calls) == sidecar["calls"]
+    if "verb_calls" in sidecar:
+        assert sorted([c.ordinal, c.name] for c in fake.calls) == sidecar["verb_calls"]
     if "canvases" in sidecar:
         assert [list(c) for c in gates.canvases] == sidecar["canvases"]
     for needle in sidecar.get("logs_contain", []):

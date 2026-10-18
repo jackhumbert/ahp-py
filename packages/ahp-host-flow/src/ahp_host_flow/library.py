@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import dataclasses
 import math
 from collections.abc import AsyncIterator, Callable, Coroutine, Mapping
 from typing import Any
@@ -20,6 +21,8 @@ from ahp_host_flow.engine import (
     RunOptions,
     Scheduler,
     SchedulerRefusal,
+    VerbHandler,
+    VerbRunner,
 )
 from ahp_host_flow.sandbox import pyrunner
 from ahp_host_flow.sandbox.client import (
@@ -78,7 +81,7 @@ class FlowRun:
                 phase=phase if isinstance(phase, str) else None,
                 label=label if isinstance(label, str) else None,
             )
-        except SchedulerRefusal as exc:
+        except (SchedulerRefusal, ValueError) as exc:
             return pyrunner.failed(exc)
         return self._track(self._scheduler.run(call, cached))
 
@@ -115,6 +118,17 @@ class FlowRun:
                 return pyrunner.failed(TypeError(f"workflow() args must be JSON: {exc}"))
         return self._track(self._workflow(ref, args))
 
+    def verb(self, name: str, *args: Any) -> asyncio.Future[Any]:
+        try:
+            cloned = pyrunner.clone_json(list(args))
+        except (TypeError, ValueError) as exc:
+            return pyrunner.failed(TypeError(f"{name}() arguments must be JSON: {exc}"))
+        try:
+            call, cached = self._state.verbs.issue(name, cloned)
+        except ValueError as exc:
+            return pyrunner.failed(exc)
+        return self._track(self._state.verbs.run(call, cached))
+
     async def _workflow(self, ref: object, args: Any) -> Any:
         resolved = await resolve_for_run(self._state, ref)
         # The child always gets a runner of its own, so it cannot nest.
@@ -141,14 +155,25 @@ async def run(
     on_agent_start: Callable[[AgentCall], None] | None = None,
     on_agent_end: Callable[[AgentCall, Any], None] | None = None,
     on_run_start: Callable[[str], None] | None = None,
+    verbs: Mapping[str, VerbHandler] | None = None,
+    key_extra: Callable[[AgentCall], Any] | None = None,
 ) -> AsyncIterator[FlowRun]:
     """Run agents in-process on the same Scheduler and journal as a script run.
 
     Calls the body does not await are cancelled when it exits. With
     `options.state_dir` the run is journaled with no script snapshot (filename
-    `<library>`) and `options.resume_from` replays by key.
+    `<library>`) and `options.resume_from` replays by key. `verbs` maps custom verb
+    names to handlers, called with `FlowRun.verb`; with no host there, a handler's
+    `ask` and `confirm` fail like gates do. `key_extra` is the resume-key hook: its value for
+    a call joins that call's journal key, so a cached call replays only for the same value
+    (the journal header names the hook by its module and qualified name). Left out, a hook set
+    on `options` (with its `key_mode`) is kept.
     """
     options = options or RunOptions()
+    if verbs is not None:
+        options = dataclasses.replace(options, verbs=dict(verbs))
+    if key_extra is not None:
+        options = dataclasses.replace(options, key_extra=key_extra, key_mode=None)
     jr: JournalRun | None = None
     if options.state_dir is not None:
         jr = JournalRun.open(
@@ -178,6 +203,16 @@ async def run(
         raise
     # No gate answerer in-process: ask()/approve() fail clearly (like headless flow run).
     gate_runner = GateRunner(None, abort=abort, mask=options.redact, on_log=on_log)
+    verb_runner = VerbRunner(
+        options.verbs,
+        abort=abort,
+        mask=options.redact,
+        on_log=on_log,
+        journal=jr.writer if jr else None,
+        replay=jr.verb_replay if jr else None,
+        run_id=jr.run_id if jr else None,
+        phase_of=lambda: scheduler.phase,
+    )
     state = RunState(
         scheduler=scheduler,
         options=options,
@@ -191,6 +226,7 @@ async def run(
         on_log=on_log,
         on_phase=on_phase,
         gates=gate_runner,
+        verbs=verb_runner,
     )
     flow = FlowRun(state, jr.run_id if jr else None)
     try:
@@ -201,6 +237,7 @@ async def run(
         await flow._cancel_pending()
         state.kill_children(SandboxError("run ended"))
         gate_runner.close()
+        verb_runner.close()
         scheduler.close()
         if jr is not None:
             jr.close()

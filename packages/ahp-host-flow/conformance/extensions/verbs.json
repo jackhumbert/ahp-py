@@ -1,0 +1,14 @@
+{
+  "verbs": { "tool": "echo", "render": "echo", "approve": "echo", "boom": "fail" },
+  "result": {
+    "found": { "name": "tool", "args": ["search", { "q": "docs" }] },
+    "view": { "name": "render", "args": [{ "title": "T" }] },
+    "ok": { "name": "approve", "args": ["ada", "Ship it?"] },
+    "caught": "boom failed: 1",
+    "kinds": ["function", "undefined", "function"],
+    "a": "after"
+  },
+  "verb_calls": [[0, "tool"], [1, "render"], [2, "approve"], [3, "boom"]],
+  "calls": [[0, "after"]],
+  "gates": []
+}

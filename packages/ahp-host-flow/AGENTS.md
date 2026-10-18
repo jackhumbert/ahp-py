@@ -1,7 +1,7 @@
 # Agent guide
 
 An `ahp-host` provider that runs Claude Code workflow scripts. `docs/plan.md`
-is the design; milestones M0–M11 there say what exists and what's next.
+is the design; milestones M0–M12 there say what exists and what's next.
 
 - `engine/` and `sandbox/` never import `ahp_host` (an import-linter
   contract), so the engine can move into its own distribution later. They
@@ -19,7 +19,8 @@ is the design; milestones M0–M11 there say what exists and what's next.
   in-memory host for `flow run --config`) and `__main__` (the server). They may
   import `ahp_host`; `engine/` and `sandbox/` may not. `library` (`run`, `FlowRun`) and `verbs`
   are top-level modules too; `library` may not import `ahp_host`. `engine/gates.py` (`GateRunner`) is
-  engine code and may not import `ahp_host`.
+  engine code and may not import `ahp_host`; so are `engine/verbs.py` (`VerbRunner`) and
+  `engine/verbnames.py`. `gates.MainChatVerbs` is the provider's verb host.
 - Dispatch is split by provider kind (`ProviderConfig.kind`: `inprocess`,
   `fleet`, `remote`). `dispatch.StepDispatcher` is the shared base (the main
   chat's `agent` tool call and its typed progress); `ProviderDispatcher`
@@ -163,6 +164,15 @@ is the design; milestones M0–M11 there say what exists and what's next.
   `tests.flow_fakes:StrippedEchoProvider`.
 - The corpus scripts (`conformance/corpus`) run unmodified on
   `tests/corpus_fakes.py` and have no `.py` twins.
+- Custom verbs: the host re-checks every verb name against the run's verbs, whatever a
+  runner sent. `RESERVED_VERBS` are refused at config load and in `RunOptions`, and so are names that would
+  shadow a sandbox global (`verbnames`: JS globals, names the sandbox keeps absent, Python builtins). Verbs
+  have a counter of their own, never shared with `agent()` or gate ordinals. Args,
+  results and errors are masked before publishing or journaling, and the masked result
+  is what the script gets. `call_id` is derived from the key and the occurrence.
+- Resume keys: with no `key_extra` every `call_key` is byte-identical to M11's, guarded
+  by the pinned hashes in `test_keyhook_engine_pinned_keys`. Never change the key
+  payload without that test.
 - Conventional commits, scope `ahp-host-flow`; `CHANGELOG.md` under
   `[Unreleased]`.
 

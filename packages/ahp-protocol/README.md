@@ -139,7 +139,9 @@ small descriptor under `_meta["ahp-py/flow"]` of the system notifications that
 open and close a run and its phases, and of each step's tool call. The JSON
 Schema of the descriptors ships as `flow.schema.json`, and `run_view` folds a
 chat's reduced state into phases, steps, results and usage. A stock client
-ignores the `_meta` and renders the text as before.
+ignores the `_meta` and renders the text as before. A host also marks each custom
+verb's tool call with a `verbStarted`/`verbFinished` descriptor, and `run_view` lists
+them as `verbs` (kind `verb`) beside the steps.
 
 ```python
 from ahp_protocol.ext import flow

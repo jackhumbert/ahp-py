@@ -28,6 +28,7 @@ __all__ = [
     "parallel",
     "phase",
     "pipeline",
+    "verb",
     "workflow",
 ]
 
@@ -87,7 +88,17 @@ def ask(
         opts["choices"] = choices
     if schema is not None:
         opts["schema"] = schema
-    return _runtime("ask").ask(question, **opts)
+    rt = _runtime("ask")
+    if "ask" in rt.verbs:
+        return pyrunner.failed(TypeError(_replaced("ask")))
+    return rt.ask(question, **opts)
+
+
+def _replaced(name: str) -> str:
+    return (
+        f"{name}() is a custom verb in this run: call it as a global or with "
+        f"ahp_host_flow.verbs.verb({name!r}, ...)"
+    )
 
 
 def approve(
@@ -97,7 +108,10 @@ def approve(
     opts: dict[str, Any] = {}
     if diff is not None:
         opts["diff"] = diff
-    return _runtime("approve").approve(summary, **opts)
+    rt = _runtime("approve")
+    if "approve" in rt.verbs:
+        return pyrunner.failed(TypeError(_replaced("approve")))
+    return rt.approve(summary, **opts)
 
 
 def canvas(url: str, *, title: str | None = None) -> None:
@@ -105,7 +119,15 @@ def canvas(url: str, *, title: str | None = None) -> None:
     opts: dict[str, Any] = {}
     if title is not None:
         opts["title"] = title
-    _runtime("canvas").canvas(url, **opts)
+    rt = _runtime("canvas")
+    if "canvas" in rt.verbs:
+        raise TypeError(_replaced("canvas"))
+    rt.canvas(url, **opts)
+
+
+def verb(name: str, *args: Any) -> Awaitable[Any]:
+    """Call a custom verb of this run by name; the awaitable gives the handler's JSON value."""
+    return _runtime("verb").verb(name, *args)
 
 
 class _Budget:

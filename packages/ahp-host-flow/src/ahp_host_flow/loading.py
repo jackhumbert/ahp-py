@@ -5,7 +5,7 @@ from __future__ import annotations
 import importlib
 import inspect
 import logging
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from pathlib import Path
 from typing import Any, Final
 
@@ -13,6 +13,8 @@ from ahp_host.node import Roots
 from ahp_host.provider.base import AgentProvider
 
 from ahp_host_flow.config import ConfigError, FlowConfig, ProviderConfig
+from ahp_host_flow.engine import AgentCall, VerbCall, VerbHandler
+from ahp_host_flow.routing import resolved_route
 
 _log = logging.getLogger(__name__)
 
@@ -22,18 +24,21 @@ RUNS_ROOT_NAME: Final = "flow-runs"
 _ACCEPTED_KINDS = (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
 
 
-def _import_factory(spec: ProviderConfig) -> Any:
-    assert spec.load is not None
-    module_name, _, attr_path = spec.load.partition(":")
+def import_object(path: str, where: str) -> Any:
+    """The object 'module:attr.path' names; a `ConfigError` led by *where* if it is missing."""
+    module_name, _, attr_path = path.partition(":")
     try:
         obj: Any = importlib.import_module(module_name)
         for attr in attr_path.split("."):
             obj = getattr(obj, attr)
     except (ImportError, AttributeError) as exc:
-        raise ConfigError(
-            f"providers.{spec.name}.load: cannot import {spec.load!r}: {exc}"
-        ) from exc
+        raise ConfigError(f"{where}: cannot import {path!r}: {exc}") from exc
     return obj
+
+
+def _import_factory(spec: ProviderConfig) -> Any:
+    assert spec.load is not None
+    return import_object(spec.load, f"providers.{spec.name}.load")
 
 
 def provider_roots(host_roots: Roots | None, state_dir: Path) -> Roots:
@@ -156,3 +161,64 @@ class LazyProviders(Mapping[str, AgentProvider]):
 
     def _names(self) -> list[str]:
         return [n for n, spec in self._config.providers.items() if spec.kind == "inprocess"]
+
+
+class LazyVerb:
+    """A custom verb handler imported on its first call, never at config load.
+
+    A failed import, or an object that is not callable, is cached and raised on every call
+    (it is not retried), so one broken verb fails only its own calls.
+    """
+
+    def __init__(self, name: str, path: str) -> None:
+        self._name = name
+        self._path = path
+        self._handler: VerbHandler | None = None
+        self._failed: ConfigError | None = None
+
+    def _load(self) -> VerbHandler:
+        if self._handler is not None:
+            return self._handler
+        if self._failed is not None:
+            raise self._failed
+        try:
+            obj = import_object(self._path, f"verbs.{self._name}")
+            if not callable(obj):
+                raise ConfigError(f"verbs.{self._name}: {self._path!r} is not callable")
+        except ConfigError as exc:
+            _log.warning("verb %r failed to load: %s", self._name, exc)
+            self._failed = exc
+            raise
+        handler: VerbHandler = obj
+        self._handler = handler
+        return handler
+
+    async def __call__(self, call: VerbCall) -> Any:
+        result = self._load()(call)
+        if inspect.isawaitable(result):
+            result = await result
+        return result
+
+
+def lazy_verbs(config: FlowConfig) -> dict[str, VerbHandler]:
+    """A `LazyVerb` for each `[verbs]` entry; nothing is imported until a verb is called."""
+    return {name: LazyVerb(name, path) for name, path in config.verbs.items()}
+
+
+def resume_key_hook(
+    config: FlowConfig, run_model: str | None
+) -> tuple[Callable[[AgentCall], Any] | None, str | None]:
+    """The `[resume] key` hook and its journal mode name: `(None, None)` for 'default'.
+
+    'model' keys each call by its resolved provider and model; an import path is called with the
+    call and that route. A path that is missing or not callable is a `ConfigError`.
+    """
+    key = config.resume.key
+    if key == "default":
+        return None, None
+    if key == "model":
+        return (lambda call: resolved_route(config, call, run_model)), "model"
+    fn = import_object(key, "resume.key")
+    if not callable(fn):
+        raise ConfigError(f"resume.key: {key!r} is not callable")
+    return (lambda call: fn(call, resolved_route(config, call, run_model))), key

@@ -2,6 +2,39 @@
 
 ## [Unreleased]
 
+### Added — the resume-key hook (M12)
+
+- `RunOptions.key_extra` (a callable taking an `AgentCall`) and `key_mode` (its name in the journal): the hook's JSON value joins each `agent()` call's key as an `extra` field, so a cached call replays only for the same value. With no hook every key is byte-identical to before (`call_key(call, extra=...)`; an extra of `None` still adds `"extra": null`). `key_mode_name()` is `default`, the given `key_mode`, or the hook's `module:qualname`; the options reject a mode without a hook and `default` with one.
+- The key is taken at issue time, before dispatch and before the ordinal, so a hook that raises or returns non-JSON makes that `agent()` throw `resume key hook failed for agent() #<n>: ...` and takes no ordinal. `Scheduler.admit(call, key=None)`, `Replay.lookup` and `Replay.reattach` take the key.
+- The journal header records `options.keyMode` (`RunHeader.key_mode`; a journal without it reads as `default`). A resume whose mode differs from the old run's logs one line and replays no `agent()` call (gate and verb replays still apply).
+- `library.run(key_extra=fn)` sets the hook; `FlowRun.agent` turns a failing hook into a failed future.
+- `flow.toml` gains `[resume] key` (`ResumeConfig`): `"default"` (the old keys), `"model"` (each call's key gains `{provider, model}`) or `'module:function'` (called with the `AgentCall` and that route; its value is the extra). A bad value is a config error.
+- `routing.resolved_route(config, call, run_model)` is the route from the config alone, known before dispatch: the pinned or routed provider, and the model as `opts.model` (a `models` alias expands, an unknown one passes through), else the run's model when the provider lists it, else None. `loading.resume_key_hook` builds the hook and its journal mode; `FlowProvider` sets it on each run, and a continued run uses the model of the run it continues. A path that cannot be imported fails the turn (`resume.key: cannot import ...`).
+- README sections `Custom verbs` and `Resume keys`, the expanded `Custom verbs` and new `[resume] keys` parts of `docs/format.md`, plan status and M12 result, and the AGENTS.md invariants.
+
+### Added — custom verbs in the sandbox (M12)
+
+- A new `verb` request {name, args} -> {value} on the wire, with `VERB_ERROR` (-32008) for a failed handler; `run` takes `verbs?: [str]`, and both runners define one global per name after the built-ins (so `ask`, `approve` and `canvas` may be replaced), children included. The host takes the verb ordinal when the line arrives and re-checks the name: an undeclared name or a malformed request gets `INVALID_PARAMS`.
+- `Sandbox.run` and `run_script` take `verb_host=`; `RunState` carries a `VerbRunner`, which the library API builds too. Python workflows also get `ahp_host_flow.verbs.verb(name, *args)`; `ask()`, `approve()` and `canvas()` from that module say so when the run replaced them.
+- Conformance script `extensions/verbs` (JavaScript and Python twins) and a `Custom verbs` section in `docs/format.md`.
+
+### Added — custom verb runner (M12)
+
+- `engine.VerbRunner` runs a run's custom verbs: its own ordinal counter, call ids stable across a resume, an `open`/`done`/`error` journal record per call, masked arguments, results and errors, abort that cancels a running handler (leaving only the `open` record, so a resume calls it again), and replay of finished calls without calling the handler. Verbs take no agent cap, budget or concurrency slot. A handler gets a `VerbCall` with a `VerbContext` (`ask` and `confirm` raise `GateUnavailableError` when no client can answer); a `VerbHost` supplies the context and shows progress.
+- `RunOptions.verbs` maps verb names to handlers. Names match `[A-Za-z][A-Za-z0-9_]*` and may not be one of `RESERVED_VERBS`, a JavaScript or Python reserved word, a JavaScript standard global (`Object`, `JSON`, `console`, ...), a name the sandbox keeps absent (`require`, `process`, `fetch`, ...) or a Python builtin; `ask`, `approve` and `canvas` (`REPLACEABLE_VERBS`) may be replaced. `verb_name_error` explains a refusal.
+
+### Added — custom verbs (M12)
+
+- The journal gains `verb` records (`VerbRecord`: ordinal, key, name, call id, `open`/`done`/`error`, masked value or error); a finished record wins over an open one on load, `LoadedJournal.verbs` and `open_verbs` expose them, and `JOURNAL_VERSION` stays 1. `verb_key` (sha256 of the canonical JSON of name and args) and `verb_call_id` (`verb-<key[:16]>-<occurrence>`, stable across a resume) name a call.
+- `VerbReplay` serves finished verb records by call id and key, once each, in a prefix resume and with `continue_run` alike, and never touches the `agent()` replay; `JournalRun.verb_replay` is set whenever a run resumes.
+
+- `run(verbs={name: handler})` and `FlowRun.verb(name, *args)` call custom verbs from the library API with no model; a bad name is a `ValueError` (reserved or unknown), a handler error a `VerbFailedError`, and with no host a handler's `ask`/`confirm` fail like gates do.
+- `FlowProvider` runs `[verbs]` handlers on a hosted run: `MainChatVerbs` shows each call as a tool call on the main chat (`verb-<ordinal>`, `verb-r<k>-<ordinal>` in a continued run) with `verbStarted`/`verbFinished` descriptors, masked arguments and results, and verbs replayed from the journal are not published again. A replaced `approve()` raises no confirmation.
+- `flow.toml` gains a `[verbs]` table (`name = "module:function"`). A reserved or malformed name is a config error; `loading.lazy_verbs` builds a `LazyVerb` per entry, which imports its handler on the first call only and caches a failed import (`import_object` is shared with provider loading, whose messages are unchanged).
+- A hosted verb's `context.ask(question, options)` is an input request on the main chat and `context.confirm(summary, options)` a tool confirmation (`approve`), both through a `MainChatGates` of their own (ids `verb-<ordinal>-<k>` and `verb-<ordinal>-<k>-<attempt>`, distinct from the verb's call and from `gate-...`); prompts are masked, the answer reaches the handler as typed, `ask` gives None when declined, bad options raise `ValueError` as for `ask()`/`approve()`. They are not journaled: a handler finds a request it already made by `call.call_id`, which is stable across a resume.
+- Verbs replay and re-call across a restart (a `FileSessionStore` drain or crash, resumed by itself or by `chat/turnResume`): a finished verb is served from the journal without calling its handler, a cut-off one is called again with the same call id and a `resume: <name>() #<n> was cut off...` notification, and the continued run's calls are `verb-r<k>-<ordinal>` with the cut-off `verb-<ordinal>` cancelled. `test_customverb_restart` covers it in JS and Python; no source change was needed.
+- README sections `Custom verbs` and `Resume keys`, the expanded `Custom verbs` and new `[resume] keys` parts of `docs/format.md`, plan status and M12 result, and the AGENTS.md invariants.
+
 ### Added — live tests and a sample live flow.toml (M11)
 
 - `test_triage_corpus_live` and `test_review_routed_to_glm_live` (a Review phase routed to a `glm` provider; skipped without one) beside the fan-out live test, all under `AHP_FLOW_LIVE_CONFIG`; `run_corpus` takes a script and args.

@@ -2,10 +2,11 @@
 
 The header record holds the script snapshot; each dispatched `agent()` call adds a
 start record and, when it completes, an agent record; each `ask()`/`approve()` gate
-adds a gate record (open when asked, answered when it has an answer). A torn final line
-(a killed process) is ignored on read. Record types other than
-run/workflow/agent/started/gate are ignored on load, on purpose, so a later record kind
-stays readable by this code; keep it so.
+adds a gate record (open when asked, answered when it has an answer), and each custom
+verb call adds a verb record (open when called, done or error when it finished). A torn
+final line (a killed process) is ignored on read. Record types other than
+run/workflow/agent/started/gate/verb are ignored on load, on purpose, so a later record
+kind stays readable by this code; keep it so.
 """
 
 from __future__ import annotations
@@ -15,7 +16,7 @@ import json
 import os
 import sys
 import uuid
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import IO, Any, Final, Literal, TypeGuard
@@ -37,6 +38,9 @@ _STATUSES: Final = frozenset({"ok", "null", "error"})
 GateStatus = Literal["open", "answered"]
 _GATE_STATUSES: Final = frozenset({"open", "answered"})
 _GATE_RECORD_KINDS: Final = frozenset({"ask", "approve"})
+
+VerbStatus = Literal["open", "done", "error"]
+_VERB_STATUSES: Final = frozenset({"open", "done", "error"})
 
 
 class JournalError(Exception):
@@ -89,15 +93,34 @@ def canonical_json(value: Any) -> str:
     )
 
 
-def call_key(call: AgentCall) -> str:
+#: `call_key`'s default: no resume-key hook, so the payload has no `extra` field and the key
+#: is the one every journal before the hook holds.
+_NO_EXTRA: Final = object()
+
+
+def call_key(call: AgentCall, *, extra: object = _NO_EXTRA) -> str:
     # One JSON object, not string concatenation, so field boundaries are unambiguous.
-    payload = {
+    payload: dict[str, Any] = {
         "label": call.label,
         "opts": dict(call.opts),
         "phase": call.phase,
         "prompt": call.prompt,
     }
+    if extra is not _NO_EXTRA:
+        payload["extra"] = extra
     return hashlib.sha256(canonical_json(payload).encode("utf-8")).hexdigest()
+
+
+def verb_key(name: str, args: Sequence[Any]) -> str:
+    """The replay key of a custom verb call: sha256 of the canonical JSON of name and args."""
+    payload = {"args": list(args), "name": name}
+    return hashlib.sha256(canonical_json(payload).encode("utf-8")).hexdigest()
+
+
+def verb_call_id(key: str, occurrence: int) -> str:
+    """The call id of the *occurrence*-th use of *key*; stable across a resume because it
+    never involves the ordinal."""
+    return f"verb-{key[:16]}-{occurrence}"
 
 
 def new_run_id() -> str:
@@ -121,6 +144,8 @@ class RunHeader:
     max_agents: int
     budget_total: int | None
     resumed_from: str | None = None
+    # How the run keyed its agent() calls: "default", or the resume-key hook's mode name.
+    key_mode: str = "default"
 
 
 @dataclass(frozen=True)
@@ -171,12 +196,27 @@ class GateRecord:
 
 
 @dataclass(frozen=True)
+class VerbRecord:
+    """One custom verb call: `open` when called, `done` or `error` once it finished."""
+
+    ordinal: int
+    key: str
+    name: str
+    call_id: str
+    status: VerbStatus
+    # The verb's return value (masked); None unless done.
+    value: Any = None
+    error: str | None = None
+
+
+@dataclass(frozen=True)
 class LoadedJournal:
     header: RunHeader
     workflows: Mapping[str, WorkflowSnapshot]
     agents: tuple[AgentRecord, ...]
     started: tuple[StartRecord, ...] = ()
     gates: tuple[GateRecord, ...] = ()
+    verbs: tuple[VerbRecord, ...] = ()
 
     @property
     def unfinished(self) -> tuple[StartRecord, ...]:
@@ -188,6 +228,11 @@ class LoadedJournal:
     def open_gates(self) -> tuple[GateRecord, ...]:
         """Gates asked but never answered: open when the run was killed."""
         return tuple(g for g in self.gates if g.status == "open")
+
+    @property
+    def open_verbs(self) -> tuple[VerbRecord, ...]:
+        """Verb calls never finished: open when the run was killed."""
+        return tuple(v for v in self.verbs if v.status == "open")
 
 
 def _line(record: dict[str, Any]) -> str:
@@ -248,6 +293,7 @@ class JournalWriter:
                     "options": {
                         "maxAgents": header.max_agents,
                         "budgetTotal": header.budget_total,
+                        "keyMode": header.key_mode,
                     },
                 }
             )
@@ -312,6 +358,29 @@ class JournalWriter:
             }
         )
 
+    def append_verb(self, record: VerbRecord) -> None:
+        mask = self._mask
+        value = record.value if record.status == "done" else None
+        if mask is not None and record.status == "done":
+            value = mask(value)
+        error: str | None = None
+        if record.status == "error":
+            error = record.error or ""
+            if mask is not None:
+                error = mask(error)
+        self._write(
+            {
+                "type": "verb",
+                "ordinal": record.ordinal,
+                "key": record.key,
+                "name": record.name,
+                "callId": record.call_id,
+                "status": record.status,
+                "value": value,
+                "error": error,
+            }
+        )
+
     def append_workflow(self, snapshot: WorkflowSnapshot) -> None:
         self._write(
             {
@@ -358,8 +427,8 @@ def _redacted_marker(raw: Any) -> dict[str, str] | Literal[False] | None:
 
 
 def load_journal(state_dir: Path, run_id: str) -> LoadedJournal:
-    """Read a run's journal. Record types other than run/workflow/agent/started/gate are
-    ignored, on purpose, so a later record kind stays readable; keep it so.
+    """Read a run's journal. Record types other than run/workflow/agent/started/gate/verb
+    are ignored, on purpose, so a later record kind stays readable; keep it so.
     """
     path = run_dir(state_dir, run_id) / JOURNAL_FILE
     if not path.is_file():
@@ -372,6 +441,7 @@ def load_journal(state_dir: Path, run_id: str) -> LoadedJournal:
     agents: dict[int, AgentRecord] = {}
     started: dict[int, StartRecord] = {}
     gates: dict[int, GateRecord] = {}
+    verbs: dict[int, VerbRecord] = {}
     for n, part in enumerate(parts, start=1):
         try:
             rec = json.loads(part)
@@ -388,6 +458,7 @@ def load_journal(state_dir: Path, run_id: str) -> LoadedJournal:
             options = rec.get("options")
             options = options if isinstance(options, dict) else {}
             source = rec.get("source")
+            key_mode = options.get("keyMode")
             header = RunHeader(
                 run_id=str(rec.get("runId", run_id)),
                 filename=str(rec.get("filename", "")),
@@ -397,6 +468,7 @@ def load_journal(state_dir: Path, run_id: str) -> LoadedJournal:
                 max_agents=options.get("maxAgents", 0),
                 budget_total=options.get("budgetTotal"),
                 resumed_from=rec.get("resumedFrom"),
+                key_mode=key_mode if isinstance(key_mode, str) else "default",
             )
         elif kind == "workflow":
             filename, source = rec.get("filename"), rec.get("source")
@@ -462,6 +534,24 @@ def load_journal(state_dir: Path, run_id: str) -> LoadedJournal:
             have = gates.get(ordinal)
             if have is None or (have.status == "open" and status == "answered"):
                 gates[ordinal] = GateRecord(ordinal, key, gate_kind, status, rec.get("answer"))
+        elif kind == "verb":
+            ordinal, key, name = rec.get("ordinal"), rec.get("key"), rec.get("name")
+            call_id, status, error = rec.get("callId"), rec.get("status"), rec.get("error")
+            if (
+                not _is_count(ordinal)
+                or not isinstance(key, str)
+                or not isinstance(name, str)
+                or not isinstance(call_id, str)
+                or status not in _VERB_STATUSES
+                or (error is not None and not isinstance(error, str))
+            ):
+                raise JournalError(f"journal line {n}: bad verb record")
+            # A finished record wins over an open one, whatever the line order.
+            have_verb = verbs.get(ordinal)
+            if have_verb is None or (have_verb.status == "open" and status != "open"):
+                verbs[ordinal] = VerbRecord(
+                    ordinal, key, name, call_id, status, rec.get("value"), error
+                )
     if header is None:
         raise JournalError(f"journal for run {run_id!r} does not start with a run header")
     return LoadedJournal(
@@ -470,6 +560,7 @@ def load_journal(state_dir: Path, run_id: str) -> LoadedJournal:
         tuple(agents[o] for o in sorted(agents)),
         tuple(started[o] for o in sorted(started)),
         tuple(gates[o] for o in sorted(gates)),
+        tuple(verbs[o] for o in sorted(verbs)),
     )
 
 

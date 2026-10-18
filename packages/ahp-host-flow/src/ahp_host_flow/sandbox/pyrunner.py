@@ -345,6 +345,7 @@ class Runtime:
         args: Any,
         child: bool,
         spent: list[int],
+        verbs: tuple[str, ...] = (),
     ) -> None:
         self.link = link
         self.budget_total = budget_total
@@ -352,6 +353,7 @@ class Runtime:
         self.args = args
         self.child = child
         self.spent = spent
+        self.verbs = verbs
         self.budget = _Budget(self)
 
     def _mirror(self, value: object) -> None:
@@ -450,6 +452,23 @@ class Runtime:
         reply = self.link.call("gate", {"kind": "approve", "question": summary, "options": options})
         return asyncio.ensure_future(self._approve_result(reply))
 
+    def verb(self, name: object, *args: Any) -> asyncio.Future[Any]:
+        if not isinstance(name, str) or name not in self.verbs:
+            return failed(NameError(f"name {name!r} is not defined: it is not a verb of this run"))
+        try:
+            wire_args = clone_json(list(args))
+        except (TypeError, ValueError) as exc:
+            return failed(TypeError(f"{name}() arguments must be JSON: {exc}"))
+        reply = self.link.call("verb", {"name": name, "args": wire_args})
+        return asyncio.ensure_future(self._gate_result(reply))
+
+    def verb_function(self, name: str) -> Callable[..., asyncio.Future[Any]]:
+        def function(*args: Any) -> asyncio.Future[Any]:
+            return self.verb(name, *args)
+
+        function.__name__ = function.__qualname__ = name
+        return function
+
     async def _gate_result(self, reply: asyncio.Future[Any]) -> Any:
         msg = await reply
         if msg.get("error") is not None:
@@ -519,6 +538,7 @@ class Runtime:
             args=args,
             child=True,
             spent=self.spent,
+            verbs=self.verbs,
         )
         ctx = contextvars.copy_context()
         ctx.run(CURRENT.set, child)
@@ -542,7 +562,7 @@ class Runtime:
 
 
 def _namespace(rt: Runtime, filename: str) -> dict[str, Any]:
-    return {
+    ns: dict[str, Any] = {
         "__name__": "__workflow__",
         "__file__": filename,
         "__builtins__": builtins,
@@ -558,6 +578,10 @@ def _namespace(rt: Runtime, filename: str) -> dict[str, Any]:
         "workflow": rt.workflow,
         "args": rt.args,
     }
+    # After the built-ins, so a verb may replace ask, approve or canvas.
+    for name in rt.verbs:
+        ns[name] = rt.verb_function(name)
+    return ns
 
 
 def _compile(source: str, filename: str) -> Any:
@@ -610,6 +634,8 @@ async def _run(link: _Link, params: dict[str, Any]) -> dict[str, Any]:
     limits: dict[str, Any] = raw if isinstance(raw, dict) else {}
     max_items = _int(limits.get("maxItems"))
     spent = _int(params.get("spent"))
+    raw_verbs = params.get("verbs")
+    verbs = tuple(v for v in raw_verbs if isinstance(v, str)) if isinstance(raw_verbs, list) else ()
     rt = Runtime(
         link,
         budget_total=_int(limits.get("budgetTotal")),
@@ -617,6 +643,7 @@ async def _run(link: _Link, params: dict[str, Any]) -> dict[str, Any]:
         args=params.get("args"),
         child=params.get("child") is True,
         spent=[spent if spent is not None and spent >= 0 else 0],
+        verbs=verbs,
     )
     ns = _namespace(rt, filename)
     ctx = contextvars.copy_context()

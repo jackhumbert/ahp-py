@@ -13,6 +13,10 @@ with the builders below, the client reads them back with :func:`run_view`, and
 :data:`DESCRIPTOR_SCHEMA` (shipped as ``flow.schema.json``) is the contract for
 any third party.
 
+A host also marks each custom verb's tool call with a ``verbStarted`` /
+``verbFinished`` descriptor; :func:`run_view` lists those as ``verbs`` (kind
+``verb``) beside the agent steps, which stay in ``steps``.
+
 Everything here is pure and stdlib-only. :func:`run_view` never raises: a part it
 does not understand is ignored, never an error, because the chat state is data
 written by a peer.
@@ -34,7 +38,9 @@ __all__ = [
     "RUN_FINISHED_STATUSES",
     "SCHEDULE_TRIGGER_ID",
     "SCHEMA_FILE",
+    "STEP_KINDS",
     "STEP_STATUSES",
+    "VERB_STATUSES",
     "PhaseView",
     "RunView",
     "StepView",
@@ -51,6 +57,9 @@ __all__ = [
     "step",
     "step_finished",
     "step_started",
+    "verb",
+    "verb_finished",
+    "verb_started",
     "with_offered_schedule",
 ]
 
@@ -64,6 +73,10 @@ NOTIFICATION_KINDS: Final = ("runStarted", "phaseStarted", "phaseFinished", "run
 STEP_STATUSES: Final = ("ok", "null", "error", "skipped")
 #: ``runFinished.status``.
 RUN_FINISHED_STATUSES: Final = ("ok", "error")
+#: ``verbFinished.status``.
+VERB_STATUSES: Final = ("ok", "error")
+#: :attr:`StepView.kind`: a model step or a custom verb.
+STEP_KINDS: Final = ("agent", "verb")
 #: The id of the schedule trigger :func:`with_offered_schedule` adds.
 SCHEDULE_TRIGGER_ID: Final = "ahp-py/flow-schedule"
 
@@ -74,7 +87,11 @@ DESCRIPTOR_SCHEMA: Final[Mapping[str, Any]] = {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "$id": "https://github.com/jackhumbert/ahp-py/tree/main/packages/ahp-protocol/src/ahp_protocol/ext/flow.schema.json",
     "title": "ahp-py/flow progress descriptor",
-    "oneOf": [{"$ref": "#/$defs/notification"}, {"$ref": "#/$defs/step"}],
+    "oneOf": [
+        {"$ref": "#/$defs/notification"},
+        {"$ref": "#/$defs/step"},
+        {"$ref": "#/$defs/verb"},
+    ],
     "$defs": {
         "usage": {
             "type": "object",
@@ -148,6 +165,32 @@ DESCRIPTOR_SCHEMA: Final[Mapping[str, Any]] = {
                 "stepStarted": {"$ref": "#/$defs/stepStarted"},
                 "stepFinished": {"$ref": "#/$defs/stepFinished"},
                 "awaitingInput": {"const": True},
+            },
+            "additionalProperties": False,
+        },
+        "verbStarted": {
+            "type": "object",
+            "required": ["name", "ordinal", "phase"],
+            "properties": {
+                "name": {"type": "string"},
+                "ordinal": {"type": "integer", "minimum": 0},
+                "phase": _NULLABLE_STRING,
+            },
+        },
+        "verbFinished": {
+            "type": "object",
+            "required": ["status"],
+            "properties": {
+                "status": {"enum": list(VERB_STATUSES)},
+                "error": {"type": "string"},
+            },
+        },
+        "verb": {
+            "type": "object",
+            "required": ["verbStarted"],
+            "properties": {
+                "verbStarted": {"$ref": "#/$defs/verbStarted"},
+                "verbFinished": {"$ref": "#/$defs/verbFinished"},
             },
             "additionalProperties": False,
         },
@@ -227,6 +270,27 @@ def step(
         body["stepFinished"] = dict(finished)
     if awaiting:
         body["awaitingInput"] = True
+    return body
+
+
+def verb_started(*, name: str, ordinal: int, phase: str | None) -> dict[str, Any]:
+    return {"name": name, "ordinal": ordinal, "phase": phase}
+
+
+def verb_finished(*, status: str, error: str | None = None) -> dict[str, Any]:
+    if status not in VERB_STATUSES:
+        raise ValueError(f"verb status must be one of {VERB_STATUSES}, got {status!r}")
+    body: dict[str, Any] = {"status": status}
+    if error is not None:
+        body["error"] = error
+    return body
+
+
+def verb(started: Mapping[str, Any], finished: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    """A custom verb's descriptor; ``finished`` is added on the result."""
+    body: dict[str, Any] = {"verbStarted": dict(started)}
+    if finished is not None:
+        body["verbFinished"] = dict(finished)
     return body
 
 
@@ -327,6 +391,10 @@ class StepView:
     usage: Mapping[str, int] | None = None
     error: str | None = None
     awaiting: bool = False
+    #: One of :data:`STEP_KINDS`.
+    kind: str = "agent"
+    #: A verb's name; ``None`` for an agent step.
+    name: str | None = None
 
 
 @dataclass(frozen=True)
@@ -335,6 +403,7 @@ class PhaseView:
     #: ``running`` or ``finished``.
     status: str
     steps: tuple[StepView, ...]
+    verbs: tuple[StepView, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -352,6 +421,11 @@ class RunView:
     def steps(self) -> tuple[StepView, ...]:
         """Every step of every phase, by ordinal."""
         return tuple(sorted((s for p in self.phases for s in p.steps), key=lambda s: s.ordinal))
+
+    @property
+    def verbs(self) -> tuple[StepView, ...]:
+        """Every custom verb of every phase, by ordinal."""
+        return tuple(sorted((s for p in self.phases for s in p.verbs), key=lambda s: s.ordinal))
 
 
 EMPTY_RUN: Final = RunView(
@@ -396,6 +470,7 @@ def _fold_turn(turn: Mapping[str, Any], active: bool) -> RunView | None:
     phase_order: list[str | None] = []
     phase_state: dict[str, str] = {}
     steps: dict[int, _Raw] = {}
+    verbs: dict[int, _Raw] = {}
 
     def note_phase(title: str | None) -> None:
         if title not in phase_order:
@@ -432,15 +507,21 @@ def _fold_turn(turn: Mapping[str, Any], active: bool) -> RunView | None:
             if not isinstance(tc, Mapping):
                 continue
             d = descriptor_of(tc.get("_meta"))
-            started = d.get("stepStarted") if d is not None else None
-            if d is None or not isinstance(started, Mapping):
+            if d is None:
                 continue
+            started = d.get("stepStarted")
+            target = steps
+            if not isinstance(started, Mapping):
+                started = d.get("verbStarted")
+                target = verbs
+                if not isinstance(started, Mapping):
+                    continue
             ordinal = started.get("ordinal")
             if not isinstance(ordinal, int) or isinstance(ordinal, bool):
                 continue
-            steps[ordinal] = _Raw(
+            target[ordinal] = _Raw(
                 started,
-                d.get("stepFinished"),
+                d.get("stepFinished" if target is steps else "verbFinished"),
                 d.get("awaitingInput") is True,
                 _str(tc.get("toolCallId")) or "",
                 tc.get("status"),
@@ -502,6 +583,34 @@ def _fold_turn(turn: Mapping[str, Any], active: bool) -> RunView | None:
                 awaiting=raw.awaiting and step_status == "running",
             )
         )
+    verbs_by_phase: dict[str | None, list[StepView]] = {title: [] for title in phase_order}
+    for ordinal in sorted(verbs):
+        raw = verbs[ordinal]
+        fin = raw.finished
+        error = None
+        if isinstance(fin, Mapping) and fin.get("status") in VERB_STATUSES:
+            verb_status = fin["status"]
+            error = _str(fin.get("error"))
+        elif raw.status == "cancelled" or status != "running":
+            verb_status = "cancelled"
+        else:
+            verb_status = "running"
+        s = raw.started
+        verbs_by_phase[_str(s.get("phase"))].append(
+            StepView(
+                tool_call_id=raw.tool_call_id,
+                ordinal=ordinal,
+                label=None,
+                phase=_str(s.get("phase")),
+                chat=None,
+                model=None,
+                provider=None,
+                status=verb_status,
+                error=error,
+                kind="verb",
+                name=_str(s.get("name")),
+            )
+        )
     phases = tuple(
         PhaseView(
             title=title,
@@ -512,6 +621,7 @@ def _fold_turn(turn: Mapping[str, Any], active: bool) -> RunView | None:
                 else "running"
             ),
             steps=tuple(by_phase[title]),
+            verbs=tuple(verbs_by_phase[title]),
         )
         for title in phase_order
     )

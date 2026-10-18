@@ -30,3 +30,21 @@ def test_readme_operations_example_parses(tmp_path: Path) -> None:
     config = parse_config(tomllib.loads(block.group(1)), base=tmp_path)
     assert config.workflows.sources == ("client", "workspace", "user", "host")
     assert config.providers["claude"].interactive is True
+
+
+def test_readme_verbs_and_resume_examples_parse(tmp_path: Path) -> None:
+    """The README's Custom verbs and Resume keys blocks parse into the config."""
+    text = (ROOT / "README.md").read_text(encoding="utf-8")
+    data: dict[str, object] = {}
+    for heading in ("## Custom verbs", "## Resume keys"):
+        section = text[text.index(heading) :]
+        block = re.search(r"```toml\n(.*?)```", section, re.DOTALL)
+        assert block is not None
+        data.update(tomllib.loads('[providers.claude]\nload = "m:C"\n' + block.group(1)))
+    config = parse_config(data, base=tmp_path)
+    assert config.verbs == {
+        "tool": "my_pkg.verbs:tool",
+        "render": "my_pkg.verbs:render",
+        "approve": "my_pkg.verbs:approve",
+    }
+    assert config.resume.key == "model"

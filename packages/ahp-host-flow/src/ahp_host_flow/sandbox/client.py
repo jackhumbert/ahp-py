@@ -31,6 +31,11 @@ from ahp_host_flow.engine import (
     RunOptions,
     Scheduler,
     SchedulerRefusal,
+    VerbCall,
+    VerbFailedError,
+    VerbHost,
+    VerbRecord,
+    VerbRunner,
     WorkflowRefError,
     load_journal,
     resolve_workflow,
@@ -45,6 +50,15 @@ NO_ARGS: Final = object()
 CANVAS_FLUSH_TIMEOUT: Final = 5.0
 
 Language = Literal["js", "py"]
+
+# What `_dispatch` takes at the host when a request line arrives, passed on to its handler.
+_Issued = (
+    tuple[AgentCall, AgentRecord | None]
+    | tuple[GateCall, GateRecord | None]
+    | tuple[VerbCall, VerbRecord | None]
+    | Exception
+    | None
+)
 
 
 def language_of(filename: str) -> Language:
@@ -137,6 +151,7 @@ class RunState:
     on_log: Callable[[str], None] | None
     on_phase: Callable[[str], None] | None
     gates: GateRunner
+    verbs: VerbRunner
     # Child runners of the other language, alive while the run is.
     children: set[Sandbox] = field(default_factory=set)
 
@@ -343,6 +358,8 @@ class Sandbox:
                 if method == "agent"
                 else self._issue_gate(msg)
                 if method == "gate"
+                else self._issue_verb(msg)
+                if method == "verb"
                 else None
             )
             task = asyncio.create_task(self._on_request(msg, issued))
@@ -388,16 +405,23 @@ class Sandbox:
         except Exception as exc:
             return exc
 
-    async def _on_request(
-        self,
-        msg: Mapping[str, Any],
-        issued: tuple[AgentCall, AgentRecord | None]
-        | tuple[GateCall, GateRecord | None]
-        | Exception
-        | None = None,
-    ) -> None:
+    def _issue_verb(
+        self, msg: Mapping[str, Any]
+    ) -> tuple[VerbCall, VerbRecord | None] | Exception | None:
+        """Take the verb's ordinal at the host; a refused request is returned, not raised."""
+        state = self._run
+        if state is None:
+            return None
+        params = msg.get("params")
+        params = params if isinstance(params, Mapping) else {}
+        try:
+            return state.verbs.issue(params.get("name"), params.get("args"))
+        except Exception as exc:
+            return exc
+
+    async def _on_request(self, msg: Mapping[str, Any], issued: _Issued = None) -> None:
         method = msg.get("method")
-        if method in ("agent", "workflow", "gate"):
+        if method in ("agent", "workflow", "gate", "verb"):
             task = asyncio.current_task()
             if task is not None:
                 self._agent_tasks.add(task)
@@ -406,6 +430,8 @@ class Sandbox:
                     await self._on_agent(msg, issued)
                 elif method == "gate":
                     await self._on_gate(msg, issued)
+                elif method == "verb":
+                    await self._on_verb(msg, issued)
                 else:
                     await self._on_workflow(msg)
             except asyncio.CancelledError:
@@ -437,14 +463,7 @@ class Sandbox:
             error["data"] = data
         await self._write({"jsonrpc": protocol.JSONRPC, "id": request_id, "error": error})
 
-    async def _on_agent(
-        self,
-        msg: Mapping[str, Any],
-        issued: tuple[AgentCall, AgentRecord | None]
-        | tuple[GateCall, GateRecord | None]
-        | Exception
-        | None,
-    ) -> None:
+    async def _on_agent(self, msg: Mapping[str, Any], issued: _Issued) -> None:
         state = self._run
         if state is None or issued is None:
             await self._write_error(msg["id"], protocol.INTERNAL_ERROR, "no run is active")
@@ -454,7 +473,7 @@ class Sandbox:
             if isinstance(issued, Exception):
                 raise issued
             call, cached = issued
-            if not isinstance(call, AgentCall) or isinstance(cached, GateRecord):
+            if not isinstance(call, AgentCall) or isinstance(cached, GateRecord | VerbRecord):
                 raise TypeError("not an agent request")
             value = await scheduler.run(call, cached)
         except SchedulerRefusal as exc:
@@ -473,14 +492,7 @@ class Sandbox:
             }
         )
 
-    async def _on_gate(
-        self,
-        msg: Mapping[str, Any],
-        issued: tuple[AgentCall, AgentRecord | None]
-        | tuple[GateCall, GateRecord | None]
-        | Exception
-        | None,
-    ) -> None:
+    async def _on_gate(self, msg: Mapping[str, Any], issued: _Issued) -> None:
         state = self._run
         if state is None or issued is None:
             await self._write_error(msg["id"], protocol.INTERNAL_ERROR, "no run is active")
@@ -489,13 +501,34 @@ class Sandbox:
             await self._write_error(msg["id"], protocol.INVALID_PARAMS, str(issued))
             return
         call, cached = issued
-        if not isinstance(call, GateCall) or isinstance(cached, AgentRecord):
+        if not isinstance(call, GateCall) or isinstance(cached, AgentRecord | VerbRecord):
             await self._write_error(msg["id"], protocol.INTERNAL_ERROR, "not a gate request")
             return
         try:
             value = await state.gates.run(call, cached)
         except GateUnavailableError as exc:
             await self._write_error(msg["id"], protocol.GATE_ERROR, str(exc))
+            return
+        await self._write(
+            {"jsonrpc": protocol.JSONRPC, "id": msg["id"], "result": {"value": value}}
+        )
+
+    async def _on_verb(self, msg: Mapping[str, Any], issued: _Issued) -> None:
+        state = self._run
+        if state is None or issued is None:
+            await self._write_error(msg["id"], protocol.INTERNAL_ERROR, "no run is active")
+            return
+        if isinstance(issued, Exception):
+            await self._write_error(msg["id"], protocol.INVALID_PARAMS, str(issued))
+            return
+        call, cached = issued
+        if not isinstance(call, VerbCall) or isinstance(cached, (AgentRecord, GateRecord)):
+            await self._write_error(msg["id"], protocol.INTERNAL_ERROR, "not a verb request")
+            return
+        try:
+            value = await state.verbs.run(call, cached)
+        except VerbFailedError as exc:
+            await self._write_error(msg["id"], protocol.VERB_ERROR, str(exc))
             return
         await self._write(
             {"jsonrpc": protocol.JSONRPC, "id": msg["id"], "result": {"value": value}}
@@ -602,6 +635,8 @@ class Sandbox:
                 "child": True,
                 "spent": state.scheduler.budget.spent,
             }
+            if state.verbs.names:
+                params["verbs"] = list(state.verbs.names)
             if args is not NO_ARGS:
                 params["args"] = args
             result = await self._request("run", params)
@@ -629,6 +664,7 @@ class Sandbox:
         on_agent_end: Callable[[AgentCall, Any], None] | None = None,
         on_run_start: Callable[[str], None] | None = None,
         gates: Gates | None = None,
+        verb_host: VerbHost | None = None,
     ) -> Any:
         """Run a script; `agent()` calls go through a Scheduler to `dispatcher`.
 
@@ -688,6 +724,17 @@ class Sandbox:
                 journal=jr.writer if jr else None,
                 replay=jr.gate_replay if jr else None,
             )
+            verb_runner = VerbRunner(
+                options.verbs,
+                host=verb_host,
+                abort=abort,
+                mask=options.redact,
+                on_log=on_log,
+                journal=jr.writer if jr else None,
+                replay=jr.verb_replay if jr else None,
+                run_id=jr.run_id if jr else None,
+                phase_of=lambda: scheduler.phase,
+            )
             state = RunState(
                 scheduler=scheduler,
                 options=options,
@@ -701,6 +748,7 @@ class Sandbox:
                 on_log=on_log,
                 on_phase=on_phase,
                 gates=gate_runner,
+                verbs=verb_runner,
             )
             self._run = state
             try:
@@ -717,6 +765,8 @@ class Sandbox:
                 }
                 if args is not NO_ARGS:
                     params["args"] = args
+                if verb_runner.names:
+                    params["verbs"] = list(verb_runner.names)
                 try:
                     async with asyncio.timeout(options.timeout):
                         result = await self._request("run", params)
@@ -747,6 +797,7 @@ class Sandbox:
                         canvas_task.cancel()
                     await asyncio.gather(*stuck, return_exceptions=True)
                 state.gates.close()
+                verb_runner.close()
                 tasks = list(self._agent_tasks)
                 for task in tasks:
                     task.cancel()
@@ -785,6 +836,7 @@ async def run_script(
     on_agent_end: Callable[[AgentCall, Any], None] | None = None,
     on_run_start: Callable[[str], None] | None = None,
     gates: Gates | None = None,
+    verb_host: VerbHost | None = None,
 ) -> Any:
     """Run a script with a throwaway sandbox; Node for `.js`, the Python runner for `.py`."""
     name = filename
@@ -804,4 +856,5 @@ async def run_script(
             on_agent_end=on_agent_end,
             on_run_start=on_run_start,
             gates=gates,
+            verb_host=verb_host,
         )
