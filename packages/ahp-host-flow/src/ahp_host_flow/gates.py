@@ -33,7 +33,15 @@ from ahp_host.provider.changes import FileChange
 from ahp_protocol.ext import flow
 
 from ahp_host_flow import catalog
-from ahp_host_flow.engine import GateCall, Redactor, VerbCall, VerbContext, schema_error
+from ahp_host_flow.engine import (
+    AskOutcome,
+    ConfirmOutcome,
+    GateCall,
+    Redactor,
+    VerbCall,
+    VerbContext,
+    schema_error,
+)
 from ahp_host_flow.engine.gates import options_error
 
 #: The same bound as `ahp_host.core.structured.MAX_ATTEMPTS`: invalid answers re-asked.
@@ -206,10 +214,14 @@ class MainChatGates:
         return mask(message) if message is not None else None, masked
 
     async def ask(self, call: GateCall) -> Any:
+        return (await self.ask_outcome(call)).value
+
+    async def ask_outcome(self, call: GateCall) -> AskOutcome:
         message, questions = self._masked_form(self._redactor.mask(call.question), call.options)
         # The validation form is built from the raw options; only what is shown is masked.
         key = ""
         reason: str | None = None
+        answered_by: str | None = None
         try:
             for attempt in range(ASK_ATTEMPTS):
                 key = f"{self._prefix}-{call.ordinal}-{attempt}"
@@ -219,18 +231,19 @@ class MainChatGates:
                 outcome = await self._sink.request_input(
                     InputRequest(message=shown, questions=questions, key=key)
                 )
+                answered_by = outcome.answered_by
                 if not outcome.accepted:
-                    return None
+                    return AskOutcome(None, answered_by)
                 value, reason = gate_answer(call.options, outcome.answers)
                 if reason is None:
-                    return value
+                    return AskOutcome(value, answered_by)
         except asyncio.CancelledError:
             if isinstance(self._sink, ResolvesInput) and key:
                 with contextlib.suppress(Exception):
                     await self._sink.input_resolved(key, response="cancel")
             raise
         self._log(f"ask() #{call.ordinal}: no valid answer after {ASK_ATTEMPTS} attempts: {reason}")
-        return None
+        return AskOutcome(None, answered_by)
 
     def _edits(self, call: GateCall, diff: list[Any]) -> list[FileChange]:
         if self._workspace is None:
@@ -260,6 +273,9 @@ class MainChatGates:
         return edits
 
     async def approve(self, call: GateCall) -> bool:
+        return (await self.approve_outcome(call)).approved
+
+    async def approve_outcome(self, call: GateCall) -> ConfirmOutcome:
         call_id = f"{self._prefix}-{call.ordinal}"
         summary = self._redactor.mask(call.question)
         diff = call.options.get("diff")
@@ -285,14 +301,14 @@ class MainChatGates:
                 )
             )
             if not outcome.approved:
-                return False
+                return ConfirmOutcome(False, outcome.answered_by)
             await self._sink.tool_call_completed(
                 call_id,
                 {"content": [{"type": "text", "text": "approved"}]},
                 success=True,
                 past_tense_message="Approved",
             )
-            return True
+            return ConfirmOutcome(True, outcome.answered_by)
         except asyncio.CancelledError:
             with contextlib.suppress(Exception):
                 await self._sink.tool_call_confirmed(
@@ -328,7 +344,9 @@ class MainChatVerbs:
         on_log: Callable[[str], None] | None = None,
         call_id_prefix: str = "verb",
         working_directories: Sequence[str] = (),
+        principal: str | None = None,
     ) -> None:
+        self._principal = principal
         self._sink = sink
         self._publisher = publisher
         self.chat = chat
@@ -356,23 +374,22 @@ class MainChatVerbs:
         )
         n = itertools.count()
 
-        async def ask(question: str, options: Mapping[str, Any] | None = None) -> Any:
+        async def ask(question: str, options: Mapping[str, Any] | None = None) -> AskOutcome:
             opts = dict(options or {})
             if (reason := options_error("ask", opts)) is not None:
                 raise ValueError(reason)
-            return await gates.ask(GateCall(next(n), "ask", str(question), opts))
+            return await gates.ask_outcome(GateCall(next(n), "ask", str(question), opts))
 
-        async def confirm(summary: str, options: Mapping[str, Any] | None = None) -> bool:
+        async def confirm(summary: str, options: Mapping[str, Any] | None = None) -> ConfirmOutcome:
             opts = dict(options or {})
             if (reason := options_error("approve", opts)) is not None:
                 raise ValueError(reason)
-            return await gates.approve(GateCall(next(n), "approve", str(summary), opts))
+            return await gates.approve_outcome(GateCall(next(n), "approve", str(summary), opts))
 
-        # ahp-host hands providers no principal today.
         return VerbContext(
             session=self._session_uri,
             chat=self.chat,
-            principal=None,
+            principal=self._principal,
             log=self._log,
             ask=ask,
             confirm=confirm,

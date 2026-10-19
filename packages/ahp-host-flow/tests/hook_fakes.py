@@ -11,6 +11,8 @@ from ahp_host_flow.engine import VerbCall, VerbContext, VerbHandler
 
 # Call id of every echo_verb call, in call order.
 ECHO_CALLS: list[str] = []
+# The principal each principal_hold_verb call saw, in call order.
+PRINCIPAL_CALLS: list[str | None] = []
 
 
 async def echo_verb(call: VerbCall) -> dict[str, Any]:
@@ -41,24 +43,48 @@ async def hold_verb(call: VerbCall) -> Any:
     return "released"
 
 
+async def principal_hold_verb(call: VerbCall) -> Any:
+    """Record the run's principal, then hold like `hold_verb`; returns the principal."""
+    PRINCIPAL_CALLS.append(call.context.principal)
+    while HoldVerb.holding:
+        await asyncio.Event().wait()
+    return call.context.principal
+
+
 async def ask_verb(call: VerbCall) -> Any:
-    return await call.context.ask("which?")
+    return (await call.context.ask("which?")).value
 
 
 async def asking_verb(call: VerbCall) -> Any:
     return {
-        "answer": await call.context.ask("Pick a colour", {"choices": ["red", "blue"]}),
+        "answer": (await call.context.ask("Pick a colour", {"choices": ["red", "blue"]})).value,
         "session": call.context.session,
         "chat": call.context.chat,
     }
 
 
 async def confirming_verb(call: VerbCall) -> Any:
-    return await call.context.confirm("Deploy now?")
+    return (await call.context.confirm("Deploy now?")).approved
 
 
 async def bad_ask_verb(call: VerbCall) -> Any:
-    return await call.context.ask("q", {"choices": []})
+    return (await call.context.ask("q", {"choices": []})).value
+
+
+async def principal_verb(call: VerbCall) -> Any:
+    return call.context.principal
+
+
+async def approve_person_verb(call: VerbCall) -> Any:
+    """Ask again until *person* answers (up to 3 times), reporting who answered each time."""
+    person = call.args[0]
+    answered: list[str | None] = []
+    for _ in range(3):
+        outcome = await call.context.confirm(f"Approve as {person}?")
+        answered.append(outcome.answered_by)
+        if outcome.answered_by == person:
+            return {"approved": outcome.approved, "answeredBy": answered}
+    return {"approved": False, "answeredBy": answered}
 
 
 def counting_verb(counter: list[str]) -> VerbHandler:
@@ -114,6 +140,7 @@ class FakeVerbHost:
 
 def reset_hooks() -> None:
     ECHO_CALLS.clear()
+    PRINCIPAL_CALLS.clear()
     HoldVerb.calls.clear()
     HoldVerb.holding = True
 

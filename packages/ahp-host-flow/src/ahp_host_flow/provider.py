@@ -38,8 +38,10 @@ from ahp_host_flow import __version__, catalog
 from ahp_host_flow.commands import (
     BadRequest,
     Help,
+    StartRun,
     help_text,
     parse_message,
+    parse_ref,
     unknown_text,
 )
 from ahp_host_flow.config import (
@@ -71,8 +73,10 @@ from ahp_host_flow.engine import (
     RunOptions,
     VerbHandler,
     WorkflowDir,
+    args_error,
     load_journal,
     preamble_text,
+    run_dir,
 )
 from ahp_host_flow.fleet import FleetClients, FleetDispatcher
 from ahp_host_flow.gates import MainChatGates, MainChatVerbs
@@ -215,9 +219,12 @@ class RunEntry:
     resumes: int = 0
     phases_started: int = 0
     phases_finished: int = 0
+    # Who the run is for: the turn's principal only (None for a queued, steered or host-started
+    # turn); never the session creator's.
+    principal: str | None = None
 
     def to_json(self) -> dict[str, Any]:
-        return {
+        entry: dict[str, Any] = {
             "chat": self.chat,
             "turnId": self.turn_id,
             "runId": self.run_id,
@@ -227,6 +234,9 @@ class RunEntry:
             "phasesStarted": self.phases_started,
             "phasesFinished": self.phases_finished,
         }
+        if self.principal is not None:
+            entry["principal"] = self.principal
+        return entry
 
 
 def _count(item: Mapping[str, Any], key: str) -> int | None:
@@ -250,6 +260,7 @@ def _parse_runs(state: Mapping[str, Any] | None) -> dict[str, RunEntry]:
         if isinstance(item, Mapping):
             chat, turn_id, run_id = item.get("chat"), item.get("turnId"), item.get("runId")
             workflow, model = item.get("workflow"), item.get("model")
+            principal = item.get("principal")
             counts = [_count(item, k) for k in ("resumes", "phasesStarted", "phasesFinished")]
             if (
                 isinstance(chat, str)
@@ -258,11 +269,12 @@ def _parse_runs(state: Mapping[str, Any] | None) -> dict[str, RunEntry]:
                 and RUN_ID.fullmatch(run_id)
                 and (workflow is None or isinstance(workflow, str))
                 and (model is None or isinstance(model, str))
+                and (principal is None or isinstance(principal, str))
                 and None not in counts
             ):
                 resumes, started, finished = (int(c or 0) for c in counts)
                 found[chat] = RunEntry(
-                    chat, turn_id, run_id, workflow, model, resumes, started, finished
+                    chat, turn_id, run_id, workflow, model, resumes, started, finished, principal
                 )
                 continue
         _log.warning("ignoring a malformed run entry in the flow resume state")
@@ -323,12 +335,14 @@ class FlowProvider:
         )
         #: Every session this provider created or resumed, until it is collected.
         self._sessions: weakref.WeakSet[FlowSession] = weakref.WeakSet()
+        #: Client-chosen run ids claimed by a run that has not yet created its journal.
+        self._reserved_run_ids: set[str] = set()
 
     def live_run_ids(self) -> frozenset[str]:
         """The run id of every run live now (not the ones a restart left to resume)."""
         return frozenset(
             entry.run_id for session in list(self._sessions) for entry in session._runs.values()
-        )
+        ) | frozenset(self._reserved_run_ids)
 
     def changeset_operations(self) -> Mapping[str, OperationHandler]:
         """Apply and Discard for kept worktrees (`ProvidesOperations`); called once by a Host."""
@@ -616,6 +630,7 @@ class FlowSession:
                 client_entries=[e for e in entries if e.source == "client"],
                 resume_from=resumed.run_id,
                 resumed=resumed,
+                principal=resumed.principal,
             )
         finally:
             self._runs.pop(chat_uri, None)
@@ -631,7 +646,31 @@ class FlowSession:
         # A new turn on the chat: the restored run's turn is no longer the latest,
         # so `chat/turnResume` can never reach it again.
         self._restored.pop(chat, None)
-        parsed = parse_message(message.text)
+        redactor = self.provider.redactor
+        try:
+            start = flow.parse_workflow_start(message.raw.get("_meta"))
+        except ValueError as exc:
+            await sink.turn_failed(
+                redactor.mask(f"bad workflow start: {exc}"), flow.BAD_ARGS_ERROR_TYPE
+            )
+            return
+        run_id: str | None = None
+        parsed: Help | BadRequest | StartRun
+        if start is not None:
+            # A typed start wins over the text (which stays `/name {json}` for stock hosts).
+            ref_parts = parse_ref(start.workflow)
+            if isinstance(ref_parts, BadRequest):
+                await sink.turn_failed(
+                    redactor.mask("bad workflow start: " + ref_parts.message),
+                    flow.BAD_ARGS_ERROR_TYPE,
+                )
+                return
+            parsed = StartRun(
+                ref_parts[1], ref_parts[0], None, start.args if start.has_args else NO_ARGS
+            )
+            run_id = start.run_id
+        else:
+            parsed = parse_message(message.text)
         if isinstance(parsed, BadRequest):
             await sink.text_delta(parsed.message)
             return
@@ -652,6 +691,13 @@ class FlowSession:
             if entry is None:
                 await sink.text_delta(unknown_text(ref, catalog.visible_names(entries)))
                 return
+            if parsed.args is not NO_ARGS:
+                schema, _ = catalog.args_schema_of(entry.meta)
+                if schema is not None and (err := args_error(schema, parsed.args)) is not None:
+                    await sink.turn_failed(
+                        redactor.mask(f"bad args for /{ref}: {err}"), flow.BAD_ARGS_ERROR_TYPE
+                    )
+                    return
             source, filename = entry.source_text(), entry.filename()
         if node is None and language_of(filename) == "js":
             await sink.turn_failed(str(NodeNotFoundError()), "flow.node")
@@ -660,6 +706,9 @@ class FlowSession:
             await sink.turn_failed("no session publisher", "flow.run")
             return
 
+        # The turn's principal only: never the session creator's, so a turn with none (queued,
+        # steered, host-started, or no policy hook) cannot act as whoever created the session.
+        principal = message.principal
         await self._run_workflow(
             chat=chat,
             sink=sink,
@@ -671,6 +720,8 @@ class FlowSession:
             node=node,
             dirs=dirs,
             client_entries=[e for e in entries if e.source == "client"],
+            principal=principal,
+            run_id=run_id,
         )
 
     async def _run_workflow(
@@ -688,6 +739,8 @@ class FlowSession:
         client_entries: Sequence[catalog.WorkflowEntry] = (),
         resume_from: str | None = None,
         resumed: RunEntry | None = None,
+        principal: str | None = None,
+        run_id: str | None = None,
     ) -> None:
         """Run one workflow as the turn *sink* publishes; *resume_from* continues that run.
 
@@ -696,6 +749,9 @@ class FlowSession:
         and `phaseFinished` notices the turn already holds -- the script
         replays its `phase()` calls, and a phase the transcript has opened must
         not be opened a second time.
+
+        *run_id* is the id a client asked for (never with *resume_from*): used when free,
+        else the run gets a fresh one and says so.
         """
         context = self.context
         config = self.provider.config
@@ -711,6 +767,18 @@ class FlowSession:
         # (for the workspace, its `.claude/workflows`, not the whole working directory), and
         # never a source that `[workflows] sources` leaves out. Always set on a provider run.
         python_dirs = catalog.python_dirs(dirs, config.workflows.python_sources)
+        taken_run_id: str | None = None
+        if run_id is not None and not (
+            RUN_ID.fullmatch(run_id)
+            and run_id not in self.provider.live_run_ids()
+            and not run_dir(config.state_dir, run_id).exists()
+        ):
+            taken_run_id, run_id = run_id, None
+        # Claimed now, with no await since the check above, so a second start asking for the
+        # same id sees it taken until this run's journal exists (its directory then says so).
+        reserved = run_id
+        if reserved is not None:
+            self.provider._reserved_run_ids.add(reserved)
         try:
             key_extra, key_mode = resume_key_hook(config, model)
             options = RunOptions(
@@ -729,8 +797,11 @@ class FlowSession:
                 key_mode=key_mode,
                 resume_from=resume_from,
                 continue_run=resume_from is not None,
+                run_id=run_id,
             )
         except ValueError as exc:
+            if reserved is not None:
+                self.provider._reserved_run_ids.discard(reserved)
             await sink.turn_failed(redactor.mask(str(exc)), "flow.run")
             return
         abort = AbortSignal()
@@ -773,6 +844,9 @@ class FlowSession:
         def on_log(text: str) -> None:
             notes.put_nowait((redactor.mask(text), None))
 
+        if taken_run_id is not None:
+            on_log(f"run id {taken_run_id!r} is not available; this run gets a fresh one")
+
         # A continued run's calls get ids of their own: the cut-off ones stay in the turn.
         call_id_prefix = f"agent-r{resumes}" if resumes else "agent"
 
@@ -796,6 +870,7 @@ class FlowSession:
             on_log=on_log,
             call_id_prefix=f"verb-r{resumes}" if resumes else "verb",
             working_directories=context.working_directories,
+            principal=principal,
         )
 
         remote_workers = RemoteWorkerChats(
@@ -889,6 +964,7 @@ class FlowSession:
                     resumes,
                     published[0],
                     published[1],
+                    principal,
                 )
             if resume_from is None:
                 notes.put_nowait((f"Run {run_id}", flow.meta(flow.run_started(run_id, workflow))))
@@ -961,6 +1037,8 @@ class FlowSession:
             await sink.text_delta(f"```json\n{body}\n```")
         finally:
             # Also reached on cancellation: the run is over, so stop the notifier.
+            if reserved is not None:
+                self.provider._reserved_run_ids.discard(reserved)
             self._aborts.pop(chat, None)
             self._runs.pop(chat, None)
             if not drainer.done():

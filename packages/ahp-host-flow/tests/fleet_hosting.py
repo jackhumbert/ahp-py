@@ -58,8 +58,10 @@ rules = [
 class HostConnector:
     """Dials in-process hosts over memory pairs; `hosts` may change, and a link may be severed."""
 
-    def __init__(self, hosts: Mapping[str, Host]) -> None:
+    def __init__(self, hosts: Mapping[str, Host], *, principal_header: str | None = None) -> None:
         self.hosts = dict(hosts)
+        # Stands in for a deployment's `CredentialSource` + `principal_of` (plan M13 item 1).
+        self.principal_header = principal_header
         self.tasks: list[asyncio.Task[None]] = []
         self.links: dict[str, list[Transport]] = {}
 
@@ -69,7 +71,8 @@ class HostConnector:
             raise OSError(f"{record.node_id} is unreachable")
         client_end, server_end = memory_pair()
         self.links.setdefault(record.node_id, []).append(server_end)
-        self.tasks.append(asyncio.create_task(host.serve(server_end)))
+        headers = {self.principal_header: principal.subject} if self.principal_header else None
+        self.tasks.append(asyncio.create_task(host.serve(server_end, headers=headers)))
         return client_end
 
     async def sever(self, node_id: str) -> None:
@@ -148,6 +151,8 @@ async def boot_fleet(
     gateway_options: Mapping[str, Any] | None = None,
     flow_store: SessionStore | None = None,
     node_providers: Mapping[str, Any] | None = None,
+    flow_policy: Any = None,
+    principal_header: str | None = None,
 ) -> FleetFixture:
     """`alpha`, `beta`: gated echo; `vault`: another group's; `flow`: the flow agent."""
     (base / "user").mkdir(parents=True, exist_ok=True)
@@ -160,12 +165,13 @@ async def boot_fleet(
     hosts = {name: Host(p, LoopbackSingleUserPolicy()) for name, p in providers.items()}
     config = load_config(write_toml(base, "flow", flow_toml_body))
     flow = FlowProvider(config, user_workflows_dir=base / "user", fleet_client_wait=5.0)
-    hosts["flow"] = Host(flow, LoopbackSingleUserPolicy(), store=flow_store)
+    policy = flow_policy if flow_policy is not None else LoopbackSingleUserPolicy()
+    hosts["flow"] = Host(flow, policy, store=flow_store)
     records = [
         NodeRecord(name, f"mem://{name}", frozenset({"ops"}) if name == "vault" else DEV)
         for name in hosts
     ]
-    connector = HostConnector(hosts)
+    connector = HostConnector(hosts, principal_header=principal_header)
 
     def authenticate(info: ConnectionInfo) -> Principal:
         return Principal(info.client_id, DEV)
@@ -185,7 +191,7 @@ async def boot_fleet(
         """A flow host as a restart builds it: same state dir and store, a fresh provider."""
         again = load_config(write_toml(base, "flow", flow_toml_body))
         provider = FlowProvider(again, user_workflows_dir=base / "user", fleet_client_wait=5.0)
-        return Host(provider, LoopbackSingleUserPolicy(), store=store_for(base))
+        return Host(provider, policy, store=store_for(base))
 
     return FleetFixture(
         base, hosts, connector, make_gateway(), [], providers, make_gateway, make_flow

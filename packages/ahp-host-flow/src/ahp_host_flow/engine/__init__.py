@@ -89,9 +89,11 @@ from ahp_host_flow.engine.scheduler import (
     Scheduler,
     SchedulerRefusal,
 )
-from ahp_host_flow.engine.schema import schema_error
+from ahp_host_flow.engine.schema import args_error, args_schema_error, schema_error
 from ahp_host_flow.engine.verbnames import REPLACEABLE_VERBS, RESERVED_VERBS, verb_name_error
 from ahp_host_flow.engine.verbs import (
+    AskOutcome,
+    ConfirmOutcome,
     VerbCall,
     VerbContext,
     VerbFailedError,
@@ -126,10 +128,12 @@ __all__ = [
     "AgentLimitError",
     "AgentRecord",
     "AgentResult",
+    "AskOutcome",
     "Budget",
     "BudgetExhaustedError",
     "ClientDispatcher",
     "ClientWorkflow",
+    "ConfirmOutcome",
     "DispatchHandle",
     "Dispatcher",
     "EchoDispatcher",
@@ -173,6 +177,8 @@ __all__ = [
     "WorkflowDir",
     "WorkflowRefError",
     "WorkflowSnapshot",
+    "args_error",
+    "args_schema_error",
     "call_key",
     "canonical_json",
     "default_concurrency",

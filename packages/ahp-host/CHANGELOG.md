@@ -10,6 +10,10 @@ versions each release speaks.
 
 ## [Unreleased]
 
+### Documentation
+
+- README, `docs/guide/deploying.md` and `docs/requests.md` entry 14: `principal_of`, `answered_by`, `bearer_token_validator`, `ping_interval` and `max_size`.
+
 ### Added
 
 - **`OriginTurn` and `ResolvesOriginTurn`**: a worker chat from `open_tool_chat`
@@ -22,6 +26,19 @@ versions each release speaks.
   client turn can hand it to the workers that turn started, whose own turns never
   pass `may_dispatch`. Runtime only: a resumed run opens its workers again under
   the resuming turn.
+
+- **`RequestOutcome.answered_by`, `InputOutcome.answered_by`, `ToolConfirmationOutcome.answered_by`**:
+  who answered, from `principal_of`; `clientId` stays a non-identity.
+- **`Policy.principal_of`** (optional, looked up with `getattr`, not a Protocol member),
+  `AgentSessionContext.principal` and `UserMessage.principal`: the principal of the
+  connection that created the session, and of the one that dispatched each turn.
+  The session's is persisted under `StoredSession.metadata["ahp-py/principal"]`
+  (`PRINCIPAL_METADATA_KEY`). Queued, steered and host-started turns carry none.
+- **`is_loopback`, `bearer_token_validator`, and `ping_interval`/`max_size`** on
+  `ahp_host.ws`: one loopback check shared with the flow CLI, a ready-made
+  `connection_token` callable admitting `?tkn=` or `Authorization: Bearer`, and
+  `WebSocketServer`/`serve_websocket` options for the keepalive interval and the
+  incoming frame limit (defaults are websockets' own, so nothing changes).
 - **A delegation session origin**: `createSession` `_meta["ahp-py/origin"]` with
   `{kind: "ahp-py/delegation", session, chat, toolCallId}`
   (`ahp_protocol.ext.delegation`) is seeded into the session's immutable
@@ -39,6 +56,8 @@ versions each release speaks.
 
 ### Changed
 
+- The WebSocket server's loopback check now accepts all of 127.0.0.0/8 (127.0.0.2
+  was refused), matching the flow CLI.
 - A restored chat or session no longer lists changesets: their channels are not
   restored, so the links pointed at nothing. A provider republishes what it still has.
 

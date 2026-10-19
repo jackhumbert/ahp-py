@@ -17,6 +17,7 @@ from __future__ import annotations
 
 from ahp_host.core import (
     DEFAULT_SUPPORTED_VERSIONS,
+    PRINCIPAL_METADATA_KEY,
     ROOT_URI,
     AhpError,
     ConnectionInfo,
@@ -43,6 +44,7 @@ __version__ = "0.1.0"
 
 __all__ = [
     "DEFAULT_SUPPORTED_VERSIONS",
+    "PRINCIPAL_METADATA_KEY",
     "ROOT_URI",
     "AgentInfo",
     "AgentProvider",

@@ -754,7 +754,9 @@ class ActionTurnSink:
 
         outcome = await parked.future
         answers = outcome.payload if isinstance(outcome.payload, Mapping) else {}
-        return InputOutcome(response=outcome.response, answers=answers)
+        return InputOutcome(
+            response=outcome.response, answers=answers, answered_by=outcome.answered_by
+        )
 
     async def input_resolved(
         self,
@@ -931,6 +933,7 @@ class ActionTurnSink:
             # ever heard "no" and tried the same thing again.
             reason_message=markdown_text(payload.get("reasonMessage")),
             user_suggestion=user_message(suggestion) if isinstance(suggestion, Mapping) else None,
+            answered_by=outcome.answered_by,
         )
 
     async def tool_call_confirmed(
@@ -1243,6 +1246,7 @@ def user_message(
     *,
     chat_uri: str | None = None,
     attached: Sequence[AttachedChat] = (),
+    principal: str | None = None,
 ) -> UserMessage:
     """A wire `Message` in provider terms.
 
@@ -1258,6 +1262,7 @@ def user_message(
         agent_uri=_agent_uri(message.get("agent")),
         chat_uri=chat_uri,
         attached_chats=tuple(attached),
+        principal=principal,
     )
 
 
@@ -1431,7 +1436,13 @@ class TurnRunner:
         self.sink = sink
         return sink
 
-    async def run(self, agent_session: AgentSession | None, started: Mapping[str, Any]) -> None:
+    async def run(
+        self,
+        agent_session: AgentSession | None,
+        started: Mapping[str, Any],
+        *,
+        principal: str | None = None,
+    ) -> None:
         turn_id = started.get("turnId")
         if not isinstance(turn_id, str):
             return
@@ -1452,6 +1463,7 @@ class TurnRunner:
                 # session, and nothing told it which one a message was for.
                 chat_uri=self._channel,
                 attached=attached_chats(self._sequencer, message),
+                principal=principal,
             )
             # Inside `_drive`, so a bad `_meta` value fails the turn with the
             # structured error type rather than escaping.

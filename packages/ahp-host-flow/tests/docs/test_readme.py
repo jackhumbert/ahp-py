@@ -1,8 +1,14 @@
+import asyncio
 import re
 import tomllib
+from collections.abc import Mapping
 from pathlib import Path
+from typing import Any
+
+import pytest
 
 from ahp_host_flow.config import parse_config
+from ahp_host_flow.engine import ConfirmOutcome, VerbCall, VerbContext
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -48,3 +54,65 @@ def test_readme_verbs_and_resume_examples_parse(tmp_path: Path) -> None:
         "approve": "my_pkg.verbs:approve",
     }
     assert config.resume.key == "model"
+
+
+def _section(text: str, heading: str) -> str:
+    start = text.index(heading)
+    end = text.find(chr(10) + "## ", start + 1)
+    return text[start : end if end != -1 else len(text)]
+
+
+def test_readme_client_workflows_line_is_current() -> None:
+    """The README says scripts reach client workflows, not that they cannot."""
+    text = " ".join((ROOT / "README.md").read_text(encoding="utf-8").split())
+    assert "inside a script reaches client workflows too (`.js` only)" in text
+    assert "does not reach client workflows" not in text
+
+
+def test_readme_proxy_section() -> None:
+    """The proxy section names the options, the header token and the ahp-host anchor."""
+    text = (ROOT / "README.md").read_text(encoding="utf-8")
+    section = _section(text, "## Behind a proxy")
+    for needle in (
+        "--ping-interval",
+        "--max-size",
+        "Authorization: Bearer",
+        "#embedding-it-behind-a-proxy",
+    ):
+        assert needle in section
+
+
+def test_readme_typed_starts_section() -> None:
+    """The typed-starts section names the error, the schema key and the client call."""
+    text = (ROOT / "README.md").read_text(encoding="utf-8")
+    section = _section(text, "## Typed workflow starts")
+    for needle in ("flow.badArgs", "argsSchema", "start_workflow"):
+        assert needle in section
+
+
+def test_readme_approve_person_example_runs() -> None:
+    """The README's approve(person) handler runs: it re-asks until the person answers."""
+    text = (ROOT / "README.md").read_text(encoding="utf-8")
+    section = text[text.index("An `approve(person)` handler") :]
+    block = re.search(r"```python\n(.*?)```", section, re.DOTALL)
+    assert block is not None
+    scope: dict[str, Any] = {}
+    exec(block.group(1), scope)
+    approve = scope["approve"]
+
+    def call_with(answers: list[str | None], asked: list[tuple[str, Any]]) -> VerbCall:
+        async def confirm(summary: str, options: Mapping[str, Any] | None = None) -> ConfirmOutcome:
+            asked.append((summary, options))
+            return ConfirmOutcome(True, answers.pop(0))
+
+        ctx = VerbContext(confirm=confirm)
+        return VerbCall("approve", ("alice",), 0, "verb-x-0", None, "r", ctx)
+
+    asked: list[tuple[str, Any]] = []
+    result = asyncio.run(approve(call_with(["bob", "alice"], asked)))
+    assert result == {"approved": True}
+    assert len(asked) == 2
+    assert all(options is None for _, options in asked)
+
+    with pytest.raises(RuntimeError, match="no principal"):
+        asyncio.run(approve(call_with([None], [])))

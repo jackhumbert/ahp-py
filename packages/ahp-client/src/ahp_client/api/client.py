@@ -23,6 +23,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import dataclasses
+import json
 import os
 import uuid
 from collections.abc import AsyncIterator, Iterator, Mapping, Sequence
@@ -30,9 +31,10 @@ from ssl import SSLContext
 from types import TracebackType
 from typing import Any, Self
 
+import ahp_protocol.ext.flow as flow
 from ahp_protocol.channels import ROOT_URI
 from ahp_protocol.ext.delegation import ORIGIN_META_KEY, parse_delegation
-from ahp_protocol.ext.flow import EMPTY_RUN, RunView, run_view
+from ahp_protocol.ext.flow import EMPTY_RUN, RunView, WorkflowInfo, run_view
 from ahp_protocol.ext.structured import (
     OUTPUT_SCHEMA_META_KEY,
     STRUCTURED_OUTPUT_TOOL,
@@ -824,6 +826,39 @@ class Session:
         """
         return _LazyTurnStream(self, text, kwargs)  # type: ignore[return-value]
 
+    def workflows(self) -> tuple[WorkflowInfo, ...]:
+        """The workflows the host lists among this session's customizations.
+
+        An ahp-py extension: a stock host lists none.
+        """
+        raw = self.state.get("customizations")
+        return flow.workflows_of(raw if isinstance(raw, list) else [])
+
+    def start_workflow(
+        self, name: str, args: Any = None, *, run_id: str | None = None, **kwargs: Any
+    ) -> TurnStream:
+        """Start the workflow ``name`` (a qualified name) as a turn.
+
+        Keywords are :class:`TurnStream`'s. An ahp-py extension. The host uses
+        ``run_id`` when it is free, otherwise it reports a fresh one in
+        ``runStarted`` (read ``flow_view().run_id``); without one a 32-hex id is
+        made up. ``args=None`` sends none. A stock host just sees
+        the ``/name {json}`` text. A bad name or run id is a ``ValueError``, before
+        anything is sent.
+        """
+        if "meta" in kwargs:
+            raise TypeError("start_workflow sets meta itself")
+        rid = run_id if run_id is not None else uuid.uuid4().hex
+        start = (
+            flow.workflow_start(name, run_id=rid)
+            if args is None
+            else flow.workflow_start(name, args=args, run_id=rid)
+        )
+        text = f"/{name}" if args is None else f"/{name} {json.dumps(args, ensure_ascii=False)}"
+        return _LazyTurnStream(  # type: ignore[return-value]
+            self, text, {**kwargs, "meta": flow.meta(start), "run_id": rid}
+        )
+
     async def watch(self, *, from_start: bool = True) -> ChatWatch:
         """:meth:`Chat.watch` on the default chat."""
         chat = await self.chat()
@@ -1543,11 +1578,15 @@ class TurnStream:
         approval_timeout: float = 300.0,
         model: str | Mapping[str, Any] | None = None,
         output_schema: Mapping[str, Any] | None = None,
+        meta: Mapping[str, Any] | None = None,
+        run_id: str | None = None,
     ) -> None:
         self._client = client
         self._chat = chat
         self._text = text
         self._output_schema = output_schema
+        self._meta = meta
+        self._run_id = run_id
         self._policy = resolve_policy(approvals)
         self._turn_id = turn_id or str(uuid.uuid4())
         self._idle_timeout = idle_timeout
@@ -1563,6 +1602,11 @@ class TurnStream:
         #: so the caller would never see the turn end.
         self._terminal: TurnEvent | None = None
         self._finished = False
+
+    @property
+    def run_id(self) -> str | None:
+        """The workflow run id this stream asked for, or None when it started no workflow."""
+        return self._run_id
 
     def __await__(self) -> Any:
         return self._drain().__await__()
@@ -1633,17 +1677,16 @@ class TurnStream:
             )
         self._reader = self._client._runtime.events()
         started = asyncio.get_running_loop().time()
+        extra = dict(self._meta or {})
+        if self._output_schema is not None:
+            extra[OUTPUT_SCHEMA_META_KEY] = dict(self._output_schema)
         self._client.protocol.dispatch(
             self._chat.uri,
             actions.turn_started(
                 self._turn_id,
                 text=self._text,
                 model=self._model,
-                meta=(
-                    None
-                    if self._output_schema is None
-                    else {OUTPUT_SCHEMA_META_KEY: dict(self._output_schema)}
-                ),
+                meta=extra if extra else None,
             ),
         )
         # Recorded on our own clock so a later `Chat.cancel()` has a duration it
@@ -1914,6 +1957,11 @@ class _LazyTurnStream:
         self._text = text
         self._kwargs = dict(kwargs)
         self._inner: TurnStream | None = None
+
+    @property
+    def run_id(self) -> str | None:
+        """The run id asked for, known without awaiting."""
+        return self._kwargs.get("run_id")
 
     async def _resolve(self) -> TurnStream:
         if self._inner is None:

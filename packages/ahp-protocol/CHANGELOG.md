@@ -8,6 +8,25 @@ the spec revision it targets.
 
 ## [Unreleased]
 
+### Documentation
+
+- README: typed workflow starts (`workflow_start`, `parse_workflow_start`), with an executed example.
+
+### Added — ahp-py extension: typed workflow starts
+
+- **`flow.workflow_start`**, **`flow.parse_workflow_start`** and **`flow.WorkflowStart`**: a
+  client starts a workflow with `{workflow, args?, runId?}` under `_meta['ahp-py/flow']`;
+  the builder rejects an empty name and a run id outside **`flow.RUN_ID_PATTERN`**, and
+  keeps `args=None` as a value. The parser returns `None` for any other descriptor and
+  raises `ValueError` for a non-string `workflow` or `runId`.
+- **`flow.WorkflowInfo`** and **`flow.workflows_of`**: list the workflows among a host's
+  customizations (prompts carrying the `workflow` marker, also inside container children),
+  never raising on malformed input.
+- **`flow.BAD_ARGS_ERROR_TYPE`** (`flow.badArgs`): the turn's `errorType` for a malformed
+  start or args that fail the workflow's `argsSchema`.
+- `DESCRIPTOR_SCHEMA` and `flow.schema.json` gain `workflowStart` and `workflow` (the
+  customization marker) branches of the `oneOf`; both stay exclusive with the others.
+
 ### Added — ahp-py extension: verb progress
 
 - **`flow.verb_started`**, **`flow.verb_finished`** and **`flow.verb`**: builders for the

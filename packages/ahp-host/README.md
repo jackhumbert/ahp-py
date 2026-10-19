@@ -591,6 +591,18 @@ carries a principal, and whether to believe it, is the embedder's decision — a
 a forwarded header is evidence only if the socket cannot be reached except
 through the proxy that set it.
 
+A `Policy` may also define `principal_of(info: ConnectionInfo) -> str | None`, an
+optional hook looked up like the others. When present, the host stamps the creating
+connection's principal on `AgentSessionContext.principal` and each
+`chat/turnStarted` sender's on `UserMessage.principal`. It also reports who answered
+an input or confirmation request as `answered_by` on `InputOutcome` and
+`ToolConfirmationOutcome` (a `clientId` is never an identity). The principal is
+persisted under `metadata["ahp-py/principal"]`. Without the hook every one is
+`None`. For the socket, `bearer_token_validator(token)` checks an
+`Authorization: Bearer` header, and `serve_websocket` takes `ping_interval` (so a
+proxy's idle timeout does not cut a quiet connection) and `max_size` (the frame
+limit; keep a proxy's at or above it).
+
 `Host.counters()` reports connections, sessions, active turns, pending requests,
 watches, channels and `serverSeq`. `AuditSink` records decisions — admissions,
 refusals, session creation, tool-call resolutions — with **no conversation

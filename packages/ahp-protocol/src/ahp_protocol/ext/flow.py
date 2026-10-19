@@ -17,6 +17,13 @@ A host also marks each custom verb's tool call with a ``verbStarted`` /
 ``verbFinished`` descriptor; :func:`run_view` lists those as ``verbs`` (kind
 ``verb``) beside the agent steps, which stay in ``steps``.
 
+A client starts a workflow with a *typed start*: :func:`workflow_start` builds the
+descriptor a ``UserMessage`` carries under ``_meta[FLOW_META_KEY]`` (the workflow's
+qualified name, optional ``args`` and an optional ``runId``), and
+:func:`parse_workflow_start` reads it back on the host. :func:`workflows_of` lists the
+workflows a host offers by walking its customizations for the ``workflow`` marker on
+each prompt, flattening the plugin and directory containers that nest them.
+
 Everything here is pure and stdlib-only. :func:`run_view` never raises: a part it
 does not understand is ignored, never an error, because the chat state is data
 written by a peer.
@@ -24,6 +31,7 @@ written by a peer.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Final
@@ -31,11 +39,13 @@ from typing import Any, Final
 from ahp_protocol.ext.redaction import REDACTED_TEXT
 
 __all__ = [
+    "BAD_ARGS_ERROR_TYPE",
     "DESCRIPTOR_SCHEMA",
     "EMPTY_RUN",
     "FLOW_META_KEY",
     "NOTIFICATION_KINDS",
     "RUN_FINISHED_STATUSES",
+    "RUN_ID_PATTERN",
     "SCHEDULE_TRIGGER_ID",
     "SCHEMA_FILE",
     "STEP_KINDS",
@@ -44,9 +54,12 @@ __all__ = [
     "PhaseView",
     "RunView",
     "StepView",
+    "WorkflowInfo",
+    "WorkflowStart",
     "descriptor_of",
     "meta",
     "offered_schedule",
+    "parse_workflow_start",
     "phase_finished",
     "phase_started",
     "redacted_step",
@@ -61,6 +74,8 @@ __all__ = [
     "verb_finished",
     "verb_started",
     "with_offered_schedule",
+    "workflow_start",
+    "workflows_of",
 ]
 
 #: Key in ``_meta``; the value is one descriptor.
@@ -80,6 +95,15 @@ STEP_KINDS: Final = ("agent", "verb")
 #: The id of the schedule trigger :func:`with_offered_schedule` adds.
 SCHEDULE_TRIGGER_ID: Final = "ahp-py/flow-schedule"
 
+#: A run id: it names a directory, so it is the pattern ahp-host-flow accepts.
+RUN_ID_PATTERN: Final = r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$"
+#: The turn's ``errorType`` when a workflow start is malformed or its args fail the schema.
+BAD_ARGS_ERROR_TYPE: Final = "flow.badArgs"
+
+_RUN_ID: Final = re.compile(RUN_ID_PATTERN)
+#: Tells "no args" from ``args=None``, which is a value.
+_ABSENT: Final = object()
+
 _NULLABLE_STRING: Final = {"type": ["string", "null"]}
 
 #: Generated into ``flow.schema.json``; never hand-edit that file.
@@ -91,6 +115,8 @@ DESCRIPTOR_SCHEMA: Final[Mapping[str, Any]] = {
         {"$ref": "#/$defs/notification"},
         {"$ref": "#/$defs/step"},
         {"$ref": "#/$defs/verb"},
+        {"$ref": "#/$defs/workflow"},
+        {"$ref": "#/$defs/workflowStart"},
     ],
     "$defs": {
         "usage": {
@@ -194,6 +220,38 @@ DESCRIPTOR_SCHEMA: Final[Mapping[str, Any]] = {
             },
             "additionalProperties": False,
         },
+        "workflowStart": {
+            "type": "object",
+            "required": ["workflow"],
+            "properties": {
+                "workflow": {"type": "string", "minLength": 1},
+                "args": {},
+                "runId": {"type": "string", "pattern": RUN_ID_PATTERN},
+            },
+            "additionalProperties": False,
+        },
+        # The customization marker on a workflow's prompt; it may grow, so it is open.
+        "workflow": {
+            "type": "object",
+            "required": ["kind", "phases", "source"],
+            "properties": {
+                "kind": {"const": "workflow"},
+                "phases": {"type": "array"},
+                "source": {"type": "string"},
+                "shadowedBy": {"type": "string"},
+                "language": {"enum": ["js", "python"]},
+                "schedule": {
+                    "type": "object",
+                    "required": ["expression", "timeZone"],
+                    "properties": {
+                        "expression": {"type": "string"},
+                        "timeZone": {"type": "string"},
+                    },
+                },
+                "warnings": {"type": "array", "items": {"type": "string"}},
+                "argsSchema": {"type": "object"},
+            },
+        },
     },
 }
 
@@ -294,6 +352,22 @@ def verb(started: Mapping[str, Any], finished: Mapping[str, Any] | None = None) 
     return body
 
 
+def workflow_start(
+    workflow: str, *, args: Any = _ABSENT, run_id: str | None = None
+) -> dict[str, Any]:
+    """The descriptor that starts ``workflow`` (a qualified name); ``args`` only if passed."""
+    if not isinstance(workflow, str) or not workflow:
+        raise ValueError("workflow must be a non-empty string")
+    if run_id is not None and not (isinstance(run_id, str) and _RUN_ID.fullmatch(run_id)):
+        raise ValueError(f"runId must match {RUN_ID_PATTERN}, got {run_id!r}")
+    body: dict[str, Any] = {"workflow": workflow}
+    if args is not _ABSENT:
+        body["args"] = args
+    if run_id is not None:
+        body["runId"] = run_id
+    return body
+
+
 def redacted_step(descriptor: Mapping[str, Any]) -> dict[str, Any]:
     """A copy of a step descriptor with its result (and error) replaced by ``[redacted]``.
 
@@ -374,6 +448,96 @@ def with_offered_schedule(
         )
     out["triggers"] = triggers
     return out
+
+
+@dataclass(frozen=True)
+class WorkflowStart:
+    """A parsed typed start; ``has_args`` tells absent ``args`` from ``None``."""
+
+    workflow: str
+    args: Any
+    has_args: bool
+    run_id: str | None
+
+
+def parse_workflow_start(meta: Any) -> WorkflowStart | None:
+    """The typed start under :data:`FLOW_META_KEY`, or ``None`` if ``meta`` holds none.
+
+    A customization marker or a progress descriptor has no ``workflow`` key and is not
+    a start. ``runId`` is only checked to be a string: the pattern is the host's call,
+    which mints a fresh id for one it cannot use.
+    """
+    d = descriptor_of(meta)
+    if d is None or "workflow" not in d:
+        return None
+    workflow = d["workflow"]
+    if not isinstance(workflow, str) or not workflow:
+        raise ValueError("workflow must be a non-empty string")
+    run_id = d.get("runId")
+    if "runId" in d and not isinstance(run_id, str):
+        raise ValueError("runId must be a string")
+    return WorkflowStart(workflow, d.get("args"), "args" in d, run_id)
+
+
+@dataclass(frozen=True)
+class WorkflowInfo:
+    name: str
+    qualified_name: str
+    description: str
+    phases: tuple[str, ...]
+    args_schema: Mapping[str, Any] | None
+    source: str
+    language: str
+
+
+def workflows_of(customizations: Any) -> tuple[WorkflowInfo, ...]:
+    """The workflows a host lists among its customizations, in the order met.
+
+    Each item and each item of its ``children`` (one level: how ahp-host-flow nests
+    prompts in plugin and directory containers) counts when it is a ``prompt`` whose
+    ``_meta`` holds a ``workflow`` marker with a ``source``. Malformed input is skipped.
+    """
+    if not isinstance(customizations, list):
+        return ()
+    found: list[WorkflowInfo] = []
+    for item in customizations:
+        if not isinstance(item, Mapping):
+            continue
+        children = item.get("children")
+        candidates = [item, *(children if isinstance(children, list) else [])]
+        for c in candidates:
+            if not isinstance(c, Mapping) or c.get("type") != "prompt":
+                continue
+            name = c.get("name")
+            marker = descriptor_of(c.get("_meta"))
+            if (
+                not isinstance(name, str)
+                or marker is None
+                or marker.get("kind") != "workflow"
+                or not isinstance(marker.get("source"), str)
+            ):
+                continue
+            source = marker["source"]
+            description = c.get("description")
+            raw_phases = marker.get("phases")
+            raw_schema = marker.get("argsSchema")
+            language = marker.get("language")
+            found.append(
+                WorkflowInfo(
+                    name=name,
+                    qualified_name=f"{source}:{name}",
+                    description=description if isinstance(description, str) else "",
+                    phases=tuple(
+                        p["title"]
+                        for p in (raw_phases if isinstance(raw_phases, list) else [])
+                        if isinstance(p, Mapping) and isinstance(p.get("title"), str)
+                    ),
+                    args_schema=dict(raw_schema) if isinstance(raw_schema, Mapping) else None,
+                    source=source,
+                    language=language if isinstance(language, str) else "js",
+                )
+            )
+    return tuple(found)
 
 
 @dataclass(frozen=True)

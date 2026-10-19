@@ -13,7 +13,22 @@ loopback by default.
 
 from __future__ import annotations
 
-from ahp_host.ws.server import WebSocketServer, serve_websocket
+from ahp_host.ws.server import (
+    DEFAULT_MAX_SIZE,
+    DEFAULT_PING_INTERVAL,
+    WebSocketServer,
+    bearer_token_validator,
+    is_loopback,
+    serve_websocket,
+)
 from ahp_host.ws.transport import WebSocketTransport
 
-__all__ = ["WebSocketServer", "WebSocketTransport", "serve_websocket"]
+__all__ = [
+    "DEFAULT_MAX_SIZE",
+    "DEFAULT_PING_INTERVAL",
+    "WebSocketServer",
+    "WebSocketTransport",
+    "bearer_token_validator",
+    "is_loopback",
+    "serve_websocket",
+]

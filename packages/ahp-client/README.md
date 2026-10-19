@@ -91,6 +91,11 @@ For a chat driven by an ahp-host-flow workflow, `chat.flow_view()` and
 `session.flow_view()` fold its typed progress descriptors into a run view
 (phases, steps, status, results, usage).
 
+`session.workflows()` lists the workflows a flow host offers (name, description,
+args schema, source), and `session.start_workflow(name, args, run_id=None)` starts
+one with a typed `_meta` start beside the usual `/name {json}` text. The run id is
+known before the first event.
+
 ### Redaction (ahp-py extension)
 
 A host can redact a response part or a turn's user message after publishing it.

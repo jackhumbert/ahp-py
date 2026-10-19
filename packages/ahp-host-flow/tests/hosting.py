@@ -149,15 +149,17 @@ def leaks(host: Host, *secrets: str) -> list[str]:
     ]
 
 
-async def connect(host: Host) -> tuple[Wire, asyncio.Task[None]]:
+async def connect(
+    host: Host, *, headers: Mapping[str, str] | None = None, client_id: str = "c1"
+) -> tuple[Wire, asyncio.Task[None]]:
     client, server = memory_pair()
-    serving = asyncio.create_task(host.serve(server))
+    serving = asyncio.create_task(host.serve(server, headers=headers))
     wire = Wire(host, client)
     response = await wire.request(
         "initialize",
         {
             "channel": ROOT_URI,
-            "clientId": "c1",
+            "clientId": client_id,
             "protocolVersions": ["1.0.0"],
             "initialSubscriptions": [ROOT_URI],
         },
@@ -190,15 +192,20 @@ async def open_session(
     return str(chat)
 
 
-async def start_turn(wire: Wire, chat: str, turn_id: str, text: str) -> None:
-    """Start a turn on *chat* without waiting for it."""
+async def start_turn(
+    wire: Wire, chat: str, turn_id: str, text: str, *, meta: Mapping[str, Any] | None = None
+) -> None:
+    """Start a turn on *chat* without waiting for it; *meta* is the message's `_meta`."""
+    message: dict[str, Any] = {"text": text, "origin": {"kind": "user"}}
+    if meta is not None:
+        message["_meta"] = dict(meta)
     await wire.dispatch(
         chat,
         {
             "type": "chat/turnStarted",
             "turnId": turn_id,
             "startedAt": "1970-01-01T00:00:01.000Z",
-            "message": {"text": text, "origin": {"kind": "user"}},
+            "message": message,
         },
     )
 

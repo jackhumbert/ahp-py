@@ -65,6 +65,18 @@ def _split(text: str) -> tuple[str, str]:
     return parts[0], (parts[1] if len(parts) > 1 else "")
 
 
+def parse_ref(ref: str) -> tuple[str | None, str] | BadRequest:
+    """Split a workflow reference, `source:name` or a bare `name`, into (source, name)."""
+    prefix, sep, tail = ref.partition(":")
+    if sep:
+        if prefix not in SOURCES or not WORKFLOW_NAME.fullmatch(tail):
+            return BadRequest(f"Not a workflow name: {ref!r}")
+        return (prefix, tail)
+    if not WORKFLOW_NAME.fullmatch(ref):
+        return BadRequest(f"Not a workflow name: {ref!r}")
+    return (None, ref)
+
+
 def parse_message(text: str) -> Help | BadRequest | StartRun:
     """Classify the text of a user message."""
     try:
@@ -81,15 +93,10 @@ def parse_message(text: str) -> Help | BadRequest | StartRun:
             ref, rest = _split(remainder.strip())
         else:
             ref, rest = head[1:], remainder
-        source: str | None = None
-        name = ref
-        prefix, sep, tail = ref.partition(":")
-        if sep:
-            if prefix not in SOURCES or not WORKFLOW_NAME.fullmatch(tail):
-                return BadRequest(f"Not a workflow name: {ref!r}")
-            source, name = prefix, tail
-        elif not WORKFLOW_NAME.fullmatch(ref):
-            return BadRequest(f"Not a workflow name: {ref!r}")
+        parsed_ref = parse_ref(ref)
+        if isinstance(parsed_ref, BadRequest):
+            return parsed_ref
+        source, name = parsed_ref
         return StartRun(name, source, None, _args(rest))
     except _BadArgsError as exc:
         return BadRequest(str(exc))

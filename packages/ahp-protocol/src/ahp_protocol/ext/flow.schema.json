@@ -11,6 +11,12 @@
     },
     {
       "$ref": "#/$defs/verb"
+    },
+    {
+      "$ref": "#/$defs/workflow"
+    },
+    {
+      "$ref": "#/$defs/workflowStart"
     }
   ],
   "$defs": {
@@ -254,6 +260,76 @@
         }
       },
       "additionalProperties": false
+    },
+    "workflowStart": {
+      "type": "object",
+      "required": [
+        "workflow"
+      ],
+      "properties": {
+        "workflow": {
+          "type": "string",
+          "minLength": 1
+        },
+        "args": {},
+        "runId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$"
+        }
+      },
+      "additionalProperties": false
+    },
+    "workflow": {
+      "type": "object",
+      "required": [
+        "kind",
+        "phases",
+        "source"
+      ],
+      "properties": {
+        "kind": {
+          "const": "workflow"
+        },
+        "phases": {
+          "type": "array"
+        },
+        "source": {
+          "type": "string"
+        },
+        "shadowedBy": {
+          "type": "string"
+        },
+        "language": {
+          "enum": [
+            "js",
+            "python"
+          ]
+        },
+        "schedule": {
+          "type": "object",
+          "required": [
+            "expression",
+            "timeZone"
+          ],
+          "properties": {
+            "expression": {
+              "type": "string"
+            },
+            "timeZone": {
+              "type": "string"
+            }
+          }
+        },
+        "warnings": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "argsSchema": {
+          "type": "object"
+        }
+      }
     }
   }
 }

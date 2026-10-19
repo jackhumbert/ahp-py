@@ -7,7 +7,7 @@ an AHP session, and each `agent()` call is a **child chat** of it, so any AHP
 client can watch and steer the whole run. Extensions to the format are opt-in,
 and a script written for Claude Code runs unchanged.
 
-Status: M0-M12 done (M4b complete). No milestone is next; what remains open is listed under **Open after M10.** in §8.
+Status: M0-M13 done (M4b complete). M14-M18 are planned (§8, **Post-M12 plan**); M14 is next.
 
 ## 1. Where it sits
 
@@ -585,6 +585,12 @@ A live GLM smoke test is opt-in, behind a marker.
 | M10 | **Extensions** (§6) + shim | `ask()` round-trips to a phone; a dual-target script runs in both runtimes |
 | M11 (done) | **Close the gaps** (the M11 spec below): the M4b remainder (`from_config` factories, the subagent preamble, watched workflow dirs, live corpus tests), operations as a provider capability (so `ahp-node` has them), changesets across a restart, `workflow()` reaching client workflows and qualified names, the delegation origin | every item's proving test passes on Linux and Windows; a flow.toml naming `ahp_host_claude:from_config` and `ahp_host_acp:from_config` runs the live fan-out, triage and GLM-routed Review tests |
 | M12 (done) | **Custom verbs and the resume-key hook** (the M12 spec below): host-side verbs a script calls like `agent()` but that run no model (`tool()`, `render()`, an `approve(person)` of the deployment's own), journaled and replayed like gates; an opt-in hook that adds the routed provider and model (or anything a callable returns) to each `agent()` call's resume key | the M12 proving tests pass on Linux and Windows; with no hook configured every journal key is byte-identical to M11's |
+| M13 (done) | **Identity, typed workflow calls, quick fixes** (the M13 spec below): the README and proxy fixes, `--ping-interval` and `--max-size`, a non-loopback bind with a token; an optional principal on sessions, messages and answers; `meta.x.args`, typed workflow starts and client-chosen run ids | the M13 proving tests in §8 pass |
+| M14 | Folders, sandboxes and host policy | the M14 proving tests in §8 pass |
+| M15 | Approvals and changesets | the M15 proving tests in §8 pass |
+| M16 | Limits, timeouts and fallback | the M16 proving tests in §8 pass |
+| M17 | Sandboxed workflow hosts, client tools in workers, durable workers | the M17 proving tests in §8 pass |
+| M18 | A reference non-Claude agent, the support matrix, releases | the M18 proving tests in §8 pass |
 
 **M0 spike result.** `tests/integration/test_spike_worker_chat.py` showed:
 
@@ -678,6 +684,279 @@ Out of M11, needing a person: a phone round trip of `ask()` and watching a run f
 
 Known limits. A verb's `ask`/`confirm` requests are not journaled (a handler finds its request by `call_id`); `principal` is None until the host passes one. A verb replayed from the journal is not published again as a main-chat tool call: the continued turn still holds the original. `run_view` lists verb calls in a separate `verbs` tuple beside `steps` (`StepView.kind` tells the two apart) rather than mixed into `steps`. The `model` key mode reads config only (the routed provider and the alias-expanded model id), never a provider's discovered model list, so a change the config does not show does not invalidate a cached call.
 
+**Post-M12 plan (M13-M18).** Fourteen requests from a deployment, plus three nits, grouped into six milestones. Each item names its proving tests. None is a live test; live ones are extra and opt-in. Order matters in four places:
+- M13's principal comes before M15's `approve(person)` and M16's quotas.
+- M14's sandbox comes before M14's hard ACP enforcement.
+- M15's remote approvals come before M17's remote client tools, because both iterate the remote `TurnStream`.
+- M16's error kinds come before M16's fallback.
+
+Two facts from the survey (2026-10-19) shape the items:
+- **No `spawn_scrubbed`.** Nothing in this repo is called `spawn_scrubbed`. No spawn path filters the environment: ahp-host-acp spawns with `{**os.environ, **env}` (`jsonrpc.py`), and Claude inherits it too. So the allowlist in M14 item 2 is new code, not a layer in front of something that exists.
+- **ACP's own tools are invisible.** ahp-host-acp advertises `fs` and `terminal` as false, so an ACP agent runs its own tools, and the host sees only what the agent chooses to ask permission for.
+
+**M13: identity, typed workflow calls, quick fixes.**
+
+0. **Nits.**
+   - README "Client workflows" still says `workflow('name')` does not reach client workflows. M11 item 6 made it reach them (`.js` only), as the CHANGELOG and the README's own source list say. Fix the line, and add a README doc test asserting the sentence is gone.
+   - `python -m ahp_host_flow --bind <non-loopback> --token-file t` always fails: `_serve` never passes `allow_remote` to `serve_websocket`, which refuses any non-loopback bind. Also, the flow's `_is_loopback` accepts `127.0.0.2` but the server's set does not. Fix both by sharing ahp-host's loopback check.
+   - Behind a WebSocket proxy, expose `--ping-interval` and `--max-size` (today the server's 1 MiB default is far below the client's 16 MiB). Add a proxy section to the README: the token in a header rather than `?tkn=`, because proxies log the URI; header-asserted principals linking ahp-host's "Embedding it behind a proxy"; and idle-timeout settings for the proxy.
+   - Proving tests: the real `_serve` binds `0.0.0.0` with a token, without the monkeypatch `test_flow_main` uses today. A client connects through a minimal in-test TCP or WebSocket relay that forwards the upgrade with an `X-Forwarded-For` header and a header token, and a run completes through it.
+   - The OpenHands ACP lane nit has no source here: no GOTCHAS file, and no mention of OpenHands, exists anywhere in this repo or its history. It is left out until someone points to the file it came from.
+1. **The principal (ahp-host, ahp-host-flow).**
+   - Add an optional `Policy.principal_of(info: ConnectionInfo) -> str | None`, looked up with `getattr` like the other optional hooks. `OwnedSessionPolicy` already has one.
+   - The host stamps `AgentSessionContext.principal` from the creating connection, and `UserMessage.principal` from the connection that sent each `chat/turnStarted`. The value persists in session metadata, beside the owner `OwnedSessionPolicy` stores.
+   - In `_react`, the host adds `answeredBy` to `RequestOutcome`, surfaced as `InputOutcome.answered_by` and `ToolConfirmationOutcome.answered_by`. `clientId` stays a non-identity.
+   - ahp-host-flow puts the turn's principal (only the turn's: never the session creator's, so a queued, steered or host-started turn runs with `None`) on the run entry and its resume state, and `MainChatVerbs` fills `VerbContext.principal`. `VerbContext.confirm` and `ask` return the outcome with `answered_by`, so a handler can implement `approve(person)` by re-asking when the wrong person answered.
+   - No gateway change: a node already gets per-principal credentials through `CredentialSource`, and a deployment's `principal_of` reads them.
+   - Proving tests:
+     - ahp-host: a header-asserted principal reaches the provider's context and each `UserMessage`, survives a store restart, and is `None` without the hook; `answered_by` names the answering connection's principal (`test_multi_user` style).
+     - ahp-host-flow: a verb sees the principal; an `approve(person)` handler re-asks when another principal answers (`test_customverb_context` style); through a real in-memory gateway (`fleet_hosting.py`), the flow node sees the gateway principal's subject.
+2. **Typed workflow calls (ahp-protocol, ahp-host-flow, ahp-client).**
+   - **Schema.** `meta.x.args` is a JSON Schema literal, validated at catalog time like `meta.x.schedule`, published as `_meta["ahp-py/flow"].argsSchema` on the prompt child, and added to `flow.schema.json`.
+   - **Typed start.** A client sends an ordinary `chat/turnStarted` whose message `_meta["ahp-py/flow"]` is `{workflow: "<source:name>", args, runId?}`. The text stays `/name {json}`, so stock hosts and the history still read. `send_user_message` prefers the `_meta` over parsing, validates `args` against `argsSchema`, and fails the turn with `errorType` `flow.badArgs` naming the first error.
+   - **Run id.** A client-chosen `runId` is used when it is free; otherwise a fresh one is minted and reported in `runStarted`, as today.
+   - **Helpers.** `ahp_protocol.ext.flow` gains a pure `workflows_of(customizations) -> tuple[WorkflowInfo, ...]` (name, qualified name, description, phases, args schema, source, language). ahp-client adds `Session.workflows()` and `Session.start_workflow(name, args, run_id=None)`, which returns the turn stream with `run_id` known up front.
+   - Proving tests:
+     - Protocol: builder, schema and fold tests in `test_flow_ext`.
+     - Catalog: the schema is published, and a non-literal or invalid schema is a catalog warning, not a crash.
+     - Hosted: a typed start runs with the given run id; bad args fail with `flow.badArgs` and dispatch nothing; a stock-text start still works.
+     - ahp-client: `workflows()` lists them, and `start_workflow` returns the run id before the first event.
+     - A `.py` workflow's `meta["x"]["args"]` works the same.
+
+**M13 result.** The three groups landed with no live model anywhere.
+
+1. **Quick fixes.** `--ping-interval`, `--max-size` (16 MiB default, as the client) and a non-loopback `--bind` with `--token-file`: ahp-host `tests/unit/test_wsopts.py`; ahp-host-flow `tests/integration/test_flowproxy.py`. The README line on client workflows is current, and a proxy section was added.
+2. **The principal.** ahp-host `tests/integration/test_hostprincipal.py` and `test_answeredby.py`; ahp-host-flow `tests/integration/test_flowprincipal.py` and, through a real in-memory gateway, `test_flowprincipal_fleet.py`.
+3. **Typed workflow calls.** ahp-protocol `test_flow_ext` (`test_flow_ext_workflow_*`); ahp-host-flow `tests/unit/test_typedargs_catalog.py` and `tests/integration/test_typedstart.py`, `test_startworkflow_client.py`; ahp-client `tests/client/test_start_workflow.py`.
+
+Known limits. Queued, steered and host-started turns carry no principal. Absent args are not validated. The OpenHands nit stays out.
+
+**M14: folders, sandboxes and host policy.**
+
+1. **A call in a given folder (`opts.x.cwd`).**
+   - The folder is an extension option, not a new `isolation` value, because `isolation` is Claude Code's (§3).
+   - `dispatch.call_directory(opts, roots)` is parsed like `message_attachments`: resolved strictly, a directory, inside `_roots()`, with a relative path resolved against `roots[0]`. It replaces `self.working_directories` in the inner `AgentSessionContext`.
+   - With `isolation: 'worktree'`, the folder is the base of the worktree (`create_worktree(workdir=cwd)`), and the inner cwd is its relative path inside the worktree.
+   - With `opts.x.chat`, the first call fixes the folder; a later different one logs a line, as config does.
+   - Fleet passes `folder` to `start_session`, and the node's roots decide. Remote passes `working_directories=[uri]` to `create_session`.
+   - Unknown `isolation` values become one log line instead of being silently ignored. Fleet and remote log that `isolation: 'worktree'` is not applied there.
+   - The key already covers `opts`.
+   - Proving tests:
+     - The inner session gets the folder.
+     - A folder outside the roots and a file path each fail the call with a line.
+     - With a worktree, the worktree is cut from that folder.
+     - Fleet `start_session` and remote `create_session` receive the folder (`fleet_fakes`, `remote_dialer`).
+     - Plus a conformance script and its `.py` twin.
+2. **Launcher and environment allowlist (ahp-host, ahp-host-acp).**
+   - `ahp_host.provider.spawn` gains `child_env(allow, extra, *, base=os.environ)`. It keeps only the named variables, which may be glob patterns, plus `extra`, and always drops variables with secret-shaped names unless named exactly. The ahp-host and ahp-host-claude CLIs keep inheriting by default.
+   - ahp-host-acp agent options gain two keys:
+     - `launcher`: an argv prefix with `{cwd}`, `{uid}` and `{gid}` placeholders, for example `["docker", "run", "-i", "--rm", "-v", "{cwd}:{cwd}", "-w", "{cwd}", "img"]`.
+     - `env_allow`: when set, the agent's environment is built by `child_env`; unset keeps today's behaviour, with a CHANGELOG note recommending it.
+   - Both keys go in `AGENT_OPTIONS`, `config.py` and `AgentSpec`, kept in step as ahp-host-acp's AGENTS.md requires.
+   - **Paths.** The supported mapping is identity: each root is mounted at the same path, and the README says so. A `path_map` (host path to container path, applied to `session/new` cwd, prompt resource links, and the paths of inbound diffs, locations and `rawInput`) is a later option, not part of M14.
+   - **Relay in a container.**
+     - `relay_command` overrides `sys.executable -m ahp_host_acp.relay`, so the relay can be installed in the image.
+     - `relay_host` (for example `host.docker.internal`) makes the bridge listen on that interface instead of loopback, and only when set.
+     - The bridge token reaches the relay through the launcher's environment (`-e NAME`), never argv.
+   - ahp-host-claude gets `env_allow` only, through the SDK's `env`. Whether the SDK can be launched in a container is out of scope.
+   - Proving tests:
+     - `fake_agent.py` gains a scenario that reports its `os.environ` keys and argv: `env_allow` drops an unlisted variable and a secret-shaped one, keeps `PATH`, and the launcher prefix and placeholders reach argv.
+     - A launcher that is a small Python wrapper script, standing in for docker, starts a working session.
+     - The relay with `relay_command`/`relay_host` round-trips a client tool.
+     - The token never appears in argv.
+     - No test needs docker; an opt-in one may.
+3. **Host-enforced command and path policy (ahp-host, ahp-host-claude, ahp-host-acp).**
+   - `ahp_host.provider.policy.ToolPolicy` is pure: `decide(ToolRequest(name, kind, input, cwd, roots)) -> Decision(allow | deny | ask, reason)`. A deny is final in every approval mode, never downgraded by `acceptEdits` or `bypass`. `ask` forces a prompt.
+   - Rules come from config as a `[policy]` table:
+     - `deny_commands`: shell-word patterns such as `git push*`, `git remote set-url*` and `curl * | sh`. Matching is on the parsed command (`shlex`), so `git  push` and `git -C x push` match.
+     - `deny_paths`: globs such as `**/.env`, `**/id_*` and `~/.ssh/**`. Matching happens after `resolve()`, so symlinks and `..` are caught.
+     - `ask_paths`: reads that need a prompt.
+     - `allow_paths_outside_roots = false`.
+     - A callable by import path, for a deployment's own rules.
+   - Each provider maps its tools to `ToolRequest`, and its mapping table is the security decision tested:
+     - Claude maps `Bash` (the command), `Read`, `Write`, `Edit`, `Glob`, `Grep` and `NotebookEdit` (the path), and MCP tools (by name). It consults the policy first in `_pre_tool_use`, where a deny is binding in every mode.
+     - ACP consults it in `_request_permission` before `confirm_tool_call` and answers the reject option.
+   - The ACP limit: on its own this is advisory, because an ACP agent in its own allow-always mode never asks.
+   - The hard path is `[policy] host_tools = true`: ahp-host-acp advertises the ACP `fs` and `terminal` client capabilities and serves `fs/read_text_file`, `fs/write_text_file` and `terminal/*` itself, through the roots jail and the policy. Reads, writes and commands then run under host control. Pair it with the M14 item 2 sandbox, so an agent that ignores the host's tools still has no credentials.
+   - The policy reason reaches the agent: Claude through `PermissionResultDeny(message=)`; ACP through the tool error text.
+   - Proving tests:
+     - The pure policy: command parsing variants, symlink and `..` escapes, `~` expansion, and Windows paths under `--platform linux` mypy and on the Windows CI.
+     - Claude: a denied `git push` is refused under `acceptEdits` and `bypassPermissions`, with the reason, using the fake SDK.
+     - ACP: a permission request for a denied path is rejected without a prompt; with `host_tools`, a `fs/read_text_file` of `.env` returns an error, a read inside the roots works, and `terminal/create` of `git push` is refused (`fake_agent.py` gains these client calls).
+     - Each mapping table is pinned by a test.
+
+**M15: approvals and changesets.**
+
+1. **A waiting signal from `inputNeeded`.**
+   - A step's `awaitingInput` is derived from the session's `inputNeeded`, filtered to the worker chat, by observing the host's session state as `inprocess._unanswerable` already does. So out-of-turn MCP entries, authentication requests and restore withdrawals count.
+   - `TurnTee.on_waiting` stays as the fallback when no session view exists.
+   - `run_view` gains `RunView.waiting`: each step waiting, with its request kind and, if the protocol entry carries one, the chat. ahp-client adds `Session.waiting()` over `inputNeeded`, with no flow knowledge needed.
+   - Proving tests:
+     - An MCP authentication entry on a worker chat sets `awaitingInput`.
+     - A restore withdrawal clears it.
+     - `RunView.waiting` lists two parallel waiting steps.
+2. **Approvals for remote workers.**
+   - `ClientDispatcher` iterates the remote `TurnStream` instead of awaiting it:
+     - `ToolCallReady` is re-raised as a tool confirmation on the thin worker chat (`RemoteOut.confirm`, implemented by `RemoteWorkerChats` with the worker sink), and the answer goes back with `approve()` or `deny(reason_message=)`.
+     - `InputRequested` is re-raised as an input request there and answered with `.answer()`.
+   - `idle_timeout` stays the backstop, and an open relayed request pauses it.
+   - Masking applies to the relayed copies, as the `TurnTee` does.
+   - Proving tests, against a second in-memory host (`remote_dialer`): a remote approval answered on the run's worker chat lets the remote turn finish; a denial with a reason reaches the remote agent; a remote question round-trips; an unanswered one still times out.
+3. **Bulk and policy approvals.**
+   - Changing the run's `Approvals` session config now fans out to every live worker in `_workers`, not only new ones, so "approve all for this run" applies at once.
+   - A flow.toml `[approvals]` rule table answers a worker's confirmation in `TurnTee.confirm_tool_call` before it is published, logging "approved by rule <n>":
+     - Match keys: tool name glob, `readOnly` hint, provider, phase.
+     - Actions: `allow` or `deny`.
+     - A `persons` list answers only when the turn's principal is listed (M13 item 1).
+   - M14's `ToolPolicy` is checked first and always wins; a rule can never allow what the policy denies. This is a security decision, tested as one and named in AGENTS.md.
+   - Proving tests:
+     - A config change approves an already-running worker's next prompt.
+     - A rule auto-approves a read-only tool and leaves a write to prompt.
+     - A rule cannot override a policy deny.
+     - A person-scoped rule applies only for that principal.
+4. **Commit on a changeset, and reasons back to the agent (ahp-host, ahp-host-flow, ahp-host-acp, ahp-client).**
+   - **Operations, widened compatibly.**
+     - `OperationHandler` may take a fourth `OperationContext(params, principal)` argument, chosen by signature, with `params` from `InvokeChangesetOperationParams._meta["ahp-py/operation"]`.
+     - It may return `{message, followUp}`, which the host passes through in place of `{}`.
+     - Existing three-argument handlers keep working.
+   - **Commit.**
+     - Adds `COMMIT_OPERATION = "ahp-host-flow.worktree.commit"`: commit the worktree on a branch named by `[changesets] branch` (default `flow/<runId>-<ordinal>`), with the message from `params.message`, defaulting to the step label or the first prompt line.
+     - Optionally (`params.apply = true`) apply onto the working tree and commit there.
+     - The author is the git config's; the principal goes in a `Flow-Principal:` trailer only when `[changesets] trailer = true`.
+     - It never pushes.
+     - It is persisted across a restart like Apply and Discard (M11 item 5).
+   - **Discard with a reason.** Discard takes `params.reason`, logs it, and posts a system notification on the worker chat. A named chat (`opts.x.chat`) gets it as the first line of its next turn.
+   - **Reasons in the script.** `approve()` keeps returning a bool (Claude Code parity). With `opts.x.detail: true`, it returns `{approved, reason, answeredBy}`.
+   - **ACP reasons.** ACP has no reason field, so ahp-host-acp sends a declined call's reason as a short user-visible text block on the agent's next prompt in that session (`[declined: <tool>] <reason>`), behind `decline_feedback = true` (the default).
+   - **ahp-client.** `ToolCallReady.deny` and `InputResponder.confirm_tool` gain `reason_message=` and `user_suggestion=`, and `Session.invoke_operation(..., params=)` exists.
+   - Proving tests:
+     - Commit creates the branch with the message and leaves the repo's checkout untouched; commit-and-apply lands it; a second resolve fails; commit survives a restart.
+     - A discard reason reaches a named chat's next turn.
+     - The ACP fake receives the reason on its next prompt.
+     - The ahp-client helpers send the fields.
+     - A three-argument handler still works.
+
+**M16: limits, timeouts and fallback.**
+
+1. **Error kinds reach the engine.**
+   - `TurnTee.turn_failed` keeps `error_type` and `resumable`.
+   - Dispatchers raise `DispatchError(kind, transient, message)`, where `kind` is one of `unavailable`, `rate_limited`, `refused`, `timeout`, `empty` or `failed`. The table maps `claude.*` (the transient statuses already there), `acp.start`/`acp.agentExited` (unavailable), `acp.refusal`, `acp.max_tokens`, a provider load failure and a remote `TurnFailed`.
+   - The scheduler records `kind` on the `error` record; old readers ignore it.
+   - Proving test: the mapping table, one case per row.
+2. **Budgets and a hard cap.**
+   - `Budget` becomes named counters, each with an optional limit:
+     - `output_tokens`, which is `budget` and unchanged by default;
+     - `input_tokens`, including cache reads unless `[limits] count_cache = false`;
+     - `cost_usd`, where a provider reports it;
+     - `wall_seconds`.
+   - Usage is read properly: Claude's `_meta.turnTotals` (the summed figures, not the last request's gauge) and ACP's cache tokens.
+   - **Hard cap, two layers.**
+     1. At admission, each call reserves `[limits] reserve` tokens (default: the mean of finished calls, else 0), released or corrected when it ends. So N parallel calls cannot each pass a check that only one fits.
+     2. A live stop: when a counter passes its limit, the scheduler cancels every in-flight call through the existing skip path, which stops the inner turn, the remote turn and the fleet session. Those calls are recorded as `error` with kind `budget`, not `null`, so a resume re-runs them rather than replaying a null.
+   - Because providers report usage only at turn end, the live stop is driven by wall time and by Claude's per-`AssistantMessage` usage. ahp-host-claude emits `sink.usage` per assistant message, behind a capability flag, so the overshoot is bounded by one model request rather than one turn. The README states the bound for each provider.
+   - Per-call `opts.x.timeout` and `ProviderConfig.call_timeout`.
+   - flow.toml `[limits]`: `budget`, `input_budget`, `cost_budget`, `timeout`, `concurrency`, `reserve`. These finally give the provider path what `--budget`, `--timeout` and `--concurrency` give the CLI.
+   - **Per-user quotas.** A provider-wide `QuotaLedger` keyed by principal (M13 item 1), with per-day and per-run token and cost limits in `[quotas]`, persisted under `state_dir`, and checked in `Scheduler.admit` and on each usage report. Hitting it fails the call like the budget does, with a run log line naming the quota, never the principal's other runs. ahp-gateway gains a per-principal `max_running` beside the per-session one.
+   - Proving tests:
+     - Eight parallel calls under a budget that fits two overshoot by at most the reservation.
+     - The live stop cancels in-flight fakes and records `budget` errors that a resume re-runs.
+     - A wall-clock limit stops a slow call.
+     - Input and cost counters.
+     - Claude per-message usage with the fake SDK.
+     - The quota survives a provider restart and is per principal.
+     - The gateway's per-principal cap holds across two flow sessions.
+3. **Idle timeout, heartbeat, empty-turn retry and single-slot models.**
+   - `idle_timeout` is allowed for every provider kind. A watchdog fed by a `TurnTee.on_activity` hook covers every delta, including reasoning, tool updates and usage, so thinking output is the heartbeat. An open approval pauses the watchdog. It cancels the turn and fails the call with kind `timeout`.
+   - ahp-client's `TurnStream` also counts `activityChanged` and session-level `inputNeeded` changes for its turn's chat, and documents what resets it. The README's live-test advice (`idle_timeout=None`) is replaced by: a flow run's main chat emits a heartbeat (a `_meta` progress tick on `activityChanged`) every `[limits] heartbeat` seconds (default 30) while steps run.
+   - `ProviderConfig.retry_empty` (default 0): a turn whose final text is empty or whitespace-only, with no structured result, is retried inside the dispatcher up to N times. The ordinal and key are unchanged, the journal holds one record, and the usage of every attempt is summed. Reasoning-only output counts as empty. Under the default, Claude Code semantics are unchanged.
+   - `ProviderConfig.concurrency` is a semaphore per provider, shared across a provider's runs and held inside the run's own slot. `concurrency = "probe"` times two parallel minimal turns at first use. If the second turn's time to first event is about as long as the first turn takes, the semaphore is set to 1 with a log line. A 429 or 503 marked busy also halves it, down to 1. Explicit numbers win.
+   - Proving tests:
+     - A worker that only streams reasoning is not timed out; a silent one is.
+     - An approval pauses the watchdog.
+     - Empty then text succeeds on retry with one journal record and summed usage.
+     - `concurrency = 1` serialises calls across two runs.
+     - The probe detects a fake single-slot provider and leaves a parallel one alone.
+     - The client heartbeat keeps a default-`idle_timeout` client attached through a 10-minute fake step under a virtual clock.
+4. **Fallback chain.**
+   - `ProviderConfig.fallback = ["claude"]`, and a rule-level `fallback`, validated at config load: known providers, no cycles.
+   - `RoutingDispatcher` walks the chain on `unavailable`, `rate_limited`, a transient failure, `timeout` and `empty` after retries. It never walks on `refused`, a schema failure, or `budget`. It logs "fell back from a to b (kind)".
+   - The provider actually used goes in the `started` record and the step descriptor. The key stays on the primary route, so `key = "model"` is still decided before dispatch, and a resume replays the fallback's result unless routing changes.
+   - Named chats and `attach` never fall back to a fleet or remote provider. Such a fallback is skipped with a line.
+   - Proving tests:
+     - A local fake that is unavailable falls back to a second fake.
+     - A refusal does not fall back.
+     - A cycle is a config error.
+     - Pinned key hashes stay byte-identical under the default `[resume]`.
+     - The step descriptor names the used provider.
+
+**M17: sandboxed workflow hosts, client tools in workers, durable workers.**
+
+1. **Client tools in worker chats.**
+   - In-process workers get the session's active clients and client tools in their inner `AgentSessionContext`. `FlowSession.active_clients_changed` is forwarded to every live worker that `FollowsActiveClients`. The worker sink's `run_client_tool` already routes, since active clients are per session.
+   - `[workflows] client_tools = true | false | ["name", ...]` (default `true`) lets a deployment narrow them.
+   - Remote workers get a `ClientToolHost` advertising the same tools. Its executors call back through a callable injected from the provider layer (the engine never imports `ahp_host`), which runs the tool on the worker chat. Fleet workers are unchanged: their node session's own clients apply.
+   - Proving tests:
+     - A worker turn calls a main-session client tool and gets its answer.
+     - A client joining mid-run reaches a running worker.
+     - `client_tools = false` hides them.
+     - A remote worker's tool call round-trips through the run's client.
+2. **Per-call sandboxed hosts.**
+   - `ProviderConfig.launch = "pkg.mod:factory"`, for `via = "remote"`: an async factory returning `(transport, aclose)`. With `per_call = true`, `ClientDispatcher` launches, dials, runs and tears down a host for each `agent()` call, and on every failure path.
+   - It takes the call's folder (M14 item 1) and the client tools (item 1 above).
+   - Reattach for such a call is "run again", logged.
+   - The README gets a "Running on sandboxed hosts" section:
+     - a launcher example that starts `ahp-host` in a container with `--bind` and a token file, using placeholder names;
+     - what crosses the boundary (prompt, folder, client tools, approvals per M15 item 2);
+     - what does not (worktrees, named chats, `attach`);
+     - a reminder to set `env_allow`.
+   - Proving tests:
+     - A fake launcher starting an in-memory host per call runs a fan-out and is torn down after each call, including on skip, abort and failure, with no leaked tasks.
+     - The README example parses.
+3. **Worker chats that resume after a restart.**
+   - The named-chat map is persisted in the flow session's resume state as `{name: {provider, worker_chat, title, config, inner_state}}`, with `inner_state` from the inner provider's `resume_state_of`, refreshed after each turn. It is an optional key, so `RESUME_STATE_VERSION` stays 1.
+   - On resume, a provider that is a `ResumableAgentProvider` rebuilds the named chat lazily through `resume_session` on the old worker chat, keeping Claude's memory by session id and ACP's by `session/load`; others are recreated, as today, with the line.
+   - A cut-off unnamed call whose inner provider `ResumesTurns` is resumed in place rather than re-dispatched, when its inner state was recorded at start. Otherwise it is re-dispatched as today.
+   - Proving tests, over a `FileSessionStore` with drain and crash: a named chat on a resumable fake remembers an earlier turn after the restart; a non-resumable one is recreated with the line; a cut-off call on a `ResumesTurns` fake is resumed once, not re-dispatched.
+4. **Secrets out of the run log.**
+   - The journal header's `args` are masked with `mask_value`. Its `source`, and each `workflow` record's `source`, are masked with `mask`.
+   - Since resume needs the real text, the header gains `sourceSha` (and `argsSha`). A masked journal resumes only if the current script and args hash to those values, with a clear error otherwise.
+   - `[journal] keep_source = true` keeps today's behaviour.
+   - The run's `Redactor` is offered to ahp-host's and ahp-client's `WireLog` as an optional content masker.
+   - `log()` and run errors stay masked on every path: library, CLI and provider.
+   - Update the M9 "still not redacted" list.
+   - Proving tests:
+     - A secret in args and in the script text appears in neither the journal nor the wire log.
+     - A masked journal resumes against the same script and refuses a different one.
+     - `keep_source` keeps the text.
+
+**M18: a reference non-Claude agent, the support matrix, releases.**
+
+1. **A reference agent on an OpenAI-compatible endpoint.**
+   - `ahp_host_acp.reference` is a small, standard-library-only ACP agent (`python -m ahp_host_acp.reference`, console script `ahp-acp-openai`). It runs a `/v1/chat/completions` tool loop: base URL, model and key from environment variables (the key never in argv or logs).
+   - It maps the relay's MCP tools to OpenAI `tools` and returns structured output through the relay's `StructuredOutput` tool. It streams text and reasoning (`reasoning_content`, where the server sends it), honours `session/cancel`, and asks `session/request_permission` before its one built-in tool, a file write.
+   - It is an ACP agent rather than a host provider, so permissions, relay, structured output and every M14 policy path apply to it unchanged.
+   - It is tested against an in-test stub HTTP server that speaks the chat completions SSE format. A live lane (`AHP_OPENAI_BASE_URL`) runs it against Ollama or any compatible server, in CI too if a deployment provides one.
+   - Proving tests:
+     - Text, a tool round trip through the relay, structured output, cancel mid-stream, a permission denial with its reason (M15 item 4), and a 429 classified `rate_limited` (M16 item 1).
+     - A flow run routes a phase to it.
+2. **The support matrix.**
+   - A README table (ahp-py root) lists providers (echo, ACP generic, ACP reference, Claude, flow) by capability: steering, structured output (native or prompted), client tools, host policy (advisory or hard), turn resume, session resume, fork, history truncation, changesets, usage (live or at turn end), cost and reasoning stream.
+   - It also lists the ACP agents known to work (opencode, OpenClaw, the reference agent), with what each supports in practice.
+   - A test builds the capability columns from `isinstance` checks on each provider's session class and fails when the table disagrees. The "in practice" columns are prose, with a date.
+3. **Tagged releases and a compatibility matrix.**
+   - Pin ahp-host-flow's siblings (`ahp-client`, `ahp-host-claude`, `ahp-host-acp`, and `ahp-gateway` for tests) to `~=0.1.0`, add it to `[tool.uv.sources]`, and add `ahp_host_flow` to the CI wheel smoke import.
+   - Each package without one gets `RELEASING.md`, `smoke_wheel.py` and a dated release section moved out of `[Unreleased]`.
+   - Fix release-plan.md's stale PyPI line and sequencing.
+   - A root `COMPATIBILITY.md` has one row per tag: package, version, `ahp-protocol` range, the AHP versions it offers (`DEFAULT_SUPPORTED_VERSIONS`), the upstream spec commit, and the tested sibling versions. A root docs test reads each `pyproject.toml` and `versions.py` and fails on drift.
+   - Release in dependency order: `ahp-protocol/v0.1.0`, `ahp-host/v0.1.0`, `ahp-client/v0.1.0`, then gateway and the providers. Each tag goes through `release.yml`.
+   - Tagging and pushing tags is done by the maintainer, not by a build run.
+   - Proving tests: the compatibility test; `release.yml`'s version check against each wheel (it exists); and the wheel smoke importing every package.
+
+**Not in M13-M18.**
+- A container path map for ACP: identity mounts only.
+- Launching Claude's SDK in a container.
+- Upstream requests for a decline reason in ACP, a principal on `UserMessage`, and typed workflow starts, which are added to §10 as each lands.
+
 ## 9. Risks
 
 - **Format drift:** Claude's workflow format is internal. Mitigation:
@@ -723,3 +1002,9 @@ upstream:
    `ahp-host` `docs/requests.md` entry 12). Built as the interim kind
    `ahp-py/delegation` in `createSession` `_meta["ahp-py/origin"]` (M11); the
    upstream kind is still the ask.
+6. **Principal on messages and answers:** who sent a message and who answered an input
+   or confirmation request, as an optional, host-supplied identity (§8 M13; `ahp-host`
+   `docs/requests.md` entry 14).
+7. **Typed workflow starts:** a `_meta["ahp-py/flow"]` start (`{workflow, args, runId?}`) on an
+   ordinary `chat/turnStarted`, and `argsSchema` on a workflow's prompt customization (§8 M13).
+

@@ -221,6 +221,19 @@ The other ten — `may_see_channel`, `may_create_session`, `may_access_resource`
 demo binds to loopback. It is not a starting point for a deployment; it is the
 absence of one.
 
+### Who is the user: `principal_of`
+
+A `Policy` can also define `principal_of(info)`, which returns a string naming the
+person behind a connection, or `None`. It is optional, and the host looks it up
+without requiring it. Define it from the same evidence `authorize_connection` uses,
+for example a header your proxy sets, and only when the socket is reachable solely
+through that proxy. The host copies the value onto the session context when a
+connection creates a session, onto each user message when a connection sends a turn,
+and onto the answer to an input or confirmation request (`answered_by`), and stores
+it with the session so it survives a restart. A provider can then act per person, for
+example by checking that the right person approved. The `clientId` is chosen by the
+peer and is never used as an identity.
+
 ## The demo is a demo
 
 `python -m ahp_host` uses `LoopbackSingleUserPolicy`, binds to

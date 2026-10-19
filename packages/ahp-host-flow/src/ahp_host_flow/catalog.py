@@ -15,7 +15,7 @@ from ahp_host.core.automations import CronExpression
 from ahp_protocol.ext.flow import FLOW_META_KEY as FLOW_META_KEY
 
 from ahp_host_flow.config import PYTHON_SOURCES_DEFAULT, SOURCES
-from ahp_host_flow.engine import WORKFLOW_NAME
+from ahp_host_flow.engine import WORKFLOW_NAME, args_schema_error
 from ahp_host_flow.sandbox import Sandbox, SandboxError, pyrunner
 
 PLUGIN_ID: Final = "ahp-host-flow.host"
@@ -364,6 +364,18 @@ def schedule_of(meta: Mapping[str, Any] | None) -> tuple[dict[str, str] | None, 
     return ({"expression": expression, "timeZone": tz}, None)
 
 
+def args_schema_of(meta: Mapping[str, Any] | None) -> tuple[dict[str, Any] | None, str | None]:
+    """The JSON Schema `meta.x.args` declares for the args, and a warning when unusable."""
+    x = meta.get("x") if isinstance(meta, Mapping) else None
+    if not isinstance(x, Mapping) or "args" not in x:
+        return (None, None)
+    raw = x["args"]
+    error = args_schema_error(raw)
+    if error is not None:
+        return (None, error)
+    return (dict(raw), None)
+
+
 def _child(entry: WorkflowEntry) -> dict[str, Any]:
     phases = entry.meta.get("phases") if entry.meta is not None else None
     flow: dict[str, Any] = {
@@ -375,12 +387,21 @@ def _child(entry: WorkflowEntry) -> dict[str, Any]:
         flow["shadowedBy"] = entry.shadowed_by
     if entry.language == "python":
         flow["language"] = "python"
+    warnings: list[str] = []
     schedule, warning = schedule_of(entry.meta)
     if schedule is not None:
         flow["schedule"] = schedule
     if warning is not None:
-        flow["warnings"] = [warning]
-        _logger.warning("%s: %s", entry.name, warning)
+        warnings.append(warning)
+    args_schema, warning = args_schema_of(entry.meta)
+    if args_schema is not None:
+        flow["argsSchema"] = args_schema
+    if warning is not None:
+        warnings.append(warning)
+    if warnings:
+        flow["warnings"] = warnings
+        for text in warnings:
+            _logger.warning("%s: %s", entry.name, text)
     return {
         "type": "prompt",
         "id": f"{entry.container_id}.{entry.name}",

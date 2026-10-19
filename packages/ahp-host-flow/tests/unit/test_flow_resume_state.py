@@ -102,6 +102,24 @@ async def test_flow_resume_state_round_trips(tmp_path: Path) -> None:
     assert await provider.resume_state_of(session) == state
 
 
+async def test_flowprincipal_resume_state_round_trips(tmp_path: Path) -> None:
+    named = {"flow": 1, "runs": [{**_run(), "principal": "alice"}]}
+    provider, session = await _resumed(tmp_path, named)
+    assert await provider.resume_state_of(session) == named
+    assert session._restored["ahp-chat:/main"].principal == "alice"
+    provider, session = await _resumed(tmp_path, {"flow": 1, "runs": [_run()]})
+    assert session._restored["ahp-chat:/main"].principal is None
+    written = await provider.resume_state_of(session)
+    assert written is not None
+    (entry,) = written["runs"]
+    assert "principal" not in entry
+
+
+async def test_flowprincipal_resume_state_drops_a_bad_principal(tmp_path: Path) -> None:
+    provider, session = await _resumed(tmp_path, {"flow": 1, "runs": [{**_run(), "principal": 5}]})
+    assert await provider.resume_state_of(session) == {"flow": 1, "runs": []}
+
+
 async def test_flow_resume_state_reads_an_entry_without_the_counts(tmp_path: Path) -> None:
     """The counts are optional: an entry written without them means a turn never resumed."""
     short = {"chat": "ahp-chat:/main", "turnId": "t1", "runId": "abc", "workflow": "demo"}

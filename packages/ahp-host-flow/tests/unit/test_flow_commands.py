@@ -8,6 +8,7 @@ from ahp_host_flow.commands import (
     StartRun,
     help_text,
     parse_message,
+    parse_ref,
     unknown_text,
 )
 from ahp_host_flow.sandbox import NO_ARGS
@@ -89,3 +90,11 @@ def test_client_qualified_name() -> None:
     assert parse_message('/client:nightly {"a": 1}') == StartRun(
         "nightly", "client", None, {"a": 1}
     )
+
+
+def test_typedstart_parse_ref() -> None:
+    assert parse_ref("host:fanout") == ("host", "fanout")
+    assert parse_ref("fanout") == (None, "fanout")
+    assert parse_ref("bogus:x") == BadRequest("Not a workflow name: 'bogus:x'")
+    assert isinstance(parse_ref("a b"), BadRequest)
+    assert isinstance(parse_ref(""), BadRequest)

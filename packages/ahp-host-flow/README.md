@@ -30,6 +30,42 @@ address that is not loopback is refused unless `--token-file` is given.
 `--root PATH` (repeatable) names a folder the inner providers may work in; see
 [flow.toml](#flowtoml).
 
+`--ping-interval SECONDS` (default 20, `0` = off) sends a WebSocket ping that
+often so an idle connection survives a proxy. `--max-size BYTES` (default 16 MiB,
+matching ahp-client; `0` = no limit) caps one frame. A non-loopback `--bind` with
+`--token-file` works, and the token is accepted as `Authorization: Bearer <token>`
+or as `?tkn=`.
+
+## Behind a proxy
+
+Put the host behind a reverse proxy by binding it off loopback with `--token-file`.
+
+- Send the token in the `Authorization: Bearer` header rather than `?tkn=`;
+  proxies log the request URI.
+- To take the principal from a header the proxy asserts, see
+  [Embedding it behind a proxy](https://github.com/jackhumbert/ahp-py/blob/main/packages/ahp-host/README.md#embedding-it-behind-a-proxy).
+  A forwarded header is evidence only if the socket is reachable only through the
+  proxy.
+- Set the proxy's idle/read timeout above `--ping-interval` (or keep pings on), and
+  its body/frame limit at or above `--max-size`.
+
+## Typed workflow starts
+
+A client can start a workflow without building the `/name {json}` text. Put
+`_meta["ahp-py/flow"]` = `{workflow, args, runId?}` on an ordinary `chat/turnStarted`;
+the message text stays `/name {json}` for clients that do not know the key, and the
+typed start wins over the text.
+
+- A workflow's `meta.x.args` (a JSON Schema) is published as `argsSchema` on its
+  prompt customization, so a client can build a form.
+- Args are validated against that schema for typed and text starts alike. A mismatch
+  ends the turn with errorType `flow.badArgs` and nothing is dispatched.
+- `runId` names the run when it is free; otherwise the host picks one.
+
+From ahp-client, `session.workflows()` lists them and
+`session.start_workflow(name, args, run_id=None)` starts one. In ahp_protocol,
+`workflows_of` reads the listing from a customization container.
+
 ## Running a script from the command line
 
 ```sh
@@ -105,8 +141,7 @@ or, to pick it explicitly, `/client:name`. It is listed in a container of the
 provider's own, "Workflows (<plugin>)" with id `ahp-host-flow.client.<plugin id>`,
 beside the client's plugin (the host owns and re-expands it). It is re-published
 when the client republishes its plugin. The run snapshots the script text the
-client served, so resume never needs the client. `workflow('name')` inside a
-script does not reach client workflows yet.
+client served, so resume never needs the client. `workflow('name')` inside a script reaches client workflows too (`.js` only).
 
 ## Python workflows
 
@@ -339,8 +374,28 @@ async def tool(call: VerbCall):
 `VerbCall` has `name`, `args` (a tuple of JSON values), `ordinal` (verbs only),
 `call_id` (stable across a resume), `phase`, `run_id` and `context`.
 `context.log(text)`, `context.ask(question, options)` and `context.confirm(summary,
-options)` reach the run's main chat; `context.principal` is `None` until the host
-passes one. A script calls `await tool('search', {q: 'x'})`.
+options)` reach the run's main chat; `context.principal` is the run's principal (the
+turn's, from ahp-host's `principal_of`; `None` for a turn with none, such as a queued,
+steered or host-started one, or without the hook; never the session creator's). `context.ask` returns `AskOutcome(value, answered_by)`, not the bare value (use
+`.value`), and `context.confirm` returns `ConfirmOutcome(approved, answered_by)`. A script calls
+`await tool('search', {q: 'x'})`.
+
+An `approve(person)` handler can insist that the named person answers, and re-ask
+when someone else does:
+
+```python
+from ahp_host_flow.engine import VerbCall
+
+
+async def approve(call: VerbCall):
+    person = call.args[0]
+    while True:
+        outcome = await call.context.confirm(f"{person}, please approve")
+        if outcome.answered_by is None:
+            raise RuntimeError("this host gives no principal, so answers cannot be attributed")
+        if outcome.answered_by == person:
+            return {"approved": outcome.approved}
+```
 
 - A handler that raises makes the call throw with its masked message, which the
   script can catch. Aborting the run cancels a running handler. Verbs take no

@@ -7,6 +7,35 @@
 - `ScopedPublisher.origin_turn(chat=None)` (`ahp_host.provider.base.ResolvesOriginTurn`) passes the host's answer to an inner provider: the client turn a run's worker chat works for, so an embedder's `Policy` that binds a credential per client turn can reach the workers. Per run (each run's main chat has its own turn) and a resumed run resolves to the resuming turn. Foreign chats get `None`.
 - `build_host(policy=, session_store=)` and `run_in_process(policy=)` take an embedder's `Policy` (and session store) instead of the hard-coded loopback policy; the defaults are unchanged.
 
+### Documentation (M13)
+
+- README: `--ping-interval`, `--max-size`, a non-loopback bind with a token, a proxy section, typed workflow starts and the `approve(person)` example; `docs/format.md` covers `meta.x.args` and typed starts; AGENTS.md invariants; plan status and the M13 result.
+
+### Added — typed workflow calls (M13)
+
+- `meta.x.args` (a JSON Schema literal) is checked at catalog time and published as `_meta["ahp-py/flow"].argsSchema`; a non-object or invalid schema is a catalog warning, and a bad schema never fails discovery. `engine.args_schema_error` and `engine.args_error` are the checks.
+- A typed start (`_meta["ahp-py/flow"]` `{workflow, args, runId?}`) wins over the message text. Args are validated against `argsSchema` for typed and text starts; a failure is `errorType` `flow.badArgs` and nothing is dispatched. A free client-chosen `runId` is used; a taken or invalid one is replaced with a fresh id and logged.
+
+### Added — the principal (M13)
+
+- The run's principal (the turn's own; `None` for a queued, steered or host-started turn, never the session creator's) is on `RunEntry` and in the resume state (written only when set, so existing states are unchanged), and reaches custom verbs as `VerbContext.principal`.
+
+### Changed — verb context answers (M13)
+
+- **Breaking for custom verbs:** `VerbContext.ask` now returns `AskOutcome(value, answered_by)`, not the bare value (use `.value`; `None` is still a declined question's `value`), and `confirm` returns `ConfirmOutcome(approved, answered_by)` (truthy as `approved`), so a handler can implement `approve(person)`. `MainChatGates.ask_outcome` and `approve_outcome` carry them; `ask` and `approve` are unchanged.
+
+### Changed
+
+- `python -m ahp_host_flow --max-size` defaults to 16 MiB, matching ahp-client.
+
+### Fixed — serving off loopback and behind a proxy (M13)
+
+- `--bind` off loopback with `--token-file` works: `allow_remote` is now passed to the server, so every non-loopback bind no longer fails.
+- The loopback check is ahp-host's `is_loopback` (127.0.0.2 counts); `_is_loopback` is gone.
+- The token is accepted as `Authorization: Bearer` as well as `?tkn=`, so a reverse proxy can forward it in a header.
+- `--ping-interval` (seconds, default 20, 0 for none) and `--max-size` (bytes, 0 for no limit) reach the server; a negative value exits.
+- `_serve` takes `stop=` (the caller owns shutdown, so no signal handlers) and `on_ready=` (called with the bound port).
+
 ### Added — the resume-key hook (M12)
 
 - `RunOptions.key_extra` (a callable taking an `AgentCall`) and `key_mode` (its name in the journal): the hook's JSON value joins each `agent()` call's key as an `extra` field, so a cached call replays only for the same value. With no hook every key is byte-identical to before (`call_key(call, extra=...)`; an extra of `None` still adds `"extra": null`). `key_mode_name()` is `default`, the given `key_mode`, or the hook's `module:qualname`; the options reject a mode without a hook and `default` with one.

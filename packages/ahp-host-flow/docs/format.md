@@ -318,6 +318,24 @@ never creates an automation itself. A client applies it with
 the workflow is still listed, and the reason is in the customization's
 `warnings` and in the host log.
 
+### meta.x.args
+
+`meta.x.args` is a JSON Schema literal describing the workflow's `args`. This is an
+ahp-py extension outside Claude Code's format, which ignores it. The host publishes
+it as `_meta["ahp-py/flow"].argsSchema` on the workflow's customization, so a client
+can build a form. An invalid schema is left out, the workflow is still listed, and
+the reason is a catalog warning in the customization's `warnings` and the host log.
+
+### Typed workflow starts
+
+A client may start a workflow with an ordinary `chat/turnStarted` whose message
+`_meta["ahp-py/flow"]` is `{workflow: "<source:name>", args, runId?}`. The message
+text stays `/name {json}`, so a host that does not know the key runs the text. The
+typed start wins over the text. Args are validated against `argsSchema` for typed and
+text starts; a mismatch fails the turn with errorType `flow.badArgs` and nothing is
+dispatched. A client-chosen `runId` is used when it is free; otherwise the host mints
+one and reports it in `runStarted`.
+
 ### The shim
 
 Script: `conformance/shim/dual_target.js`. It has no Python twin: Claude Code

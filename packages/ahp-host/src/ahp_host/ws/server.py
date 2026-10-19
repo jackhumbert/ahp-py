@@ -15,7 +15,9 @@ socket without a :class:`~ahp_host.core.policy.Policy`.
 
 from __future__ import annotations
 
+import ipaddress
 import logging
+import math
 import re
 import secrets
 from collections.abc import AsyncIterator, Callable, Mapping
@@ -27,11 +29,41 @@ from urllib.parse import parse_qs, urlparse
 from ahp_host.core.host import Host
 from ahp_host.ws.transport import WebSocketTransport
 
-__all__ = ["WebSocketServer", "serve_websocket"]
+__all__ = [
+    "DEFAULT_MAX_SIZE",
+    "DEFAULT_PING_INTERVAL",
+    "WebSocketServer",
+    "bearer_token_validator",
+    "is_loopback",
+    "serve_websocket",
+]
 
 _log = logging.getLogger(__name__)
 
-_LOOPBACK = frozenset({"127.0.0.1", "::1", "localhost"})
+#: websockets' own `serve()` default for `ping_interval`, in seconds. Passing it
+#: changes nothing; it is named here so the option has a visible default.
+DEFAULT_PING_INTERVAL: Final = 20.0
+#: websockets' own `serve()` default for `max_size`, one MiB per incoming message.
+DEFAULT_MAX_SIZE: Final = 2**20
+
+
+def is_loopback(bind: str) -> bool:
+    """Whether `bind` names only the local machine.
+
+    The flow CLI and this server used to disagree: the server's fixed set of
+    three spellings lacked 127.0.0.2, so an address the CLI accepted as loopback
+    was refused here (plan M13 item 0). One function now answers for both, and
+    it asks the standard library rather than listing spellings: all of
+    127.0.0.0/8 and ``::1`` are loopback. ``0.0.0.0`` and ``::`` are not -- they
+    mean every interface -- and a hostname other than ``localhost`` is not
+    resolved, so it is refused rather than guessed at.
+    """
+    if bind == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(bind).is_loopback
+    except ValueError:
+        return False
 
 
 def _token_of(path: str) -> str | None:
@@ -80,6 +112,40 @@ def _headers_of(request: Any) -> Mapping[str, str] | None:
             return None
 
 
+def _same(a: str, b: str) -> bool:
+    # Bytes, so a non-ASCII value cannot raise TypeError the way a str pair does.
+    return secrets.compare_digest(a.encode("utf-8"), b.encode("utf-8"))
+
+
+def bearer_token_validator(token: str) -> Callable[[str | None, Mapping[str, str]], bool]:
+    """A `connection_token` callable admitting one token, by either route.
+
+    Admits when the `?tkn=` value equals `token`, or when the `authorization`
+    header is ``Bearer <token>`` (scheme matched case-insensitively, header name
+    too). Anything else -- missing, wrong, another scheme, a bare ``Bearer`` --
+    is refused, never raised.
+
+    Both routes exist for the reason in :meth:`WebSocketServer._authorize`: a
+    proxy logs `?tkn=` in the request URI, while a header is not logged by
+    default. VS Code's own client can only send the query form.
+    """
+    if not isinstance(token, str) or not token:
+        raise ValueError("token must be a non-empty string")
+
+    def validate(supplied: str | None, headers: Mapping[str, str]) -> bool:
+        if supplied is not None and _same(supplied, token):
+            return True
+        for name, value in headers.items():
+            if name.lower() != "authorization":
+                continue
+            parts = value.split(None, 1)
+            if len(parts) == 2 and parts[0].lower() == "bearer" and _same(parts[1], token):
+                return True
+        return False
+
+    return validate
+
+
 class WebSocketServer:
     def __init__(
         self,
@@ -89,8 +155,21 @@ class WebSocketServer:
         port: int = 0,
         connection_token: str | Callable[[str | None, Mapping[str, str]], bool] | None = None,
         allow_remote: bool = False,
+        ping_interval: float | None = DEFAULT_PING_INTERVAL,
+        max_size: int | None = DEFAULT_MAX_SIZE,
     ) -> None:
-        if bind not in _LOOPBACK and not allow_remote:
+        if ping_interval is not None and (
+            isinstance(ping_interval, bool)
+            or not isinstance(ping_interval, (int, float))
+            or not math.isfinite(ping_interval)
+            or ping_interval <= 0
+        ):
+            raise ValueError("ping_interval must be a number > 0 or None")
+        if max_size is not None and (
+            isinstance(max_size, bool) or not isinstance(max_size, int) or max_size < 1
+        ):
+            raise ValueError("max_size must be an integer >= 1 or None")
+        if not is_loopback(bind) and not allow_remote:
             raise ValueError(
                 f"refusing to bind {bind!r}: AHP defines no authentication, and this "
                 "library is single-trust-domain. Pass allow_remote=True only if you "
@@ -101,6 +180,10 @@ class WebSocketServer:
         self.bind = bind
         self.port = port
         self.connection_token = connection_token
+        #: Seconds between keepalive pings, or ``None`` for none (websockets' meaning).
+        self.ping_interval = ping_interval
+        #: Largest incoming message in bytes, or ``None`` for no limit.
+        self.max_size = max_size
         #: The most recent handshake path, for diagnosing a refused client.
         #: Token-redacted -- see :func:`_safe_path`.
         self.last_handshake_path: str | None = None
@@ -205,6 +288,8 @@ class WebSocketServer:
             self.bind,
             self.port,
             process_request=self._process_request,
+            ping_interval=self.ping_interval,
+            max_size=self.max_size,
         )
 
     async def stop(self) -> None:
@@ -222,6 +307,8 @@ async def serve_websocket(
     port: int = 0,
     connection_token: str | Callable[[str | None, Mapping[str, str]], bool] | None = None,
     allow_remote: bool = False,
+    ping_interval: float | None = DEFAULT_PING_INTERVAL,
+    max_size: int | None = DEFAULT_MAX_SIZE,
 ) -> AsyncIterator[WebSocketServer]:
     server = WebSocketServer(
         host,
@@ -229,6 +316,8 @@ async def serve_websocket(
         port=port,
         connection_token=connection_token,
         allow_remote=allow_remote,
+        ping_interval=ping_interval,
+        max_size=max_size,
     )
     await server.start()
     try:

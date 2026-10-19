@@ -78,7 +78,9 @@ def test_loopback_bind_needs_no_token(
 ) -> None:
     served: list[tuple[str, str | None]] = []
 
-    async def fake_serve(host: object, *, bind: str, port: int, token: str | None) -> None:
+    async def fake_serve(
+        host: object, *, bind: str, port: int, token: str | None, **_: object
+    ) -> None:
         served.append((bind, token))
 
     monkeypatch.setattr("ahp_host_flow.__main__._serve", fake_serve)
@@ -93,7 +95,9 @@ def test_non_loopback_bind_with_a_token_file_serves(
 ) -> None:
     served: list[tuple[str, str | None]] = []
 
-    async def fake_serve(host: object, *, bind: str, port: int, token: str | None) -> None:
+    async def fake_serve(
+        host: object, *, bind: str, port: int, token: str | None, **_: object
+    ) -> None:
         served.append((bind, token))
 
     monkeypatch.setattr("ahp_host_flow.__main__._serve", fake_serve)
@@ -105,10 +109,24 @@ def test_non_loopback_bind_with_a_token_file_serves(
     assert served == [("0.0.0.0", "s3cret")]
 
 
+@pytest.mark.parametrize("content", ["", "  \n\t\n"])
+def test_empty_token_file_exits(tmp_path: Path, content: str) -> None:
+    toml = tmp_path / "flow.toml"
+    toml.write_text(ECHO_TOML, encoding="utf-8")
+    token = tmp_path / "token"
+    token.write_text(content, encoding="utf-8")
+    with pytest.raises(SystemExit) as info:
+        main(["--config", str(toml), "--token-file", str(token)])
+    assert "token file" in str(info.value.code)
+    assert "empty" in str(info.value.code)
+
+
 def test_flow_main_root_flag(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     hosts: list[Any] = []
 
-    async def fake_serve(host: Any, *, bind: str, port: int, token: str | None) -> None:
+    async def fake_serve(
+        host: Any, *, bind: str, port: int, token: str | None, **_: object
+    ) -> None:
         hosts.append(host)
 
     monkeypatch.setattr("ahp_host_flow.__main__._serve", fake_serve)
@@ -132,7 +150,9 @@ def test_flow_main_store_is_a_file_store_under_the_state_dir(tmp_path: Path) -> 
 def test_flow_main_store_no_store_flag(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     hosts: list[Any] = []
 
-    async def fake_serve(host: Any, *, bind: str, port: int, token: str | None) -> None:
+    async def fake_serve(
+        host: Any, *, bind: str, port: int, token: str | None, **_: object
+    ) -> None:
         hosts.append(host)
 
     monkeypatch.setattr("ahp_host_flow.__main__._serve", fake_serve)

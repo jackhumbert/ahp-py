@@ -9,8 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from ahp_host import Host, LoopbackSingleUserPolicy
-from ahp_host.core import Policy
+from ahp_host import Host, LoopbackSingleUserPolicy, Policy
 from ahp_host.core.automations import AutomationStore
 from ahp_host.core.store import FileSessionStore, SessionStore
 from ahp_protocol.ext.flow import FLOW_META_KEY
@@ -56,6 +55,7 @@ async def boot_flow(
     provider_options: Mapping[str, Any] | None = None,
     automations: AutomationStore | None = None,
     policy: Policy | None = None,
+    headers: Mapping[str, str] | None = None,
 ) -> FlowFixture:
     workspace = workspace if workspace is not None else base / "ws"
     (workspace / ".claude" / "workflows").mkdir(parents=True, exist_ok=True)
@@ -66,7 +66,7 @@ async def boot_flow(
         store=store,
         automations=automations,
     )
-    wire, serving = await connect(host)
+    wire, serving = await connect(host, headers=headers)
     chat = await open_session(
         wire,
         SESSION,

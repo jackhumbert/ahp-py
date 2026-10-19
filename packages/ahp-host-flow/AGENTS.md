@@ -173,6 +173,16 @@ is the design; milestones M0–M12 there say what exists and what's next.
 - Resume keys: with no `key_extra` every `call_key` is byte-identical to M11's, guarded
   by the pinned hashes in `test_keyhook_engine_pinned_keys`. Never change the key
   payload without that test.
+- The run's principal is the turn's `UserMessage.principal` only; there is no
+  fallback to `AgentSessionContext.principal` (the session creator), so a turn without one
+  runs with `None`. It is kept on `RunEntry` and in the resume state only
+  when set (`RESUME_STATE_VERSION` stays 1) and is what `VerbContext.principal` reports.
+  A `clientId` is never a principal.
+- Typed starts: a start in `_meta["ahp-py/flow"]` wins over the text. Args are validated
+  against `argsSchema` for typed and text starts and fail as `flow.badArgs` before
+  anything is dispatched. A client run id is used only when it is free.
+- `__main__` uses ahp-host's `is_loopback` and `bearer_token_validator`, never a private
+  copy.
 - Conventional commits, scope `ahp-host-flow`; `CHANGELOG.md` under
   `[Unreleased]`.
 

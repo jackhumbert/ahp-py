@@ -414,6 +414,30 @@ connected stock client until it resubscribes, replay must be truncated by
 convention, and a client cannot tell a redacted part from one that said
 `[redacted]`.
 
+## 14. Who sent a message and who answered (upstream)
+
+**What the spec says today.** A message and the answer to a pending input or tool
+confirmation carry a `clientId`, which a peer chooses. Nothing names the person.
+Connection admission is outside the protocol, so a host cannot tell a provider who
+asked or who approved.
+
+**What ahp-py does.** An optional `Policy.principal_of(info)` names the person behind
+a connection. The host stamps it on `AgentSessionContext.principal` (the creating
+connection), on `UserMessage.principal` (the sender of each turn) and as
+`answered_by` on `InputOutcome` and `ToolConfirmationOutcome`. It is stored under
+`metadata["ahp-py/principal"]`, never put on the wire, and is `None` without the hook.
+
+**Request.** An optional identity on the wire, so any host and client can agree on it:
+
+- A `principal` string on a user message and on the resolution of an input or tool
+  confirmation request, set by the host from its own admission and never taken from
+  the peer's message.
+- Clients must preserve it verbatim and may display it.
+- Its meaning stays the host's; the protocol only carries it.
+
+Why upstream: without it every deployment invents its own header and metadata key,
+and an agent that wants "this person approved" has no portable field to read.
+
 ## Still deliberately not requested
 
 The list above holds, and one addition:

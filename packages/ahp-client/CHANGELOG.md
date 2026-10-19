@@ -6,6 +6,18 @@ Every release states the protocol versions it speaks.
 
 ## [Unreleased]
 
+### Documentation
+
+- README: `session.workflows()` and `session.start_workflow()`.
+
+### Added — ahp-py extension: typed workflow starts
+
+- `Session.workflows()` lists the workflows the host offers, as `WorkflowInfo`.
+- `Session.start_workflow(name, args, run_id=None)` starts one with a typed
+  `_meta` descriptor and the usual `/name {json}` text; the run id is chosen up
+  front and readable from `TurnStream.run_id` before anything is awaited.
+- `TurnStream` takes `meta=` (extra `Message._meta` entries) and `run_id=`.
+
 ### Added — ahp-py extension: delegation session origin
 
 - `create_session(origin=)` takes an `ahp_protocol.ext.delegation.delegation_origin`

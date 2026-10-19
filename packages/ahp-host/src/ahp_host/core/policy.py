@@ -22,9 +22,13 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Final, Protocol, runtime_checkable
+
+#: Where a session's principal rides in `StoredSession.metadata`.
+PRINCIPAL_METADATA_KEY: Final = "ahp-py/principal"
 
 __all__ = [
+    "PRINCIPAL_METADATA_KEY",
     "ConnectionInfo",
     "Denied",
     "LoopbackSingleUserPolicy",
@@ -82,7 +86,17 @@ class ConnectionInfo:
 
 @runtime_checkable
 class Policy(Protocol):
-    """Every trust decision the core refuses to make for you."""
+    """Every trust decision the core refuses to make for you.
+
+    A policy may also have an OPTIONAL ``principal_of(info: ConnectionInfo) ->
+    str | None``, looked up with ``getattr`` and deliberately not a member of
+    this Protocol (so ``isinstance`` checks and the count of decision points are
+    unchanged). It names who a connection is; the host hands that to the
+    provider as ``AgentSessionContext.principal`` (the session's creator) and
+    ``UserMessage.principal`` (the turn's sender) and persists the creator under
+    ``PRINCIPAL_METADATA_KEY``. A raise, ``None`` or an empty string is
+    anonymous. Queued, steered and host-started turns carry none.
+    """
 
     def authorize_connection(self, info: ConnectionInfo) -> bool:
         """Whether this peer may complete ``initialize`` at all."""

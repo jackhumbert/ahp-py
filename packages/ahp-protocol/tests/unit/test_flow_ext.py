@@ -558,3 +558,116 @@ def test_flow_ext_verb_malformed_ignored() -> None:
         view = flow.run_view({"turns": [turn([note(flow.run_started("r", None)), part])]})
         assert view.verbs == ()
         assert view.steps == ()
+
+
+def test_flow_ext_workflow_constants() -> None:
+    assert flow.RUN_ID_PATTERN == r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$"
+    assert flow.BAD_ARGS_ERROR_TYPE == "flow.badArgs"
+
+
+def test_flow_ext_workflow_start_builders_exact() -> None:
+    assert flow.workflow_start("host:x") == {"workflow": "host:x"}
+    assert flow.workflow_start("host:x", args={"n": 1}, run_id="r1") == {
+        "workflow": "host:x",
+        "args": {"n": 1},
+        "runId": "r1",
+    }
+    assert flow.workflow_start("host:x", args=None) == {"workflow": "host:x", "args": None}
+    assert list(flow.workflow_start("w", args=1, run_id="r")) == ["workflow", "args", "runId"]
+    names: list[Any] = ["", 5]
+    for name in names:
+        with pytest.raises(ValueError, match="workflow must be a non-empty string"):
+            flow.workflow_start(name)
+    for run_id in ("../x", "a" * 65):
+        with pytest.raises(ValueError, match="runId must match"):
+            flow.workflow_start("w", run_id=run_id)
+
+
+def test_flow_ext_workflow_start_parse() -> None:
+    assert flow.parse_workflow_start({}) is None
+    assert flow.parse_workflow_start(flow.meta(flow.phase_started("A"))) is None
+    marker = {"kind": "workflow", "phases": [], "source": "h"}
+    assert flow.parse_workflow_start(flow.meta(marker)) is None
+    got = flow.parse_workflow_start(
+        flow.meta(flow.workflow_start("h:x", args={"n": 1}, run_id="r1"))
+    )
+    assert got == flow.WorkflowStart("h:x", {"n": 1}, True, "r1")
+    null = flow.parse_workflow_start(flow.meta(flow.workflow_start("h:x", args=None)))
+    assert null == flow.WorkflowStart("h:x", None, True, None)
+    bare = flow.parse_workflow_start(flow.meta(flow.workflow_start("h:x")))
+    assert bare == flow.WorkflowStart("h:x", None, False, None)
+    extra = flow.parse_workflow_start(flow.meta({"workflow": "h:x", "other": 1}))
+    assert extra == flow.WorkflowStart("h:x", None, False, None)
+    with pytest.raises(ValueError, match="workflow must be a non-empty string"):
+        flow.parse_workflow_start(flow.meta({"workflow": 5}))
+    with pytest.raises(ValueError, match="runId must be a string"):
+        flow.parse_workflow_start(flow.meta({"workflow": "x", "runId": 5}))
+
+
+def test_flow_ext_workflow_schema() -> None:
+    ok: list[dict[str, Any]] = [
+        flow.workflow_start("host:x"),
+        flow.workflow_start("host:x", args={"n": 1}, run_id="r1"),
+        flow.workflow_start("host:x", args=None),
+        {
+            "kind": "workflow",
+            "phases": [{"title": "A"}],
+            "source": "host",
+            "argsSchema": {"type": "object"},
+        },
+    ]
+    for out in ok:
+        VALIDATOR.validate(out)
+    bad: list[dict[str, Any]] = [
+        {"workflow": ""},
+        {"workflow": "x", "kind": "workflow"},
+        {"workflow": "x", "runId": "../x"},
+        {"kind": "workflow", "phases": [], "source": "h", "language": "rust"},
+    ]
+    for doc in bad:
+        assert not VALIDATOR.is_valid(doc), doc
+    path = Path(flow.__file__).with_name(flow.SCHEMA_FILE)
+    assert json.loads(path.read_text(encoding="utf-8")) == DESCRIPTOR_SCHEMA
+
+
+def _prompt(name: str, source: str | None, **marker: Any) -> dict[str, Any]:
+    body: dict[str, Any] = {"kind": "workflow", "phases": []}
+    if source is not None:
+        body["source"] = source
+    body.update(marker)
+    return {"type": "prompt", "name": name, "_meta": flow.meta(body)}
+
+
+def test_flow_ext_workflow_workflows_of() -> None:
+    nested = _prompt(
+        "a",
+        "plug",
+        phases=[{"title": "P1"}, {"x": 1}, "junk", {"title": 3}, {"title": "P2"}],
+        argsSchema={"type": "object"},
+        language="python",
+    )
+    nested["description"] = "does a"
+    customizations = [
+        {
+            "type": "plugin",
+            "children": [
+                nested,
+                "junk",
+                {"type": "prompt", "name": "plain"},
+                _prompt("nosrc", None),
+            ],
+        },
+        {"type": "directory", "children": [_prompt("b", "dir")]},
+        _prompt("c", "host"),
+        "junk",
+        None,
+        {"type": "prompt", "name": "unmarked"},
+    ]
+    assert flow.workflows_of(customizations) == (
+        flow.WorkflowInfo(
+            "a", "plug:a", "does a", ("P1", "P2"), {"type": "object"}, "plug", "python"
+        ),
+        flow.WorkflowInfo("b", "dir:b", "", (), None, "dir", "js"),
+        flow.WorkflowInfo("c", "host:c", "", (), None, "host", "js"),
+    )
+    assert flow.workflows_of(None) == ()

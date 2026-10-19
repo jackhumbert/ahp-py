@@ -24,23 +24,46 @@ if TYPE_CHECKING:
     from ahp_host_flow.engine.resume import VerbReplay
 
 
+@dataclass(frozen=True)
+class AskOutcome:
+    """The human's answer as JSON (None when declined) and who gave it, when the host knows."""
+
+    value: Any
+    answered_by: str | None = None
+
+
+@dataclass(frozen=True)
+class ConfirmOutcome:
+    """Whether the human approved and who answered, when the host knows; truthy as approved."""
+
+    approved: bool
+    answered_by: str | None = None
+
+    def __bool__(self) -> bool:
+        return self.approved
+
+
 class AskFn(Protocol):
-    def __call__(self, question: str, options: Mapping[str, Any] | None = None) -> Awaitable[Any]:
-        """The human's answer as JSON, or None when the question was declined."""
+    def __call__(
+        self, question: str, options: Mapping[str, Any] | None = None
+    ) -> Awaitable[AskOutcome]:
+        """The human's answer, or a None value when the question was declined."""
         ...
 
 
 class ConfirmFn(Protocol):
-    def __call__(self, summary: str, options: Mapping[str, Any] | None = None) -> Awaitable[bool]:
+    def __call__(
+        self, summary: str, options: Mapping[str, Any] | None = None
+    ) -> Awaitable[ConfirmOutcome]:
         """Whether the human approved."""
         ...
 
 
-async def _no_ask(question: str, options: Mapping[str, Any] | None = None) -> Any:
+async def _no_ask(question: str, options: Mapping[str, Any] | None = None) -> AskOutcome:
     raise GateUnavailableError(no_answer_path("ask"))
 
 
-async def _no_confirm(summary: str, options: Mapping[str, Any] | None = None) -> bool:
+async def _no_confirm(summary: str, options: Mapping[str, Any] | None = None) -> ConfirmOutcome:
     raise GateUnavailableError(no_answer_path("confirm"))
 
 

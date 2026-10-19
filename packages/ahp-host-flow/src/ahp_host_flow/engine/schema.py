@@ -52,3 +52,35 @@ def schema_error(schema: Mapping[str, Any], value: Any) -> str | None:
     e = errors[0]
     path = "/".join(str(p) for p in e.absolute_path) or "(root)"
     return f"result does not match opts.schema: {path}: {e.message}"
+
+
+def args_schema_error(schema: Any) -> str | None:
+    """Why `schema` cannot be a workflow's `meta.x.args`, or None when it can."""
+    if not isinstance(schema, Mapping):
+        return "meta.x.args must be a JSON Schema object"
+    cls = jsonschema.validators.validator_for(schema, default=jsonschema.Draft202012Validator)
+    try:
+        cls.check_schema(dict(schema))
+    except jsonschema.exceptions.SchemaError as exc:
+        return f"meta.x.args is not a valid JSON Schema: {exc.message}"
+    ref = _foreign_ref(schema)
+    if ref is not None:
+        return f"meta.x.args may only reference itself ('#...'), not {ref!r}"
+    return None
+
+
+def args_error(schema: Mapping[str, Any], value: Any) -> str | None:
+    """Why `value` does not satisfy the `meta.x.args` `schema`, or None when it does."""
+    cls = jsonschema.validators.validator_for(schema, default=jsonschema.Draft202012Validator)
+    validator = cls(dict(schema), registry=referencing.Registry())
+    try:
+        errors = sorted(
+            validator.iter_errors(value), key=lambda e: [str(p) for p in e.absolute_path]
+        )
+    except referencing.exceptions.Unresolvable as exc:
+        return f"meta.x.args has a reference that does not resolve: {exc}"
+    if not errors:
+        return None
+    e = errors[0]
+    path = "/".join(str(p) for p in e.absolute_path) or "(root)"
+    return f"args do not match meta.x.args: {path}: {e.message}"

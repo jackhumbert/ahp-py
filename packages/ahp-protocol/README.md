@@ -181,6 +181,18 @@ assert view.status == "ok"
 assert view.steps[0].result == "hi"
 ```
 
+A client starts a workflow with a typed start under the same key, `{workflow, args?,
+runId?}`, on an ordinary `chat/turnStarted` message whose text stays `/name {json}`.
+`workflows_of` lists the workflows a host offers from its customizations:
+
+```python
+from ahp_protocol.ext import flow
+
+start = flow.workflow_start("host:nightly", args={"day": "mon"}, run_id="r1")
+assert start == {"workflow": "host:nightly", "args": {"day": "mon"}, "runId": "r1"}
+assert flow.parse_workflow_start(flow.meta(start)).run_id == "r1"
+```
+
 `ahp_protocol.ext.delegation` is the origin of a session started on another
 session's behalf: `delegation_origin(session, chat, tool_call_id)` builds
 `{kind: "ahp-py/delegation", session, chat, toolCallId}` (`SessionOrigin.kind` is

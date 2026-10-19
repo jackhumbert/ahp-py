@@ -12,12 +12,19 @@ from ahp_host.core.automations import (
     InMemoryAutomationStore,
 )
 from ahp_host.core.host import Host, HostInfo
-from ahp_host.core.policy import ConnectionInfo, Denied, LoopbackSingleUserPolicy, Policy
+from ahp_host.core.policy import (
+    PRINCIPAL_METADATA_KEY,
+    ConnectionInfo,
+    Denied,
+    LoopbackSingleUserPolicy,
+    Policy,
+)
 from ahp_host.core.redaction import RedactionError
 from ahp_host.core.sequencer import Sequencer
 
 __all__ = [
     "DEFAULT_SUPPORTED_VERSIONS",
+    "PRINCIPAL_METADATA_KEY",
     "ROOT_URI",
     "AhpError",
     "AutomationStore",

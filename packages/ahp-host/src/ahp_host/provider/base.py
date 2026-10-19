@@ -292,6 +292,12 @@ class UserMessage:
     #: structured-output follow-up. The provider adds to the same turn and must
     #: not count or mark a new one.
     continues_turn: bool = False
+    #: The principal of the connection that dispatched this `chat/turnStarted`
+    #: (the policy's optional `principal_of`). ``None`` without that hook, and
+    #: for host-started turns -- queued or steered messages, a restart's
+    #: carry-on, external turns, a `createChat` with no connection -- and for a
+    #: message built outside a turn.
+    principal: str | None = None
 
 
 @dataclass(frozen=True)
@@ -358,6 +364,9 @@ class InputOutcome:
 
     response: str
     answers: Mapping[str, Any] = field(default_factory=dict)
+    #: The principal of the connection that answered, from `Policy.principal_of`;
+    #: ``None`` when the policy has no such hook. Never a clientId.
+    answered_by: str | None = None
 
     @property
     def accepted(self) -> bool:
@@ -452,6 +461,9 @@ class ToolConfirmationOutcome:
     #: `Message`): `text` is the suggestion, `raw` the wire message with any
     #: attachments.
     user_suggestion: UserMessage | None = None
+    #: The principal of the connection that answered, from `Policy.principal_of`;
+    #: ``None`` when the policy has no such hook. Never a clientId.
+    answered_by: str | None = None
 
     @property
     def selected_option_id(self) -> str | None:
@@ -586,6 +598,9 @@ class AgentSessionContext:
     #: Set when this session was created with `createSession.fork`. The turns
     #: it carries are already published as this session's history.
     fork: ForkedFrom | None = None
+    #: The principal of the connection that created the session (the policy's
+    #: optional `principal_of`); restored from the store. ``None`` without the hook.
+    principal: str | None = None
 
 
 @dataclass(frozen=True)

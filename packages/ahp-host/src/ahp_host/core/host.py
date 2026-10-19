@@ -104,7 +104,7 @@ from ahp_host.core.plugin_copies import (
     copy_root,
     split_copy_uri,
 )
-from ahp_host.core.policy import Policy, TracksChannels
+from ahp_host.core.policy import PRINCIPAL_METADATA_KEY, Policy, TracksChannels
 from ahp_host.core.redaction import AUDIT_KIND, RedactionError, extensions_of, redacts_live
 from ahp_host.core.resources import (
     NullResourceProvider,
@@ -198,6 +198,15 @@ from ahp_host.provider.base import (
 __all__ = ["Host", "HostInfo"]
 
 _log = logging.getLogger(__name__)
+
+
+def _stored_principal(metadata: object) -> str | None:
+    """The principal `_persisted_metadata` wrote, if the record has one."""
+    if not isinstance(metadata, Mapping):
+        return None
+    value = metadata.get(PRINCIPAL_METADATA_KEY)
+    return value if isinstance(value, str) and value else None
+
 
 #: `AutomationCapabilities.runHistoryLimit` unless the embedder says otherwise.
 DEFAULT_AUTOMATION_HISTORY: Final = 20
@@ -1591,6 +1600,10 @@ class _Session:
     #: the agent is offered it, so an edit racing the handoff is refused too,
     #: and a re-set of a consumed id cannot run the same input twice.
     handed_off: dict[str, set[str]] = field(default_factory=dict)
+    #: The principal of the connection that created the session (the policy's
+    #: optional `principal_of`), persisted in the store's metadata. ``None`` for
+    #: a session a provider opened, or under a policy with no such hook.
+    principal: str | None = None
 
     def running(self, chat: str | None = None) -> list[asyncio.Task[None]]:
         """Live turn tasks -- for one chat, or for the whole session.
@@ -2285,6 +2298,7 @@ class Host:
             created_at=stored.created_at,
             resume_state=stored.resume_state,
             content=self._content_store(),
+            principal=_stored_principal(stored.metadata),
         )
         # Every open request the previous process had published is withdrawn:
         # the turn that asked is failed below, and a turn resumed later runs
@@ -2512,7 +2526,7 @@ class Host:
             # cached: a policy that re-keys ownership between the
             # session starting and this write should not persist a
             # stale answer.
-            metadata=self._session_metadata(session.uri),
+            metadata=self._persisted_metadata(session),
             interrupted_by_restart=tuple(sorted(session.interrupted)),
         )
         if immediate:
@@ -4795,7 +4809,7 @@ class Host:
             # and every later `chat/turnStarted` was rejected as "a turn is
             # already active". Wedged from birth, and silently: `createChat`
             # answered `{}`.
-            await self._react(chat_uri, started)
+            await self._react(chat_uri, started, connection)
         await self._mirror_summary(session)
         return
 
@@ -5315,6 +5329,30 @@ class Host:
         if isinstance(self.policy, TracksChannels):
             return self.policy.session_metadata(session)
         return None
+
+    def _persisted_metadata(self, session: _Session) -> Mapping[str, Any] | None:
+        """The policy's metadata, plus the session's principal when it has one."""
+        metadata = self._session_metadata(session.uri)
+        if session.principal is None:
+            return metadata
+        return {**(metadata or {}), PRINCIPAL_METADATA_KEY: session.principal}
+
+    def _principal_of(self, connection: Connection | None) -> str | None:
+        """Who *connection* is, by the policy's optional `principal_of` hook.
+
+        ``None`` for no connection, no hook, a failing hook, or an empty answer:
+        an anonymous turn, never a refused one. A clientId is not an identity
+        and is never consulted.
+        """
+        hook = getattr(self.policy, "principal_of", None)
+        if connection is None or not callable(hook):
+            return None
+        try:
+            principal = hook(connection.info)
+        except Exception:
+            _log.warning("policy.principal_of failed; treating as anonymous", exc_info=True)
+            return None
+        return principal if isinstance(principal, str) and principal else None
 
     def _serve_plugin_copy(
         self, connection: Connection, method: str, uri: str, params: Mapping[str, Any]
@@ -7027,6 +7065,7 @@ class Host:
             else title or _DEFAULT_SESSION_TITLE,
             created_at=created_at,
             content=self._content_store(),
+            principal=self._principal_of(connection),
         )
         session.chat_uris.add(chat_uri)
         token = params.get("progressToken")
@@ -7127,6 +7166,7 @@ class Host:
         try:
             active_client = _active_clients(params.get("activeClient"))
             context = AgentSessionContext(
+                principal=session.principal,
                 publisher=session.publisher,
                 session_uri=session.uri,
                 chat_uri=session.chat_uri,
@@ -7764,7 +7804,9 @@ class Host:
         if session is None:
             return
         if action_type == "chat/turnStarted":
-            await self._start_turn(session, channel, action)
+            await self._start_turn(
+                session, channel, action, principal=self._principal_of(connection)
+            )
         elif action_type == "chat/turnResume":
             # Validation established the preconditions and the reducer has
             # reopened the turn; the agent picks it up under the same id.
@@ -7794,6 +7836,7 @@ class Host:
                         # merged result and re-deriving it here could only get it
                         # wrong.
                         payload=_answers_of(self.sequencer.state_of(channel), request_id),
+                        answered_by=self._principal_of(connection),
                     ),
                 )
                 if resolved:
@@ -7828,6 +7871,7 @@ class Host:
                     outcome = RequestOutcome(
                         response="accept" if approved is not False else "decline",
                         payload=payload,
+                        answered_by=self._principal_of(connection),
                     )
                 else:
                     # A client-run tool reports success on the RESULT, and
@@ -7839,7 +7883,9 @@ class Host:
                     result = action.get("result")
                     failed = isinstance(result, Mapping) and result.get("success") is False
                     outcome = RequestOutcome(
-                        response="decline" if failed else "accept", payload=result
+                        response="decline" if failed else "accept",
+                        payload=result,
+                        answered_by=self._principal_of(connection),
                     )
                 if self.pending.resolve(request_id, outcome):
                     await self._retract_input_needed(session, request_id)
@@ -8186,6 +8232,7 @@ class Host:
         agent: AgentSession | None = None,
         *,
         resume: bool = False,
+        principal: str | None = None,
     ) -> None:
         """Run *action* as a turn on *channel*, by *agent* if given (an external
         turn) or else the session's own agent.
@@ -8216,7 +8263,7 @@ class Host:
             )
             session.runners[channel] = runner
             task = asyncio.create_task(
-                self._run_turn(session, runner, action, agent, resume=resume)
+                self._run_turn(session, runner, action, agent, resume=resume, principal=principal)
             )
         session.turns[channel] = task
         session.turn_started[channel] = time.monotonic()
@@ -8560,6 +8607,7 @@ class Host:
             working_directories=tuple(f for f in folders or () if isinstance(f, str)),
             config=dict(values) if isinstance(values, Mapping) else {},
             resume_state=session.resume_state,
+            principal=session.principal,
         )
         try:
             agent = await provider.resume_session(context)
@@ -8731,6 +8779,7 @@ class Host:
         agent: AgentSession | None = None,
         *,
         resume: bool = False,
+        principal: str | None = None,
     ) -> None:
         """Run one turn, then bring the root catalogue back in step.
 
@@ -8746,7 +8795,7 @@ class Host:
             if resume and isinstance(turn_id, str):
                 await runner.resume(agent or session.agent_session, turn_id)
             else:
-                await runner.run(agent or session.agent_session, action)
+                await runner.run(agent or session.agent_session, action, principal=principal)
         finally:
             # Retracted in a DETACHED task on purpose. This one is frequently
             # the task being cancelled, and a cancelled task cannot be relied on

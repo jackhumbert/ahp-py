@@ -41,6 +41,9 @@ class RequestOutcome:
 
     response: str
     payload: Any = None
+    #: The principal (`Policy.principal_of`) of the connection whose action
+    #: resolved the request. Never a clientId, which the client asserts.
+    answered_by: str | None = None
 
 
 @dataclass
