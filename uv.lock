@@ -1,5 +1,5 @@
 version = 1
-revision = 5
+revision = 3
 requires-python = ">=3.11"
 resolution-markers = [
     "python_full_version >= '3.15'",
@@ -10,6 +10,7 @@ resolution-markers = [
 
 [manifest]
 members = [
+    "ahp-acp",
     "ahp-client",
     "ahp-gateway",
     "ahp-host",
@@ -17,6 +18,30 @@ members = [
     "ahp-host-claude",
     "ahp-host-flow",
     "ahp-protocol",
+]
+
+[[package]]
+name = "ahp-acp"
+source = { editable = "packages/ahp-acp" }
+
+[package.dev-dependencies]
+dev = [
+    { name = "import-linter" },
+    { name = "mypy" },
+    { name = "pytest" },
+    { name = "pytest-asyncio" },
+    { name = "ruff" },
+]
+
+[package.metadata]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "import-linter", specifier = ">=2" },
+    { name = "mypy", specifier = ">=1.11" },
+    { name = "pytest", specifier = ">=8" },
+    { name = "pytest-asyncio", specifier = ">=0.24" },
+    { name = "ruff", specifier = ">=0.6" },
 ]
 
 [[package]]
@@ -146,6 +171,7 @@ provides-extras = ["dev", "ws"]
 name = "ahp-host-acp"
 source = { editable = "packages/ahp-host-acp" }
 dependencies = [
+    { name = "ahp-acp" },
     { name = "ahp-host", extra = ["ws"] },
 ]
 
@@ -158,7 +184,10 @@ dev = [
 ]
 
 [package.metadata]
-requires-dist = [{ name = "ahp-host", extras = ["ws"], editable = "packages/ahp-host" }]
+requires-dist = [
+    { name = "ahp-acp", editable = "packages/ahp-acp" },
+    { name = "ahp-host", extras = ["ws"], editable = "packages/ahp-host" },
+]
 
 [package.metadata.requires-dev]
 dev = [

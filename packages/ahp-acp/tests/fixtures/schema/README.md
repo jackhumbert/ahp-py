@@ -1,0 +1,1 @@
+Upstream ACP schema files (v1 track, stable and unstable) from tag `schema-v1.26.0` of agentclientprotocol/agent-client-protocol, tagged commit dated 2026-10-16, fetched 2026-10-19. Used by `tests/test_updates.py`.

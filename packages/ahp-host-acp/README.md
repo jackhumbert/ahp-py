@@ -5,7 +5,8 @@ Any [Agent Client Protocol](https://agentclientprotocol.com/) (ACP) agent as an
 (AHP) provider for [`ahp-host`](https://github.com/jackhumbert/ahp-py/tree/main/packages/ahp-host).
 
 ACP is what editors such as Zed use to drive coding agents: the agent runs as
-a subprocess and speaks JSON-RPC over stdio. This adapter is the editor's half.
+a subprocess and speaks JSON-RPC over stdio. This adapter is the editor's half,
+built on [`ahp-acp`](../ahp-acp), the plain ACP client.
 Each AHP session starts the configured agent command (`openclaw acp`, or any
 other ACP agent), and any AHP client (VS Code's Agent Sessions view, the Python
 client, a gateway in front of several hosts) can then start and follow sessions

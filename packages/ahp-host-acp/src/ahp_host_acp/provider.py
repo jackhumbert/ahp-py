@@ -67,6 +67,24 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Final, Protocol
 
+from ahp_acp import (
+    AcpConnection,
+    AcpError,
+    AgentExitedError,
+    AgentMessageChunk,
+    AgentThoughtChunk,
+    AvailableCommandsUpdate,
+    ConfigOptionUpdate,
+    CurrentModeUpdate,
+    MethodNotFoundError,
+    PlanUpdate,
+    SessionInfoUpdate,
+    UsageUpdate,
+    parse_update,
+)
+from ahp_acp import ToolCall as AcpToolCall
+from ahp_acp import ToolCallUpdate as AcpToolCallUpdate
+from ahp_acp.connection import NotificationHandler, RequestHandler
 from ahp_host import AhpError
 from ahp_host.provider.base import (
     AgentInfo,
@@ -82,22 +100,17 @@ from ahp_host.provider.base import (
     ForkedFrom,
     ModelInfo,
     ToolConfirmation,
+    ToolConfirmationOutcome,
     TurnSink,
     UserMessage,
 )
 
-from ahp_host_acp import client_tools, jsonrpc, permissions, prompts
+from ahp_host_acp import client_tools, permissions, prompts
 from ahp_host_acp import commands as slash
 from ahp_host_acp import plan as plans
 from ahp_host_acp.catalogue import Catalogue
 from ahp_host_acp.changes import Diff, SessionEdits, diffs_of
 from ahp_host_acp.client_tools import RelayTool
-from ahp_host_acp.jsonrpc import (
-    AcpConnection,
-    AcpError,
-    AgentExitedError,
-    MethodNotFoundError,
-)
 from ahp_host_acp.mcp import McpServer
 from ahp_host_acp.options import AgentOptions, coerce, same
 from ahp_host_acp.paths import directory_of
@@ -131,11 +144,12 @@ class Connector(Protocol):
     async def __call__(
         self,
         command: Sequence[str],
+        /,
         *,
         cwd: Path,
         env: Mapping[str, str] | None,
-        on_notification: jsonrpc.NotificationHandler,
-        on_request: jsonrpc.RequestHandler,
+        on_notification: NotificationHandler,
+        on_request: RequestHandler,
     ) -> AcpConnection: ...
 
 
@@ -206,6 +220,9 @@ class _Chat:
         self.context_size: int | None = None
         self.cost: Mapping[str, Any] | None = None
         self.inflight: asyncio.Task[Any] | None = None
+        #: Permission questions put to the user and not yet answered; a cancel
+        #: settles each as ACP's `cancelled` outcome (see `AcpSession._cancel`).
+        self.asking: set[asyncio.Task[ToolConfirmationOutcome]] = set()
         #: The agent's slash commands, once this session reports them.
         self.commands: tuple[slash.Command, ...] | None = None
         self.plan: tuple[plans.Entry, ...] | None = None
@@ -483,7 +500,7 @@ class AcpSession:
             result = _mapping(await conn.request("session/new", base))
             session_id = result.get("sessionId")
             if not isinstance(session_id, str) or not session_id:
-                raise AcpError("the agent's session/new returned no sessionId")
+                raise AcpError(message="the agent's session/new returned no sessionId")
             chat.acp_session_id = session_id
         finally:
             self._opening = None
@@ -586,6 +603,11 @@ class AcpSession:
         return conn if chat.generation == self._generation else None
 
     async def _cancel(self, chat: _Chat) -> None:
+        # ACP: on cancel the client answers every pending permission request
+        # with `cancelled`. Settle them first, so the agent sees that before it
+        # winds the turn down, and the user's open question is withdrawn.
+        for asking in list(chat.asking):
+            asking.cancel()
         conn = self._live(chat)
         if conn is not None:
             try:
@@ -709,7 +731,7 @@ class AcpSession:
                     self._opening = None
         session_id = result.get("sessionId")
         if not isinstance(session_id, str) or not session_id:
-            raise AcpError("the agent's session/fork returned no sessionId")
+            raise AcpError(message="the agent's session/fork returned no sessionId")
         return source, result
 
     async def fork_out(self, fork: ForkedFrom, cwd: Path) -> str | None:
@@ -908,54 +930,53 @@ class AcpSession:
         if method != "session/update":
             log.debug("ignoring ACP notification %s", method)
             return
-        params = _mapping(params)
-        chat = self._chat_of(params.get("sessionId"))
+        event = parse_update(params)
+        chat = self._chat_of(event.session_id)
         if chat is None:
             return
-        update = _mapping(params.get("update"))
-        kind = update.get("sessionUpdate")
         # Session state first: it is true whether or not a turn is running,
         # and a `session/load` replay brings it up to date too.
-        if kind == "usage_update":
-            await self._on_usage(chat, update)
+        if isinstance(event, UsageUpdate):
+            await self._on_usage(chat, event)
             return
-        if kind in ("config_option_update", "current_mode_update"):
-            chat.options.note_update(update)
-            if kind == "config_option_update":
+        if isinstance(event, ConfigOptionUpdate | CurrentModeUpdate):
+            chat.options.note_update(event.raw)
+            if isinstance(event, ConfigOptionUpdate):
                 chat.verified = True
             await self._publish_config(chat)
             return
-        if kind == "available_commands_update":
-            raw = update.get("availableCommands")
-            chat.commands = slash.parse_commands(raw)
-            self._catalogue.remember_commands(raw)
+        if isinstance(event, AvailableCommandsUpdate):
+            chat.commands = slash.parse_commands(event.commands)
+            self._catalogue.remember_commands(event.commands)
             return
-        if kind == "session_info_update":
+        if isinstance(event, SessionInfoUpdate):
             # The session is named after its default chat's conversation; a
             # replayed title is history, not a rename.
             if chat is self._default and not chat.quiet:
-                await self._on_title(update)
+                await self._on_title(event)
             return
-        if kind == "plan":
-            await self._on_plan(chat, update)
+        if isinstance(event, PlanUpdate):
+            await self._on_plan(chat, event)
             return
         sink = chat.sink
         if sink is None or chat.quiet:
             return
-        if kind == "agent_message_chunk":
-            text = _text_block(update.get("content"))
+        if isinstance(event, AgentMessageChunk):
+            text = _text_block(event.content)
             if text:
                 await sink.text_delta(text)
-        elif kind == "agent_thought_chunk":
-            text = _text_block(update.get("content"))
+        elif isinstance(event, AgentThoughtChunk):
+            text = _text_block(event.content)
             if text:
                 await sink.reasoning_delta(text)
-        elif kind in ("tool_call", "tool_call_update"):
-            await self._on_tool_call(chat, update, sink)
+        elif isinstance(event, AcpToolCall | AcpToolCallUpdate):
+            await self._on_tool_call(chat, event.raw, sink)
         else:
-            log.debug("ignoring session update %s", kind)
+            # A kind this provider has no use for, a user-message replay, or an
+            # update missing a field its kind requires.
+            log.debug("ignoring session update %s", getattr(event, "kind", type(event).__name__))
 
-    async def _on_usage(self, chat: _Chat, update: Mapping[str, Any]) -> None:
+    async def _on_usage(self, chat: _Chat, update: UsageUpdate) -> None:
         """`usage_update`: tokens in context, the window's size, and the cost.
 
         `used` stands in for a turn's input tokens when the prompt's answer
@@ -963,33 +984,32 @@ class AcpSession:
         :meth:`_report_usage`), and `size` is remembered as the model's
         context window for the picker.
         """
-        used, size, cost = update.get("used"), update.get("size"), update.get("cost")
-        if isinstance(used, int) and not isinstance(used, bool):
-            chat.context_used = used
-        if isinstance(size, int) and not isinstance(size, bool) and size > 0:
-            chat.context_size = size
-            self._catalogue.remember_context_window(_current_model(chat), size)
+        chat.context_used = update.used
+        if update.size > 0:
+            chat.context_size = update.size
+            self._catalogue.remember_context_window(_current_model(chat), update.size)
             await self._on_agent_changed()
-        if isinstance(cost, Mapping) and isinstance(cost.get("amount"), int | float):
+        cost = update.cost
+        if cost is not None and isinstance(cost.get("amount"), int | float):
             chat.cost = dict(cost)
 
-    async def _on_title(self, update: Mapping[str, Any]) -> None:
+    async def _on_title(self, update: SessionInfoUpdate) -> None:
         """`session_info_update.title` renames the session.
 
         A null title ("set to null to clear") is not passed on: AHP has no
         untitled state to go back to, and the session keeps the name it has.
         """
-        title = update.get("title")
+        title = update.title
         publisher = self.context.publisher
-        if not isinstance(title, str) or not title.strip() or title == self._title:
+        if title is None or not title.strip() or title == self._title:
             return
         self._title = title
         if publisher is not None:
             await publisher.title_changed(title)
 
-    async def _on_plan(self, chat: _Chat, update: Mapping[str, Any]) -> None:
+    async def _on_plan(self, chat: _Chat, update: PlanUpdate) -> None:
         """A plan update: one finished "Update plan" row. See :mod:`ahp_host_acp.plan`."""
-        entries = plans.parse_plan(update.get("entries"))
+        entries = plans.parse_plan(update.entries)
         if entries == chat.plan:
             return  # resent unchanged
         chat.plan = entries
@@ -1000,7 +1020,7 @@ class AcpSession:
         await sink.tool_call_started(
             call_id,
             plans.TOOL_NAME,
-            {"entries": update.get("entries")},
+            {"entries": update.entries},
             display_name=plans.DISPLAY_NAME,
         )
         await sink.tool_call_completed(
@@ -1135,8 +1155,8 @@ class AcpSession:
         call.merge(update)
         self._note_diffs(chat, call)
         await self._announce(chat, call, sink)
-        try:
-            outcome = await sink.confirm_tool_call(
+        asking = asyncio.ensure_future(
+            sink.confirm_tool_call(
                 ToolConfirmation(
                     call_id=call_id,
                     name=call.name,
@@ -1148,8 +1168,14 @@ class AcpSession:
                     edits=self._edits.preview(diffs_of(call.content), self.directory),
                 )
             )
+        )
+        chat.asking.add(asking)
+        try:
+            outcome = await asking
         except asyncio.CancelledError:
-            return permissions.CANCELLED  # the turn ended while the prompt was open
+            return permissions.CANCELLED  # cancelled, or the turn ended while the prompt was open
+        finally:
+            chat.asking.discard(asking)
         return permissions.answer(offered, outcome)
 
     # -- turns ---------------------------------------------------------------

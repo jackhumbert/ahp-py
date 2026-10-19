@@ -74,12 +74,12 @@ jobs:
         # Windows has its own path here: agents are often npm `.cmd` shims.
         working-directory: packages/ahp-host-acp
         run: uv run --no-sync pytest && uv run --no-sync python -m ahp_host_acp --help
-      - name: Protocol, client and gateway
+      - name: Protocol, client, gateway and ACP client
         # Every package runs even after one fails, so a failure never hides
         # the next one's.
         run: |
           status=0
-          for package in ahp-protocol ahp-client ahp-gateway; do
+          for package in ahp-protocol ahp-client ahp-gateway ahp-acp; do
             (cd "packages/$package" && uv run --no-sync pytest) || status=1
           done
           exit $status

@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+### Changed
+
+- The ACP transport and `session/update` parsing moved to the new `ahp-acp`
+  dependency. `ahp_host_acp.jsonrpc` is a deprecated re-export of its old names.
+  The provider reads updates as typed events; a known kind missing a required field
+  is now logged and ignored, like an unknown kind. Agents start in their own
+  process group, so shutdown reaches grandchildren.
+
+### Fixed
+
+- A cancel now answers any open permission request as `cancelled`, so the
+  user's question is withdrawn and the agent is told, instead of leaving it
+  waiting until the turn is torn down.
+
 ### Added
 
 - `from_config(config=None, *, roots=None, state_dir=None, **options)`: build an

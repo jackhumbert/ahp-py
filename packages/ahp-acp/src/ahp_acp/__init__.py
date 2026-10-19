@@ -1,0 +1,78 @@
+"""A plain Agent Client Protocol (ACP) client: standard library only."""
+
+from ahp_acp.client import (
+    CANCELLED,
+    AcpClient,
+    allow_once,
+    mcp_server_http,
+    mcp_server_stdio,
+    reject_once,
+)
+from ahp_acp.connection import AcpConnection
+from ahp_acp.errors import (
+    AcpError,
+    AgentExitedError,
+    MethodNotFoundError,
+    ProtocolVersionError,
+    RequestTimeoutError,
+    UnsupportedError,
+)
+from ahp_acp.updates import (
+    DELIBERATELY_UNTYPED,
+    AgentMessageChunk,
+    AgentThoughtChunk,
+    AvailableCommandsUpdate,
+    CompactionSummaryChunk,
+    CompactionUpdate,
+    ConfigOptionUpdate,
+    CurrentModeUpdate,
+    MessageChunk,
+    NoticeUpdate,
+    PlanUpdate,
+    SessionInfoUpdate,
+    SessionUpdate,
+    ToolCall,
+    ToolCallUpdate,
+    UnknownUpdate,
+    UsageUpdate,
+    UserMessageChunk,
+    parse_update,
+)
+
+__version__ = "0.1.0"
+
+__all__ = [
+    "CANCELLED",
+    "DELIBERATELY_UNTYPED",
+    "AcpClient",
+    "AcpConnection",
+    "AcpError",
+    "AgentExitedError",
+    "AgentMessageChunk",
+    "AgentThoughtChunk",
+    "AvailableCommandsUpdate",
+    "CompactionSummaryChunk",
+    "CompactionUpdate",
+    "ConfigOptionUpdate",
+    "CurrentModeUpdate",
+    "MessageChunk",
+    "MethodNotFoundError",
+    "NoticeUpdate",
+    "PlanUpdate",
+    "ProtocolVersionError",
+    "RequestTimeoutError",
+    "SessionInfoUpdate",
+    "SessionUpdate",
+    "ToolCall",
+    "ToolCallUpdate",
+    "UnknownUpdate",
+    "UnsupportedError",
+    "UsageUpdate",
+    "UserMessageChunk",
+    "__version__",
+    "allow_once",
+    "mcp_server_http",
+    "mcp_server_stdio",
+    "parse_update",
+    "reject_once",
+]

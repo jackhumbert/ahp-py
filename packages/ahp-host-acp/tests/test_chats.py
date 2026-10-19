@@ -251,6 +251,34 @@ async def test_the_agent_gets_exactly_what_the_user_picked(
     assert "".join(e[1] for e in sink.events if e[0] == "text") == f"chose {chose}"
 
 
+class _AskingSink(RecordingSink):
+    """A sink whose user never answers: the question stays open."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.asked = asyncio.Event()
+
+    async def confirm_tool_call(self, call: Any) -> ToolConfirmationOutcome:
+        self.asked.set()
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")
+
+
+async def test_a_cancel_settles_an_open_permission_request_as_cancelled(
+    tmp_path: Path, log: Path
+) -> None:
+    session = await _provider(tmp_path, log).create_session(context(tmp_path))
+    sink = _AskingSink()
+    try:
+        turn = asyncio.create_task(_say(session, "tool", sink=sink))
+        await asyncio.wait_for(sink.asked.wait(), 10)
+        await session.cancel("stopped")
+        await asyncio.wait_for(turn, 10)  # the agent got its answer and finished
+    finally:
+        await session.aclose()
+    assert "".join(e[1] for e in sink.events if e[0] == "text") == "chose cancelled"
+
+
 def test_nothing_broader_than_the_answer_is_ever_picked() -> None:
     always_only = permissions.acp_options(
         [{"optionId": "a", "name": "Always", "kind": "allow_always"}]

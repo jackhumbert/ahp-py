@@ -4,8 +4,11 @@ An `ahp-host` provider adapter, living in its own distribution as the
 server's AGENTS.md requires ("Adding a provider adapter"). It is the ACP
 *client*: it spawns an ACP agent per session and speaks JSON-RPC over stdio.
 
-- `jsonrpc.py` is the transport. Notifications are handled in order before the
-  next line is read; requests from the agent run on their own tasks. Keep both.
+- The ACP transport and `session/update` parsing are the `ahp-acp` package
+  (`AcpConnection`, `parse_update`); `jsonrpc.py` only re-exports its old names
+  and is deprecated, so import from `ahp_acp`. Notifications are handled in
+  order before the next line is read; requests from the agent run on their own
+  tasks. Keep both, and see `ahp-acp`'s AGENTS.md before changing either.
 - `provider.py` translates ACP `session/update`s into the host's neutral
   `TurnSink` events. Never emit AHP actions directly; the host owns ordering
   and the wire. A notification handler must never await an ACP *request*:
@@ -23,7 +26,8 @@ server's AGENTS.md requires ("Adding a provider adapter"). It is the ACP
   own options, *allow always* included, and the agent gets exactly the one
   the user picked; a plain approve or deny is *once*, and nothing broader is
   ever picked for the user. Changing it is a security decision: say so in the
-  commit, and test it.
+  commit, and test it. A cancel answers every open permission request as
+  `cancelled` (`AcpSession._cancel`), as ACP requires.
 - `client_tools.py` and `relay.py` give the agent a session's client tools (and
   the host's per-turn tools) as an MCP server, `ahp_client`. `relay.py` is a
   stdio server the agent launches (`sys.executable -m ahp_host_acp.relay`;

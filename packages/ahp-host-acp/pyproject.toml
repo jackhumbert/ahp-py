@@ -19,9 +19,9 @@ classifiers = [
   "Programming Language :: Python :: 3.13",
   "Typing :: Typed",
 ]
-# ACP is newline-delimited JSON-RPC over the agent's stdio, small enough to
-# speak directly; no ACP SDK, so the only pin is the host's protocol version.
+# The ACP client (transport, update parsing) is ahp-acp; no ACP SDK.
 dependencies = [
+  "ahp-acp~=0.1.0",
   "ahp-host[ws]~=0.1.0",
 ]
 

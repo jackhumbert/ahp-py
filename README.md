@@ -10,6 +10,7 @@ sessions. One repository, several independently installable packages:
 | [`ahp-host`](packages/ahp-host) | The host: serves sessions to any AHP client (VS Code's Agent Sessions view, the Python client, the [iOS app][ios]). |
 | [`ahp-host-claude`](packages/ahp-host-claude) | Claude, via the Claude Agent SDK, as a host provider. |
 | [`ahp-host-acp`](packages/ahp-host-acp) | Any [Agent Client Protocol](https://agentclientprotocol.com/) agent as a host provider. |
+| [`ahp-acp`](packages/ahp-acp) | A plain Agent Client Protocol client: spawn an agent, speak JSON-RPC over stdio. Standard library only; imports nothing here. |
 | [`ahp-client`](packages/ahp-client) | The client. |
 | [`ahp-gateway`](packages/ahp-gateway) | One endpoint and one login in front of many hosts: an AHP host to clients, an AHP client to each node. |
 
@@ -20,7 +21,7 @@ sessions. One repository, several independently installable packages:
         ahp-host  ahp-gateway  ahp-client
           ▲                  (host + client)
           │
-  ahp-host-claude, ahp-host-acp
+  ahp-host-claude, ahp-host-acp ──▶ ahp-acp (standalone: imports nothing here)
 ```
 
 The native iPhone and iPad client, **Agent Host**, lives in its own repository:
