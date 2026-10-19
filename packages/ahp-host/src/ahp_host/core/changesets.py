@@ -42,6 +42,7 @@ from ahp_host.provider.changes import (
     Changeset,
     ChangesetOperation,
     FileChange,
+    OperationContext,
     OperationHandler,
 )
 
@@ -54,6 +55,7 @@ __all__ = [
     "ChangesetOperation",
     "ContentStore",
     "FileChange",
+    "OperationContext",
     "OperationHandler",
     "changeset_content_uri",
     "content_uris",

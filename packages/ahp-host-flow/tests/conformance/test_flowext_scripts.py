@@ -38,7 +38,11 @@ async def test_flowext_scripts_script(script: Path) -> None:
             pytest.skip(f"no Node >= {MIN_NODE_MAJOR} (set {NODE_ENV} or put node on PATH)")
     sidecar = json.loads(script.with_suffix(".json").read_text(encoding="utf-8"))
     dispatcher = FakeDispatcher()
-    gates = FakeGates(answers=sidecar.get("answers"), approvals=sidecar.get("approvals"))
+    gates = FakeGates(
+        answers=sidecar.get("answers"),
+        approvals=sidecar.get("approvals"),
+        reasons=sidecar.get("approval_reasons"),
+    )
     fake = FakeVerbs(sidecar.get("verbs", {}))
     logs: list[str] = []
     value = await run_script(

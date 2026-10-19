@@ -436,7 +436,7 @@ class Runtime:
         reply = self.link.call("gate", {"kind": "ask", "question": question, "options": options})
         return asyncio.ensure_future(self._gate_result(reply))
 
-    def approve(self, summary: object, **opts: Any) -> asyncio.Future[bool]:
+    def approve(self, summary: object, **opts: Any) -> asyncio.Future[Any]:
         if not isinstance(summary, str):
             return failed(TypeError("approve() needs a summary string"))
         diff = opts.get("diff")
@@ -444,13 +444,22 @@ class Runtime:
             return failed(
                 TypeError("approve() diff must be a string or an array of {path, before?, after?}")
             )
+        x = opts.get("x")
+        if x is not None:
+            if not isinstance(x, dict):
+                return failed(TypeError("approve() x must be an object"))
+            if "detail" in x and not isinstance(x["detail"], bool):
+                return failed(TypeError("approve() x.detail must be a boolean"))
+        detail = x is not None and x.get("detail") is True
         options: dict[str, Any] = {} if diff is None else {"diff": diff}
+        if detail:
+            options["x"] = {"detail": True}
         try:
             options = clone_json(options)
         except (TypeError, ValueError) as exc:
             return failed(TypeError(f"approve() opts must be JSON: {exc}"))
         reply = self.link.call("gate", {"kind": "approve", "question": summary, "options": options})
-        return asyncio.ensure_future(self._approve_result(reply))
+        return asyncio.ensure_future(self._approve_result(reply, detail))
 
     def verb(self, name: object, *args: Any) -> asyncio.Future[Any]:
         if not isinstance(name, str) or name not in self.verbs:
@@ -476,8 +485,9 @@ class Runtime:
         result = msg.get("result")
         return result.get("value") if isinstance(result, dict) else None
 
-    async def _approve_result(self, reply: asyncio.Future[Any]) -> bool:
-        return await self._gate_result(reply) is True
+    async def _approve_result(self, reply: asyncio.Future[Any], detail: bool = False) -> Any:
+        value = await self._gate_result(reply)
+        return value if detail else value is True
 
     def canvas(self, url: object, **opts: Any) -> None:
         if not isinstance(url, str) or re.match(r"(?i)https?://\S", url) is None:

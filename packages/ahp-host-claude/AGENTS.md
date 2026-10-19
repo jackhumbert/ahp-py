@@ -36,7 +36,11 @@ server's AGENTS.md requires ("Adding a provider adapter").
   host `ToolPolicy` is consulted first in `_pre_tool_use` (before the
   client/host tool allow) and in `_can_use_tool`; a deny is binding in every
   mode, and an ask still does the call's bookkeeping; `permissions.POLICY_TOOLS`
-  and `POLICY_GLOBS` are pinned by a test.
+  and `POLICY_GLOBS` are pinned by a test. A confirmation's `read_only` hint is
+  `permissions.read_only_hint` (True only for the reads `POLICY_TOOLS` files, None
+  for a tool it does not list) and `policy_asked` is the policy's ask; an
+  automatic answerer (ahp-host-flow's approval rules) may approve on them, so
+  both are security decisions (`tests/test_claudehints.py`).
 - `agent.py` is the `claude` agent type for `ahp-node` and `from_config`, a
   synchronous factory (`load = "ahp_host_claude:from_config"`) that shares
   `parse_agent_options` and `config.read_config_file` with it. It builds

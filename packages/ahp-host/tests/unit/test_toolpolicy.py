@@ -331,3 +331,53 @@ def test_toolpolicy_from_table() -> None:
         policy_from_table({"check": "no.such.mod:f"})
     with pytest.raises(PolicyError, match="is not callable"):
         policy_from_table({"check": "os:sep"})
+
+
+def test_toolpolicy_table_check_may_be_a_callable() -> None:
+    """A table built in code may hold the check itself (a host composing two policies)."""
+
+    def check(request: ToolRequest) -> Decision | None:
+        return Decision("deny", "no") if request.name == "Bad" else None
+
+    policy = policy_from_table({"check": check})
+    assert policy.check is check
+    assert policy.decide(ToolRequest("Bad", "tool", {}, Path("/"), ())).action == "deny"
+    assert policy.decide(ToolRequest("Good", "tool", {}, Path("/"), ())).action == "allow"
+
+
+def test_toolpolicy_combine_denies_from_either() -> None:
+    from ahp_host.provider.policy import combine, combine_tables
+
+    cwd = Path.cwd()
+    push = ToolRequest("Bash", "command", {"command": "git push"}, cwd, (cwd,))
+    curl = ToolRequest("Bash", "command", {"command": "curl x"}, cwd, (cwd,))
+    ls = ToolRequest("Bash", "command", {"command": "ls"}, cwd, (cwd,))
+    a = ToolPolicy(deny_commands=("git push*",))
+    b = ToolPolicy(deny_commands=("curl *",))
+    assert combine() is None
+    assert combine(None, a) is a
+    both = combine(a, None, b)
+    assert both is not None
+    assert both.decide(push).reason == "denied by policy: the command matches 'git push*'"
+    assert both.decide(curl).action == "deny"
+    assert both.decide(ls).action == "allow"
+    # Each policy's own roots rule applies, not a stricter one of the combination's.
+    outside = ToolRequest("Read", "read", {"paths": ("/elsewhere/x",)}, cwd, (cwd / "sub",))
+    loose = ToolPolicy(allow_paths_outside_roots=True)
+    combined = combine(loose, ToolPolicy(allow_paths_outside_roots=True, deny_commands=("x",)))
+    assert combined is not None
+    assert combined.decide(outside).action == "allow"
+
+    table = combine_tables(
+        {"deny_commands": ["git push*"], "host_tools": False},
+        {"deny_commands": ["curl *"], "host_tools": True},
+        extra={"host_tools"},
+    )
+    assert table is not None
+    assert table["host_tools"] is True
+    merged = policy_from_table(table, extra={"host_tools"})
+    assert merged.decide(push).action == "deny"
+    assert merged.decide(curl).action == "deny"
+    assert merged.decide(ls).action == "allow"
+    with pytest.raises(PolicyError):
+        combine_tables({"deny_commands": "x"}, {})

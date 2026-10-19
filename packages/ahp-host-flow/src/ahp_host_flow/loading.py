@@ -11,6 +11,14 @@ from typing import Any, Final
 
 from ahp_host.node import Roots
 from ahp_host.provider.base import AgentProvider
+from ahp_host.provider.policy import (
+    Decision,
+    PolicyError,
+    ToolPolicy,
+    ToolRequest,
+    combine,
+    load_check,
+)
 
 from ahp_host_flow.config import ConfigError, FlowConfig, ProviderConfig
 from ahp_host_flow.engine import AgentCall, VerbCall, VerbHandler
@@ -83,8 +91,61 @@ def _extras(
     return extras
 
 
+def _policy_check(
+    flow: ToolPolicy, own: Callable[[ToolRequest], Decision | None] | None
+) -> Callable[[ToolRequest], Decision | None]:
+    """A `ToolPolicy.check` consulting the flow's policy and the provider table's own check.
+
+    `combine` decides: the most restrictive verdict wins (a deny from either is a deny), None
+    when both allow, and a check that raises is a deny (`ToolPolicy._run_check`).
+    """
+    table_check = ToolPolicy(allow_paths_outside_roots=True, check=own) if own else None
+    policy = combine(flow, table_check)
+    assert policy is not None
+
+    def check(request: ToolRequest) -> Decision | None:
+        verdict = policy.decide(request)
+        return None if verdict.action == "allow" else verdict
+
+    return check
+
+
+def _with_flow_policy(
+    spec: ProviderConfig, table: Mapping[str, Any], flow: ToolPolicy
+) -> dict[str, Any]:
+    """The provider table's `policy` with the flow's `[policy]` folded into its check.
+
+    Security decision (plan §8 M15 item 2): the flow policy is enforced by the inner
+    provider's own policy hook, which runs in every approval mode, so an approve-all that
+    stops the provider asking cannot also stop the flow's denies applying. The table's other
+    keys (its rules, a provider-specific key such as ACP's `host_tools`) are kept as they are.
+    """
+    own = table.get("policy")
+    if own is None:
+        # No rules of the table's own, so no roots check of its own either: the flow
+        # policy's `allow_paths_outside_roots` is the one that decides.
+        merged: dict[str, Any] = {"allow_paths_outside_roots": True}
+    elif isinstance(own, Mapping):
+        merged = dict(own)
+    else:
+        raise ConfigError(f"providers.{spec.name}.policy must be a table")
+    own_check: Callable[[ToolRequest], Decision | None] | None = None
+    if "check" in merged:
+        value = merged["check"]
+        try:
+            own_check = value if callable(value) else load_check(value)
+        except PolicyError as exc:
+            raise ConfigError(f"providers.{spec.name}: {exc}") from exc
+    merged["check"] = _policy_check(flow, own_check)
+    return merged
+
+
 def load_provider(
-    spec: ProviderConfig, *, host_roots: Roots | None = None, state_dir: Path | None = None
+    spec: ProviderConfig,
+    *,
+    host_roots: Roots | None = None,
+    state_dir: Path | None = None,
+    policy: ToolPolicy | None = None,
 ) -> AgentProvider:
     """Import and construct one provider.
 
@@ -92,18 +153,28 @@ def load_provider(
     is passed as `config=`. With a *state_dir*, a factory that takes `roots` and/or `state_dir`
     (named parameters, not `**kwargs`) is given them unless its table sets them: the host's
     roots plus the runs folder, and `<state_dir>/providers/<name>`.
+
+    The flow's *policy* is handed to a factory that takes a named `policy` keyword, combined
+    with the table's own `policy` (see `_with_flow_policy`). A factory configured by a file
+    path gets the flow policy alone and must combine it with its file's `[policy]` (the
+    Claude and ACP `from_config` do); a factory without the keyword is enforced only at the
+    flow's own confirmation hook.
     """
     if spec.load is None:
         raise ConfigError(f"providers.{spec.name} is not an in-process provider")
     factory = _import_factory(spec)
+    table: Mapping[str, Any] = spec.config if isinstance(spec.config, Mapping) else {}
+    composed: dict[str, Any] = {}
+    if policy is not None and _accepts(factory, "policy"):
+        composed["policy"] = _with_flow_policy(spec, table, policy)
     try:
         extras = _extras(spec, factory, host_roots, state_dir) if state_dir is not None else {}
         if spec.config is None:
-            made = factory(**extras)
+            made = factory(**extras, **composed)
         elif isinstance(spec.config, Mapping):
-            made = factory(**spec.config, **extras)
+            made = factory(**{**spec.config, **composed}, **extras)
         else:
-            made = factory(config=spec.config, **extras)
+            made = factory(config=spec.config, **extras, **composed)
     except Exception as exc:
         raise ConfigError(f"providers.{spec.name}: {exc}") from exc
     if not isinstance(made, AgentProvider):
@@ -114,7 +185,9 @@ def load_provider(
 def load_providers(config: FlowConfig, *, roots: Roots | None = None) -> dict[str, AgentProvider]:
     """Every in-process provider, loaded now; the first that fails raises `ConfigError`."""
     return {
-        name: load_provider(spec, host_roots=roots, state_dir=config.state_dir)
+        name: load_provider(
+            spec, host_roots=roots, state_dir=config.state_dir, policy=config.policy
+        )
         for name, spec in config.providers.items()
         if spec.kind == "inprocess"
     }
@@ -145,7 +218,12 @@ class LazyProviders(Mapping[str, AgentProvider]):
         if spec.kind != "inprocess":
             raise KeyError(name)
         try:
-            provider = load_provider(spec, host_roots=self._roots, state_dir=self._config.state_dir)
+            provider = load_provider(
+                spec,
+                host_roots=self._roots,
+                state_dir=self._config.state_dir,
+                policy=self._config.policy,
+            )
         except ConfigError as exc:
             _log.warning("provider %r failed to load: %s", name, exc)
             self._failed[name] = exc

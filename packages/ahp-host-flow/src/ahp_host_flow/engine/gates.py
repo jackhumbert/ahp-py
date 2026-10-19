@@ -49,7 +49,7 @@ def options_error(kind: str, options: Mapping[str, Any]) -> str | None:
     The host is the authority: a runner checks the same shapes, but a script can
     make its runner send anything (a `toJSON`, a replaced `JSON.stringify`).
     """
-    allowed = ("choices", "schema") if kind == "ask" else ("diff",)
+    allowed = ("choices", "schema") if kind == "ask" else ("diff", "x")
     extra = sorted(str(k) for k in options if k not in allowed)
     if extra:
         return f"{kind}() options: unknown key(s) {', '.join(extra)}"
@@ -77,7 +77,21 @@ def options_error(kind: str, options: Mapping[str, Any]) -> str | None:
             )
         ):
             return "approve() diff must be a string or an array of {path, before?, after?}"
+    if "x" in options:
+        x = options["x"]
+        if not (
+            isinstance(x, Mapping)
+            and set(x) <= {"detail"}
+            and isinstance(x.get("detail", False), bool)
+        ):
+            return "approve() x must be an object of {detail: boolean}"
     return None
+
+
+def wants_detail(options: Mapping[str, Any]) -> bool:
+    """Whether an approve() asked for `{approved, reason, answeredBy}` instead of a bool."""
+    x = options.get("x")
+    return isinstance(x, Mapping) and x.get("detail") is True
 
 
 def gate_key(kind: str, question: str, options: Mapping[str, Any]) -> str:
@@ -103,6 +117,19 @@ class GateUnavailableError(Exception):
 
 def no_answer_path(kind: str) -> str:
     return f"{kind}() has no answer path in this run: no client can answer a human gate here"
+
+
+def _approval_parts(answer: Any) -> tuple[bool, str | None, str | None]:
+    """An approve() answer as (approved, reason, answered_by); a bare bool has neither."""
+    if isinstance(answer, bool):
+        return answer, None, None
+    reason = getattr(answer, "reason", None)
+    by = getattr(answer, "answered_by", None)
+    return (
+        getattr(answer, "approved", False) is True,
+        reason if isinstance(reason, str) else None,
+        by if isinstance(by, str) else None,
+    )
 
 
 class GateRunner:
@@ -170,15 +197,28 @@ class GateRunner:
             self._journal.append_gate(record)
 
     async def run(self, call: GateCall, cached: GateRecord | None = None) -> Any:
-        """The gate's answer: a value (ask), a bool (approve); None/False when aborted.
+        """The gate's answer: a value (ask), a bool (approve; its detail object with `x.detail`);
+        None/False when aborted.
 
         A `cached` record (an earlier run's answer) is journaled again and returned
         without asking, even after an abort: the answer is already known.
         """
+        detail = call.kind == "approve" and wants_detail(call.options)
         if cached is not None:
             self._append(cached)
-            return cached.answer is True if call.kind == "approve" else cached.answer
+            if call.kind != "approve":
+                return cached.answer
+            answer = cached.answer
+            if detail:
+                if isinstance(answer, Mapping):
+                    return answer
+                return {"approved": answer is True, "reason": None, "answeredBy": None}
+            if isinstance(answer, Mapping):
+                return answer.get("approved") is True
+            return answer is True
         declined: Any = None if call.kind == "ask" else False
+        if detail:
+            declined = {"approved": False, "reason": None, "answeredBy": None}
         aborted = f"{call.kind}() #{call.ordinal} aborted"
         if self.aborted:
             self._log(aborted)
@@ -188,8 +228,10 @@ class GateRunner:
             raise GateUnavailableError(no_answer_path(call.kind))
         key = gate_key(call.kind, call.question, call.options)
         self._append(GateRecord(call.ordinal, key, call.kind, "open"))
+        outcome_fn = getattr(gates, "approve_outcome", None)
+        approve_fn = outcome_fn if callable(outcome_fn) else gates.approve
         task: asyncio.Future[Any] = asyncio.ensure_future(
-            gates.ask(call) if call.kind == "ask" else gates.approve(call)
+            gates.ask(call) if call.kind == "ask" else approve_fn(call)
         )
         self._tasks.add(task)
         try:
@@ -205,8 +247,15 @@ class GateRunner:
             if not task.done():
                 task.cancel()
         if call.kind == "approve":
-            self._append(GateRecord(call.ordinal, key, call.kind, "answered", answer is True))
-            return answer is True
+            approved, why, by = _approval_parts(answer)
+            if not detail:
+                self._append(GateRecord(call.ordinal, key, call.kind, "answered", approved))
+                return approved
+            if self._mask is not None and why is not None:
+                why = self._mask(why)
+            value = {"approved": approved, "reason": why, "answeredBy": by}
+            self._append(GateRecord(call.ordinal, key, call.kind, "answered", value))
+            return value
         reason = self._reject(call, answer)
         if reason is not None:
             self._log(f"ask() #{call.ordinal}: answer rejected: {reason}")

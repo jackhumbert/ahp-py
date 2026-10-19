@@ -26,11 +26,18 @@ asks, so this cannot see its calls.
 The one exception is a call to a tool the client offered through the MCP relay
 (`relayed_answer`): its owner decides, so it is allowed once without asking.
 
-What does not reach the agent: a denial's reason (`reasonMessage`) and a
-suggestion of what to do instead (`userSuggestion`). ACP's outcome has a field
-for the option and none for either -- only `_meta`, which "implementations
-MUST NOT make assumptions about" -- so there is no honest way to tell the
-agent why. The host keeps both in the transcript, where the user sees them.
+What does not reach the agent in the outcome: a denial's reason
+(`reasonMessage`) and a suggestion of what to do instead (`userSuggestion`).
+ACP's outcome has a field for the option and none for either -- only `_meta`,
+which "implementations MUST NOT make assumptions about" -- so there is no
+honest way to tell the agent why there. The host keeps both in the transcript,
+where the user sees them, and (`decline_feedback`) sends them as a text block
+on the chat's next prompt: `decline_line`.
+
+**Confirmation hints are security decisions too.** `read_only_hint` says
+whether a call only reads, from the same kinds the policy uses, so an automatic
+answerer may trust it: only `read` and `search` are read-only; every other
+kind, unknown ones included, is not claimed to be.
 """
 
 from __future__ import annotations
@@ -142,6 +149,38 @@ POLICY_KINDS: Final[Mapping[str, str]] = {
     "move": "write",
     "execute": "command",
 }
+
+#: Policy kind -> whether a call of that kind only reads. A `tool` (any other
+#: ACP kind) is absent: nothing is claimed about it. Security-relevant, pinned
+#: by a test.
+READ_ONLY_BY_POLICY_KIND: Final[Mapping[str, bool]] = {
+    "read": True,
+    "write": False,
+    "command": False,
+}
+
+
+def read_only_hint(kind: str) -> bool | None:
+    """Whether an ACP tool *kind* only reads: True, False, or None when not known.
+
+    **A security decision:** an automatic answerer may approve on `True`, so only
+    the kinds the policy treats as reads (`read`, `search`) say so.
+    """
+    return READ_ONLY_BY_POLICY_KIND.get(POLICY_KINDS.get(kind, "tool"))
+
+
+#: The longest decline reason sent to the agent, in characters; chosen to keep
+#: the block short, no external source.
+DECLINE_REASON_MAX: Final = 300
+
+
+def decline_line(tool: str, reason: str) -> str:
+    """One line telling the agent why *tool* was declined, whitespace collapsed and capped."""
+    text = " ".join(reason.split())
+    if len(text) > DECLINE_REASON_MAX:
+        text = text[: DECLINE_REASON_MAX - 1] + "…"
+    return f"[declined: {tool}] {text}"
+
 
 #: `rawInput` keys that name a path, for agents that send no `locations`.
 RAW_PATH_KEYS: Final = ("path", "file_path", "filePath", "abs_path", "absolute_path", "destination")

@@ -32,6 +32,7 @@ from types import TracebackType
 from typing import Any, Self
 
 import ahp_protocol.ext.flow as flow
+import ahp_protocol.ext.operation as operation_ext
 from ahp_protocol.channels import ROOT_URI
 from ahp_protocol.ext.delegation import ORIGIN_META_KEY, parse_delegation
 from ahp_protocol.ext.flow import EMPTY_RUN, RunView, WorkflowInfo, run_view
@@ -82,7 +83,13 @@ from ahp_client.client.errors import AhpClientError, RpcError
 from ahp_client.client.events import ActionEvent, ClientEvent, SessionRemoved
 from ahp_client.client.mirror import StateMirror
 from ahp_client.hosts.runtime import HostConfig, HostRuntime, TransportFactory
-from ahp_client.serve.inputs import ClientToolHost, InputResponder, pending_inputs
+from ahp_client.serve.inputs import (
+    ClientToolHost,
+    InputResponder,
+    WaitingEntry,
+    pending_inputs,
+    waiting_entries,
+)
 from ahp_client.serve.router import ResourceServer
 
 __all__ = ["Chat", "ChatWatch", "Client", "ClientContext", "Session", "TurnStream", "connect"]
@@ -872,6 +879,37 @@ class Session:
         session list can resolve a prompt without opening the conversation.
         """
         return pending_inputs(self._client.mirror, self.uri)
+
+    def waiting(self, chat: str | None = None) -> tuple[WaitingEntry, ...]:
+        """What is waiting on a person, optionally for one *chat*.
+
+        :meth:`pending_inputs` without the ``toolClientExecution`` entries, which
+        ask a client to run a tool and do not block a human.
+        """
+        return waiting_entries(self._client.mirror, self.uri, chat)
+
+    async def invoke_operation(
+        self,
+        changeset: str,
+        operation_id: str,
+        *,
+        target: Mapping[str, Any] | None = None,
+        params: Mapping[str, Any] | None = None,
+    ) -> JsonObject:
+        """Run a changeset operation, optionally with parameters.
+
+        *params* ride in ``_meta["ahp-py/operation"]`` and are ignored by a stock
+        host. There is no client-side check against the declared operations; use
+        :meth:`Changeset.invoke` for that.
+        """
+        extra: dict[str, Any] = {}
+        if target is not None:
+            extra["target"] = dict(target)
+        if params is not None:
+            extra["_meta"] = operation_ext.operation_meta(params)
+        return await self._client.protocol.invoke_changeset_operation(
+            changeset, operation_id=operation_id, **extra
+        )
 
     @property
     def responder(self) -> InputResponder:

@@ -102,12 +102,20 @@ def _replaced(name: str) -> str:
 
 
 def approve(
-    summary: str, *, diff: str | Sequence[Mapping[str, Any]] | None = None
-) -> Awaitable[bool]:
-    """Ask a human to approve; the awaitable gives True, or False when denied."""
+    summary: str,
+    *,
+    diff: str | Sequence[Mapping[str, Any]] | None = None,
+    x: Mapping[str, Any] | None = None,
+) -> Awaitable[Any]:
+    """Ask a human to approve; the awaitable gives True, or False when denied.
+
+    With `x={"detail": True}` it gives `{approved, reason, answeredBy}` instead.
+    """
     opts: dict[str, Any] = {}
     if diff is not None:
         opts["diff"] = diff
+    if x is not None:
+        opts["x"] = x
     rt = _runtime("approve")
     if "approve" in rt.verbs:
         return pyrunner.failed(TypeError(_replaced("approve")))

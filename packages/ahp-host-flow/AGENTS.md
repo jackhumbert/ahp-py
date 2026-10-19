@@ -21,6 +21,16 @@ is the design; milestones M0–M12 there say what exists and what's next.
   are top-level modules too; `library` may not import `ahp_host`. `engine/gates.py` (`GateRunner`) is
   engine code and may not import `ahp_host`; so are `engine/verbs.py` (`VerbRunner`) and
   `engine/verbnames.py`. `gates.MainChatVerbs` is the provider's verb host.
+- Security decision (plan §8 M15 item 3): `[policy]` is checked first and always wins. An
+  `[approvals]` rule can never allow what the policy denies or asks, nor a call the inner
+  provider's policy asked about (`policy_asked`); keep that order in `approvals.Approver.decide`.
+  Remote relays get no `Approver`. The flow `[policy]` is also folded into each in-process
+  provider's own policy (`loading._with_flow_policy`, for factories with a named `policy`
+  keyword), so an approve-all cannot switch it off; never drop that. A `read_only` rule matches an
+  agent-supplied hint (`read_only_from_agent`) only with `trust_agent_hints`.
+- `approve()` returns a bool; with `opts.x.detail` it returns `{approved, reason, answeredBy}`
+  (`engine.gates.wants_detail`). Without detail the gate key and journal record are
+  byte-identical to before (no `x` key); `GateRunner` prefers `approve_outcome` when the gates have one.
 - Dispatch is split by provider kind (`ProviderConfig.kind`: `inprocess`,
   `fleet`, `remote`). `dispatch.StepDispatcher` is the shared base (the main
   chat's `agent` tool call and its typed progress); `ProviderDispatcher`
@@ -77,8 +87,11 @@ is the design; milestones M0–M12 there say what exists and what's next.
   host-initiated. A live run is refused (`live_runs`, and `journal.lock`, which a `JournalWriter`
   holds while open, for another process). `redact_step` takes a required `actor`. Journal agent records may carry
   `redacted` (`JOURNAL_VERSION` stays 1).
-- `awaitingInput` is derived from the `TurnTee`'s confirmations and input
-  requests, an approximation of the session's `inputNeeded`.
+- `awaitingInput` and the step's `waiting` entries come from the session's
+  `inputNeeded` filtered to the worker chat (`StepDispatcher._watch_loop`,
+  polled every `WAIT_POLL`); `TurnTee.on_waiting` is used only when the
+  publisher is not `ObservesSessionState`. Inner sessions never get the session
+  view (`ScopedPublisher` has no `session_state`).
 - `agent()` results are re-validated against `opts.schema` in the engine
   (`conformance/agent_schema.js`), whatever the provider claims.
 - Hosting tests use `tests/hosting.py` over `memory_pair`.
@@ -151,8 +164,8 @@ is the design; milestones M0–M12 there say what exists and what's next.
 - Worker chat interactivity follows `ProviderConfig.interactive`: `full` when
   set, else read-only. Steering is forwarded only if the inner session
   `SteersTurns`, otherwise rejected with a reason.
-- The changeset operation ids are `APPLY_OPERATION` and `DISCARD_OPERATION`
-  (`worktree.py`); keep them stable, clients and `FlowProvider.changeset_operations`
+- The changeset operation ids are `APPLY_OPERATION`, `COMMIT_OPERATION` and
+  `DISCARD_OPERATION` (`worktree.py`); keep them stable, clients and `FlowProvider.changeset_operations`
   share them.
 - The subagent preamble (`ProviderConfig.preamble`, on by default) reaches only
   the inner agent: the in-process `UserMessage` text and `raw["text"]`, the fleet

@@ -10,9 +10,11 @@ from ahp_host.provider.base import (
     AgentSessionContext,
     GatesSteering,
     HostTool,
+    ObservesSessionState,
     OriginTurn,
     ProvidesOperations,
     ReadsClientPlugins,
+    ReopensToolChats,
     ResolvesOriginTurn,
     ResumableAgentProvider,
     ResumesOnRestore,
@@ -20,6 +22,7 @@ from ahp_host.provider.base import (
     TurnSink,
     UserMessage,
 )
+from ahp_host.provider.changes import OperationContext
 from ahp_host.provider.echo import EchoProvider, EchoSession
 
 __all__ = [
@@ -32,9 +35,12 @@ __all__ = [
     "EchoSession",
     "GatesSteering",
     "HostTool",
+    "ObservesSessionState",
+    "OperationContext",
     "OriginTurn",
     "ProvidesOperations",
     "ReadsClientPlugins",
+    "ReopensToolChats",
     "ResolvesOriginTurn",
     "ResumableAgentProvider",
     "ResumesOnRestore",

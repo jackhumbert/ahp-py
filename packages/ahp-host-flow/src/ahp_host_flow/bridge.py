@@ -6,7 +6,7 @@ import dataclasses
 import inspect
 from collections import Counter, deque
 from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
-from typing import Any, Final
+from typing import TYPE_CHECKING, Any, Final
 
 from ahp_host import TurnSink
 from ahp_host.provider.base import (
@@ -24,6 +24,9 @@ from ahp_host.provider.base import (
 )
 
 from ahp_host_flow.engine import Redactor
+
+if TYPE_CHECKING:
+    from ahp_host_flow.approvals import Approver
 
 #: Most drop records kept: an inner session reporting progress in a loop must
 #: not grow memory without bound.
@@ -272,7 +275,9 @@ class TurnTee:
     line at a time, so a secret split across deltas is still caught) while `text`
     and `reply` keep the raw text for the engine to mask itself. Nothing handed
     back to the inner session changes. *on_waiting* hears `True` when the first
-    confirmation or input request opens and `False` when the last one closes.
+    confirmation or input request opens and `False` when the last one closes. An *approver*
+    answers a confirmation itself when the policy or a rule decides it, on the agent's unmasked
+    call and without publishing anything; otherwise the confirmation goes to the sink.
     """
 
     def __init__(
@@ -281,6 +286,7 @@ class TurnTee:
         *,
         redactor: Redactor | None = None,
         on_waiting: Callable[[bool], Awaitable[None]] | None = None,
+        approver: Approver | None = None,
     ) -> None:
         self.sink = sink
         self.text: list[str] = []
@@ -292,6 +298,7 @@ class TurnTee:
         self._text_stream = self._redactor.stream() if self._redactor else None
         self._reasoning_stream = self._redactor.stream() if self._redactor else None
         self._on_waiting = on_waiting
+        self._approver = approver
         self._open = 0
 
     @property
@@ -515,6 +522,8 @@ class TurnTee:
 
     async def confirm_tool_call(self, call: ToolConfirmation) -> ToolConfirmationOutcome:
         await self.flush()
+        if self._approver is not None and (decided := self._approver.decide(call)) is not None:
+            return decided
         await self._waiting(1)
         try:
             return await self.sink.confirm_tool_call(self._masked_confirmation(call))

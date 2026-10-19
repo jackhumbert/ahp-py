@@ -56,6 +56,18 @@ def test_readme_verbs_and_resume_examples_parse(tmp_path: Path) -> None:
     assert config.resume.key == "model"
 
 
+def test_approvalrules_readme_example_parses(tmp_path: Path) -> None:
+    """The README's Approval rules block parses into two rules and a policy."""
+    text = (ROOT / "README.md").read_text(encoding="utf-8")
+    section = text[text.index("### Approval rules") :]
+    block = re.search(r"```toml\n(.*?)```", section, re.DOTALL)
+    assert block is not None
+    data = tomllib.loads('[providers.claude]\nload = "m:C"\n' + block.group(1))
+    config = parse_config(data, base=tmp_path)
+    assert len(config.approvals.rules) == 2
+    assert config.policy is not None
+
+
 def _section(text: str, heading: str) -> str:
     start = text.index(heading)
     end = text.find(chr(10) + "## ", start + 1)

@@ -10,6 +10,33 @@ versions each release speaks.
 
 ## [Unreleased]
 
+### Added — session view, worker chat reopening, confirmation hints (M15)
+
+- **`ObservesSessionState`** (`ahp_host.provider`): the publisher's `session_state()` returns the session
+  channel's current reduced state, read-only, for a provider to poll.
+- **`ReopensToolChats`**: the publisher's `worker_chat(resource)` returns a `ProviderChat` for a worker
+  chat the session opened with `open_tool_chat`, also after a restart, and `None` for any other chat.
+  A restored session knows its worker chats again (`provider_chats`, from each chat's stored `tool`
+  origin, which only `open_tool_chat` sets), so they keep a worker chat's rules after a restart and a
+  turn a restart cut off on one is not offered for resuming.
+- **`ToolConfirmation.read_only_from_agent`** (the `read_only` hint is the agent's own claim, such as
+  ACP's `kind`) and **`locations`** (paths named outside the call's input): advisory, never published.
+- `policy_from_table` accepts a callable `check` from code (a file still names an import path), so a
+  host can compose its policy with a provider's; `combine(*policies)` and `combine_tables(*tables)`
+  do that (the most restrictive verdict of each wins).
+- **`ToolConfirmation.read_only`** (the tool's read-only hint, `None` when unknown) and
+  **`policy_asked`** (the provider's `ToolPolicy` said `ask`): advisory input for whoever answers,
+  never published.
+
+### Added — operation context and results (M15)
+
+- **`OperationContext`** (`ahp_host.provider`, `ahp_host.core.changesets`): an operation handler may
+  take a fourth argument carrying `params` (from `_meta["ahp-py/operation"]`, `{}` when absent or not
+  an object) and `principal` (the invoking connection's `Policy.principal_of`, never a clientId).
+  Three-argument handlers are unchanged; the host decides by arity.
+- A handler that returns a mapping supplies the request's `message` and `followUp`; anything else
+  still returns `{}`.
+
 ### Added — ToolPolicy (M14)
 
 - **`ahp_host.provider.policy`** (`ToolPolicy`, `ToolRequest`, `Decision`, `policy_from_table`,

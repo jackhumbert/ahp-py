@@ -190,6 +190,9 @@ class AgentSpec:
     #: Offer the agent `fs/*` and `terminal/*`, served by the host under the
     #: roots jail and `policy`: see :mod:`ahp_host_acp.client_methods`.
     client_methods: bool = False
+    #: Tell the agent why a call was declined, as a text block on the chat's
+    #: next prompt (ACP's outcome has no field for it).
+    decline_feedback: bool = True
 
 
 def launch_argv(spec: AgentSpec, cwd: Path) -> tuple[str, ...]:
@@ -273,6 +276,9 @@ class _Chat:
         #: forked chat shows. ``None``: not known (a lost or replaced agent
         #: session, a state saved before this was kept).
         self.turns = turns
+        #: Why calls were declined since the last prompt (`permissions.decline_line`),
+        #: sent as one text block on the next one: ACP's outcome has no reason field.
+        self.declines: list[str] = []
 
     @classmethod
     def restored(cls, uri: str, state: Mapping[str, Any], model: str | None) -> _Chat:
@@ -1230,6 +1236,10 @@ class AcpSession:
                 # The user sees why: under the call's name now, and in its
                 # result when it ends (the agent's failure, or the turn's end).
                 call.notice = reason
+                if self._spec.decline_feedback:
+                    chat.declines.append(
+                        permissions.decline_line(call.title.strip() or call.name, reason)
+                    )
                 await self._announce(chat, call, sink)
                 await sink.tool_call_delta(call_id, invocation_message=reason)
                 return permissions.rejected_answer(offered)
@@ -1258,6 +1268,13 @@ class AcpSession:
                     confirmation_title=call.title or None,
                     options=permissions.confirmation_options(offered),
                     edits=self._edits.preview(diffs_of(call.content), self.directory),
+                    read_only=permissions.read_only_hint(call.kind),
+                    # The kind is the agent's word, not the host's: see the field.
+                    read_only_from_agent=True,
+                    locations=tuple(
+                        loc["path"] for loc in call.locations if isinstance(loc.get("path"), str)
+                    ),
+                    policy_asked=ask_anyway,
                 )
             )
         )
@@ -1268,6 +1285,19 @@ class AcpSession:
             return permissions.CANCELLED  # cancelled, or the turn ended while the prompt was open
         finally:
             chat.asking.discard(asking)
+        if self._spec.decline_feedback and not outcome.approved:
+            declined_why = outcome.reason_message
+            suggestion = getattr(outcome.user_suggestion, "text", None)
+            if isinstance(suggestion, str) and suggestion:
+                declined_why = (
+                    f"{declined_why} (suggested instead: {suggestion})"
+                    if declined_why
+                    else f"(suggested instead: {suggestion})"
+                )
+            if declined_why:
+                chat.declines.append(
+                    permissions.decline_line(call.title.strip() or call.name, declined_why)
+                )
         return permissions.answer(offered, outcome)
 
     # -- turns ---------------------------------------------------------------
@@ -1390,9 +1420,18 @@ class AcpSession:
                 "This agent could not take the forked conversation over itself, so the "
                 "earlier turns were given to it as context with this message."
             )
+        # The reasons go out with this prompt and are dropped only once it was delivered:
+        # an agent that dies on the prompt never read them, so the retry carries them again.
+        # Declines made during this turn are appended after them, for the next prompt.
+        sent_declines = len(chat.declines)
+        if sent_declines:
+            # Last, so the agent's first text block stays the user's message.
+            blocks.append({"type": "text", "text": "\n".join(chat.declines)})
         try:
             result = await self._prompt(conn, chat, blocks)
         except asyncio.CancelledError:
+            # The prompt was in flight (the agent has it); a cancel does not resend it.
+            del chat.declines[:sent_declines]
             await self._cancel(chat)
             raise
         except AgentExitedError as error:
@@ -1405,6 +1444,7 @@ class AcpSession:
             await self._close_open_calls(chat, sink)
             await sink.turn_failed(str(error), error_type=f"acp.{error.code}")
             return
+        del chat.declines[:sent_declines]
         await self._close_open_calls(chat, sink)
         await self._report_usage(chat, result, sink)
         stop = result.get("stopReason")

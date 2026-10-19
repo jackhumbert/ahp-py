@@ -301,7 +301,7 @@ class MainChatGates:
                 )
             )
             if not outcome.approved:
-                return ConfirmOutcome(False, outcome.answered_by)
+                return ConfirmOutcome(False, outcome.answered_by, reason=outcome.reason_message)
             await self._sink.tool_call_completed(
                 call_id,
                 {"content": [{"type": "text", "text": "approved"}]},

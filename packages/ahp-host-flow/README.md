@@ -228,9 +228,10 @@ async with ahp_host_flow.run(dispatcher, RunOptions(budget_total=50_000)) as r:
   notifications, and `stepStarted`, `awaitingInput` and `stepFinished` on each
   `agent` tool call (the running call links its worker chat; the result carries
   the status, the structured result and usage). A stock client shows the same
-  text without them. `awaitingInput` is derived from the confirmations and
-  input requests the provider sees on the worker's turn (`TurnTee`), an
-  approximation of the session's `inputNeeded`. The shapes belong to `ahp_protocol.ext.flow`, whose
+  text without them. `awaitingInput` comes from the session's `inputNeeded`,
+  filtered to the worker chat, and the step's `waiting` entries (kind and
+  chat of each open request, `RunView.waiting` in the folded view) say what it
+  is blocked on, including an MCP server's authentication. The shapes belong to `ahp_protocol.ext.flow`, whose
   `run_view` folds a chat's state into phases, steps and their status;
   `ahp-client` gives it as `session.flow_view()` (and `chat.flow_view()`).
 - A run's main chat is quiet while a step runs; the step's work is on its
@@ -333,7 +334,15 @@ await agent('fix the tests', {x: {cwd: 'packages/api'}})
 const go = await ask('Proceed?', {choices: ['yes', 'no']})
 const ok = await approve('Apply the plan', {diff: 'one-line summary of the diff'})
 canvas('https://example.com/run', {title: 'Live view'})
+
+// The human's reason and who answered, instead of a bool.
+const {approved, reason, answeredBy} = await approve('Drop?', {x: {detail: true}})
 ```
+
+`approve(..., {x: {detail: true}})` resolves to `{approved, reason, answeredBy}`: `reason` is
+the explanation given with a denial (masked) and `answeredBy` the answering principal, each
+`null` when unknown. A plain `approve()` still returns a bool, as under Claude Code, which
+ignores `opts.x`.
 
 `meta.x.schedule` offers a default schedule: `x: {schedule: '0 9 * * 1-5'}` or
 `x: {schedule: {expression: '0 9 * * 1-5', timeZone: 'Europe/London'}}`
@@ -466,7 +475,15 @@ Two more kinds of provider run a call somewhere else than this process
   link to the node session, the status, the result and its usage. The node
   session holds the transcript and its approvals.
 - **Remote** (`url`): without a gateway, the engine dials another host with
-  `ahp-client` (`ClientDispatcher`) and runs the call as a session there.
+  `ahp-client` (`ClientDispatcher`) and runs the call as a session there. An
+  approval or a question the remote agent raises appears on the call's worker
+  chat, and the answer given there goes back to the remote session (no approval
+  rules apply to it). An open request pauses `idle_timeout`, so an answer that
+  takes longer still lands; a remote turn that goes quiet for `idle_timeout`
+  otherwise is stopped and the call fails. By default a relayed request waits
+  until the run is aborted; `approval_timeout` (seconds) bounds it: an
+  unanswered one then fails the call with an error naming the provider and the
+  setting, and the remote turn is stopped.
 
 ```toml
 [providers.build-box]                 # fleet: a session on the gateway node `build-box`
@@ -483,6 +500,7 @@ url = "wss://my-mac-mini.example.com"
 token_file = "~/.config/ahp/mac.token"
 agent = "claude"
 idle_timeout = 600                    # seconds the remote turn may go quiet (default 600)
+# approval_timeout = 3600             # seconds a relayed approval may wait (default: no limit)
 
 [routing]
 default = "claude"
@@ -564,6 +582,29 @@ its worker chat, with Apply and Discard working. One whose directory is gone
 (removed with `git worktree remove` / `git worktree prune`, say) is dropped with
 a log line, and no changeset link is left behind.
 
+Commit makes the agent's work a commit instead of a patch. By default it commits the
+worktree's changes on a new branch (`flow/<runId>-<ordinal>`, never checked out, so the
+checkout is untouched) and removes the worktree; with `params.apply = true` it applies
+them to the working tree and commits just those paths there, leaving other staged work
+alone. `params` come from the invoking client (`Session.invoke_operation(params=)`):
+`message` is the commit message (default: the call's label, else the prompt's first line
+cut at 72 characters, else `flow: run <runId> step <ordinal>`, masked by the run's redactor)
+and `apply` a bool. A rename or a delete is committed whole either way. Author and hooks are
+git's own config; nothing is ever pushed. `[changesets]` sets `branch` (a template; `{runId}`
+and `{ordinal}` are replaced) and `trailer` (add a `Flow-Principal:` line naming who pressed
+Commit, when the policy knows them; CR, LF and other control characters are removed from
+the name, so it cannot add lines of its own). Discard takes an optional
+`params.reason`: it is logged (masked), shown in the changeset's description, posted as a
+notification turn on the worker chat and, for a named chat (`x.chat`), put before that
+chat's next prompt as `[discarded: <label>] <reason>`, so the agent learns why its work
+was dropped.
+
+```toml
+[changesets]
+branch = "flow/{runId}-{ordinal}"
+trailer = false
+```
+
 ### Which client turn a worker serves
 
 A worker chat's turns are host-internal, so an embedding host whose `Policy` binds a
@@ -580,6 +621,57 @@ read-only. A steering message on a running worker chat is forwarded to the inner
 session when it takes steering mid-turn (`SteersTurns`), and otherwise rejected
 with the reason. Worker chats of a provider that is not interactive stay
 read-only.
+
+Changing the session's Approvals config reaches the workers that are running: "approve
+all for this run" applies to their next prompt at once (effort is not fanned out).
+
+### Approval rules
+
+A flow-level `[policy]` and `[[approvals.rules]]` answer an in-process worker's tool
+confirmations without bothering anyone. The policy is the same table the Claude and ACP hosts
+take (`deny_commands`, `deny_paths`, `ask_paths`, ...); a rule matches on `tool` (a glob),
+`read_only`, `provider`, `phase` and `persons` (the turn's principal), and every key present
+must match. A `read_only` key matches a hint the agent supplied itself (an ACP call's `kind`,
+`read_only_from_agent`) only when the rule also sets `trust_agent_hints = true`: an ACP agent
+can label any call a read, so by default such a call is prompted. A call the provider files as
+a read or a write but whose path cannot be read (an ACP read with no `locations`) is judged
+by the policy as one with no path, which asks when there are path rules.
+
+```toml
+[policy]
+deny_commands = ["git push*"]
+
+[[approvals.rules]]
+read_only = true
+action = "allow"
+
+[[approvals.rules]]
+tool = "Bash"
+persons = ["alice"]
+action = "allow"
+```
+
+The order is fixed. The policy is checked first and always wins: a deny is final, an ask goes
+to a person, and no rule can allow what the policy denies or asks. Next, a call the inner
+provider's own policy asked about is prompted. Then the rules run in order and the first match
+decides; a call no rule matches is prompted as before. A decision is logged on the main chat
+as `agent() #<n>: <tool> approved by rule <i>` (or `denied by rule <i>`, or the policy's
+reason). A rule approval is once and nothing broader.
+
+The policy is also handed to each in-process provider whose factory takes a named `policy`
+keyword (`ahp_host_claude:from_config` and `ahp_host_acp:from_config` do), folded into the
+provider table's own `policy` as a check: a deny from either wins. That hook runs in every
+approval mode, so setting the run's Approvals to auto (which stops a worker asking) does not
+stop the flow's denies applying. A provider configured by a file path (`config = "x.toml"`)
+is given the flow policy alone, and its `from_config` combines it with the file's own
+`[policy]` (`ahp_host.provider.policy.combine`), again a deny from either winning. A factory
+without the keyword is judged only when its worker asks.
+
+Limits: a remote call's relayed approvals are always prompted (neither the policy nor the rules
+see them), and neither fleet nor remote workers get the flow `[policy]` at all: they run on
+another host, under that host's own policy, so an approve-all there is not checked here. An
+inner policy ask is honoured only when the provider sets `policy_asked`, as `ahp-host-claude`
+and `ahp-host-acp` do.
 
 ## flow.toml
 

@@ -8,6 +8,17 @@ the spec revision it targets.
 
 ## [Unreleased]
 
+### Added — waiting entries and operation params (M15)
+
+- **`flow.step(..., waiting=[{kind, chat?}])`** adds `waiting` entries (and `awaitingInput`)
+  to a step descriptor; an entry without a string `kind` raises `ValueError`.
+  `DESCRIPTOR_SCHEMA` and `flow.schema.json` gain the `waiting` definition.
+- **`flow.WaitingView`**, **`StepView.waiting`** and **`RunView.waiting`** list what each
+  awaiting step is blocked on; a descriptor without entries yields one with `kind=None`.
+- **`ahp_protocol.ext.operation`** (`OPERATION_META_KEY`, `operation_meta`,
+  `operation_params`): a changeset operation's parameters under
+  `InvokeChangesetOperationParams._meta['ahp-py/operation']`; reading never raises.
+
 ### Documentation
 
 - README: typed workflow starts (`workflow_start`, `parse_workflow_start`), with an executed example.

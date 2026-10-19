@@ -107,6 +107,7 @@ from ahp_client.client import (
     TransportError,
     is_session_gone,
 )
+from ahp_client.serve.inputs import WaitingEntry
 
 # The one place the version is written. `pyproject.toml` declares `version` as
 # dynamic and hatch reads it from this line at build time.
@@ -179,6 +180,7 @@ __all__ = [
     "UnknownEvent",
     "UnknownTerminalEvent",
     "Usage",
+    "WaitingEntry",
     "__version__",
     "approve_all",
     "ask",

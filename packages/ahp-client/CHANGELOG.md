@@ -6,6 +6,15 @@ Every release states the protocol versions it speaks.
 
 ## [Unreleased]
 
+### Added — M15
+
+- `ToolCallReady.deny()` and `InputResponder.confirm_tool()` take `reason_message=`
+  and `user_suggestion=`, sent on the denial only and omitted when `None`.
+- `Session.waiting(chat=None)` lists what blocks a human, as `WaitingEntry`
+  (`id`, `kind`, `chat`, `turn_id`); `toolClientExecution` entries are skipped.
+- `Session.invoke_operation(changeset, operation_id, target=, params=)`: `params`
+  ride in `_meta["ahp-py/operation"]`, which a stock host ignores.
+
 ### Documentation
 
 - README: `session.workflows()` and `session.start_workflow()`.

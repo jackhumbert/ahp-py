@@ -63,6 +63,7 @@ from pathlib import Path
 from typing import Any
 
 from ahp_host.node import NodeContext
+from ahp_host.provider.policy import PolicyError, combine_tables
 
 from ahp_host_acp.config import (
     DEFAULT_AGENT_NAME,
@@ -71,6 +72,7 @@ from ahp_host_acp.config import (
     SERVER_ONLY_KEYS,
     ConfigError,
     _command,
+    _decline_feedback,
     _env_allow,
     _launcher,
     _mcp_servers,
@@ -105,6 +107,7 @@ AGENT_OPTIONS = frozenset(
         "relay_command",
         "relay_host",
         "policy",
+        "decline_feedback",
         "env",
         "models",
         "model_command",
@@ -142,6 +145,7 @@ def provider_from_options(options: Mapping[str, Any], roots: Roots, state_dir: P
             relay_host=_relay_host(options),
             policy=policy,
             client_methods=client_methods,
+            decline_feedback=_decline_feedback(options),
             env=_strings(options, "env"),
             model_command=model_command,
             config_options=_option_values(options),
@@ -165,6 +169,7 @@ def from_config(
     | Mapping[str, str | os.PathLike[str]]
     | None = None,
     state_dir: str | os.PathLike[str] | None = None,
+    policy: Mapping[str, Any] | None = None,
     **options: Any,
 ) -> AcpProvider:
     """A provider from a config file and/or keywords, with no node; keywords win."""
@@ -178,6 +183,18 @@ def from_config(
     from_file = {key: value for key, value in data.items() if key not in SERVER_ONLY_KEYS}
     merged = {key: value for key, value in from_file.items() if key in AGENT_OPTIONS}
     merged.update(options)
+    if policy is not None:
+        # A named keyword (not just **options) so a host that composes policies, such as
+        # ahp-host-flow's loader, can see this factory takes one. It is combined with the
+        # file's own [policy], never put in its place: a deny from either wins.
+        own = merged.get("policy")
+        if isinstance(own, Mapping) and isinstance(policy, Mapping):
+            try:
+                merged["policy"] = combine_tables(own, policy, extra={"host_tools"})
+            except PolicyError as exc:
+                raise ConfigError(f"[policy]: {exc}") from exc
+        else:
+            merged["policy"] = policy
     served = roots_option(roots) if roots is not None else _roots_from_file(data)
     if served is None:
         raise ConfigError(

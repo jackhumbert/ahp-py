@@ -10,6 +10,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Final, Literal
 
+from ahp_host.provider.policy import PolicyError, ToolPolicy, policy_from_table
+
 from ahp_host_flow.engine.redact import Redactor
 from ahp_host_flow.engine.registry import WORKFLOW_SOURCES
 from ahp_host_flow.engine.verbnames import verb_name_error
@@ -78,6 +80,9 @@ class ProviderConfig:
     # Remote: seconds the remote turn may go without an event (a question or an approval
     # nobody can answer from here) before the call fails. None: `remote.IDLE_TIMEOUT`.
     idle_timeout: float | None = None
+    # Remote: seconds a relayed approval or question may wait for an answer on the worker
+    # chat before the call fails. None: wait until the run is aborted.
+    approval_timeout: float | None = None
     # In-process: worker chats of this provider take steering (plan §4.5).
     interactive: bool = False
     # Text put before every prompt the inner agent is sent: True for the default, a string for
@@ -114,6 +119,34 @@ class ResumeConfig:
 
 
 @dataclass(frozen=True)
+class ChangesetsConfig:
+    # The branch a Commit creates; `{runId}` and `{ordinal}` are replaced.
+    branch: str = "flow/{runId}-{ordinal}"
+    # Add a `Flow-Principal:` trailer naming who pressed Commit.
+    trailer: bool = False
+
+
+@dataclass(frozen=True)
+class ApprovalRule:
+    """One `[[approvals.rules]]` entry: every key present must match; the first match decides."""
+
+    action: Literal["allow", "deny"]
+    tool: str | None = None
+    read_only: bool | None = None
+    provider: str | None = None
+    phase: str | None = None
+    persons: tuple[str, ...] | None = None
+    #: Whether `read_only` may match a hint the agent supplied itself
+    #: (`ToolConfirmation.read_only_from_agent`, ACP's `toolCall.kind`); off by default.
+    trust_agent_hints: bool = False
+
+
+@dataclass(frozen=True)
+class ApprovalsConfig:
+    rules: tuple[ApprovalRule, ...] = ()
+
+
+@dataclass(frozen=True)
 class FlowConfig:
     # In TOML order.
     providers: Mapping[str, ProviderConfig]
@@ -125,6 +158,10 @@ class FlowConfig:
     # Custom verbs: global name -> 'module:function', imported on the first call, in TOML order.
     verbs: Mapping[str, str] = field(default_factory=dict)
     resume: ResumeConfig = ResumeConfig()
+    approvals: ApprovalsConfig = ApprovalsConfig()
+    # Checked before the approval rules and always wins over them.
+    policy: ToolPolicy | None = None
+    changesets: ChangesetsConfig = ChangesetsConfig()
 
 
 def _table(value: Any, where: str) -> Mapping[str, Any]:
@@ -201,7 +238,15 @@ def _parse_provider(name: str, raw: Any, base: Path) -> ProviderConfig:
         )
     else:
         kind = "remote"
-        allowed = ("url", "token_file", "agent", "models", "idle_timeout", "preamble")
+        allowed = (
+            "url",
+            "token_file",
+            "agent",
+            "models",
+            "idle_timeout",
+            "approval_timeout",
+            "preamble",
+        )
     _check_keys(table, allowed, where)
     load = via = node = agent = url = None
     token_file: Path | None = None
@@ -270,6 +315,7 @@ def _parse_provider(name: str, raw: Any, base: Path) -> ProviderConfig:
         token_file,
         reply_timeout=_seconds(table, "reply_timeout", where),
         idle_timeout=_seconds(table, "idle_timeout", where),
+        approval_timeout=_seconds(table, "approval_timeout", where),
         interactive=interactive,
         preamble=preamble,
     )
@@ -388,6 +434,77 @@ def _parse_resume(raw: Any) -> ResumeConfig:
     return ResumeConfig(key)
 
 
+def _parse_changesets(raw: Any) -> ChangesetsConfig:
+    table = _table(raw, "changesets")
+    _check_keys(table, ("branch", "trailer"), "changesets")
+    branch = table.get("branch", ChangesetsConfig.branch)
+    if not isinstance(branch, str) or not branch.strip():
+        raise ConfigError(f"changesets.branch must be a non-empty string, got {branch!r}")
+    trailer = table.get("trailer", ChangesetsConfig.trailer)
+    if not isinstance(trailer, bool):
+        raise ConfigError(f"changesets.trailer must be a boolean, got {trailer!r}")
+    return ChangesetsConfig(branch, trailer)
+
+
+def _parse_approvals(raw: Any, providers: Mapping[str, ProviderConfig]) -> ApprovalsConfig:
+    table = _table(raw, "approvals")
+    _check_keys(table, ("rules",), "approvals")
+    raw_rules = table.get("rules", [])
+    if not isinstance(raw_rules, list):
+        raise ConfigError("approvals.rules must be an array of tables")
+    rules: list[ApprovalRule] = []
+    for i, raw_rule in enumerate(raw_rules):
+        where = f"approvals.rules[{i}]"
+        rule = _table(raw_rule, where)
+        _check_keys(
+            rule,
+            ("tool", "read_only", "provider", "phase", "persons", "action", "trust_agent_hints"),
+            where,
+        )
+        action = _str(rule, "action", where)
+        if action == "allow":
+            verdict: Literal["allow", "deny"] = "allow"
+        elif action == "deny":
+            verdict = "deny"
+        else:
+            raise ConfigError(f"{where}.action must be 'allow' or 'deny', got {action!r}")
+        tool = _str(rule, "tool", where)
+        phase = _str(rule, "phase", where)
+        for key, value in (("tool", tool), ("phase", phase)):
+            if value is not None and not value:
+                raise ConfigError(f"{where}.{key} must not be empty")
+        read_only = rule.get("read_only")
+        if read_only is not None and not isinstance(read_only, bool):
+            raise ConfigError(f"{where}.read_only must be true or false")
+        trust = rule.get("trust_agent_hints", False)
+        if not isinstance(trust, bool):
+            raise ConfigError(f"{where}.trust_agent_hints must be true or false")
+        provider = _str(rule, "provider", where)
+        if provider is not None and provider not in providers:
+            raise ConfigError(f"{where}.provider names unknown provider {provider!r}")
+        persons: tuple[str, ...] | None = None
+        if "persons" in rule:
+            listed = _str_list(rule["persons"], f"{where}.persons")
+            if not listed or not all(listed):
+                raise ConfigError(f"{where}.persons must be a non-empty array of non-empty strings")
+            persons = tuple(listed)
+        if tool is None and read_only is None and provider is None and phase is None:
+            raise ConfigError(
+                f'{where} needs at least one of tool, read_only, provider, phase (tool = "*" '
+                "matches every call)"
+            )
+        rules.append(ApprovalRule(verdict, tool, read_only, provider, phase, persons, trust))
+    return ApprovalsConfig(tuple(rules))
+
+
+def _parse_policy(raw: Any) -> ToolPolicy:
+    table = _table(raw, "policy")
+    try:
+        return policy_from_table(table)
+    except PolicyError as exc:
+        raise ConfigError(f"policy: {exc}") from exc
+
+
 def make_redactor(redact: RedactConfig) -> Redactor:
     return Redactor(redact.patterns, builtin=redact.builtin)
 
@@ -396,7 +513,19 @@ def parse_config(data: Mapping[str, Any], *, base: Path) -> FlowConfig:
     """Validate `data` (a parsed flow.toml); relative paths resolve against `base`."""
     _check_keys(
         data,
-        ("state_dir", "node", "providers", "routing", "workflows", "redact", "verbs", "resume"),
+        (
+            "state_dir",
+            "node",
+            "providers",
+            "routing",
+            "workflows",
+            "redact",
+            "verbs",
+            "resume",
+            "approvals",
+            "policy",
+            "changesets",
+        ),
         "flow.toml",
     )
     state_dir_raw = _str(data, "state_dir", "flow.toml")
@@ -413,7 +542,22 @@ def parse_config(data: Mapping[str, Any], *, base: Path) -> FlowConfig:
     redact = _parse_redact(data.get("redact", {}))
     verbs = _parse_verbs(data.get("verbs", {}))
     resume = _parse_resume(data.get("resume", {}))
-    return FlowConfig(providers, routing, state_dir, node, workflows, redact, verbs, resume)
+    approvals = _parse_approvals(data.get("approvals", {}), providers)
+    policy = _parse_policy(data["policy"]) if "policy" in data else None
+    changesets = _parse_changesets(data.get("changesets", {}))
+    return FlowConfig(
+        providers,
+        routing,
+        state_dir,
+        node,
+        workflows,
+        redact,
+        verbs,
+        resume,
+        approvals,
+        policy,
+        changesets,
+    )
 
 
 def load_config(path: Path) -> FlowConfig:

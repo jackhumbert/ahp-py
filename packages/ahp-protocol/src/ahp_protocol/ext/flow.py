@@ -54,6 +54,7 @@ __all__ = [
     "PhaseView",
     "RunView",
     "StepView",
+    "WaitingView",
     "WorkflowInfo",
     "WorkflowStart",
     "descriptor_of",
@@ -184,6 +185,15 @@ DESCRIPTOR_SCHEMA: Final[Mapping[str, Any]] = {
                 "error": {"type": "string"},
             },
         },
+        "waiting": {
+            "type": "object",
+            "required": ["kind"],
+            "properties": {
+                "kind": {"type": "string"},
+                "chat": {"type": "string"},
+            },
+            "additionalProperties": False,
+        },
         "step": {
             "type": "object",
             "required": ["stepStarted"],
@@ -191,6 +201,7 @@ DESCRIPTOR_SCHEMA: Final[Mapping[str, Any]] = {
                 "stepStarted": {"$ref": "#/$defs/stepStarted"},
                 "stepFinished": {"$ref": "#/$defs/stepFinished"},
                 "awaitingInput": {"const": True},
+                "waiting": {"type": "array", "items": {"$ref": "#/$defs/waiting"}},
             },
             "additionalProperties": False,
         },
@@ -321,13 +332,30 @@ def step(
     finished: Mapping[str, Any] | None = None,
     *,
     awaiting: bool = False,
+    waiting: Sequence[Mapping[str, Any]] = (),
 ) -> dict[str, Any]:
-    """A step descriptor; ``finished`` is added on the result, ``awaiting`` while blocked."""
+    """A step descriptor; ``finished`` is added on the result, ``awaiting`` while blocked.
+
+    ``waiting`` lists what the step is blocked on, one ``{kind, chat?}`` per distinct
+    request; a non-empty list implies ``awaitingInput``.
+    """
+    entries: list[dict[str, Any]] = []
+    for w in waiting:
+        kind = w.get("kind")
+        if not isinstance(kind, str):
+            raise ValueError("waiting entries need a string kind")
+        entry: dict[str, Any] = {"kind": kind}
+        chat = w.get("chat")
+        if isinstance(chat, str):
+            entry["chat"] = chat
+        entries.append(entry)
     body: dict[str, Any] = {"stepStarted": dict(started)}
     if finished is not None:
         body["stepFinished"] = dict(finished)
-    if awaiting:
+    if awaiting or entries:
         body["awaitingInput"] = True
+    if entries:
+        body["waiting"] = entries
     return body
 
 
@@ -541,6 +569,16 @@ def workflows_of(customizations: Any) -> tuple[WorkflowInfo, ...]:
 
 
 @dataclass(frozen=True)
+class WaitingView:
+    """One request a running step is blocked on; ``kind`` is ``None`` if the host did not say."""
+
+    ordinal: int
+    tool_call_id: str
+    kind: str | None
+    chat: str | None
+
+
+@dataclass(frozen=True)
 class StepView:
     tool_call_id: str
     ordinal: int
@@ -559,6 +597,8 @@ class StepView:
     kind: str = "agent"
     #: A verb's name; ``None`` for an agent step.
     name: str | None = None
+    #: What the step is blocked on; empty unless ``awaiting``.
+    waiting: tuple[WaitingView, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -591,6 +631,15 @@ class RunView:
         """Every custom verb of every phase, by ordinal."""
         return tuple(sorted((s for p in self.phases for s in p.verbs), key=lambda s: s.ordinal))
 
+    @property
+    def waiting(self) -> tuple[WaitingView, ...]:
+        """Everything the awaiting steps are blocked on, by ordinal."""
+        found: list[WaitingView] = []
+        for s in self.steps:
+            if s.awaiting:
+                found.extend(s.waiting or (WaitingView(s.ordinal, s.tool_call_id, None, None),))
+        return tuple(found)
+
 
 EMPTY_RUN: Final = RunView(
     None, None, None, "none", None, (), {"inputTokens": 0, "outputTokens": 0}
@@ -605,10 +654,20 @@ def _count(value: Any) -> int:
     return value if isinstance(value, int) and not isinstance(value, bool) else 0
 
 
+def _waiting_entries(value: Any) -> tuple[tuple[str, str | None], ...]:
+    if not isinstance(value, list):
+        return ()
+    return tuple(
+        (w["kind"], _str(w.get("chat")))
+        for w in value
+        if isinstance(w, Mapping) and isinstance(w.get("kind"), str)
+    )
+
+
 class _Raw:
     """What one step's latest part said, before the run's status is known."""
 
-    __slots__ = ("awaiting", "finished", "started", "status", "tool_call_id")
+    __slots__ = ("awaiting", "finished", "started", "status", "tool_call_id", "waiting")
 
     def __init__(
         self,
@@ -617,12 +676,14 @@ class _Raw:
         awaiting: bool,
         tool_call_id: str,
         status: Any,
+        waiting: tuple[tuple[str, str | None], ...] = (),
     ) -> None:
         self.started = started
         self.finished = finished
         self.awaiting = awaiting
         self.tool_call_id = tool_call_id
         self.status = status
+        self.waiting = waiting
 
 
 def _fold_turn(turn: Mapping[str, Any], active: bool) -> RunView | None:
@@ -689,6 +750,7 @@ def _fold_turn(turn: Mapping[str, Any], active: bool) -> RunView | None:
                 d.get("awaitingInput") is True,
                 _str(tc.get("toolCallId")) or "",
                 tc.get("status"),
+                _waiting_entries(d.get("waiting")),
             )
             note_phase(_str(started.get("phase")))
 
@@ -730,6 +792,7 @@ def _fold_turn(turn: Mapping[str, Any], active: bool) -> RunView | None:
             step_status = "cancelled"
         else:
             step_status = "running"
+        awaiting = raw.awaiting and step_status == "running"
         s = raw.started
         by_phase[_str(s.get("phase"))].append(
             StepView(
@@ -744,7 +807,12 @@ def _fold_turn(turn: Mapping[str, Any], active: bool) -> RunView | None:
                 result=result,
                 usage=usage,
                 error=error,
-                awaiting=raw.awaiting and step_status == "running",
+                awaiting=awaiting,
+                waiting=(
+                    tuple(WaitingView(ordinal, raw.tool_call_id, k, c) for k, c in raw.waiting)
+                    if awaiting
+                    else ()
+                ),
             )
         )
     verbs_by_phase: dict[str | None, list[StepView]] = {title: [] for title in phase_order}

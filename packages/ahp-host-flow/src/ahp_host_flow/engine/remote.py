@@ -4,11 +4,16 @@ Limits of a remote call, which only a gateway's fleet dispatch lifts (README, pl
 
 * The worker chat is a mirror of the remote turn's **text, at completion**: the
   remote session holds the transcript, tool calls and approvals.
-* An approval or a question the remote agent raises cannot be answered from
-  here (the dispatcher is a bare client with no person behind it). Someone has
-  to answer it in a client of that host, and if nothing happens for
-  `RemoteSpec.idle_timeout` seconds the call is stopped and fails, rather than
-  hanging the run.
+* An approval or a question the remote agent raises is relayed to the worker
+  chat when there is one (`RemoteOut.confirm` and `ask`), and the answer goes
+  back to the remote session. While it is open the idle timer is paused: a
+  person may take longer than `RemoteSpec.idle_timeout` to answer, and the
+  answer still lands. `RemoteSpec.approval_timeout`, when set, bounds that wait
+  (the call fails and the remote turn is stopped); otherwise the run's abort is
+  what ends a wait nobody answers. A bare
+  dispatcher (no worker chat) cannot answer: someone has to answer it in a
+  client of that host, and if nothing happens for `idle_timeout` seconds the
+  call is stopped and fails, rather than hanging the run.
 * `opts.x.cwd` must be an absolute path or a `file:` URI on the remote host; it is sent as
   the session's working directory and not checked here. `isolation` is not applied.
 * A call a restart cut off is not reattached: the remote turn it left is
@@ -23,10 +28,13 @@ import logging
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import PurePosixPath, PureWindowsPath
-from typing import Any, Final, Protocol
+from typing import Any, Final, Protocol, TypeVar
 
 from ahp_client import (
     Client,
+    InputRequested,
+    ToolCallReady,
+    ToolCallResultReview,
     TurnCancelled,
     TurnCompleted,
     TurnFailed,
@@ -45,6 +53,8 @@ from ahp_host_flow.engine.dispatcher import (
 from ahp_host_flow.engine.preamble import with_preamble
 
 _log = logging.getLogger(__name__)
+
+_T = TypeVar("_T")
 
 TITLE_MAX: Final = 60
 #: Seconds a remote turn may go without an event before the call is stopped and fails: a
@@ -71,8 +81,50 @@ class RemoteSpec:
     #: *models* names it or is empty, as for fleet calls.
     run_model: str | None = None
     idle_timeout: float = IDLE_TIMEOUT
+    #: Seconds a relayed approval or question waits for an answer on the worker chat before
+    #: the call fails (flow.toml `approval_timeout`); None waits until the run is aborted.
+    approval_timeout: float | None = None
     #: Text put before the prompt the remote agent is sent (flow.toml `preamble`).
     preamble: str | None = None
+
+
+@dataclass(frozen=True)
+class RemoteConfirmation:
+    """A tool call the remote agent wants approved."""
+
+    tool_call_id: str
+    tool_name: str
+    invocation_message: str
+    tool_input: Any = None
+    confirmation_title: str | None = None
+    read_only: bool | None = None
+
+
+@dataclass(frozen=True)
+class RemoteDecision:
+    """The answer to a `RemoteConfirmation`."""
+
+    approved: bool
+    reason_message: str | None = None
+    #: The wire `Message` of what to do instead, for a denial.
+    user_suggestion: Mapping[str, Any] | None = None
+
+
+@dataclass(frozen=True)
+class RemoteQuestion:
+    """An input request the remote agent raised."""
+
+    message: str | None
+    url: str | None
+    questions: tuple[Mapping[str, Any], ...] = ()
+
+
+@dataclass(frozen=True)
+class RemoteAnswer:
+    """The answer to a `RemoteQuestion`: `accept`, `decline` or `cancel`, and the answers."""
+
+    response: str
+    answers: Mapping[str, Any]
 
 
 class RemoteOut(Protocol):
@@ -81,6 +133,14 @@ class RemoteOut(Protocol):
     async def text(self, delta: str) -> None: ...
 
     async def linked(self, session_uri: str) -> None: ...
+
+    async def confirm(self, request: RemoteConfirmation) -> RemoteDecision | None:
+        """Ask for the approval; None: no one can answer here."""
+        ...
+
+    async def ask(self, request: RemoteQuestion) -> RemoteAnswer | None:
+        """Ask the question; None: no one can answer here."""
+        ...
 
 
 class RemoteWorkers(Protocol):
@@ -125,6 +185,31 @@ def _title(call: AgentCall) -> str:
     return title[: TITLE_MAX - 1] + "…" if len(title) > TITLE_MAX else title
 
 
+def _confirmation(event: ToolCallReady) -> RemoteConfirmation:
+    message = event.action.get("invocationMessage")
+    if isinstance(message, Mapping):
+        message = message.get("markdown")
+    title = event.action.get("confirmationTitle")
+    read_only = (event.annotations or {}).get("readOnlyHint")
+    return RemoteConfirmation(
+        tool_call_id=event.tool_call_id,
+        tool_name=event.tool_name,
+        invocation_message=message if isinstance(message, str) else "",
+        tool_input=event.tool_input,
+        confirmation_title=title if isinstance(title, str) else None,
+        read_only=read_only if isinstance(read_only, bool) else None,
+    )
+
+
+def _question(event: InputRequested) -> RemoteQuestion:
+    message, url = event.request.get("message"), event.request.get("url")
+    return RemoteQuestion(
+        message=message if isinstance(message, str) else None,
+        url=url if isinstance(url, str) else None,
+        questions=tuple(q for q in event.questions if isinstance(q, Mapping)),
+    )
+
+
 class _BareOut:
     """No worker chat: only the dispatch handle is recorded."""
 
@@ -136,6 +221,12 @@ class _BareOut:
 
     async def linked(self, session_uri: str) -> None:
         report_dispatch(DispatchHandle(provider=self.provider, session=session_uri))
+
+    async def confirm(self, request: RemoteConfirmation) -> RemoteDecision | None:
+        return None
+
+    async def ask(self, request: RemoteQuestion) -> RemoteAnswer | None:
+        return None
 
 
 class ClientDispatcher:
@@ -249,6 +340,26 @@ class ClientDispatcher:
             return run_model
         return None
 
+    async def _relayed(self, awaitable: Awaitable[_T]) -> _T:
+        """Wait for the worker chat's answer, however long a person takes (plan §8 M15 item 2).
+
+        An open relayed request pauses `idle_timeout`: no `__anext__` is pending, so the
+        stream's own idle timer (measured from each `__anext__`) is not running, and no
+        timer of our own caps a person's answer. `idle_timeout` stays the backstop for a
+        remote turn that goes silent; an abort cancels this wait. `approval_timeout`, when
+        set, bounds it: the call fails naming the provider and the setting.
+        """
+        limit = self.spec.approval_timeout
+        if limit is None:
+            return await awaitable
+        try:
+            return await asyncio.wait_for(awaitable, limit)
+        except TimeoutError:
+            raise RemoteAgentError(
+                f"provider {self.spec.name!r}: nobody answered the remote agent's request on "
+                f"the worker chat within approval_timeout ({limit:g}s); stopped the remote turn"
+            ) from None
+
     async def _body(self, call: AgentCall, out: RemoteOut, title: str) -> AgentResult:
         spec = self.spec
         folder = folder_uri(call.opts)
@@ -267,15 +378,47 @@ class ClientDispatcher:
         await out.linked(session.uri)
         raw_schema = call.opts.get("schema")
         schema = raw_schema if isinstance(raw_schema, Mapping) else None
+        stream = chat.prompt(
+            with_preamble(call.prompt, spec.preamble),
+            output_schema=schema,
+            model=self._model(call),
+            idle_timeout=spec.idle_timeout,
+        )
+        event: Any = None
         try:
-            event = await chat.prompt(
-                with_preamble(call.prompt, spec.preamble),
-                output_schema=schema,
-                model=self._model(call),
-                idle_timeout=spec.idle_timeout,
-                approval_timeout=spec.idle_timeout,
-            )
+            async for item in stream:
+                if isinstance(item, ToolCallReady):
+                    decision = await self._relayed(out.confirm(_confirmation(item)))
+                    if decision is None:
+                        continue
+                    if decision.approved:
+                        item.approve()
+                    else:
+                        item.deny(
+                            reason_message=decision.reason_message,
+                            user_suggestion=decision.user_suggestion,
+                        )
+                elif isinstance(item, InputRequested):
+                    answer = await self._relayed(out.ask(_question(item)))
+                    if answer is None:
+                        continue
+                    if answer.response == "accept":
+                        item.answer(answer.answers)
+                    elif answer.response == "decline":
+                        item.decline()
+                    else:
+                        item.cancel()
+                elif isinstance(item, ToolCallResultReview):
+                    item.confirm()
+                elif isinstance(item, TurnCompleted | TurnFailed | TurnCancelled):
+                    event = item
+                    break
         except asyncio.CancelledError:
+            with contextlib.suppress(Exception):
+                await chat.cancel()
+            raise
+        except RemoteAgentError:
+            # `approval_timeout` passed: stop the remote turn the request was holding.
             with contextlib.suppress(Exception):
                 await chat.cancel()
             raise
@@ -287,6 +430,8 @@ class ClientDispatcher:
                 "happening (an approval or question there cannot be answered from this run); "
                 f"stopped it: {exc}"
             ) from exc
+        finally:
+            await stream.aclose()
         if isinstance(event, TurnFailed):
             raise RemoteAgentError(event.reason or "the remote turn failed")
         if isinstance(event, TurnCancelled) or not isinstance(event, TurnCompleted):

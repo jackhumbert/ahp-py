@@ -21,18 +21,22 @@ from ahp_host.provider.base import (
     AgentProvider,
     AgentSession,
     AgentSessionContext,
+    InputQuestion,
+    InputRequest,
     ModelSelection,
     ProviderChat,
     ReconfiguresChats,
     ReconfiguresSessions,
     ReturnsStructuredOutput,
     SessionPublisher,
+    ToolConfirmation,
     UserMessage,
 )
 from ahp_protocol.ext import flow
 from ahp_protocol.ext.structured import OUTPUT_SCHEMA_META_KEY
 
 from ahp_host_flow import catalog
+from ahp_host_flow.approvals import Approver
 from ahp_host_flow.bridge import MaskingSink, ScopedPublisher, TurnTee
 from ahp_host_flow.config import (
     APPROVAL_KEY,
@@ -50,7 +54,11 @@ from ahp_host_flow.engine import (
     Dispatcher,
     DispatchHandle,
     Redactor,
+    RemoteAnswer,
+    RemoteConfirmation,
+    RemoteDecision,
     RemoteOut,
+    RemoteQuestion,
     preamble_text,
     report_dispatch,
     schema_error,
@@ -61,6 +69,7 @@ from ahp_host_flow.worktree import (
     Worktree,
     WorktreeChangesets,
     WorktreeError,
+    commit_subject,
     create_worktree,
     release_worktree,
     worktree_path,
@@ -71,6 +80,8 @@ _log = logging.getLogger(__name__)
 TITLE_MAX: Final = 60
 # Bounded grace for an inner session that honours `cancel` after the run is aborted.
 ABORT_GRACE: Final = 5.0
+# How often the session's `inputNeeded` is read for the steps in flight, in seconds.
+WAIT_POLL: Final = 0.05
 
 
 class FlowAgentError(RuntimeError):
@@ -299,6 +310,24 @@ class _TeeSession:
         return isinstance(self.inner, ReturnsStructuredOutput) and self.inner.offers_host_tools()
 
 
+def waiting_for(entries: object, chat: str) -> list[dict[str, str]]:
+    """The `inputNeeded` entries of `chat` a user must answer, as step `waiting` entries."""
+    found: list[dict[str, str]] = []
+    if not isinstance(entries, list):
+        return found
+    for entry in entries:
+        if not isinstance(entry, Mapping) or entry.get("chat") != chat:
+            continue
+        kind = entry.get("kind")
+        # The reducer's `_awaits_user` rule: a client-executed tool is not a user prompt.
+        if not isinstance(kind, str) or kind == "toolClientExecution":
+            continue
+        item = {"kind": kind, "chat": chat}
+        if item not in found:
+            found.append(item)
+    return found
+
+
 class StepDispatcher(ABC):
     """The part of a dispatcher every `agent()` call shares: the main chat's `agent` tool call."""
 
@@ -315,6 +344,7 @@ class StepDispatcher(ABC):
         redactor: Redactor | None = None,
         on_log: Callable[[str], None] | None = None,
         call_id_prefix: str = "agent",
+        session_view: Callable[[], Mapping[str, Any]] | None = None,
     ) -> None:
         self.config = config
         self.sink = sink
@@ -332,6 +362,41 @@ class StepDispatcher(ABC):
         self._completed: set[str] = set()
         #: The `stepStarted` descriptor of each call in flight (typed progress, plan §4.7).
         self._steps: dict[str, dict[str, Any]] = {}
+        #: The session's state when the publisher can show it; `inputNeeded` drives `awaitingInput`.
+        self.session_view = session_view
+        #: The link item of each call whose worker chat is open (what `_watch_loop` republishes).
+        self._links: dict[str, dict[str, Any]] = {}
+        #: The `waiting` entries last published for each call.
+        self._shown_waiting: dict[str, list[dict[str, str]]] = {}
+        self._watcher: asyncio.Task[None] | None = None
+
+    def _watch(self, call_id: str, link_item: dict[str, Any]) -> None:
+        """Start following the session's `inputNeeded` for a call whose worker chat just opened."""
+        self._links[call_id] = link_item
+        if self.session_view is not None and (self._watcher is None or self._watcher.done()):
+            self._watcher = asyncio.create_task(self._watch_loop())
+
+    async def _watch_loop(self) -> None:
+        while self._links:
+            assert self.session_view is not None
+            entries = self.session_view().get("inputNeeded")
+            for call_id, link in list(self._links.items()):
+                started = self._steps.get(call_id)
+                if started is None or call_id in self._completed:
+                    continue
+                chat = started.get("chat")
+                if not isinstance(chat, str):
+                    continue
+                waiting = waiting_for(entries, chat)
+                if waiting == self._shown_waiting.get(call_id, []):
+                    continue
+                self._shown_waiting[call_id] = waiting
+                # An empty list publishes the plain step, which clears `awaitingInput`.
+                with contextlib.suppress(Exception):
+                    await self.sink.tool_call_output(
+                        call_id, [link], meta=flow.meta(flow.step(started, waiting=waiting))
+                    )
+            await asyncio.sleep(WAIT_POLL)
 
     def _note(self, line: str) -> None:
         if self.on_log is not None:
@@ -391,6 +456,10 @@ class StepDispatcher(ABC):
         finally:
             self._completed.discard(call_id)
             self._steps.pop(call_id, None)
+            self._links.pop(call_id, None)
+            self._shown_waiting.pop(call_id, None)
+            if not self._links and self._watcher is not None and not self._watcher.done():
+                self._watcher.cancel()
 
     async def _complete(
         self,
@@ -437,6 +506,8 @@ class ProviderDispatcher(StepDispatcher):
         call_id_prefix: str = "agent",
         changesets: WorktreeChangesets | None = None,
         worker_providers: MutableMapping[str, str] | None = None,
+        session_view: Callable[[], Mapping[str, Any]] | None = None,
+        principal: str | None = None,
     ) -> None:
         super().__init__(
             config=config,
@@ -447,7 +518,10 @@ class ProviderDispatcher(StepDispatcher):
             redactor=redactor,
             on_log=on_log,
             call_id_prefix=call_id_prefix,
+            session_view=session_view,
         )
+        #: Who the run is for; the `persons` of an approval rule match it.
+        self.principal = principal
         #: Publishes a kept worktree as a changeset on its worker chat; None leaves it unpublished.
         self.changesets = changesets
         self.providers = providers
@@ -590,6 +664,7 @@ class ProviderDispatcher(StepDispatcher):
                             ordinal=call.ordinal,
                             session=self.session_uri,
                             run_id=self.run_id,
+                            subject=commit_subject(call.label, call.prompt),
                         )
                     except Exception as exc:
                         failed = True
@@ -676,6 +751,11 @@ class ProviderDispatcher(StepDispatcher):
             if existing is not None
             else with_preamble(call.prompt, preamble_text(spec.preamble))
         )
+        if existing is not None:
+            # A discarded changeset's reason, queued for this chat: sent, not recorded.
+            notes = self.changesets.take_notes(worker.resource) if self.changesets else []
+            if notes:
+                text = "\n".join(notes) + "\n" + text
         raw: dict[str, Any] = {"text": text, "origin": {"kind": "agent"}}
         if schema:
             raw["_meta"] = {OUTPUT_SCHEMA_META_KEY: dict(schema)}
@@ -688,6 +768,7 @@ class ProviderDispatcher(StepDispatcher):
         link_item = {"type": "subagent", "resource": worker.resource, "title": title}
         # Clients can open the child chat while it runs.
         await self.sink.tool_call_output(call_id, [link_item], meta=flow.meta(flow.step(started)))
+        self._watch(call_id, link_item)
         message = UserMessage(
             text=text,
             raw=raw,
@@ -734,11 +815,37 @@ class ProviderDispatcher(StepDispatcher):
                 call_id, [link_item], meta=flow.meta(flow.step(started, awaiting=waiting))
             )
 
+        approver: Approver | None = None
+        if self.config.approvals.rules or self.config.policy is not None:
+            # A worktree lies outside the working directories, and paths outside the roots
+            # are denied.
+            roots = ((wt.path,) if wt else ()) + tuple(self._roots())
+            if wt is not None:
+                cwd = wt.cwd
+            else:
+                cwd = folder if folder is not None else (roots[0] if roots else Path.cwd())
+            approver = Approver(
+                self.config.approvals.rules,
+                self.config.policy,
+                provider=name,
+                phase=call.phase,
+                principal=self.principal,
+                cwd=cwd,
+                roots=roots,
+                label=f"agent() #{call.ordinal}",
+                on_log=self._note,
+            )
+
         async def run(sink: TurnSink) -> None:
             nonlocal value
             state.started = True
             state.task = asyncio.current_task()
-            tee = TurnTee(sink, redactor=self.redactor, on_waiting=on_waiting)
+            tee = TurnTee(
+                sink,
+                redactor=self.redactor,
+                on_waiting=on_waiting if self.session_view is None else None,
+                approver=approver,
+            )
             try:
                 if schema is None:
                     await inner.send_user_message(message, cast(TurnSink, tee))
@@ -882,6 +989,67 @@ class _WorkerOut:
     async def text(self, delta: str) -> None:
         await self.sink.text_delta(self.redactor.mask(delta))
 
+    # No approval rules apply to relayed remote requests: the worker chat's user decides.
+    async def confirm(self, request: RemoteConfirmation) -> RemoteDecision | None:
+        tee = TurnTee(self.sink, redactor=self.redactor)
+        name = request.tool_name or "tool"
+        await tee.tool_call_started(
+            request.tool_call_id,
+            name,
+            request.tool_input,
+            display_name=request.tool_name or None,
+        )
+        outcome = await tee.confirm_tool_call(
+            ToolConfirmation(
+                call_id=request.tool_call_id,
+                name=name,
+                invocation_message=request.invocation_message
+                or f"Run {request.tool_name or 'a tool'} on the remote host",
+                tool_input=request.tool_input,
+                confirmation_title=request.confirmation_title,
+                read_only=request.read_only,
+            )
+        )
+        await tee.tool_call_completed(
+            request.tool_call_id,
+            None,
+            success=outcome.approved,
+            past_tense_message="Approved" if outcome.approved else "Denied",
+        )
+        suggestion: dict[str, Any] | None = None
+        given = outcome.user_suggestion
+        if given is not None:
+            if isinstance(given.raw, Mapping) and given.raw:
+                suggestion = dict(given.raw)
+            elif given.text:
+                suggestion = {"text": given.text}
+        return RemoteDecision(outcome.approved, outcome.reason_message, suggestion)
+
+    async def ask(self, request: RemoteQuestion) -> RemoteAnswer | None:
+        tee = TurnTee(self.sink, redactor=self.redactor)
+        outcome = await tee.request_input(
+            InputRequest(
+                message=request.message,
+                url=request.url,
+                questions=[
+                    InputQuestion(
+                        id=q["id"],
+                        kind=str(q.get("kind", "text")),
+                        message=str(q.get("message", "")),
+                        options=list(q.get("options") or []),
+                        extra={
+                            k: v
+                            for k, v in q.items()
+                            if k not in ("id", "kind", "message", "options")
+                        },
+                    )
+                    for q in request.questions
+                    if isinstance(q.get("id"), str)
+                ],
+            )
+        )
+        return RemoteAnswer(outcome.response, dict(outcome.answers))
+
 
 class RemoteWorkerChats(StepDispatcher):
     """Shows each remote `agent()` call as a thin worker chat: the remote session and its text."""
@@ -912,6 +1080,7 @@ class RemoteWorkerChats(StepDispatcher):
         link_item = {"type": "subagent", "resource": worker.resource, "title": title}
         # Clients can open the worker chat while it runs.
         await self.sink.tool_call_output(call_id, [link_item], meta=flow.meta(flow.step(started)))
+        self._watch(call_id, link_item)
 
         state = _Worker()
         usage = {"input_tokens": 0, "output_tokens": 0}

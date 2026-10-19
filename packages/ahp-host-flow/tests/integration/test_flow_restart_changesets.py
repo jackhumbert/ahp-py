@@ -8,7 +8,12 @@ from pathlib import Path
 
 import pytest
 
-from ahp_host_flow.worktree import APPLY_OPERATION, DISCARD_OPERATION, worktree_path
+from ahp_host_flow.worktree import (
+    APPLY_OPERATION,
+    COMMIT_OPERATION,
+    DISCARD_OPERATION,
+    worktree_path,
+)
 from tests.flow_fakes import reset_fakes
 from tests.flow_hosting import SESSION, FlowFixture, boot_flow, restart_flow, store_for
 from tests.hosting import run_turn, state, worker_chats
@@ -53,7 +58,11 @@ async def test_flow_restart_changesets_apply(tmp_path: Path, node_path: str) -> 
         assert uri2 != uri1
         assert not fx2.host.sequencer.has_channel(uri1)
         channel = state(fx2.host, uri2)
-        assert [op["id"] for op in channel["operations"]] == [APPLY_OPERATION, DISCARD_OPERATION]
+        assert [op["id"] for op in channel["operations"]] == [
+            APPLY_OPERATION,
+            COMMIT_OPERATION,
+            DISCARD_OPERATION,
+        ]
         reply = await fx2.wire.request(
             "invokeChangesetOperation", {"channel": uri2, "operationId": APPLY_OPERATION}
         )

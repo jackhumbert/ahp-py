@@ -290,7 +290,7 @@ provider = from_config(roots={"work": "~/work"}, command=["opencode", "acp"])
 The file is the config file described under Run it; `port`, `bind`,
 `token_file` and `verbose` are ignored in it (as keywords they are refused, like
 any unknown option). Keyword options (`provider_id`,
-`agent_name`, `description`, `command`, `launcher`, `env_allow`, `relay_command`, `relay_host`, `policy`, `env`, `models`, `model_command`,
+`agent_name`, `description`, `command`, `launcher`, `env_allow`, `relay_command`, `relay_host`, `policy`, `decline_feedback`, `env`, `models`, `model_command`,
 `config_options`, `mcp_servers`) override the file, `roots=` (a path, a list of
 paths or a name -> path table) overrides its root, and `state_dir=` its
 state directory.
@@ -346,9 +346,20 @@ policy: `deny_commands`, `deny_paths`, `ask_paths`, `allow_paths_outside_roots`,
 `check`) is applied to each `session/request_permission` before anything else,
 the relayed-tool shortcut included. A denied call is answered with the agent's
 reject option, picked without a prompt; a call the policy marks *ask* is always
-put to the user. The reason cannot reach the agent through ACP in this path, so
-the agent only sees a rejection; the user sees it, under the call's name and in
-its result. The policy can only judge calls the agent asks
+put to the user. ACP's answer has no reason field, so the agent first sees only
+a rejection; the user sees the reason, under the call's name and in its result.
+With `decline_feedback = true` (the default; a top-level key, also an `acp`
+agent option) the reasons of declined calls (the policy's, or what the user
+typed, with any suggestion) are sent to the agent as one text block at the end
+of the chat's next prompt, e.g. `[declined: Edit notes] use the other file`
+(each reason capped at 300 characters). Set it to `false` to send nothing.
+Confirmations also carry `read_only` (true for `read` and `search` calls) and
+`policy_asked` (the policy marked the call *ask*) for clients that answer
+automatically, plus `locations` (the call's `toolCall.locations` paths). The
+`read_only` hint comes from the call's `kind`, which the agent chooses, so it is
+marked `read_only_from_agent = true`: an agent can label any call a read, and an
+automatic answerer should not approve on that alone (ahp-host-flow's
+`[approvals]` rules do so only with `trust_agent_hints = true`). The policy can only judge calls the agent asks
 about: an agent in its own allow-always mode never asks, so it is not bound.
 Hard enforcement is `[policy] host_tools = true`, below.
 

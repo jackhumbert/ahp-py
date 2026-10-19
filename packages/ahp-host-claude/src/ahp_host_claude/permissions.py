@@ -182,6 +182,20 @@ POLICY_TOOLS: Final[Mapping[str, tuple[str, str]]] = {
     "NotebookEdit": ("write", "notebook_path"),
 }
 
+
+def read_only_hint(name: str) -> bool | None:
+    """Whether the tool *name* only reads: True, False, or None when not known.
+
+    **A security decision:** an automatic answerer may approve on `True`, so
+    only the tools `POLICY_TOOLS` files as reads say so; a tool it does not
+    list (an MCP tool, say) is not claimed to be either. Pinned by a test.
+    """
+    entry = POLICY_TOOLS.get(name)
+    if entry is None:
+        return None
+    return entry[0] == "read"
+
+
 #: Search tools that default to the working directory when given no path.
 _DEFAULT_TO_CWD: Final = frozenset({"LS", "Glob", "Grep"})
 

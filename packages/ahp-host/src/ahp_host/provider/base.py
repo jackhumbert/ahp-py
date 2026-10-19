@@ -438,6 +438,22 @@ class ToolConfirmation:
     #: go into the session's content store and the call carries `ContentRef`s
     #: to them, served by `resourceRead`, exactly as a changeset's are.
     edits: Sequence[FileChange] = ()
+    #: The tool's read-only hint when the provider knows it (an MCP
+    #: `readOnlyHint`, or its own tool table); ``None`` is unknown. Advisory
+    #: input for whoever answers the confirmation, never published.
+    read_only: bool | None = None
+    #: The provider's `ToolPolicy` returned `ask` for this call, so an
+    #: automatic answer must not approve it. Advisory input for whoever answers
+    #: the confirmation, never published.
+    policy_asked: bool = False
+    #: `read_only` is the agent's own claim about the call (ACP's `toolCall.kind`),
+    #: not something the provider knows from its own tool table. An agent can
+    #: label any call a read, so an automatic answerer must not approve on that
+    #: hint alone unless it was told to trust the agent. Never published.
+    read_only_from_agent: bool = False
+    #: Paths the call names outside its input (ACP's `toolCall.locations`), for
+    #: a policy that judges paths. Advisory, never published.
+    locations: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -1151,6 +1167,27 @@ class GatesSteering(Protocol):
     """
 
     def steering_rejection(self, chat_uri: str) -> str | None: ...
+
+
+@runtime_checkable
+class ObservesSessionState(Protocol):
+    """A publisher that can show the session channel's current state."""
+
+    def session_state(self) -> Mapping[str, Any]:
+        """The session channel's current reduced state, read-only; poll it, never mutate it."""
+        ...
+
+
+@runtime_checkable
+class ReopensToolChats(Protocol):
+    """A publisher that can hand back a worker chat opened earlier."""
+
+    def worker_chat(self, resource: str) -> ProviderChat | None:
+        """A worker chat this session opened with `open_tool_chat`, also after a restart.
+
+        ``None`` for any other chat.
+        """
+        ...
 
 
 @runtime_checkable

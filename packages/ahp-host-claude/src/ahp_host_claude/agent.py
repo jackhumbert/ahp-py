@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import Any
 
 from ahp_host.node import NodeContext
-from ahp_host.provider.policy import PolicyError, ToolPolicy, policy_from_table
+from ahp_host.provider.policy import PolicyError, ToolPolicy, combine_tables, policy_from_table
 
 from ahp_host_claude.claude_ai import LOCAL, Api, scope_of
 from ahp_host_claude.config import (
@@ -170,6 +170,7 @@ def from_config(
     | Mapping[str, str | os.PathLike[str]]
     | None = None,
     state_dir: str | os.PathLike[str] | None = None,
+    policy: Mapping[str, Any] | None = None,
     client_factory: ClientFactory | None = None,
     **options: Any,
 ) -> ClaudeProvider:
@@ -187,6 +188,18 @@ def from_config(
     if merged.get("claude_ai_sessions") == "off":
         merged["claude_ai_sessions"] = False
     merged.update(options)
+    if policy is not None:
+        # A named keyword (not just **options) so a host that composes policies, such as
+        # ahp-host-flow's loader, can see this factory takes one. It is combined with the
+        # file's own [policy], never put in its place: a deny from either wins.
+        own = merged.get("policy")
+        if isinstance(own, Mapping) and isinstance(policy, Mapping):
+            try:
+                merged["policy"] = combine_tables(own, policy)
+            except PolicyError as exc:
+                raise ValueError(f"claude agent: {exc}") from exc
+        else:
+            merged["policy"] = policy
     opts = parse_agent_options(merged)
     served = roots_option(roots) if roots is not None else _roots_from_file(data)
     if served is None:

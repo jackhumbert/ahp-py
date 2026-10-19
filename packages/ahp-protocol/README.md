@@ -141,7 +141,9 @@ Schema of the descriptors ships as `flow.schema.json`, and `run_view` folds a
 chat's reduced state into phases, steps, results and usage. A stock client
 ignores the `_meta` and renders the text as before. A host also marks each custom
 verb's tool call with a `verbStarted`/`verbFinished` descriptor, and `run_view` lists
-them as `verbs` (kind `verb`) beside the steps.
+them as `verbs` (kind `verb`) beside the steps. A step blocked on a request carries
+`waiting` entries (`{kind, chat?}`) beside `awaitingInput`, and `RunView.waiting` lists them
+as `WaitingView`s across the awaiting steps.
 
 ```python
 from ahp_protocol.ext import flow
@@ -200,6 +202,11 @@ nonexhaustive, and clients keep unknown kinds), a client sends it under
 `createSession` `_meta["ahp-py/origin"]`, and `parse_delegation` reads it back
 (`None` for any other kind or an incomplete one). A host seeds it into the
 session's `origin`; it is the client's claim, not verified.
+
+`ahp_protocol.ext.operation` carries a changeset operation's parameters in
+`InvokeChangesetOperationParams._meta["ahp-py/operation"]`, which a stock host
+ignores: `operation_meta(params)` builds the `_meta` object and `operation_params(meta)`
+reads it back (`{}` for anything that is not a mapping, never raising).
 
 `ahp_protocol.ext.redaction` is the extension for redacting content after it was
 published. A host rewrites a response part (or a turn's user message) to a marker

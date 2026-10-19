@@ -231,6 +231,33 @@ outcome = ToolConfirmationOutcome(
 assert outcome.selected_option is None and outcome.user_suggestion is None
 ```
 
+A confirmation also carries hints for whoever answers it automatically (a
+wrapper such as ahp-host-flow's approval rules); none of them is published:
+
+- `read_only` — `True`/`False` when you know whether the tool only reads (your
+  own tool table, an MCP `readOnlyHint`), `None` when you do not. Never guess:
+  an automatic answerer may approve on `True`.
+- `read_only_from_agent` — set it when `read_only` is the *agent's* claim (ACP's
+  `toolCall.kind`) rather than yours: an agent can label any call a read, so an
+  answerer must not approve on it alone.
+- `policy_asked` — your `ToolPolicy` returned `ask` for the call, so no
+  automatic answer may approve it.
+- `locations` — paths the call names outside its input (ACP's
+  `toolCall.locations`), for a policy judging paths.
+
+```python
+hinted = ToolConfirmation(
+    call_id="call-8",
+    name="read",
+    invocation_message="Read notes.md",
+    read_only=True,
+    read_only_from_agent=True,
+    locations=("/work/notes.md",),
+)
+assert hinted.policy_asked is False
+assert ToolConfirmation("c", "n", "m").read_only is None
+```
+
 `selected_option` is the `ConfirmationOption` the user picked (the host refuses
 an id you did not offer, and an approval that picks a `deny` option);
 `user_suggestion` is a `UserMessage` with what they suggested doing instead.
@@ -325,6 +352,17 @@ no turn is running. Hold it for the life of the session.
 | `open_terminal(title, chat=, cwd=, turn_id=, tool_call_id=)` | A read-only terminal for output the agent produces; returns a handle with `resource`, `write(data)` and `exited(code)`. |
 | `external_turn(text, run, *, chat=None)` | A turn that happened somewhere else, on the default chat or one of the session's own chats (never a worker chat). |
 | `progress(progress, total=, message=)` | Report against `createSession.progressToken`. |
+
+The host's publisher implements two more protocols; check with `isinstance`, since
+a test double or another host may not:
+
+- **`ObservesSessionState`** — `session_state()` is the session channel's current
+  reduced state (read-only; poll it, never mutate it), e.g. to see which of your
+  worker chats has an entry in `inputNeeded`.
+- **`ReopensToolChats`** — `worker_chat(resource)` hands back a worker chat you
+  opened with `open_tool_chat`, also after a host restart (the host knows them by
+  their `tool` origin), so a late notification can still run a turn on it; `None`
+  for any other chat.
 
 **Background work** is a shell left running or a subagent still going: work
 that outlives the turn that started it, so it goes through the publisher, not
@@ -691,6 +729,28 @@ Two capabilities that used to be the embedder's job:
 
 Changesets themselves are not restored: their channels are never stored, so a
 restored chat or session lists none, and the provider republishes what it still has.
+
+A handler takes three arguments `(changeset_uri, operation_id, target)`, or a
+fourth, an `OperationContext(params, principal)`: the host decides by arity, so a
+three-argument handler keeps working. `params` is the object a client sent in
+`invokeChangesetOperation`'s `_meta["ahp-py/operation"]` (`{}` when absent;
+peer-written data, so validate it) and `principal` is the invoking connection's
+`Policy.principal_of` (never a clientId). A handler that returns a mapping
+supplies the result's `message` and `followUp`; anything else answers `{}`.
+
+```python
+from ahp_host.provider import OperationContext
+
+
+async def commit(uri, operation, target, context: OperationContext):
+    note = context.params.get("message")
+    if note is not None and not isinstance(note, str):
+        raise ValueError("params.message must be a string")
+    return {"message": f"Committed for {context.principal or 'someone'}"}
+
+
+assert OperationContext().params == {} and OperationContext().principal is None
+```
 
 ```python
 from ahp_host.core.changesets import Changeset, ChangesetOperation

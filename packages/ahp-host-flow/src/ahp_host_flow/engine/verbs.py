@@ -38,6 +38,8 @@ class ConfirmOutcome:
 
     approved: bool
     answered_by: str | None = None
+    # The human's explanation for a denial, when there was one.
+    reason: str | None = None
 
     def __bool__(self) -> bool:
         return self.approved

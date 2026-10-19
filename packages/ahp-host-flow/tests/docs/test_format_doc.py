@@ -58,3 +58,18 @@ def test_format_doc_m14_result() -> None:
     assert len(paths) >= 10
     missing = [p for p in paths if not (repo / p).is_file()]
     assert not missing
+
+
+def test_format_doc_m15_result() -> None:
+    text = (ROOT / "docs" / "plan.md").read_text(encoding="utf-8")
+    repo = ROOT.parents[1]
+    start = re.search(r"^\*\*M15 result\.\*\*", text, re.MULTILINE)
+    assert start is not None
+    rest = text[start.start() :]
+    end = re.search(r"^\*\*M16", rest, re.MULTILINE)
+    assert end is not None
+    paragraph = rest[: end.start()]
+    paths = re.findall(r"`(packages/[^`]+)`", paragraph)
+    assert len(paths) >= 10
+    missing = [p for p in paths if not (repo / p).is_file()]
+    assert not missing

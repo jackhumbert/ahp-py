@@ -13,7 +13,7 @@ import asyncio
 from collections.abc import Mapping
 from typing import Any
 
-from ahp_host_flow.engine import OUTPUT_TOKENS, AgentCall, AgentResult, GateCall
+from ahp_host_flow.engine import OUTPUT_TOKENS, AgentCall, AgentResult, ConfirmOutcome, GateCall
 
 
 class FakeDispatcher:
@@ -85,9 +85,11 @@ class FakeGates:
         answers: Mapping[str, Any] | None = None,
         approvals: Mapping[str, bool] | None = None,
         hang: bool = True,
+        reasons: Mapping[str, str] | None = None,
     ) -> None:
         self._answers = dict(answers or {})
         self._approvals = dict(approvals or {})
+        self._reasons = dict(reasons or {})
         self._hang = hang
         self.calls: list[GateCall] = []
         self.canvases: list[tuple[str, str | None]] = []
@@ -113,6 +115,11 @@ class FakeGates:
     async def approve(self, call: GateCall) -> bool:
         await self._record(call)
         return self._approvals.get(call.question, False)
+
+    async def approve_outcome(self, call: GateCall) -> ConfirmOutcome:
+        await self._record(call)
+        approved = self._approvals.get(call.question, False)
+        return ConfirmOutcome(approved, reason=self._reasons.get(call.question))
 
     async def canvas(self, url: str, title: str | None) -> None:
         self.canvases.append((url, title))

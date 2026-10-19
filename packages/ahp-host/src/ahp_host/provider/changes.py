@@ -14,7 +14,13 @@ from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
-__all__ = ["Changeset", "ChangesetOperation", "FileChange", "OperationHandler"]
+__all__ = [
+    "Changeset",
+    "ChangesetOperation",
+    "FileChange",
+    "OperationContext",
+    "OperationHandler",
+]
 
 
 @dataclass(frozen=True)
@@ -79,6 +85,21 @@ class ChangesetOperation:
         return wire
 
 
+@dataclass(frozen=True)
+class OperationContext:
+    """What an operation handler is told beyond which button was pressed.
+
+    `params` come from `InvokeChangesetOperationParams._meta["ahp-py/operation"]`
+    and are `{}` when absent or not an object: they are data written by a peer, so
+    a handler validates them. `principal` is the invoking connection's
+    `Policy.principal_of`, never a clientId, which a client chooses for itself;
+    `None` when the policy names nobody.
+    """
+
+    params: Mapping[str, Any] = field(default_factory=dict)
+    principal: str | None = None
+
+
 #: Invoked with the changeset URI, the operation id, and the TARGET the client
 #: chose -- `None` for a changeset-scoped operation, otherwise
 #: `{"kind": "resource"|"range", "resource": URI, ...}`.
@@ -90,7 +111,18 @@ class ChangesetOperation:
 #: nothing.
 #:
 #: Anything the handler raises becomes the operation's `error`.
-OperationHandler = Callable[[str, str, Mapping[str, Any] | None], Awaitable[None]]
+#:
+#: A handler may instead take a fourth argument, an `OperationContext`; the host
+#: decides by arity, so a three-argument handler keeps working unchanged. What it
+#: returns, when a Mapping, supplies the request's `message` and `followUp`
+#: (`Awaitable[None]` still type-checks: `Awaitable` is covariant).
+OperationHandler = (
+    Callable[[str, str, Mapping[str, Any] | None], Awaitable[Mapping[str, Any] | None]]
+    | Callable[
+        [str, str, Mapping[str, Any] | None, OperationContext],
+        Awaitable[Mapping[str, Any] | None],
+    ]
+)
 
 
 @dataclass

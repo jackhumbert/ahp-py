@@ -13,21 +13,29 @@ import asyncio
 import dataclasses
 import logging
 from asyncio.subprocess import DEVNULL, PIPE
-from collections.abc import Mapping, Sequence
+from collections import deque
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Final
 
-from ahp_host.provider.base import SessionPublisher
+from ahp_host import TurnSink
+from ahp_host.provider.base import ReopensToolChats, SessionPublisher
 from ahp_host.provider.changes import Changeset, ChangesetOperation, FileChange
 
+from ahp_host_flow.config import ChangesetsConfig
 from ahp_host_flow.engine import run_dir
 
 _log = logging.getLogger(__name__)
 
 WORKTREES_DIR: Final = "worktrees"
 APPLY_OPERATION: Final = "ahp-host-flow.worktree.apply"
+COMMIT_OPERATION: Final = "ahp-host-flow.worktree.commit"
 DISCARD_OPERATION: Final = "ahp-host-flow.worktree.discard"
+# Discard reasons queued per chat for its next call.
+NOTES_KEEP: Final = 20
+# Seconds a discard waits for its notification turn, so the chat is free for the next call.
+NOTIFY_WAIT: Final = 5.0
 
 
 class WorktreeError(RuntimeError):
@@ -178,6 +186,65 @@ async def apply_to_repo(wt: Worktree, patch: bytes) -> None:
         raise WorktreeError(f"git apply failed: {err.strip()}")
 
 
+async def commit_worktree(wt: Worktree, *, branch: str, message: str) -> str:
+    """Commit the worktree's changes in it and name *branch* after the commit; its sha."""
+    code, _, _ = await _git("check-ref-format", "--branch", branch, cwd=wt.path)
+    if code != 0:
+        raise WorktreeError(f"invalid branch name {branch!r}")
+    code, _, _ = await _git("rev-parse", "--verify", "--quiet", f"refs/heads/{branch}", cwd=wt.path)
+    if code == 0:
+        raise WorktreeError(f"branch {branch!r} already exists")
+    await _stage(wt)
+    code, _, _ = await _git("diff", "--cached", "--quiet", cwd=wt.path)
+    if code == 1:
+        code, _, err = await _git_bytes(
+            "commit", "-q", "-F", "-", cwd=wt.path, stdin=message.encode("utf-8")
+        )
+        if code != 0:
+            raise WorktreeError(f"git commit failed: {err.strip()}")
+    code, out, err = await _git("rev-parse", "HEAD", cwd=wt.path)
+    if code != 0:
+        raise WorktreeError(f"git rev-parse failed: {err.strip()}")
+    sha = out.strip()
+    if sha == wt.base:
+        raise WorktreeError("nothing to commit")
+    code, _, err = await _git("branch", branch, sha, cwd=wt.path)
+    if code != 0:
+        raise WorktreeError(f"git branch failed: {err.strip()}")
+    return sha
+
+
+async def commit_onto_repo(wt: Worktree, *, message: str) -> str:
+    """Apply the worktree's changes to the repository and commit just those paths; the sha."""
+    await _stage(wt)
+    # --no-renames: a moved file must list both its old path (a deletion) and its new one, or
+    # the deletion is applied to the index but left out of the commit below. Committing just
+    # these paths (`git commit -- <paths>`) keeps anything the user had staged out of it.
+    code, out, err = await _git_bytes(
+        "diff", "--cached", "--name-only", "-z", "--no-renames", wt.base, cwd=wt.path
+    )
+    if code != 0:
+        raise WorktreeError(f"git diff failed: {err.strip()}")
+    paths = [p.decode("utf-8", errors="replace") for p in out.split(b"\0") if p]
+    if not paths:
+        raise WorktreeError("nothing to commit")
+    patch = await worktree_patch(wt)
+    code, _, err = await _git_bytes(
+        "apply", "--index", "--binary", "--whitespace=nowarn", "-", cwd=wt.repo, stdin=patch
+    )
+    if code != 0:
+        raise WorktreeError(f"git apply failed: {err.strip()}")
+    code, _, err = await _git_bytes(
+        "commit", "-q", "-F", "-", "--", *paths, cwd=wt.repo, stdin=message.encode("utf-8")
+    )
+    if code != 0:
+        raise WorktreeError(f"git commit failed: {err.strip()}")
+    code, head, err = await _git("rev-parse", "HEAD", cwd=wt.repo)
+    if code != 0:
+        raise WorktreeError(f"git rev-parse failed: {err.strip()}")
+    return head.strip()
+
+
 async def discard_worktree(wt: Worktree) -> None:
     code, _, err = await _git("worktree", "remove", "--force", str(wt.path), cwd=wt.repo)
     if code != 0:
@@ -194,10 +261,34 @@ class KeptWorktree:
     run_id: str | None
     ordinal: int
     title: str
+    #: The default commit subject (already masked); None falls back to the run and step.
+    subject: str | None = None
+
+
+#: The longest default commit subject taken from a prompt's first line.
+SUBJECT_MAX: Final = 72
+
+
+def commit_subject(label: str | None, prompt: str) -> str | None:
+    """The default commit subject of an `agent()` call: its label, else its prompt's first line.
+
+    Unlike the worker chat's title this is not ellipsized: a prompt line is cut at
+    `SUBJECT_MAX` characters. None when both are empty.
+    """
+    if isinstance(label, str) and label.strip():
+        return label.strip()
+    lines = prompt.strip().splitlines()
+    first = lines[0].strip() if lines else ""
+    return first[:SUBJECT_MAX].rstrip() or None
+
+
+def _trailer_value(value: str) -> str:
+    """*value* fit for a one-line trailer: CR, LF and other control characters removed."""
+    return "".join(c for c in value if c.isprintable() or c == " ").strip()
 
 
 class WorktreeChangesets:
-    """Kept worktrees published as changesets on their worker chats, with Apply and Discard.
+    """Kept worktrees published as changesets on their worker chats: Apply, Commit, Discard.
 
     The worktree stays until the changeset is resolved: it is the agent's work, so neither
     the end of the run nor the session closing removes it. The held state is in memory, so
@@ -207,7 +298,20 @@ class WorktreeChangesets:
     when a host is built from the provider.
     """
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        branch: str = ChangesetsConfig.branch,
+        trailer: bool = False,
+        mask: Callable[[str], str] = lambda s: s,
+    ) -> None:
+        #: The branch template Commit creates (`{runId}`, `{ordinal}`), and whether the commit
+        #: message names the principal who pressed it.
+        self.branch = branch
+        self.trailer = trailer
+        self._mask = mask
+        #: Discard reasons per worker chat, taken by that chat's next call.
+        self._notes: dict[str, deque[str]] = {}
         #: Whether a host was built from the provider, which declares the operations
         #: (`FlowProvider.changeset_operations` sets this); before that a changeset has none.
         self.operations_registered = False
@@ -223,8 +327,13 @@ class WorktreeChangesets:
         ordinal: int,
         session: str = "",
         run_id: str | None = None,
+        subject: str | None = None,
     ) -> str | None:
-        """Publish *wt*'s changes on *chat*; the changeset's URI, or None when there are none."""
+        """Publish *wt*'s changes on *chat*; the changeset's URI, or None when there are none.
+
+        *subject* is the default commit message (see `commit_subject`); it is masked here,
+        before it is held or written to the resume state.
+        """
         changes = await worktree_changes(wt)
         if not changes:
             return None
@@ -237,6 +346,13 @@ class WorktreeChangesets:
                         "Apply this agent's changes to the working tree and remove its worktree"
                     ),
                     icon="check",
+                    group="1_flow",
+                ),
+                ChangesetOperation(
+                    COMMIT_OPERATION,
+                    "Commit",
+                    description="Commit this agent's changes on a branch and remove its worktree",
+                    icon="git-commit",
                     group="1_flow",
                 ),
                 ChangesetOperation(
@@ -259,7 +375,15 @@ class WorktreeChangesets:
         )
         uri = await publisher.changes_published(changeset, changes, chat=chat)
         self._kept[uri] = KeptWorktree(
-            wt, publisher, chat, changeset, session, run_id, ordinal, title
+            wt,
+            publisher,
+            chat,
+            changeset,
+            session,
+            run_id,
+            ordinal,
+            title,
+            self._mask(subject) if subject else None,
         )
         return uri
 
@@ -269,8 +393,9 @@ class WorktreeChangesets:
             (k for k in self._kept.values() if k.session == session),
             key=lambda k: (k.chat, k.ordinal),
         )
-        return [
-            {
+        entries: list[dict[str, Any]] = []
+        for k in kept:
+            entry: dict[str, Any] = {
                 "chat": k.chat,
                 "runId": k.run_id,
                 "ordinal": k.ordinal,
@@ -280,8 +405,10 @@ class WorktreeChangesets:
                 "base": k.worktree.base,
                 "label": k.title,
             }
-            for k in kept
-        ]
+            if k.subject:
+                entry["subject"] = k.subject
+            entries.append(entry)
+        return entries
 
     async def restore(
         self,
@@ -300,6 +427,7 @@ class WorktreeChangesets:
             chat, run_id, ordinal = entry.get("chat"), entry.get("runId"), entry.get("ordinal")
             repo, path, cwd = entry.get("repo"), entry.get("path"), entry.get("cwd")
             base, label = entry.get("base"), entry.get("label")
+            subject = entry.get("subject")
             if not (
                 isinstance(chat, str)
                 and (run_id is None or isinstance(run_id, str))
@@ -310,6 +438,7 @@ class WorktreeChangesets:
                 and isinstance(cwd, str)
                 and isinstance(base, str)
                 and isinstance(label, str)
+                and (subject is None or isinstance(subject, str))
             ):
                 _log.warning("ignoring a malformed kept worktree entry")
                 continue
@@ -329,6 +458,7 @@ class WorktreeChangesets:
                     ordinal=ordinal,
                     session=session,
                     run_id=run_id,
+                    subject=subject,
                 )
             except Exception as exc:
                 _log.warning("dropping kept worktree %s of agent() #%s: %s", path, ordinal, exc)
@@ -357,8 +487,76 @@ class WorktreeChangesets:
         await apply_to_repo(kept.worktree, await worktree_patch(kept.worktree))
         await self._resolve(uri, kept, "Applied to the working tree")
 
-    async def discard(self, uri: str) -> None:
-        await self._resolve(uri, self._lookup(uri), "Discarded")
+    async def commit(
+        self, uri: str, *, params: Mapping[str, Any], principal: str | None
+    ) -> dict[str, str]:
+        """Commit the kept worktree on a new branch, or onto the working tree (`apply`)."""
+        kept = self._lookup(uri)
+        message = params.get("message")
+        if message is not None and not isinstance(message, str):
+            raise WorktreeError("params.message must be a string")
+        message = (message or "").strip() or self.default_message(kept)
+        onto_repo = params.get("apply", False)
+        if not isinstance(onto_repo, bool):
+            raise WorktreeError("params.apply must be a boolean")
+        signer = _trailer_value(principal) if principal else ""
+        if self.trailer and signer:
+            # A principal comes from a header or a token; a newline in it would forge trailers.
+            message += f"\n\nFlow-Principal: {signer}"
+        if onto_repo:
+            sha = await commit_onto_repo(kept.worktree, message=message)
+            text = f"Committed {sha[:12]} on the working tree"
+        else:
+            branch = self.branch.replace("{runId}", kept.run_id or "run").replace(
+                "{ordinal}", str(kept.ordinal)
+            )
+            sha = await commit_worktree(kept.worktree, branch=branch, message=message)
+            text = f"Committed {sha[:12]} on branch {branch}"
+        await self._resolve(uri, kept, text)
+        return {"message": text}
+
+    def default_message(self, kept: KeptWorktree) -> str:
+        """The commit message when the request names none: the subject, else run and step."""
+        if kept.subject:
+            return kept.subject
+        return self._mask(f"flow: run {kept.run_id or 'run'} step {kept.ordinal}")
+
+    async def discard(self, uri: str, *, reason: str | None = None) -> None:
+        kept = self._lookup(uri)
+        if not reason:
+            await self._resolve(uri, kept, "Discarded")
+            return
+        masked = self._mask(reason)
+        _log.info("agent() #%s: changeset discarded: %s", kept.ordinal, masked)
+        await self._resolve(uri, kept, f"Discarded: {masked}")
+        self._notes.setdefault(kept.chat, deque(maxlen=NOTES_KEEP)).append(
+            f"[discarded: {kept.title}] {masked}"
+        )
+        await self._notify(kept, masked)
+
+    def take_notes(self, chat: str) -> list[str]:
+        """The discard reasons queued for *chat*, oldest first; they are not kept."""
+        queue = self._notes.pop(chat, None)
+        return list(queue) if queue else []
+
+    async def _notify(self, kept: KeptWorktree, masked: str) -> None:
+        """Post the reason as a turn on the worker chat; best effort, never raised."""
+        publisher = kept.publisher
+        try:
+            if not isinstance(publisher, ReopensToolChats):
+                return
+            chat = publisher.worker_chat(kept.chat)
+            if not chat:
+                return
+            ended = asyncio.Event()
+
+            async def run(sink: TurnSink) -> None:
+                await sink.system_notification(f"Discarded: {masked}")
+
+            if await chat.run_turn("Changeset discarded", run, on_end=ended.set):
+                await asyncio.wait_for(ended.wait(), NOTIFY_WAIT)
+        except Exception as exc:
+            _log.warning("agent() #%s: discard notification failed: %s", kept.ordinal, exc)
 
     async def _resolve(self, uri: str, kept: KeptWorktree, text: str) -> None:
         await discard_worktree(kept.worktree)

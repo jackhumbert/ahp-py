@@ -191,7 +191,9 @@ class GateRecord:
     key: str
     kind: str
     status: GateStatus
-    # The answer the script got (masked for ask, a bool for approve); None while open.
+    # The answer the script got, masked; None while open. For ask that is the user's
+    # answer; for approve a bool, or with `opts.x.detail` the `{approved, reason,
+    # answeredBy}` object (`engine.gates.wants_detail`).
     answer: Any = None
 
 

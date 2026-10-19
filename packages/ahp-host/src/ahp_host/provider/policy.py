@@ -654,7 +654,10 @@ def load_check(path: str) -> Callable[[ToolRequest], Decision | None]:
 
 
 def policy_from_table(table: Mapping[str, Any], *, extra: Collection[str] = ()) -> ToolPolicy:
-    """Build a policy from a `[policy]` table; keys in `extra` are the caller's."""
+    """Build a policy from a `[policy]` table; keys in `extra` are the caller's.
+
+    `check` is an import path, or (from code, not a file) the callable itself.
+    """
     allowed = {"deny_commands", "deny_paths", "ask_paths", "allow_paths_outside_roots", "check"}
     unknown = set(table) - allowed - set(extra)
     if unknown:
@@ -674,7 +677,56 @@ def policy_from_table(table: Mapping[str, Any], *, extra: Collection[str] = ()) 
         kwargs["allow_paths_outside_roots"] = value
     if "check" in table:
         value = table["check"]
-        if not isinstance(value, str) or ":" not in value:
+        if callable(value):
+            # A table built in code (a host composing its policy with a provider's) may hold
+            # the callable itself; a config file can only name one.
+            kwargs["check"] = value
+        elif not isinstance(value, str) or ":" not in value:
             raise PolicyError("[policy] check must be an import path 'pkg.mod:fn'")
-        kwargs["check"] = load_check(value)
+        else:
+            kwargs["check"] = load_check(value)
     return ToolPolicy(**kwargs)
+
+
+def combine(*policies: ToolPolicy | None) -> ToolPolicy | None:
+    """One policy that consults each of *policies*: the most restrictive verdict wins.
+
+    A deny from any of them is a deny, as in `ToolPolicy.decide`. None when none is given,
+    the policy itself when only one is. The combined policy holds no rules of its own (its
+    roots check is off), so each policy's own `allow_paths_outside_roots` is what applies.
+    """
+    given = tuple(p for p in policies if p is not None)
+    if not given:
+        return None
+    if len(given) == 1:
+        return given[0]
+
+    def check(request: ToolRequest) -> Decision | None:
+        worst = _combine([policy.decide(request) for policy in given])
+        return None if worst.action == "allow" else worst
+
+    return ToolPolicy(allow_paths_outside_roots=True, check=check)
+
+
+def combine_tables(
+    *tables: Mapping[str, Any] | None, extra: Collection[str] = ()
+) -> Mapping[str, Any] | None:
+    """`[policy]` tables as one table for `policy_from_table`, every table's rules consulted.
+
+    The result's `check` is `combine` over each table's policy. A key in *extra* is the
+    caller's (ACP's `host_tools`), not a rule: the last table that sets it wins. None when no
+    table is given, the table itself when only one is. Raises `PolicyError` for a bad table.
+    """
+    given = [t for t in tables if t is not None]
+    if not given:
+        return None
+    if len(given) == 1:
+        return given[0]
+    merged: dict[str, Any] = {}
+    for table in given:
+        merged.update({key: value for key, value in table.items() if key in extra})
+    combined = combine(*(policy_from_table(t, extra=extra) for t in given))
+    assert combined is not None
+    merged["allow_paths_outside_roots"] = True
+    merged["check"] = combined.check
+    return merged

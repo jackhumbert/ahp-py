@@ -28,6 +28,39 @@ def _prompt_text(params: dict[str, Any]) -> str:
     return ""
 
 
+def _ask_permission(session_id: Any, n: int, command: str) -> str:
+    """Send `session/request_permission` for a shell *command*; the option id the host picked."""
+    request_id = f"perm-{n}"
+    _send(
+        {
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "method": "session/request_permission",
+            "params": {
+                "sessionId": session_id,
+                "toolCall": {
+                    "toolCallId": f"call-{n}",
+                    "title": command,
+                    "kind": "execute",
+                    "rawInput": {"command": command},
+                },
+                "options": [
+                    {"optionId": "allow", "name": "Allow", "kind": "allow_once"},
+                    {"optionId": "reject", "name": "Reject", "kind": "reject_once"},
+                ],
+            },
+        }
+    )
+    for line in sys.stdin.buffer:
+        if not line.strip():
+            continue
+        message = json.loads(line.decode("utf-8"))
+        if message.get("id") == request_id and "method" not in message:
+            outcome = (message.get("result") or {}).get("outcome") or {}
+            return str(outcome.get("optionId") or outcome.get("outcome"))
+    return "eof"
+
+
 def main() -> None:
     sessions = 0
     for line in sys.stdin.buffer:
@@ -48,7 +81,15 @@ def main() -> None:
             sessions += 1
             _reply(request_id, {"sessionId": f"fake-{sessions}"})
         elif method == "session/prompt":
-            reply = "acp: " + _prompt_text(params).split("\n\n")[-1]
+            text = _prompt_text(params).split("\n\n")[-1]
+            if text.startswith("perm: "):
+                # Ask to run each ';'-separated command; the reply names the picked options.
+                picked = [
+                    _ask_permission(params.get("sessionId"), n, command.strip())
+                    for n, command in enumerate(text.removeprefix("perm: ").split(";"))
+                ]
+                text = " ".join(picked)
+            reply = "acp: " + text
             _send(
                 {
                     "jsonrpc": "2.0",

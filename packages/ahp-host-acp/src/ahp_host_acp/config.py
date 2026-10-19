@@ -82,6 +82,7 @@ _KEYS = frozenset(
         "relay_command",
         "relay_host",
         "policy",
+        "decline_feedback",
         "env",
         "models",
         "model_command",
@@ -122,6 +123,7 @@ class Settings:
     relay_host: str | None = None
     policy: ToolPolicy | None = None
     client_methods: bool = False
+    decline_feedback: bool = True
     verbose: bool = False
 
 
@@ -198,6 +200,13 @@ def _env_allow(data: Mapping[str, Any]) -> tuple[str, ...] | None:
     if not isinstance(allow, list) or not all(isinstance(name, str) and name for name in allow):
         raise ConfigError("env_allow must be a list of variable names or glob patterns")
     return tuple(allow)
+
+
+def _decline_feedback(data: Mapping[str, Any]) -> bool:
+    value = data.get("decline_feedback", True)
+    if not isinstance(value, bool):
+        raise ConfigError("decline_feedback must be true or false")
+    return value
 
 
 def _relay_command(data: Mapping[str, Any]) -> tuple[str, ...] | None:
@@ -418,6 +427,7 @@ def load(args: argparse.Namespace) -> Settings:
         relay_host=_relay_host(data),
         policy=policy,
         client_methods=client_methods,
+        decline_feedback=_decline_feedback(data),
         env=_strings(data, "env"),
         config_options=_option_values(data),
         mcp_servers=_mcp_servers(data),

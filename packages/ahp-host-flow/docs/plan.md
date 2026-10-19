@@ -7,7 +7,7 @@ an AHP session, and each `agent()` call is a **child chat** of it, so any AHP
 client can watch and steer the whole run. Extensions to the format are opt-in,
 and a script written for Claude Code runs unchanged.
 
-Status: M0-M14 done (M4b complete). M15-M18 are planned (§8, **Post-M12 plan**); M15 is next.
+Status: M0-M15 done (M4b complete). M16-M18 are planned (§8, **Post-M12 plan**); M16 is next.
 
 ## 1. Where it sits
 
@@ -587,7 +587,7 @@ A live GLM smoke test is opt-in, behind a marker.
 | M12 (done) | **Custom verbs and the resume-key hook** (the M12 spec below): host-side verbs a script calls like `agent()` but that run no model (`tool()`, `render()`, an `approve(person)` of the deployment's own), journaled and replayed like gates; an opt-in hook that adds the routed provider and model (or anything a callable returns) to each `agent()` call's resume key | the M12 proving tests pass on Linux and Windows; with no hook configured every journal key is byte-identical to M11's |
 | M13 (done) | **Identity, typed workflow calls, quick fixes** (the M13 spec below): the README and proxy fixes, `--ping-interval` and `--max-size`, a non-loopback bind with a token; an optional principal on sessions, messages and answers; `meta.x.args`, typed workflow starts and client-chosen run ids | the M13 proving tests in §8 pass |
 | M14 (done) | Folders, sandboxes and host policy | the M14 proving tests in §8 pass |
-| M15 | Approvals and changesets | the M15 proving tests in §8 pass |
+| M15 (done) | Approvals and changesets | the M15 proving tests in §8 pass |
 | M16 | Limits, timeouts and fallback | the M16 proving tests in §8 pass |
 | M17 | Sandboxed workflow hosts, client tools in workers, durable workers | the M17 proving tests in §8 pass |
 | M18 | A reference non-Claude agent, the support matrix, releases | the M18 proving tests in §8 pass |
@@ -791,7 +791,7 @@ Known limits. Queued, steered and host-started turns carry no principal. Absent 
 2. **Launcher and environment allowlist.** ahp-host `packages/ahp-host/tests/unit/test_childenv.py`; ahp-host-acp `packages/ahp-host-acp/tests/test_acplaunch.py` and `packages/ahp-host-acp/tests/test_acprelayhost.py`; ahp-host-claude `packages/ahp-host-claude/tests/test_claudeenv.py`.
 3. **Host-enforced command and path policy.** The pure policy in ahp-host `packages/ahp-host/tests/unit/test_toolpolicy.py`; Claude's mapping and its binding deny in ahp-host-claude `packages/ahp-host-claude/tests/test_claudepolicy.py`; the advisory ACP path in ahp-host-acp `packages/ahp-host-acp/tests/test_acppolicy.py`; and the hard path, `[policy] host_tools = true`, in `packages/ahp-host-acp/tests/test_acphostfs.py`.
 
-Known limits. Path mapping is identity only. The ACP permission path is advisory, and an agent's reason is not sent in it (M15 item 4). Claude's dropped variables arrive as empty strings, because the SDK merges `os.environ` (`CLAUDECODE` excepted, which the SDK drops). The command policy is best effort over shell text: a command's words, `--opt=value` values and redirection targets are checked as paths, but paths built at run time (variables, `$()` output, an earlier `cd`), globs the shell expands (`cat .en*`) and files a program opens itself are not, and a word that only looks like a denied path is denied. Claude's `Glob` pattern and `Grep` glob are judged as one path each, not expanded. On Windows a terminal's grandchildren are killed only while the command still runs (`taskkill /T`). No test uses docker.
+Known limits. Path mapping is identity only. The ACP permission path is advisory, and decline feedback sends an agent's reason on the chat's next prompt (M15 item 4). Claude's dropped variables arrive as empty strings, because the SDK merges `os.environ` (`CLAUDECODE` excepted, which the SDK drops). The command policy is best effort over shell text: a command's words, `--opt=value` values and redirection targets are checked as paths, but paths built at run time (variables, `$()` output, an earlier `cd`), globs the shell expands (`cat .en*`) and files a program opens itself are not, and a word that only looks like a denied path is denied. Claude's `Glob` pattern and `Grep` glob are judged as one path each, not expanded. On Windows a terminal's grandchildren are killed only while the command still runs (`taskkill /T`). No test uses docker.
 
 **M15: approvals and changesets.**
 
@@ -809,7 +809,7 @@ Known limits. Path mapping is identity only. The ACP permission path is advisory
      - `InputRequested` is re-raised as an input request there and answered with `.answer()`.
    - `idle_timeout` stays the backstop, and an open relayed request pauses it.
    - Masking applies to the relayed copies, as the `TurnTee` does.
-   - Proving tests, against a second in-memory host (`remote_dialer`): a remote approval answered on the run's worker chat lets the remote turn finish; a denial with a reason reaches the remote agent; a remote question round-trips; an unanswered one still times out.
+   - Proving tests, against a second in-memory host (`remote_dialer`): a remote approval answered on the run's worker chat lets the remote turn finish; a denial with a reason reaches the remote agent; a remote question round-trips; an answer given after more than `idle_timeout` still lands, while a silent remote turn still times out.
 3. **Bulk and policy approvals.**
    - Changing the run's `Approvals` session config now fans out to every live worker in `_workers`, not only new ones, so "approve all for this run" applies at once.
    - A flow.toml `[approvals]` rule table answers a worker's confirmation in `TurnTee.confirm_tool_call` before it is published, logging "approved by rule <n>":
@@ -828,7 +828,7 @@ Known limits. Path mapping is identity only. The ACP permission path is advisory
      - It may return `{message, followUp}`, which the host passes through in place of `{}`.
      - Existing three-argument handlers keep working.
    - **Commit.**
-     - Adds `COMMIT_OPERATION = "ahp-host-flow.worktree.commit"`: commit the worktree on a branch named by `[changesets] branch` (default `flow/<runId>-<ordinal>`), with the message from `params.message`, defaulting to the step label or the first prompt line.
+     - Adds `COMMIT_OPERATION = "ahp-host-flow.worktree.commit"`: commit the worktree on a branch named by `[changesets] branch` (default `flow/<runId>-<ordinal>`), with the message from `params.message`, defaulting to the step label, else the first prompt line (up to 72 characters), else `flow: run <runId> step <ordinal>`, masked by the run's redactor.
      - Optionally (`params.apply = true`) apply onto the working tree and commit there.
      - The author is the git config's; the principal goes in a `Flow-Principal:` trailer only when `[changesets] trailer = true`.
      - It never pushes.
@@ -843,6 +843,10 @@ Known limits. Path mapping is identity only. The ACP permission path is advisory
      - The ACP fake receives the reason on its next prompt.
      - The ahp-client helpers send the fields.
      - A three-argument handler still works.
+
+**M15 result.** The four items landed with no live model. The proving tests are `packages/ahp-protocol/tests/unit/test_flow_ext_waiting.py`, `packages/ahp-protocol/tests/unit/test_operation_ext.py`, `packages/ahp-host/tests/integration/test_opcontext.py`, `packages/ahp-host/tests/unit/test_sessionview.py`, `packages/ahp-client/tests/client/test_m15client.py`, `packages/ahp-host-acp/tests/test_acpdecline.py`, `packages/ahp-host-claude/tests/test_claudehints.py`, `packages/ahp-host-flow/tests/integration/test_waitingview.py`, `packages/ahp-host-flow/tests/integration/test_remoteapprove.py`, `packages/ahp-host-flow/tests/integration/test_bulkapprove.py`, `packages/ahp-host-flow/tests/unit/test_approvalrules.py`, `packages/ahp-host-flow/tests/integration/test_approvalrules_hosted.py`, `packages/ahp-host-flow/tests/integration/test_flowpolicy_inner.py`, `packages/ahp-host-flow/tests/integration/test_flowcommit.py`, `packages/ahp-host-flow/tests/unit/test_approvedetail.py`, `packages/ahp-host-flow/tests/integration/test_approvedetail_hosted.py` and the conformance script `packages/ahp-host-flow/conformance/extensions/approve_detail.js`.
+
+Known limits. A relayed remote request waits until the run is aborted unless the provider sets `approval_timeout`, after which an unanswered one fails the call (naming the provider and the setting) and stops the remote turn. A `read_only` rule ignores an agent-supplied hint (ACP's `kind`) unless it sets `trust_agent_hints = true`. Remote relays are never rule-answered (`[approvals]` rules apply to in-process workers only). A flow `[policy]` judges this host's paths. It is enforced in an in-process provider's own policy hook only when the provider's factory takes a named `policy` keyword (the Claude and ACP `from_config` do; the loader folds it into the provider table's `policy`, and a provider configured by a file path combines it with the file's `[policy]` in its `from_config`); elsewhere it is consulted only when a worker asks, so an approve-all stops it. Fleet and remote workers never get it: they run under their own host's policy. A discard reason reaches a named chat only when the handler runs while the run is live, because the host refuses operations during an active turn. The Claude Code shim's `approve()` stays a bool.
 
 **M16: limits, timeouts and fallback.**
 

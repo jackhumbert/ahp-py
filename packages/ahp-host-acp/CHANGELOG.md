@@ -2,6 +2,29 @@
 
 ## [Unreleased]
 
+### Added — decline feedback and confirmation hints (M15)
+
+- `decline_feedback` (default true; config file, `acp` agent options,
+  `AgentSpec.decline_feedback`): why a call was declined (the policy's reason,
+  or the user's reason and suggestion) is sent to the agent as one text block
+  at the end of the chat's next `session/prompt`, since ACP's outcome has no
+  reason field. `permissions.decline_line` caps each reason at 300 characters.
+- **Security-relevant:** a `ToolConfirmation` now carries `policy_asked` (the
+  host policy marked the call *ask*) and `read_only`
+  (`permissions.read_only_hint`: true for `read` and `search`, false for
+  `edit`, `delete`, `move`, `execute`, none for other kinds), which an
+  automatic answerer may trust. Pinned by tests.
+- **Security-relevant:** confirmations are marked `read_only_from_agent` (the
+  hint comes from the agent's `kind`) and carry the call's `locations` paths.
+- `from_config` takes a named `policy` keyword (a table), so a host composing
+  policies (ahp-host-flow) can see it; it is combined with the file's own
+  `[policy]` (`ahp_host.provider.policy.combine_tables`): a deny from either wins.
+
+### Fixed
+
+- Decline reasons are dropped only once the prompt carrying them was delivered:
+  an agent that exits on that prompt gets them again on the retry.
+
 ### Added — [policy] host_tools (M14, security)
 
 - `[policy] host_tools = true` (config file and `acp` agent options;

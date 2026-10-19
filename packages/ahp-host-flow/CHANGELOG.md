@@ -2,6 +2,37 @@
 
 ## [Unreleased]
 
+### Added — approve() detail (M15)
+
+- `approve(summary, {x: {detail: true}})` (Python: `x={'detail': True}`) resolves to `{approved, reason, answeredBy}`; a plain `approve()` still returns a bool and its gate key and journal record are unchanged. `ConfirmOutcome` gains `reason`, and `MainChatGates.approve_outcome` fills it from a denial's `reasonMessage`. Conformance script `approve_detail`; `tests/unit/test_approvedetail.py`, `tests/integration/test_approvedetail_hosted.py`.
+
+### Documentation (M15)
+
+- Plan status and the M15 result (the proving tests and the known limits); `test_format_doc_m15_result` checks that every test path it names exists. README, `docs/format.md` and AGENTS.md document `opts.x.detail`.
+
+### Added — Commit and Discard reasons (M15)
+
+- A worktree changeset has a Commit operation (`COMMIT_OPERATION`): it commits the agent's changes on a new branch and removes the worktree, or with `params.apply` commits just those paths on the working tree. `params.message` sets the message (default: the call's label, else the prompt's first line up to 72 characters, else `flow: run <runId> step <ordinal>`, masked). A rename or delete committed with `params.apply` is committed whole (`--no-renames`), and the user's own staged changes stay out of the commit. The `Flow-Principal:` value has CR, LF and control characters removed. Never pushes. `[changesets]` in flow.toml sets `branch` (default `flow/{runId}-{ordinal}`) and `trailer` (a `Flow-Principal:` line).
+- Discard takes an optional `params.reason` (also on a changeset that survived a restart): it is masked, logged, shown in the changeset's description, posted as a notification turn on the worker chat and queued (`WorktreeChangesets.take_notes`) as a `[discarded: ...]` line before the named chat's next prompt.
+
+### Added — approval rules and flow policy (M15)
+
+- `[policy]` (the `ahp-host` `ToolPolicy` table) and `[[approvals.rules]]` (`tool`, `read_only`, `provider`, `phase`, `persons`, `action`) in flow.toml answer an in-process worker's tool confirmations (`approvals.Approver`, wired through `TurnTee(approver=)` and `ProviderDispatcher(principal=)`). Security decision: the policy is checked first and always wins; a rule can never allow what the policy denies or asks, or a call the inner provider's policy asked about. Remote relays are always prompted.
+- Security decision: the flow `[policy]` is also handed to an in-process provider whose factory takes a named `policy` keyword (`ahp_host_claude:from_config`, `ahp_host_acp:from_config`), folded into the provider table's own `policy` as a check (a deny from either wins), so an approve-all that stops a worker asking does not switch it off. A provider configured by a file path is given it too and combines it with its file's `[policy]` (`from_config`). Fleet and remote workers never get it (documented).
+- Security decision: a `read_only` rule ignores a hint the agent supplied itself (ACP's `kind`, `read_only_from_agent`) unless it sets `trust_agent_hints = true`. A call filed as a read or write whose path cannot be read (an ACP read with only `locations`, now read too) is judged as one with no path, which asks when there are path rules.
+
+### Added — remote approvals (M15)
+
+- A remote call's approvals and questions are relayed to its worker chat (`RemoteOut.confirm` and `ask`, with `RemoteConfirmation`, `RemoteDecision`, `RemoteQuestion` and `RemoteAnswer`): the answer, a denial's reason and suggestion included, goes back to the remote session. An open request pauses `idle_timeout` (a late answer still lands); a remote turn that goes silent still times out. A remote provider's optional `approval_timeout` bounds a relayed request: an unanswered one fails the call, naming the provider and the setting, and stops the remote turn. The relayed copies are masked. A bare dispatcher still cannot answer and times out as before.
+
+### Changed — Approvals reaches running workers (M15)
+
+- `FlowSession.config_changed` forwards a new Approvals (`permissionMode`) value to every live worker as a chat overlay, so "approve all for this run" applies at once; the latest change wins, and one worker failing never stops the others. Effort is not fanned out.
+
+### Changed — awaitingInput from inputNeeded (M15)
+
+- A step's `awaitingInput` and its new `waiting` entries (`{kind, chat}`) are read from the session's `inputNeeded`, filtered to the worker chat (`StepDispatcher._watch_loop`, polled every `WAIT_POLL`), so they also cover requests the worker's turn never confirms itself, such as an MCP server's authentication. `TurnTee.on_waiting` remains the fallback when the publisher cannot show the session state.
+
 ### Documentation (M14)
 
 - Plan status and the M14 result (the proving tests of the three groups and the known limits); `test_format_doc_m14_result` checks that every test path it names exists.

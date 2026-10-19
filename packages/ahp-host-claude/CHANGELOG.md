@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+### Added — confirmation hints (M15, security-relevant)
+
+- A `ToolConfirmation` now carries `read_only` (`permissions.read_only_hint`:
+  true for the tools `POLICY_TOOLS` files as reads, false for writes and Bash,
+  none for any other tool) and `policy_asked` (the host policy marked the call
+  *ask*), which an automatic answerer may trust. The table is pinned by a test.
+- `from_config` takes a named `policy` keyword (a table), so a host composing
+  policies (ahp-host-flow) can see it; it is combined with the file's own
+  `[policy]` (`ahp_host.provider.policy.combine_tables`): a deny from either wins.
+
 ### Added — host tool policy (M14, security)
 
 - **`policy`** (a `[policy]` config table, agent option, `ClaudeProvider(policy=...)`):

@@ -248,12 +248,28 @@ class ToolCallReady(_ToolCall):
             ),
         )
 
-    def deny(self, *, reason: actions.DenialReason = "denied") -> None:
+    def deny(
+        self,
+        *,
+        reason: actions.DenialReason = "denied",
+        reason_message: str | Mapping[str, Any] | None = None,
+        user_suggestion: Mapping[str, Any] | None = None,
+    ) -> None:
+        """Refuse the call.
+
+        *reason_message* says why, and *user_suggestion* is what to do instead;
+        both ride on the denial and are left off the wire when ``None``.
+        """
         send = self._dispatcher()
         send(
             self.channel,
             actions.tool_call_denied(
-                self.turn_id, self.tool_call_id, reason=reason, selected_option_id=None
+                self.turn_id,
+                self.tool_call_id,
+                reason=reason,
+                selected_option_id=None,
+                reason_message=reason_message,
+                user_suggestion=user_suggestion,
             ),
         )
 

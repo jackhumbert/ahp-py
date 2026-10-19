@@ -1,0 +1,15 @@
+{
+  "approvals": { "Ship?": true, "Drop?": false },
+  "approval_reasons": { "Drop?": "too risky" },
+  "result": {
+    "plain": true,
+    "rich": { "approved": false, "reason": "too risky", "answeredBy": null },
+    "ok": { "approved": true, "reason": null, "answeredBy": null },
+    "bad": "approve() x must be an object"
+  },
+  "gates": [
+    [0, "approve", "Ship?", {}],
+    [1, "approve", "Drop?", { "x": { "detail": true } }],
+    [2, "approve", "Ship?", { "x": { "detail": true } }]
+  ]
+}

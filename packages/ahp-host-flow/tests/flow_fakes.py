@@ -17,6 +17,7 @@ from ahp_host.provider.base import (
     AgentInfo,
     AgentSession,
     AgentSessionContext,
+    AuthChallenge,
     ClientToolCall,
     InputOutcome,
     InputQuestion,
@@ -532,6 +533,209 @@ class AskingProvider:
         return session
 
 
+@dataclass
+class ReasonSession:
+    context: AgentSessionContext
+
+    async def send_user_message(self, message: UserMessage, sink: TurnSink) -> None:
+        await sink.tool_call_started("r1", "edit", {"path": "b"})
+        outcome = await sink.confirm_tool_call(
+            ToolConfirmation(
+                call_id="r1", name="edit", invocation_message="Edit b", tool_input={"path": "b"}
+            )
+        )
+        await sink.text_delta(
+            "approved" if outcome.approved else f"denied: {outcome.reason_message}"
+        )
+
+    async def cancel(self, reason: str | None = None) -> None:
+        pass
+
+    async def aclose(self) -> None:
+        pass
+
+
+class ReasonEchoProvider:
+    """Asks to confirm an edit and replies with the decision and the denial's reason."""
+
+    def __init__(self, *, provider_id: str = "claude") -> None:
+        self.provider_id = provider_id
+
+    @property
+    def agent(self) -> AgentInfo:
+        return AgentInfo(
+            provider=self.provider_id,
+            display_name="Reason echo",
+            description="Asks for approval and echoes the decision.",
+            models=(),
+        )
+
+    async def create_session(self, context: AgentSessionContext) -> ReasonSession:
+        return ReasonSession(context)
+
+
+@dataclass
+class ModalSession:
+    context: AgentSessionContext
+    mode: str = "default"
+    overlays: list[dict[str, Any]] = field(default_factory=list)
+    changed: asyncio.Event = field(default_factory=asyncio.Event)
+
+    def __post_init__(self) -> None:
+        self.mode = str(self.context.config.get("permissionMode", "default"))
+
+    async def chat_config_changed(self, chat: str, values: Any) -> None:
+        self.overlays.append(dict(values))
+        if "permissionMode" in values:
+            self.mode = str(values["permissionMode"])
+        self.changed.set()
+
+    async def send_user_message(self, message: UserMessage, sink: TurnSink) -> None:
+        asked = 0
+        for i in (1, 2):
+            call_id = f"m{i}"
+            await sink.tool_call_started(call_id, "write", {"n": i})
+            if self.mode == "auto":
+                continue
+            asked += 1
+            outcome = await sink.confirm_tool_call(
+                ToolConfirmation(
+                    call_id=call_id,
+                    name="write",
+                    invocation_message=f"write {i}",
+                    tool_input={"n": i},
+                )
+            )
+            if not outcome.approved:
+                break
+        await sink.text_delta(f"asked={asked} mode={self.mode}")
+
+    async def cancel(self, reason: str | None = None) -> None:
+        pass
+
+    async def aclose(self) -> None:
+        pass
+
+
+class ModalProvider:
+    """Two tool calls that ask only while the approval mode is not `auto`; takes overlays."""
+
+    instances: ClassVar[list[ModalProvider]] = []
+
+    def __init__(self, *, provider_id: str = "modal") -> None:
+        self.provider_id = provider_id
+        self.sessions: list[ModalSession] = []
+        ModalProvider.instances.append(self)
+
+    @property
+    def agent(self) -> AgentInfo:
+        return AgentInfo(
+            provider=self.provider_id,
+            display_name="Modal",
+            description="Asks for approval until the mode is auto.",
+            models=(),
+        )
+
+    async def create_session(self, context: AgentSessionContext) -> ModalSession:
+        session = ModalSession(context)
+        self.sessions.append(session)
+        return session
+
+
+@dataclass
+class HintedSession:
+    context: AgentSessionContext
+
+    async def send_user_message(self, message: UserMessage, sink: TurnSink) -> None:
+        calls = json.loads(stripped(message).text)
+        replies: list[str] = []
+        for i, item in enumerate(calls):
+            call_id = f"h{i}"
+            name = item["name"]
+            await sink.tool_call_started(call_id, name, item["input"])
+            outcome = await sink.confirm_tool_call(
+                ToolConfirmation(
+                    call_id,
+                    name,
+                    f"Run {name}",
+                    tool_input=item["input"],
+                    read_only=item["read_only"],
+                )
+            )
+            replies.append(
+                f"{name}=yes" if outcome.approved else f"{name}=no({outcome.reason_message})"
+            )
+        await sink.text_delta(" ".join(replies))
+
+    async def cancel(self, reason: str | None = None) -> None:
+        pass
+
+    async def aclose(self) -> None:
+        pass
+
+
+class HintedProvider:
+    """Asks to confirm each tool call in the prompt (a JSON list) and replies with the answers."""
+
+    def __init__(self, *, provider_id: str = "claude") -> None:
+        self.provider_id = provider_id
+
+    @property
+    def agent(self) -> AgentInfo:
+        return AgentInfo(
+            provider=self.provider_id,
+            display_name="Hinted",
+            description="Asks for approval of the calls in its prompt.",
+            models=(),
+        )
+
+    async def create_session(self, context: AgentSessionContext) -> HintedSession:
+        return HintedSession(context)
+
+
+@dataclass
+class AuthSession:
+    context: AgentSessionContext
+
+    async def send_user_message(self, message: UserMessage, sink: TurnSink) -> None:
+        await sink.tool_call_started("auth-1", "mcp_lookup", {})
+        await sink.request_authentication(
+            "auth-1", AuthChallenge(resource={"resource": "https://mcp.example.com"})
+        )
+        await sink.text_delta("authed")
+
+    async def cancel(self, reason: str | None = None) -> None:
+        pass
+
+    async def aclose(self) -> None:
+        pass
+
+
+class AuthProvider:
+    """A turn whose tool call needs an MCP server's authentication."""
+
+    instances: ClassVar[list[AuthProvider]] = []
+
+    def __init__(self, *, provider_id: str = "auth") -> None:
+        self.provider_id = provider_id
+        self.sessions: list[AuthSession] = []
+        AuthProvider.instances.append(self)
+
+    @property
+    def agent(self) -> AgentInfo:
+        return AgentInfo(
+            provider=self.provider_id,
+            display_name="Auth",
+            description="Asks for an MCP server's authentication mid-tool-call.",
+            models=(),
+        )
+
+    async def create_session(self, context: AgentSessionContext) -> AuthSession:
+        session = AuthSession(context)
+        self.sessions.append(session)
+        return session
+
+
 class StrippingSession:
     """Wraps an agent session so it is sent the prompt without the subagent preamble.
 
@@ -577,6 +781,8 @@ def reset_fakes() -> None:
     SecretProvider.instances.clear()
     StructuredSecretProvider.instances.clear()
     AskingProvider.instances.clear()
+    AuthProvider.instances.clear()
+    ModalProvider.instances.clear()
     FileWriterProvider.instances.clear()
     RestartHoldProvider.prompts.clear()
     RestartHoldProvider.holding = True

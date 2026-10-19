@@ -13,6 +13,7 @@ import pytest
 from ahp_host_flow import FlowProvider
 from ahp_host_flow.worktree import (
     APPLY_OPERATION,
+    COMMIT_OPERATION,
     DISCARD_OPERATION,
     worktree_path,
 )
@@ -104,7 +105,11 @@ async def test_flow_changesets_apply(tmp_path: Path, node_path: str) -> None:
         (file,) = channel["files"]
         assert file["edit"]["after"]["uri"] == (fx.workspace / "notes.txt").as_uri()
         assert file["edit"]["diff"] == {"added": 1, "removed": 0}
-        assert [op["id"] for op in channel["operations"]] == [APPLY_OPERATION, DISCARD_OPERATION]
+        assert [op["id"] for op in channel["operations"]] == [
+            APPLY_OPERATION,
+            COMMIT_OPERATION,
+            DISCARD_OPERATION,
+        ]
         reply = await fx.wire.request(
             "invokeChangesetOperation", {"channel": uri, "operationId": APPLY_OPERATION}
         )

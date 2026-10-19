@@ -25,12 +25,13 @@ from ahp_host.provider.base import (
     ConfigValue,
     IdentifiesTurn,
     ModelInfo,
+    ObservesSessionState,
     ReadsClientPlugins,
     SessionDescription,
     SteersTurns,
     UserMessage,
 )
-from ahp_host.provider.changes import OperationHandler
+from ahp_host.provider.changes import OperationContext, OperationHandler
 from ahp_protocol.ext import flow
 from ahp_protocol.transport import Transport
 
@@ -90,7 +91,13 @@ from ahp_host_flow.sandbox import (
     language_of,
     run_script,
 )
-from ahp_host_flow.worktree import APPLY_OPERATION, DISCARD_OPERATION, WorktreeChangesets
+from ahp_host_flow.worktree import (
+    APPLY_OPERATION,
+    COMMIT_OPERATION,
+    DISCARD_OPERATION,
+    WorktreeChangesets,
+    WorktreeError,
+)
 
 _log = logging.getLogger(__name__)
 
@@ -321,7 +328,11 @@ class FlowProvider:
         self.fleet_client_wait = fleet_client_wait
         self.redactor = make_redactor(config.redact)
         #: Kept worktrees published as changesets; the provider declares their operations.
-        self.worktree_changesets = WorktreeChangesets()
+        self.worktree_changesets = WorktreeChangesets(
+            branch=config.changesets.branch,
+            trailer=config.changesets.trailer,
+            mask=self.redactor.mask,
+        )
         self.providers: Mapping[str, AgentProvider] = (
             providers if providers is not None else LazyProviders(config, roots=roots)
         )
@@ -345,12 +356,29 @@ class FlowProvider:
         ) | frozenset(self._reserved_run_ids)
 
     def changeset_operations(self) -> Mapping[str, OperationHandler]:
-        """Apply and Discard for kept worktrees (`ProvidesOperations`); called once by a Host."""
-        self.worktree_changesets.operations_registered = True
-        return {
-            APPLY_OPERATION: lambda uri, _op, _target: self.worktree_changesets.apply(uri),
-            DISCARD_OPERATION: lambda uri, _op, _target: self.worktree_changesets.discard(uri),
-        }
+        """Apply, Commit and Discard for kept worktrees (`ProvidesOperations`); called once."""
+        changesets = self.worktree_changesets
+        changesets.operations_registered = True
+
+        async def apply(
+            uri: str, _op: str, _target: Mapping[str, Any] | None, _context: OperationContext
+        ) -> None:
+            await changesets.apply(uri)
+
+        async def commit(
+            uri: str, _op: str, _target: Mapping[str, Any] | None, context: OperationContext
+        ) -> Mapping[str, Any]:
+            return await changesets.commit(uri, params=context.params, principal=context.principal)
+
+        async def discard(
+            uri: str, _op: str, _target: Mapping[str, Any] | None, context: OperationContext
+        ) -> None:
+            reason = context.params.get("reason")
+            if reason is not None and not isinstance(reason, str):
+                raise WorktreeError("params.reason must be a string")
+            await changesets.discard(uri, reason=(reason or "").strip() or None)
+
+        return {APPLY_OPERATION: apply, COMMIT_OPERATION: commit, DISCARD_OPERATION: discard}
 
     @property
     def agent(self) -> AgentInfo:
@@ -873,6 +901,7 @@ class FlowSession:
             principal=principal,
         )
 
+        view = publisher.session_state if isinstance(publisher, ObservesSessionState) else None
         remote_workers = RemoteWorkerChats(
             config=config,
             sink=sink,
@@ -882,6 +911,7 @@ class FlowSession:
             redactor=redactor,
             on_log=on_log,
             call_id_prefix=call_id_prefix,
+            session_view=view,
         )
 
         def remote_for(name: str, spec: ProviderConfig) -> Dispatcher:
@@ -906,6 +936,7 @@ class FlowSession:
                     idle_timeout=(
                         spec.idle_timeout if spec.idle_timeout is not None else IDLE_TIMEOUT
                     ),
+                    approval_timeout=spec.approval_timeout,
                     preamble=preamble_text(spec.preamble),
                 ),
                 workers=remote_workers,
@@ -931,6 +962,8 @@ class FlowSession:
                 call_id_prefix=call_id_prefix,
                 changesets=self.provider.worktree_changesets,
                 worker_providers=self._worker_providers,
+                session_view=view,
+                principal=principal,
             ),
             fleet=FleetDispatcher(
                 config=config,
@@ -1047,7 +1080,19 @@ class FlowSession:
                 await dispatcher.aclose()
 
     async def config_changed(self, values: Mapping[str, Any]) -> None:
+        """Take the session's new config; an Approvals change also reaches every live worker.
+
+        "Approve all for this run" applies at once: the latest change wins for running
+        workers, and new calls still resolve their mode through `inner_config` as before.
+        Effort is not fanned out.
+        """
         self._values.update(_own(values))
+        mode = values.get(APPROVAL_KEY)
+        if isinstance(mode, str) and mode in APPROVAL_MODES:
+            for chat, inner in list(self._workers.items()):
+                # One worker failing never stops the others.
+                with contextlib.suppress(Exception):
+                    await forward_overlay(inner, chat, {APPROVAL_KEY: mode})
 
     async def chat_config_changed(self, chat: str, values: Mapping[str, Any]) -> None:
         mapped = _own(values)

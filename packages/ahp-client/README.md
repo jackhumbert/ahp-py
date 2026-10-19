@@ -169,6 +169,18 @@ for op in changeset.operations():
         await changeset.invoke(op.id, resource=file.id, confirmed=user_said_yes)
 ```
 
+A denial can say why and what to do instead: `call.deny(reason_message="use b",
+user_suggestion={"text": "edit b"})` (the same two keywords exist on
+`responder.confirm_tool`, and are ignored on an approval).
+
+`session.waiting()` lists what is blocking a person -- `WaitingEntry(id, kind,
+chat, turn_id)` -- without the `toolClientExecution` entries that only ask a
+client to run a tool; `session.waiting(chat)` narrows it to one chat.
+
+`session.invoke_operation(changeset, op_id, params={"message": "m"})` sends the
+parameters in `_meta["ahp-py/operation"]`; a stock host ignores them, and nothing
+is checked against the declared operations (`Changeset.invoke` does that).
+
 `invoke()` checks `operationId` and `target.kind` against what *this* changeset
 declared right now — the list is recomputed by the host and "Commit" is simply
 absent while nothing is staged — and refuses an operation carrying a

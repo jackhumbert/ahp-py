@@ -14,6 +14,7 @@ import base64
 import binascii
 import contextlib
 import copy
+import inspect
 import json
 import logging
 import math
@@ -28,6 +29,7 @@ from typing import Any, Final
 from ahp_protocol import errors
 from ahp_protocol.channels import AUTOMATIONS_URI, ROOT_URI
 from ahp_protocol.ext.delegation import ORIGIN_META_KEY, parse_delegation
+from ahp_protocol.ext.operation import operation_params
 from ahp_protocol.ext.redaction import (
     REDACTABLE_PART_KINDS,
     REDACTION_CAPABILITY,
@@ -87,6 +89,7 @@ from ahp_host.core.changesets import (
     Changeset,
     ContentStore,
     FileChange,
+    OperationContext,
     OperationHandler,
     changes_summary,
     content_uris,
@@ -206,6 +209,23 @@ def _stored_principal(metadata: object) -> str | None:
         return None
     value = metadata.get(PRINCIPAL_METADATA_KEY)
     return value if isinstance(value, str) and value else None
+
+
+def _takes_context(handler: Any) -> bool:
+    """Whether an operation handler wants the `OperationContext` as a fourth argument.
+
+    Decided by arity so the three-argument handlers that predate the context keep
+    working: `*args` or four positional parameters opt in. A signature that cannot
+    be read is taken as the old shape, the one every existing handler has.
+    """
+    try:
+        parameters = list(inspect.signature(handler).parameters.values())
+    except (ValueError, TypeError):
+        return False
+    positional = (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+    return any(p.kind is inspect.Parameter.VAR_POSITIONAL for p in parameters) or (
+        sum(1 for p in parameters if p.kind in positional) >= 4
+    )
 
 
 #: `AutomationCapabilities.runHistoryLimit` unless the embedder says otherwise.
@@ -1141,6 +1161,15 @@ class _Publisher:
                 raise errors.AhpError(-32008, f"No such resource: {uri}")
             return content
         return await self._host.read_client_resource(self._plugin_connection(plugin), uri)
+
+    def session_state(self) -> Mapping[str, Any]:
+        state = self._host.sequencer.state_of(self._session.uri)
+        return state if isinstance(state, Mapping) else {}
+
+    def worker_chat(self, resource: str) -> ProviderChat | None:
+        if resource in self._session.provider_chats:
+            return _ProviderChat(self._host, self._session, resource)
+        return None
 
     async def activity_changed(self, activity: str | None) -> None:
         action: dict[str, Any] = {"type": "session/activityChanged"}
@@ -2323,6 +2352,16 @@ class Host:
             reducer = _reducer_for_restored(uri, state, stored.uri)
             restored_state = dict(state)
             if reducer == "chat":
+                # A worker chat (`open_tool_chat`) is one only the provider opens: its
+                # `tool` origin is never a client's (`_chat_origin` takes only fork and
+                # sideChat), so the stored origin says which chats were the provider's.
+                # Without this a restored session forgot them: `worker_chat` answered None
+                # (`ReopensToolChats` says "also after a restart") and a client could start
+                # turns on one as on any other chat.
+                origin = restored_state.get("origin")
+                worker = isinstance(origin, Mapping) and origin.get("kind") == "tool"
+                if worker:
+                    session.provider_chats.add(uri)
                 # "In-progress turns SHOULD be considered failed." The partial
                 # response is KEPT -- the user should see what the agent had
                 # said before the crash -- but it is moved out of `activeTurn`
@@ -2337,7 +2376,9 @@ class Host:
                     restored_state = _failed_by_restart(
                         restored_state,
                         active,
-                        resumable=self._turn_is_resumable(stored, active),
+                        # A worker chat's turns are the provider's callbacks: nothing resumes
+                        # them (`_resume_rejection`), so the failure does not offer it.
+                        resumable=not worker and self._turn_is_resumable(stored, active),
                         notice=withdrawn_notice(asked) if asked else None,
                     )
                 restored_state["turns"] = _turns_with_message_origins(restored_state.get("turns"))
@@ -5834,6 +5875,10 @@ class Host:
         if owner is not None and owner.running():
             raise errors.invalid_params(f"{operation!r} is disabled while a turn is active")
 
+        context = OperationContext(
+            params=operation_params(params.get("_meta")),
+            principal=self._principal_of(connection),
+        )
         await self.sequencer.publish(
             channel,
             {
@@ -5843,7 +5888,10 @@ class Host:
             },
         )
         try:
-            await handler(channel, operation, target)
+            if _takes_context(handler):
+                outcome = await handler(channel, operation, target, context)  # type: ignore[call-arg]
+            else:
+                outcome = await handler(channel, operation, target)  # type: ignore[call-arg]
         except Exception as exc:
             await self.sequencer.publish(
                 channel,
@@ -5872,6 +5920,9 @@ class Host:
                 "status": "idle",
             },
         )
+        # Only `message` and `followUp` are `InvokeChangesetOperationResult` fields.
+        if isinstance(outcome, Mapping):
+            return {k: outcome[k] for k in ("message", "followUp") if k in outcome}
         return {}
 
     def _operations_wire(self, session: _Session, changeset: Changeset) -> list[dict[str, Any]]:

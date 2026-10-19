@@ -125,6 +125,7 @@ from ahp_host_claude.permissions import (
     policy_hook,
     pre_tool_use_decision,
     progress_line,
+    read_only_hint,
     tool_request,
 )
 from ahp_host_claude.remote_control import CONFIG_KEY as RC_CONFIG_KEY
@@ -1609,6 +1610,8 @@ class ClaudeSession:
                     confirmation_title=context.title,
                     options=offered.options,
                     edits=(preview,) if preview is not None else (),
+                    read_only=read_only_hint(tool_name),
+                    policy_asked=decision is not None and decision.action == "ask",
                 )
             )
         except asyncio.CancelledError:

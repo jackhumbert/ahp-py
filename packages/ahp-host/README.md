@@ -293,8 +293,15 @@ is published, and a `Completes` provider declares its own completion trigger
 characters (`DeclaresCompletionTriggers`) — used when the embedder passes none,
 which is how `ahp-node` reaches its agents' completions. A `ProvidesOperations`
 provider declares its changeset operations, which the host registers when it is
-built, and a `ResumesOnRestore` provider names the restored sessions that need
-their agent at once instead of on the first turn. All of it is in
+built; a handler may take a fourth `OperationContext(params, principal)` argument
+(chosen by arity, so three-argument handlers keep working) and return
+`{message, followUp}` for the result. A `ResumesOnRestore` provider names the
+restored sessions that need their agent at once instead of on the first turn.
+The session publisher is also `ObservesSessionState` (`session_state()`, the
+session channel's reduced state) and `ReopensToolChats` (`worker_chat(resource)`,
+a worker chat opened earlier, also after a restart), and a `ToolConfirmation`
+carries hints for automatic answerers (`read_only`, `read_only_from_agent`,
+`policy_asked`, `locations`) that are never published. All of it is in
 [the provider guide](https://github.com/jackhumbert/ahp-py/blob/main/packages/ahp-host/docs/guide/writing-a-provider.md).
 
 **Params are validated where the schema is specific, and the refusal is the

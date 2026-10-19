@@ -324,6 +324,19 @@ line). An unknown `isolation` value logs a line, and fleet and remote log that
 
 Scripts: `conformance/extensions/callcwd.js` and `conformance/extensions/callcwd.py`.
 
+### opts.x.detail (approve)
+
+`approve(summary, {x: {detail: true}})` (Python: `approve(summary, x={'detail': True})`)
+resolves to `{approved, reason, answeredBy}` instead of a bool: `reason` is the
+human's explanation for a denial (masked) and `answeredBy` the answering person's
+principal, each `null` when unknown. A plain `approve()` still returns a bool, and
+its gate key and journal record are unchanged. `x` must be an object and
+`x.detail` a boolean, else `approve()` throws `approve() x must be an object` or
+`approve() x.detail must be a boolean`. Claude Code ignores `opts.x`, so there
+`approve()` stays a bool.
+
+Scripts: `conformance/extensions/approve_detail.js` and `conformance/extensions/approve_detail.py`.
+
 ### meta.x.schedule
 
 `meta.x.schedule` is a cron string or `{expression, timeZone}`; the time zone

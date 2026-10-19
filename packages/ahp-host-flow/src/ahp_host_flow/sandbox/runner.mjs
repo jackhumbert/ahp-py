@@ -365,7 +365,7 @@ Object.defineProperty(dtfProto, 'formatToParts', {
   define('approve', async function approve(summary, opts) {
     if (typeof summary !== 'string') throw new TypeError('approve() needs a summary string');
     opts = gateOpts('approve', opts);
-    const { diff } = opts;
+    const { diff, x } = opts;
     const optional = (v) => v === undefined || v === null || typeof v === 'string';
     if (
       diff !== undefined &&
@@ -378,11 +378,19 @@ Object.defineProperty(dtfProto, 'formatToParts', {
     ) {
       throw new TypeError('approve() diff must be a string or an array of {path, before?, after?}');
     }
+    if (x !== undefined && x !== null) {
+      if (!isPlain(x)) throw new TypeError('approve() x must be an object');
+      if (x.detail !== undefined && typeof x.detail !== 'boolean') {
+        throw new TypeError('approve() x.detail must be a boolean');
+      }
+    }
+    const detail = x != null && x.detail === true;
     const options = {};
     if (diff !== undefined && diff !== null) options.diff = JSON.parse(JSON.stringify(diff));
+    if (detail) options.x = { detail: true };
     const reply = await call('gate', { kind: 'approve', question: summary, options });
     if (!reply.ok) throw new Error(reply.message);
-    return reply.result?.value === true;
+    return detail ? reply.result?.value : reply.result?.value === true;
   });
   define('canvas', function canvas(url, opts) {
     if (typeof url !== 'string' || !/^https?:\\/\\/\\S/i.test(url)) {

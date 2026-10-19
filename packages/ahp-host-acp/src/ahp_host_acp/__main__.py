@@ -95,6 +95,7 @@ async def _run(settings: Settings) -> None:
             relay_host=settings.relay_host,
             policy=settings.policy,
             client_methods=settings.client_methods,
+            decline_feedback=settings.decline_feedback,
             env=settings.env,
             model_command=settings.model_command,
             config_options=settings.config_options,

@@ -68,6 +68,13 @@ server's AGENTS.md requires ("Adding a provider adapter"). It is the ACP
   the relayed shortcut and before `confirm_tool_call`; a deny answers the reject
   option without a prompt and shows the reason on the call (`ToolCall.notice`); `permissions.POLICY_KINDS` is pinned by a test
   (`tests/test_acppolicy.py`).
+- Decline reasons go to the agent as a text block on its next prompt in that
+  ACP session (ACP has no reason field), behind `decline_feedback`; the
+  `read_only` and `policy_asked` hints on a confirmation come from
+  `permissions.read_only_hint` and the policy, and are security decisions too;
+  `read_only_from_agent` stays true (the kind is the agent's word) and
+  `locations` carries the call's paths. Reasons are dropped only after the
+  prompt carrying them returned (or was cancelled in flight).
 - `client_methods.py` serves fs/* and terminal/* only when `[policy] host_tools` is
   set; the roots jail is checked before the policy and is never relaxed; a denial's
   reason is the JSON-RPC error message. Each terminal runs in its own process

@@ -14,7 +14,12 @@ from ahp_host.node import Roots
 from ahp_host.node.config import AgentSpec, NodeSettings
 from ahp_host.node.runner import create_agents
 
-from ahp_host_flow.worktree import APPLY_OPERATION, DISCARD_OPERATION, worktree_path
+from ahp_host_flow.worktree import (
+    APPLY_OPERATION,
+    COMMIT_OPERATION,
+    DISCARD_OPERATION,
+    worktree_path,
+)
 from tests.flow_fakes import reset_fakes
 from tests.flow_hosting import SESSION, write_toml
 from tests.hosting import connect, notifications, open_session, run_turn, shut, state, worker_chats
@@ -96,7 +101,11 @@ async def test_flow_node_operations_apply_and_discard(tmp_path: Path, node_path:
         turn = await run_turn(wire, chat, "t1", script("write notes.txt"))
         (uri,) = open_changesets()
         channel: dict[str, Any] = state(host, uri)
-        assert [op["id"] for op in channel["operations"]] == [APPLY_OPERATION, DISCARD_OPERATION]
+        assert [op["id"] for op in channel["operations"]] == [
+            APPLY_OPERATION,
+            COMMIT_OPERATION,
+            DISCARD_OPERATION,
+        ]
         assert run_id_of(turn)
         reply = await wire.request(
             "invokeChangesetOperation", {"channel": uri, "operationId": APPLY_OPERATION}

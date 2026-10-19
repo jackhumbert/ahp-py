@@ -227,10 +227,12 @@ async def _check(tmp_path: Path, node: str, command: str, *, drain: bool) -> Non
         assert len(cut) == 1
         assert cut[0]["state"] == "error"
         assert "rec: hold three" not in str(cut[0])
-        if drain:
-            # Offered for resuming like every interrupted chat, and declined.
-            assert error_types(cut[0]) == ["host.restart", "flow.run"]
-            assert NOTHING_TO_RESUME in str(cut[0])
+        # A worker chat is known as one after the restart too (`provider_chats` is restored
+        # from its `tool` origin), so its turn is not offered for resuming: the run's own
+        # resume dispatches the call again instead.
+        assert error_types(cut[0]) == ["host.restart"]
+        assert "'resumable': True" not in str(cut[0])
+        assert NOTHING_TO_RESUME not in str(cut[0])
     finally:
         await fx2.shut()
 

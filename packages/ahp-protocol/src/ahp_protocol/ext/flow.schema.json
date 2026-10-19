@@ -188,6 +188,21 @@
         }
       }
     },
+    "waiting": {
+      "type": "object",
+      "required": [
+        "kind"
+      ],
+      "properties": {
+        "kind": {
+          "type": "string"
+        },
+        "chat": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
     "step": {
       "type": "object",
       "required": [
@@ -202,6 +217,12 @@
         },
         "awaitingInput": {
           "const": true
+        },
+        "waiting": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/waiting"
+          }
         }
       },
       "additionalProperties": false

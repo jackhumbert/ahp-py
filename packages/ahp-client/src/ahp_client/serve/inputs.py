@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import base64
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from typing import Any
 
 from ahp_protocol.types import JsonObject
@@ -23,7 +24,14 @@ from ahp_client.client import actions, elicitation
 from ahp_client.client.client import AhpClient
 from ahp_client.client.mirror import StateMirror
 
-__all__ = ["ClientToolHost", "InputResponder", "ToolExecutor", "pending_inputs"]
+__all__ = [
+    "ClientToolHost",
+    "InputResponder",
+    "ToolExecutor",
+    "WaitingEntry",
+    "pending_inputs",
+    "waiting_entries",
+]
 
 ToolExecutor = Any  # Callable[[ToolCallContext], Awaitable[Mapping[str, Any]]]
 
@@ -35,6 +43,43 @@ def pending_inputs(mirror: StateMirror, session_uri: str) -> list[JsonObject]:
         return []
     entries = state.get("inputNeeded")
     return [dict(e) for e in entries if isinstance(e, Mapping)] if isinstance(entries, list) else []
+
+
+@dataclass(frozen=True)
+class WaitingEntry:
+    """One ``inputNeeded`` entry that blocks a human, reduced to what a UI lists."""
+
+    id: str
+    kind: str
+    chat: str | None
+    turn_id: str | None
+
+
+def waiting_entries(
+    mirror: StateMirror, session_uri: str, chat: str | None = None
+) -> tuple[WaitingEntry, ...]:
+    """What is waiting on a person, in ``inputNeeded`` order.
+
+    ``toolClientExecution`` is skipped: it asks a *client* to run a tool, and
+    does not block a human (the session reducer's ``_awaits_user`` rule). With
+    *chat* given, only that chat's entries are kept.
+    """
+    found: list[WaitingEntry] = []
+    for entry in pending_inputs(mirror, session_uri):
+        kind = entry.get("kind")
+        if kind == "toolClientExecution":
+            continue
+        entry_chat = entry.get("chat")
+        turn_id = entry.get("turnId")
+        waiting = WaitingEntry(
+            id=str(entry.get("id", "")),
+            kind=kind if isinstance(kind, str) else "",
+            chat=entry_chat if isinstance(entry_chat, str) else None,
+            turn_id=turn_id if isinstance(turn_id, str) else None,
+        )
+        if chat is None or waiting.chat == chat:
+            found.append(waiting)
+    return tuple(found)
 
 
 def _tool_call_ids(entry: Mapping[str, Any]) -> tuple[str, str]:
@@ -150,8 +195,13 @@ class InputResponder:
         edited_tool_input: str | None = None,
         reason: actions.DenialReason = "denied",
         confirmed: actions.ConfirmationReason = "user-action",
+        reason_message: str | Mapping[str, Any] | None = None,
+        user_suggestion: Mapping[str, Any] | None = None,
     ) -> None:
         """Approve or refuse a tool call.
+
+        *reason_message* and *user_suggestion* ride on a denial; an approval
+        ignores them.
 
         A host arbitrates: the **first** answer wins and later ones come back
         with a ``rejectionReason``. That is not an error on our side -- another
@@ -174,7 +224,12 @@ class InputResponder:
         self._client.dispatch(
             chat,
             actions.tool_call_denied(
-                turn_id, tool_call_id, reason=reason, selected_option_id=option_id
+                turn_id,
+                tool_call_id,
+                reason=reason,
+                selected_option_id=option_id,
+                reason_message=reason_message,
+                user_suggestion=user_suggestion,
             ),
         )
 
