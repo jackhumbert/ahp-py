@@ -125,6 +125,7 @@ class AcpConnection:
         user: str | int | None = None,
         group: str | int | None = None,
         umask: int | None = None,
+        extra_groups: Sequence[str | int] | None = None,
         stream_limit: int = LINE_LIMIT,
         on_oversize: OversizePolicy = "close",
         on_stderr: Callable[[str], None] | None = None,
@@ -137,8 +138,9 @@ class AcpConnection:
         `inherit_env=False` gives the child exactly `env` and nothing from this
         process. `new_process_group` (POSIX) puts the agent in its own session so
         shutdown can signal its whole group, grandchildren included. `user`,
-        `group` and `umask` are POSIX-only and passed to the subprocess call;
-        setting `user` also drops supplementary groups.
+        `group`, `umask` and `extra_groups` are POSIX-only and passed to the
+        subprocess call. Setting `user` drops supplementary groups unless
+        `extra_groups` names the ones to keep.
         """
         resolved = resolve_command(argv)
         kwargs: dict[str, Any] = {}
@@ -153,6 +155,8 @@ class AcpConnection:
             if user is not None:
                 kwargs["user"] = user
                 kwargs["extra_groups"] = []
+            if extra_groups is not None:
+                kwargs["extra_groups"] = list(extra_groups)
             if group is not None:
                 kwargs["group"] = group
             if umask is not None:

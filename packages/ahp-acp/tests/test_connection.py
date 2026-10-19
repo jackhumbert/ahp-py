@@ -278,3 +278,32 @@ async def test_bad_oversize_policy() -> None:
             on_request=_no_requests,
             on_oversize="bogus",  # type: ignore[arg-type]
         )
+
+
+class _SpawnedError(Exception):
+    def __init__(self, kwargs: dict[str, Any]) -> None:
+        super().__init__("spawned")
+        self.kwargs = kwargs
+
+
+async def _spawn_kwargs(monkeypatch: pytest.MonkeyPatch, **kwargs: Any) -> dict[str, Any]:
+    async def fake_exec(*argv: Any, **spawn_kwargs: Any) -> Any:
+        raise _SpawnedError(spawn_kwargs)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+    with pytest.raises(_SpawnedError) as caught:
+        await spawn({}, **kwargs)
+    return caught.value.kwargs
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="user and groups are POSIX-only")
+async def test_user_drops_supplementary_groups_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    kwargs = await _spawn_kwargs(monkeypatch, user="nobody")
+    assert kwargs["user"] == "nobody"
+    assert kwargs["extra_groups"] == []
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="user and groups are POSIX-only")
+async def test_extra_groups_keeps_the_named_groups(monkeypatch: pytest.MonkeyPatch) -> None:
+    kwargs = await _spawn_kwargs(monkeypatch, user="nobody", extra_groups=(100, "staff"))
+    assert kwargs["extra_groups"] == [100, "staff"]
