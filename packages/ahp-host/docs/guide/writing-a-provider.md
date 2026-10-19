@@ -367,6 +367,18 @@ default chat. A client stopping that turn cancels only your `run`: the
 session's agent is not interrupted, so stop the worker yourself on
 `CancelledError`.
 
+**Which client turn a worker works for.** A worker's own turns are
+host-internal (`external-<uuid>`): no client dispatched them, so a `Policy` that
+binds something to each client turn in `may_dispatch` (a credential, a quota)
+never sees them. The publisher you were given answers
+`origin_turn(chat=None) -> OriginTurn | None` (test with
+`isinstance(publisher, ResolvesOriginTurn)`): the `OriginTurn(chat, turn_id)` that
+was active on the parent chat when the worker was opened, followed up through
+nested workers, so it is always a client's turn (a resumed run resolves to the
+resuming turn). Look the binding up under it. `None` for a chat that is not a
+worker chat. A host's embedder can ask `Host.origin_turn(chat_uri)` for the same
+answer.
+
 **Terminals for the agent's own output.** `open_terminal` registers a terminal
 channel the session holds, so clients can watch it and none can type into it.
 Point a tool result's `{"type": "terminal", "resource": terminal.resource,

@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from ahp_host import LoopbackSingleUserPolicy
 from ahp_host.core.store import FileSessionStore
 
 from ahp_host_flow.__main__ import build_host, main
@@ -22,6 +23,14 @@ def test_build_host_serves_the_flow_provider(tmp_path: Path) -> None:
     toml.write_text(ECHO_TOML, encoding="utf-8")
     host = build_host(load_config(toml))
     assert host.provider.agent.provider == "flow"
+
+
+def test_build_host_takes_an_embedders_policy(tmp_path: Path) -> None:
+    toml = tmp_path / "flow.toml"
+    toml.write_text(ECHO_TOML, encoding="utf-8")
+    policy = LoopbackSingleUserPolicy()
+    assert build_host(load_config(toml), policy=policy).policy is policy
+    assert isinstance(build_host(load_config(toml)).policy, LoopbackSingleUserPolicy)
 
 
 def test_missing_config_exits(tmp_path: Path) -> None:

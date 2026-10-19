@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Added — origin turn for worker chats, and an embedder's own policy
+
+- `ScopedPublisher.origin_turn(chat=None)` (`ahp_host.provider.base.ResolvesOriginTurn`) passes the host's answer to an inner provider: the client turn a run's worker chat works for, so an embedder's `Policy` that binds a credential per client turn can reach the workers. Per run (each run's main chat has its own turn) and a resumed run resolves to the resuming turn. Foreign chats get `None`.
+- `build_host(policy=, session_store=)` and `run_in_process(policy=)` take an embedder's `Policy` (and session store) instead of the hard-coded loopback policy; the defaults are unchanged.
+
 ### Added — the resume-key hook (M12)
 
 - `RunOptions.key_extra` (a callable taking an `AgentCall`) and `key_mode` (its name in the journal): the hook's JSON value joins each `agent()` call's key as an `extra` field, so a cached call replays only for the same value. With no hook every key is byte-identical to before (`call_key(call, extra=...)`; an extra of `None` still adds `"extra": null`). `key_mode_name()` is `default`, the given `key_mode`, or the hook's `module:qualname`; the options reject a mode without a hook and `default` with one.

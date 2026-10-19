@@ -20,8 +20,8 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
-from ahp_host.core import Host, HostInfo, LoopbackSingleUserPolicy
-from ahp_host.core.store import FileSessionStore
+from ahp_host.core import Host, HostInfo, LoopbackSingleUserPolicy, Policy
+from ahp_host.core.store import FileSessionStore, SessionStore
 from ahp_host.node import Roots
 from ahp_host.ws import serve_websocket
 
@@ -63,7 +63,16 @@ def _is_loopback(bind: str) -> bool:
         return False
 
 
-def build_host(config: FlowConfig, *, roots: Sequence[Path] = (), store: bool = True) -> Host:
+def build_host(
+    config: FlowConfig,
+    *,
+    roots: Sequence[Path] = (),
+    store: bool = True,
+    policy: Policy | None = None,
+    session_store: SessionStore | None = None,
+) -> Host:
+    """The flow host. An embedder passes its own *policy* (default: loopback, one user) and
+    *session_store* (default: files under ``state_dir`` unless *store* is false)."""
     # The store is what makes a restart resumable: `Host.restore()` reads back the sessions,
     # their resume state (runs, kept worktrees) and the sequence counter.
     stored: dict[str, Any] = {}
@@ -73,6 +82,8 @@ def build_host(config: FlowConfig, *, roots: Sequence[Path] = (), store: bool = 
             "store": FileSessionStore(config.state_dir / "sessions"),
             "sequence_file": config.state_dir / "sequence",
         }
+    if session_store is not None:
+        stored["store"] = session_store
     served: Roots | None = None
     if len(roots) == 1:
         served = Roots.single(roots[0].expanduser())
@@ -81,7 +92,7 @@ def build_host(config: FlowConfig, *, roots: Sequence[Path] = (), store: bool = 
     provider = FlowProvider(config, roots=served)
     return Host(
         provider,
-        LoopbackSingleUserPolicy(),
+        policy if policy is not None else LoopbackSingleUserPolicy(),
         info=HostInfo(name="ahp-host-flow", version=__version__),
         **stored,
     )

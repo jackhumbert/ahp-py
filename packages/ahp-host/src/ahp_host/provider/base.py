@@ -635,6 +635,40 @@ class ChatContext:
         return kind if isinstance(kind, str) else None
 
 
+@dataclass(frozen=True)
+class OriginTurn:
+    """The turn a worker chat was opened under: *turn_id* on *chat*.
+
+    For a worker chat from :meth:`SessionPublisher.open_tool_chat` this is the
+    turn that was active on the parent chat when the worker was opened,
+    followed up through nested workers, so it is always a turn on a chat that
+    is not itself a worker: for a client's run, the client's turn.
+    """
+
+    chat: str
+    turn_id: str
+
+
+@runtime_checkable
+class ResolvesOriginTurn(Protocol):
+    """A :class:`SessionPublisher` that can say which turn a worker chat serves.
+
+    A worker's own turns (`external-<uuid>`) are host-internal: no client
+    dispatched them, so a policy that binds something to each client turn
+    (a credential, a quota) never saw them. This is the way back from a worker
+    to the turn it works for. The host's publisher implements it; test with
+    ``isinstance``.
+    """
+
+    def origin_turn(self, chat: str | None = None) -> OriginTurn | None:
+        """The turn *chat* (default: the default chat) works for.
+
+        ``None`` for a chat that is not a worker chat, or whose parent had no
+        active turn when it was opened.
+        """
+        ...
+
+
 @runtime_checkable
 class SessionPublisher(Protocol):
     """Out-of-turn updates: things true of the *session*, not of one turn.

@@ -177,6 +177,7 @@ from ahp_host.provider.base import (
     HostsChats,
     ManagesMcpServers,
     OpensSessions,
+    OriginTurn,
     ProviderChat,
     ProviderTerminal,
     ProvidesOperations,
@@ -1291,6 +1292,10 @@ class _Publisher:
             cwd=cwd,
         )
 
+    def origin_turn(self, chat: str | None = None) -> OriginTurn | None:
+        channel = self._chat_of(chat)
+        return None if channel is None else self._session.origin_turns.get(channel)
+
     async def open_tool_chat(
         self,
         title: str,
@@ -1558,6 +1563,9 @@ class _Session:
     #: turns are the provider's callbacks, so cancelling one cancels only that
     #: callback -- never the session's agent, which is busy with other things.
     provider_chats: set[str] = field(default_factory=set)
+    #: Worker chat -> the turn it was opened under (`origin_turn`). Runtime
+    #: only: a resumed run opens its workers afresh, under the resumed turn.
+    origin_turns: dict[str, OriginTurn] = field(default_factory=dict)
     #: Live canvases (1.0.0): (chat, provider's instance id) -> `ahp-canvas:`
     #: channel, in the order they were added. Runtime only -- a canvas's
     #: source URL "MUST NOT be reused from persisted state after a provider
@@ -4092,6 +4100,17 @@ class Host:
         moved with the parent. Read-only by default ("agent team workers").
         """
         chat = f"ahp-chat:/{uuid.uuid4()}"
+        # Resolved before the chat exists: the parent's active turn is the one
+        # the worker works for, or -- a nested worker -- the parent's own origin.
+        origin_turn = session.origin_turns.get(parent)
+        if origin_turn is None:
+            parent_state = self.sequencer.state_of(parent)
+            active = parent_state.get("activeTurn") if isinstance(parent_state, Mapping) else None
+            turn_id = active.get("id") if isinstance(active, Mapping) else None
+            if isinstance(turn_id, str) and turn_id:
+                origin_turn = OriginTurn(parent, turn_id)
+        if origin_turn is not None:
+            session.origin_turns[chat] = origin_turn
         await self.sequencer.register_channel(
             chat,
             {
@@ -4894,6 +4913,7 @@ class Host:
         session.chat_uris.discard(chat_uri)
         session.published_chats.pop(chat_uri, None)
         session.chat_changes.pop(chat_uri, None)
+        session.origin_turns.pop(chat_uri, None)
         await self.sequencer.publish(session.uri, {"type": "session/chatRemoved", "chat": chat_uri})
         # "When a chat ends, its chat-scoped changesets implicitly become
         # un-subscribable" -- said with `changeset/cleared` first, as session
@@ -9456,6 +9476,20 @@ class Host:
                 detail=detail or {},
             ),
         )
+
+    def origin_turn(self, chat_uri: str) -> OriginTurn | None:
+        """The turn the worker chat *chat_uri* works for, or ``None``.
+
+        The same answer a provider gets from `ResolvesOriginTurn.origin_turn`,
+        for an embedder that holds the host instead (a `Policy` consulted for a
+        worker's credential): ``None`` for any chat that is not a worker chat a
+        provider opened, or whose parent had no active turn at the time.
+        """
+        for session in self._sessions.values():
+            found = session.origin_turns.get(chat_uri)
+            if found is not None:
+                return found
+        return None
 
     def counters(self) -> dict[str, int]:
         """A few numbers, without reaching into private attributes.

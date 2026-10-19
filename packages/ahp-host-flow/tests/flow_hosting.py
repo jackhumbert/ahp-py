@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from ahp_host import Host, LoopbackSingleUserPolicy
+from ahp_host.core import Policy
 from ahp_host.core.automations import AutomationStore
 from ahp_host.core.store import FileSessionStore, SessionStore
 from ahp_protocol.ext.flow import FLOW_META_KEY
@@ -54,13 +55,14 @@ async def boot_flow(
     store: SessionStore | None = None,
     provider_options: Mapping[str, Any] | None = None,
     automations: AutomationStore | None = None,
+    policy: Policy | None = None,
 ) -> FlowFixture:
     workspace = workspace if workspace is not None else base / "ws"
     (workspace / ".claude" / "workflows").mkdir(parents=True, exist_ok=True)
     config = load_config(write_toml(base, node, body))
     host = Host(
         FlowProvider(config, user_workflows_dir=base / "user", **(provider_options or {})),
-        LoopbackSingleUserPolicy(),
+        policy if policy is not None else LoopbackSingleUserPolicy(),
         store=store,
         automations=automations,
     )
@@ -87,13 +89,14 @@ async def restart_flow(
     *,
     workspace: Path | None = None,
     provider_options: Mapping[str, Any] | None = None,
+    policy: Policy | None = None,
 ) -> FlowFixture:
     """A new host on the same store and state dir, restored: the session as the old host left it."""
     workspace = workspace if workspace is not None else base / "ws"
     config = load_config(write_toml(base, node, body))
     host = Host(
         FlowProvider(config, user_workflows_dir=base / "user", **(provider_options or {})),
-        LoopbackSingleUserPolicy(),
+        policy if policy is not None else LoopbackSingleUserPolicy(),
         store=store_for(base),
     )
     await host.restore()

@@ -14,8 +14,10 @@ from ahp_host.provider.base import (
     Canvas,
     InputOutcome,
     InputRequest,
+    OriginTurn,
     ProviderChat,
     ProviderTerminal,
+    ResolvesOriginTurn,
     SessionPublisher,
     ToolConfirmation,
     ToolConfirmationOutcome,
@@ -135,6 +137,18 @@ class ScopedPublisher:
             turn_id=turn_id,
             tool_call_id=tool_call_id,
         )
+
+    def origin_turn(self, chat: str | None = None) -> OriginTurn | None:
+        """The turn the worker chat works for, so an inner provider can find its caller's turn.
+
+        Only the worker chat and the tool chats opened here are answered; anything else is
+        foreign and gets ``None``, like every other call that names a foreign chat.
+        """
+        target = self._own(chat, "origin_turn")
+        resolver = self.outer
+        if target is None or not isinstance(resolver, ResolvesOriginTurn):
+            return None
+        return resolver.origin_turn(target)
 
     async def open_tool_chat(
         self,

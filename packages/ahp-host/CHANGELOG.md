@@ -12,6 +12,14 @@ versions each release speaks.
 
 ### Added
 
+- **`OriginTurn` and `ResolvesOriginTurn`**: a worker chat from `open_tool_chat`
+  remembers the turn it was opened under (the parent chat's active turn, followed
+  up through nested workers). The host's `SessionPublisher` answers
+  `origin_turn(chat=None) -> OriginTurn | None` and `Host.origin_turn(chat_uri)`
+  gives the same to an embedder, so a `Policy` that binds a credential to each
+  client turn can hand it to the workers that turn started, whose own turns never
+  pass `may_dispatch`. Runtime only: a resumed run opens its workers again under
+  the resuming turn.
 - **A delegation session origin**: `createSession` `_meta["ahp-py/origin"]` with
   `{kind: "ahp-py/delegation", session, chat, toolCallId}`
   (`ahp_protocol.ext.delegation`) is seeded into the session's immutable

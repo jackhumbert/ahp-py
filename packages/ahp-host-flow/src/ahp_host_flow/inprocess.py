@@ -18,7 +18,7 @@ from typing import Any
 
 import ahp_client
 from ahp_client import ResponsePartAdded, TurnCancelled, TurnCompleted, TurnFailed
-from ahp_host.core import Host, LoopbackSingleUserPolicy
+from ahp_host.core import Host, LoopbackSingleUserPolicy, Policy
 from ahp_host.node import Roots
 from ahp_protocol.transport import memory_pair
 
@@ -125,6 +125,7 @@ async def run_in_process(
     root: Path,
     on_note: Callable[[str], None] | None = None,
     filename: str = "script.js",
+    policy: Policy | None = None,
 ) -> Any:
     """Run *source* as a script in a session rooted at *root*; return its value.
 
@@ -152,19 +153,23 @@ async def run_in_process(
             if args is not NO_ARGS:
                 text += " " + json.dumps(args)
             return await _run_message(
-                dataclasses.replace(config, workflows=workflows), text, root, on_note
+                dataclasses.replace(config, workflows=workflows), text, root, on_note, policy
             )
     text = "```js\n" + source + "\n```"
     if args is not NO_ARGS:
         text += "\n" + json.dumps(args)
-    return await _run_message(config, text, root, on_note)
+    return await _run_message(config, text, root, on_note, policy)
 
 
 async def _run_message(
-    config: FlowConfig, text: str, root: Path, on_note: Callable[[str], None] | None
+    config: FlowConfig,
+    text: str,
+    root: Path,
+    on_note: Callable[[str], None] | None,
+    policy: Policy | None = None,
 ) -> Any:
     provider = FlowProvider(config, roots=Roots.single(root.resolve()))
-    host = Host(provider, LoopbackSingleUserPolicy())
+    host = Host(provider, policy if policy is not None else LoopbackSingleUserPolicy())
     client_t, server_t = memory_pair()
     serving = asyncio.create_task(host.serve(server_t))
     try:

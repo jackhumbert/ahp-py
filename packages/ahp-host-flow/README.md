@@ -504,6 +504,15 @@ its worker chat, with Apply and Discard working. One whose directory is gone
 (removed with `git worktree remove` / `git worktree prune`, say) is dropped with
 a log line, and no changeset link is left behind.
 
+### Which client turn a worker serves
+
+A worker chat's turns are host-internal, so an embedding host whose `Policy` binds a
+credential to each client turn never sees them. An inner provider whose
+`context.publisher` is a `ResolvesOriginTurn` calls `publisher.origin_turn()` and gets
+`OriginTurn(chat, turn_id)`, the client turn the run serves (the resuming turn after a
+`chat/turnResume`), then asks its policy for that turn's credential. Embedders pass their
+own policy with `build_host(config, policy=...)`.
+
 ### Steering
 
 `interactive = true` on a provider makes its worker chats `full` instead of
