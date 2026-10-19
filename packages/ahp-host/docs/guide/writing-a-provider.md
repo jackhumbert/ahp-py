@@ -373,10 +373,12 @@ binds something to each client turn in `may_dispatch` (a credential, a quota)
 never sees them. The publisher you were given answers
 `origin_turn(chat=None) -> OriginTurn | None` (test with
 `isinstance(publisher, ResolvesOriginTurn)`): the `OriginTurn(chat, turn_id)` that
-was active on the parent chat when the worker was opened, followed up through
-nested workers, so it is always a client's turn (a resumed run resolves to the
-resuming turn). Look the binding up under it. `None` for a chat that is not a
-worker chat. A host's embedder can ask `Host.origin_turn(chat_uri)` for the same
+was active on the parent chat when the worker was opened, provided that turn
+holds the spawning `tool_call_id` (open the worker after `tool_call_started`),
+followed up through nested workers, so it is always a client's turn (a resumed
+run resolves to the resuming turn). Look the binding up under it. `None` for a
+chat that is not a worker chat, and whenever the turn cannot be named: no
+active turn, a later turn, a worker parent with no origin, a moved chat. A host's embedder can ask `Host.origin_turn(chat_uri)` for the same
 answer.
 
 **Terminals for the agent's own output.** `open_terminal` registers a terminal

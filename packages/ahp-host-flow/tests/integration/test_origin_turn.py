@@ -77,6 +77,7 @@ class CredSession:
         assert isinstance(publisher, ResolvesOriginTurn)
         origin = publisher.origin_turn()
         CredProvider.seen.append((text, self.context.chat_uri, origin))
+        CredProvider.publishers.append(publisher)
         if text.startswith("hold") and CredProvider.holding:
             await asyncio.Event().wait()
         policy = CredProvider.policy
@@ -93,6 +94,7 @@ class CredSession:
 class CredProvider:
     seen: ClassVar[list[tuple[str, str, OriginTurn | None]]] = []
     holding: ClassVar[bool] = False
+    publishers: ClassVar[list[Any]] = []
     policy: ClassVar[BindingPolicy]
 
     @property
@@ -106,6 +108,7 @@ class CredProvider:
 def fresh() -> BindingPolicy:
     reset_fakes()
     CredProvider.seen.clear()
+    CredProvider.publishers.clear()
     CredProvider.holding = False
     CredProvider.policy = BindingPolicy()
     return CredProvider.policy
@@ -179,3 +182,22 @@ async def wait_resumed_turn(fx: FlowFixture) -> dict[str, Any]:
     from tests.integration.test_flow_durability import wait_resumed
 
     return await wait_resumed(fx)
+
+
+async def test_a_scoped_publisher_answers_only_for_chats_it_owns(
+    tmp_path: Path, node_path: str
+) -> None:
+    policy = fresh()
+    fx = await boot_flow(tmp_path, node_path, TOML, policy=policy)
+    try:
+        await start_turn(fx.wire, fx.chat, "t1", PARALLEL)
+        await wait_turn(fx.wire, fx.chat, "t1")
+        (first, second) = CredProvider.publishers
+        mine = first.origin_turn()
+        assert mine == OriginTurn(fx.chat, "t1")
+        # The sibling worker and the run's main chat are foreign to this publisher.
+        assert first.origin_turn(second.chat) is None
+        assert first.origin_turn(fx.chat) is None
+        assert fx.host.origin_turn(second.chat) == mine
+    finally:
+        await fx.shut()

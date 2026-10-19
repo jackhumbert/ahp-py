@@ -13,8 +13,10 @@ versions each release speaks.
 ### Added
 
 - **`OriginTurn` and `ResolvesOriginTurn`**: a worker chat from `open_tool_chat`
-  remembers the turn it was opened under (the parent chat's active turn, followed
-  up through nested workers). The host's `SessionPublisher` answers
+  remembers the turn it was opened under: the parent chat's active turn, only while
+  that turn still holds the spawning tool call, or the parent worker's own origin
+  for a nested worker. Anything else (no active turn, a later turn, a parent worker
+  with no origin) records nothing, so it resolves to `None`. A `moveChat` drops it. The host's `SessionPublisher` answers
   `origin_turn(chat=None) -> OriginTurn | None` and `Host.origin_turn(chat_uri)`
   gives the same to an embedder, so a `Policy` that binds a credential to each
   client turn can hand it to the workers that turn started, whose own turns never

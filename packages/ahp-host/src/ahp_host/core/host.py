@@ -4100,14 +4100,27 @@ class Host:
         moved with the parent. Read-only by default ("agent team workers").
         """
         chat = f"ahp-chat:/{uuid.uuid4()}"
-        # Resolved before the chat exists: the parent's active turn is the one
-        # the worker works for, or -- a nested worker -- the parent's own origin.
-        origin_turn = session.origin_turns.get(parent)
-        if origin_turn is None:
+        # Resolved before the chat exists, and failing closed (nothing recorded):
+        # - a worker's worker inherits its parent's origin; a worker parent with
+        #   none must not fall back to its own `external-` turn;
+        # - otherwise the turn is the parent's active turn, but only while that
+        #   turn still holds the spawning tool call. A client that cancelled the
+        #   run's turn and started another meanwhile leaves a late worker unbound
+        #   rather than bound to a turn that did not ask for it. (Tool call ids
+        #   are the provider's, so a provider reusing one across turns can still
+        #   match; the host has no better owner to name.)
+        origin_turn: OriginTurn | None = None
+        if parent in session.provider_chats:
+            origin_turn = session.origin_turns.get(parent)
+        else:
             parent_state = self.sequencer.state_of(parent)
             active = parent_state.get("activeTurn") if isinstance(parent_state, Mapping) else None
             turn_id = active.get("id") if isinstance(active, Mapping) else None
-            if isinstance(turn_id, str) and turn_id:
+            if (
+                isinstance(turn_id, str)
+                and turn_id
+                and _pending_tool_call(parent_state, turn_id, tool_call_id) is not None
+            ):
                 origin_turn = OriginTurn(parent, turn_id)
         if origin_turn is not None:
             session.origin_turns[chat] = origin_turn
@@ -5206,9 +5219,13 @@ class Host:
 
         With no *target* yet (a `newSession` move, before the session exists),
         the pieces are returned for :meth:`_adopt` to place.
+
+        A worker chat's `origin_turn` is dropped, not carried: the turn belongs
+        to the source session's run, so the moved chat fails closed (`None`).
         """
         handed = _HandedOver()
         for chat in chats:
+            source.origin_turns.pop(chat, None)
             source.chat_uris.discard(chat)
             source.published_chats.pop(chat, None)
             handed.chats.append(chat)
