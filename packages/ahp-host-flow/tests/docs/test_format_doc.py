@@ -42,3 +42,19 @@ def test_format_doc_plan_status() -> None:
     nxt = re.search(r"\b(M\d+[a-z]?)\b[^.]*\bis next\b", status.group(1))
     assert nxt is not None
     assert f"| {nxt.group(1)} |" in text
+
+
+def test_format_doc_m14_result() -> None:
+    text = (ROOT / "docs" / "plan.md").read_text(encoding="utf-8")
+    assert re.search(r"^\*\*M14 result\.\*\*", text, re.MULTILINE)
+    repo = ROOT.parents[1]
+    start = re.search(r"^\*\*M14 result\.\*\*", text, re.MULTILINE)
+    assert start is not None
+    rest = text[start.start() :]
+    end = re.search(r"^\*\*M15", rest, re.MULTILINE)
+    assert end is not None
+    paragraph = rest[: end.start()]
+    paths = re.findall(r"`(packages/[^`]+)`", paragraph)
+    assert len(paths) >= 10
+    missing = [p for p in paths if not (repo / p).is_file()]
+    assert not missing

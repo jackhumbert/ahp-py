@@ -38,11 +38,14 @@ class McpServer:
     #: http / sse.
     url: str | None = None
     headers: Mapping[str, str] = field(default_factory=dict)
+    #: stdio: look the program up on this machine's PATH. Off for a command
+    #: that names a program elsewhere (inside a container).
+    resolve: bool = True
 
     def to_acp(self, capabilities: Mapping[str, Any]) -> dict[str, Any] | None:
         """The `McpServer` for a session request, or None if the agent cannot take it."""
         if self.transport == "stdio":
-            program = shutil.which(self.command[0]) or self.command[0]
+            program = (shutil.which(self.command[0]) if self.resolve else None) or self.command[0]
             return {
                 "name": self.name,
                 "command": program,

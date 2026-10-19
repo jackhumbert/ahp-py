@@ -17,6 +17,12 @@ offered no such option, `cancelled` -- never an *always* the user did not
 choose, since that would widen (or fix) the agent's policy in its own state,
 where this host can neither see nor undo it.
 
+**The host's tool policy** (`[policy]`, `tool_request`, `rejected_answer`) is
+advisory here and comes first: a call it denies is answered with the agent's
+reject option without asking anyone, and one it marks *ask* is never let
+through by the relayed shortcut. An agent in its own allow-always mode never
+asks, so this cannot see its calls.
+
 The one exception is a call to a tool the client offered through the MCP relay
 (`relayed_answer`): its owner decides, so it is allowed once without asking.
 
@@ -30,10 +36,13 @@ agent why. The host keeps both in the transcript, where the user sees them.
 from __future__ import annotations
 
 import logging
+import shlex
 from collections.abc import Mapping, Sequence
+from pathlib import Path
 from typing import Any, Final
 
 from ahp_host.provider.base import ConfirmationOption, ToolConfirmationOutcome
+from ahp_host.provider.policy import ToolRequest
 
 log = logging.getLogger(__name__)
 
@@ -121,3 +130,72 @@ def relayed_answer(offered: Sequence[Mapping[str, Any]]) -> dict[str, Any] | Non
         if option["kind"] == "allow_once":
             return {"outcome": {"outcome": "selected", "optionId": option["optionId"]}}
     return None
+
+
+#: ACP tool kind -> the policy's kind; any other kind is a plain `tool`.
+#: Pinned by a test: a kind moved here changes what the policy checks.
+POLICY_KINDS: Final[Mapping[str, str]] = {
+    "read": "read",
+    "search": "read",
+    "edit": "write",
+    "delete": "write",
+    "move": "write",
+    "execute": "command",
+}
+
+#: `rawInput` keys that name a path, for agents that send no `locations`.
+RAW_PATH_KEYS: Final = ("path", "file_path", "filePath", "abs_path", "absolute_path", "destination")
+
+
+def _command_of(raw: Mapping[str, Any]) -> str:
+    command = raw.get("command")
+    if isinstance(command, str):
+        args = raw.get("args")
+        if isinstance(args, list) and all(isinstance(a, str) for a in args):
+            return shlex.join([command, *args])
+        return command
+    if isinstance(command, list) and all(isinstance(a, str) for a in command):
+        return shlex.join(command)
+    return ""
+
+
+def _paths_of(update: Mapping[str, Any], raw: Mapping[str, Any]) -> tuple[str, ...]:
+    found: list[str] = []
+    locations = update.get("locations")
+    for location in locations if isinstance(locations, list) else ():
+        if isinstance(location, Mapping) and isinstance(location.get("path"), str):
+            found.append(location["path"])
+    content = update.get("content")
+    for item in content if isinstance(content, list) else ():
+        if (
+            isinstance(item, Mapping)
+            and item.get("type") == "diff"
+            and isinstance(item.get("path"), str)
+        ):
+            found.append(item["path"])
+    found.extend(raw[key] for key in RAW_PATH_KEYS if isinstance(raw.get(key), str))
+    return tuple(dict.fromkeys(found))
+
+
+def tool_request(update: Mapping[str, Any], *, cwd: Path, roots: tuple[Path, ...]) -> ToolRequest:
+    """An ACP tool call as the host's :class:`ToolPolicy` judges it."""
+    title = update.get("title")
+    name = title if isinstance(title, str) and title else str(update.get("toolCallId", ""))
+    raw_input = update.get("rawInput")
+    raw = raw_input if isinstance(raw_input, Mapping) else {}
+    kind = POLICY_KINDS.get(str(update.get("kind")), "tool")
+    tool_input: Mapping[str, Any] = {}
+    if kind == "command":
+        tool_input = {"command": _command_of(raw)}
+    elif kind in ("read", "write"):
+        tool_input = {"paths": _paths_of(update, raw)}
+    return ToolRequest(name=name, kind=kind, input=tool_input, cwd=cwd, roots=roots, raw=raw)
+
+
+def rejected_answer(offered: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    """The agent's own reject option, *once* before *always*, else `cancelled`."""
+    for wanted in ("reject_once", "reject_always"):
+        for option in offered:
+            if option["kind"] == wanted:
+                return {"outcome": {"outcome": "selected", "optionId": option["optionId"]}}
+    return CANCELLED

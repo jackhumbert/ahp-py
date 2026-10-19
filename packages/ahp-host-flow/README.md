@@ -326,6 +326,9 @@ await agent('summarise', {x: {attach: [
   {kind: 'result', value: plan, label: 'plan'},
 ]}})
 
+// Run one call in a sub-folder of the run's working directory.
+await agent('fix the tests', {x: {cwd: 'packages/api'}})
+
 // Human gates: any connected client can answer.
 const go = await ask('Proceed?', {choices: ['yes', 'no']})
 const ok = await approve('Apply the plan', {diff: 'one-line summary of the diff'})
@@ -345,7 +348,9 @@ under Claude Code it falls back to `agent()` (set `FLOW_SHIM.askDefault` or
 
 `flow run --config` has no client, so it cannot answer a gate: an `ask()` or
 `approve()` fails with an error that says so. Attachments and named chats work
-with in-process providers only.
+with in-process providers only. `opts.x.cwd` works with every provider kind, but fleet and remote
+providers need an absolute folder (or a `file:` URI); a relative one is resolved in-process only
+(docs/format.md says how).
 
 ## Custom verbs
 

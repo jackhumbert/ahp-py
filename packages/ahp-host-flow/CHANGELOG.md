@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Documentation (M14)
+
+- Plan status and the M14 result (the proving tests of the three groups and the known limits); `test_format_doc_m14_result` checks that every test path it names exists.
+
 ### Added — origin turn for worker chats, and an embedder's own policy
 
 - `ScopedPublisher.origin_turn(chat=None)` (`ahp_host.provider.base.ResolvesOriginTurn`) passes the host's answer to an inner provider: the client turn a run's worker chat works for, so an embedder's `Policy` that binds a credential per client turn can reach the workers. Per run (each run's main chat has its own turn) and a resumed run resolves to the resuming turn. Foreign chats get `None`.
@@ -10,6 +14,11 @@
 ### Documentation (M13)
 
 - README: `--ping-interval`, `--max-size`, a non-loopback bind with a token, a proxy section, typed workflow starts and the `approve(person)` example; `docs/format.md` covers `meta.x.args` and typed starts; AGENTS.md invariants; plan status and the M13 result.
+
+### Added — opts.x.cwd (M14)
+
+- `opts.x.cwd` runs an in-process call in the named folder, which must lie inside the run's working directories. A worktree is cut from that folder, and a named chat keeps the folder of its first call. An unknown `isolation` value logs one line and is ignored.
+- Fleet calls pass it as `folder` to `start_session`; remote calls pass it as the session's `workingDirectories` (`engine.remote.folder_uri`). Both need an absolute path or a `file:` URI: a relative one fails the call with a log line (`fleet.fleet_folder`). Fleet and remote log that `isolation: 'worktree'` is not applied. Conformance script `extensions/callcwd`.
 
 ### Added — typed workflow calls (M13)
 

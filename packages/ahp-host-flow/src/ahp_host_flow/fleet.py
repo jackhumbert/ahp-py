@@ -7,6 +7,7 @@ import contextlib
 import json
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
+from pathlib import PurePosixPath, PureWindowsPath
 from typing import Any, Final
 
 from ahp_host import TurnSink
@@ -26,6 +27,7 @@ from ahp_host_flow.engine import (
     schema_error,
     with_preamble,
 )
+from ahp_host_flow.routing import x_opts
 
 #: The gateway's flow tool names (ahp-gateway `FLOW_TOOLS`); duplicated because neither package
 #: may import the other.
@@ -125,6 +127,24 @@ def _text_of(content: Any) -> str:
     blocks = content if isinstance(content, list) else []
     return " ".join(
         str(b["text"]) for b in blocks if isinstance(b, Mapping) and isinstance(b.get("text"), str)
+    )
+
+
+def fleet_folder(value: Any) -> str:
+    """`opts.x.cwd` for a fleet call: an absolute path or a `file:` URI.
+
+    The gateway turns it into a folder URI and refuses a relative path, and the
+    node's roots decide, so a relative one is refused here, before a worker
+    chat opens. Raises FlowAgentError.
+    """
+    if not isinstance(value, str) or not value:
+        raise FlowAgentError("opts.x.cwd must be a non-empty string")
+    if value.startswith("file:"):
+        return value
+    if PurePosixPath(value).is_absolute() or PureWindowsPath(value).is_absolute():
+        return value
+    raise FlowAgentError(
+        f"opts.x.cwd: {value} must be an absolute path or a file: URI for a fleet provider"
     )
 
 
@@ -307,6 +327,18 @@ class FleetDispatcher(StepDispatcher):
             raise FlowAgentError("no gateway offers fleet tools to this session")
         reply_timeout = spec.reply_timeout if spec.reply_timeout is not None else REPLY_TIMEOUT
         opts = call.opts
+        iso = opts.get("isolation")
+        if iso == "worktree":
+            self._note(
+                f"agent() #{call.ordinal}: isolation 'worktree' is not applied on fleet "
+                f"provider {name!r}; ignored"
+            )
+        elif iso is not None:
+            self._note(f"agent() #{call.ordinal}: isolation {iso!r} is not supported; ignored")
+        xo = x_opts(opts)
+        folder = xo.get("cwd")
+        if "cwd" in xo:
+            fleet_folder(folder)
         worker = await self.publisher.open_tool_chat(title, tool_call_id=call_id, chat=self.chat)
         raw_schema = opts.get("schema")
         schema = raw_schema if isinstance(raw_schema, Mapping) else None
@@ -434,6 +466,9 @@ class FleetDispatcher(StepDispatcher):
                         "originChat": worker.resource,
                         "originToolCall": call_id,
                     }
+                    if "cwd" in xo:
+                        # The node's roots decide; the gateway takes a path or a file URI.
+                        args["folder"] = folder
                     model = self._model(spec, opts)
                     if model is not None:
                         args["model"] = model

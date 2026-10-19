@@ -309,6 +309,21 @@ followed and must be a regular file inside the run's working directories;
 anything else fails the call before a worker chat opens, as does a bad entry
 (`null` plus a log line). In-process providers only.
 
+### opts.x.cwd
+
+`agent(prompt, {x: {cwd: 'packages/api'}})` runs the call in that folder. It is an
+ahp-py extension, not an `isolation` value (those are Claude Code's). In-process,
+the path is resolved with symlinks followed and must be a directory inside the
+run's working directories; a relative path is taken against the first. With
+`isolation: 'worktree'` it is the worktree's base. A named chat keeps its first
+folder (a log line says so). Fleet and remote need an absolute path or a `file:`
+URI (a relative one fails the call): fleet passes it as `folder` to `start_session`,
+and the node's roots decide; remote sends it as the session's working directory. A bad folder fails the call (`null` plus a log
+line). An unknown `isolation` value logs a line, and fleet and remote log that
+`isolation: 'worktree'` is not applied.
+
+Scripts: `conformance/extensions/callcwd.js` and `conformance/extensions/callcwd.py`.
+
 ### meta.x.schedule
 
 `meta.x.schedule` is a cron string or `{expression, timeZone}`; the time zone

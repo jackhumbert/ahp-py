@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -55,6 +56,12 @@ async def test_flowext_scripts_script(script: Path) -> None:
         assert got == sidecar["gates"]
     if "calls" in sidecar:
         assert sorted([c.ordinal, c.prompt] for c in dispatcher.calls) == sidecar["calls"]
+    if "call_cwds" in sidecar:
+        got_cwds = sorted(
+            [c.ordinal, (c.opts["x"] if isinstance(c.opts.get("x"), Mapping) else {}).get("cwd")]
+            for c in dispatcher.calls
+        )
+        assert got_cwds == sidecar["call_cwds"]
     if "verb_calls" in sidecar:
         assert sorted([c.ordinal, c.name] for c in fake.calls) == sidecar["verb_calls"]
     if "canvases" in sidecar:

@@ -6,6 +6,10 @@
     agent_name = "opencode"
     command = ["opencode", "acp"]
     model_command = "/model {model} -s"    # agents without ACP model support
+    # launcher = ["docker", "run", "-i", "--rm", "-v", "{cwd}:{cwd}", "-w", "{cwd}", "img"]
+    # env_allow = ["PATH", "HOME", "LANG"]  # host variables the agent may inherit
+    # relay_command = ["python3", "-m", "ahp_host_acp.relay"]  # the relay inside the container
+    # relay_host = "172.17.0.1"               # where the host listens for it
 
     [agents.env]
     OPENCODE_CONFIG = '~/.config/ahp/opencode.json'
@@ -67,10 +71,15 @@ from ahp_host_acp.config import (
     SERVER_ONLY_KEYS,
     ConfigError,
     _command,
+    _env_allow,
+    _launcher,
     _mcp_servers,
     _models,
     _option_values,
     _path,
+    _policy,
+    _relay_command,
+    _relay_host,
     _roots_from_file,
     _strings,
     read_config_file,
@@ -91,6 +100,11 @@ AGENT_OPTIONS = frozenset(
         "agent_name",
         "description",
         "command",
+        "launcher",
+        "env_allow",
+        "relay_command",
+        "relay_host",
+        "policy",
         "env",
         "models",
         "model_command",
@@ -117,10 +131,17 @@ def provider_from_options(options: Mapping[str, Any], roots: Roots, state_dir: P
     ):
         raise ConfigError("model_command must be a string containing {model}")
     description = options.get("description")
+    policy, client_methods = _policy(options)
     return AcpProvider(
         roots,
         AgentSpec(
             command=_command(None, options),
+            launcher=_launcher(options),
+            env_allow=_env_allow(options),
+            relay_command=_relay_command(options),
+            relay_host=_relay_host(options),
+            policy=policy,
+            client_methods=client_methods,
             env=_strings(options, "env"),
             model_command=model_command,
             config_options=_option_values(options),

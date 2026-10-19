@@ -9,6 +9,8 @@ Limits of a remote call, which only a gateway's fleet dispatch lifts (README, pl
   to answer it in a client of that host, and if nothing happens for
   `RemoteSpec.idle_timeout` seconds the call is stopped and fails, rather than
   hanging the run.
+* `opts.x.cwd` must be an absolute path or a `file:` URI on the remote host; it is sent as
+  the session's working directory and not checked here. `isolation` is not applied.
 * A call a restart cut off is not reattached: the remote turn it left is
   stopped, and the call is dispatched again.
 """
@@ -20,6 +22,7 @@ import contextlib
 import logging
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
+from pathlib import PurePosixPath, PureWindowsPath
 from typing import Any, Final, Protocol
 
 from ahp_client import (
@@ -89,6 +92,26 @@ class RemoteWorkers(Protocol):
         provider: str,
         body: Callable[[RemoteOut, str], Awaitable[AgentResult]],
     ) -> AgentResult: ...
+
+
+def folder_uri(opts: Mapping[str, Any]) -> str | None:
+    """`opts.x.cwd` as the file URI a remote host is asked to work in; None when absent."""
+    x = opts.get("x")
+    if not isinstance(x, Mapping) or "cwd" not in x:
+        return None
+    value = x["cwd"]
+    if not isinstance(value, str) or not value:
+        raise RemoteAgentError("opts.x.cwd must be a non-empty string")
+    if value.startswith("file:"):
+        return value
+    # The remote host's folders are not known here, so nothing is resolved or checked.
+    if PurePosixPath(value).is_absolute():
+        return PurePosixPath(value).as_uri()
+    if PureWindowsPath(value).is_absolute():
+        return PureWindowsPath(value).as_uri()
+    raise RemoteAgentError(
+        f"opts.x.cwd: {value} must be an absolute path or a file: URI for a remote provider"
+    )
 
 
 def _title(call: AgentCall) -> str:
@@ -163,6 +186,14 @@ class ClientDispatcher:
                 await client.aclose()
 
     async def run_agent(self, call: AgentCall) -> AgentResult:
+        iso = call.opts.get("isolation")
+        if iso == "worktree":
+            self._note(
+                f"agent() #{call.ordinal}: isolation 'worktree' is not applied on remote "
+                f"provider {self.spec.name!r}; ignored"
+            )
+        elif iso is not None:
+            self._note(f"agent() #{call.ordinal}: isolation {iso!r} is not supported; ignored")
         # Read here, in the dispatch task: the worker callback runs in a task of its own.
         before = reattach_handle()
         if before is not None and before.session and before.provider == self.spec.name:
@@ -220,8 +251,11 @@ class ClientDispatcher:
 
     async def _body(self, call: AgentCall, out: RemoteOut, title: str) -> AgentResult:
         spec = self.spec
+        folder = folder_uri(call.opts)
         client = await self._connected()
-        session = await client.create_session(provider=spec.agent)
+        session = await client.create_session(
+            provider=spec.agent, working_directories=[folder] if folder is not None else None
+        )
         if session.capabilities.get("multipleChats") is not None:
             chat = await session.create_chat(title=title)
         else:

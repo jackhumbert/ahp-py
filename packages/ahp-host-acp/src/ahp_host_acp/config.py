@@ -7,6 +7,16 @@
     token_file = "~/.config/ahp/openclaw.token"
     command = ["openclaw", "acp"]
     model_command = "/model {model} -s"
+    # Run the agent in a container; {cwd}, {uid} and {gid} are filled in per session.
+    # launcher = ["docker", "run", "-i", "--rm", "-v", "{cwd}:{cwd}", "-w", "{cwd}", "img"]
+    # Pass the agent only these host variables (names or globs); unset passes all.
+    # env_allow = ["PATH", "HOME", "LANG"]
+    # relay_command = ["python3", "-m", "ahp_host_acp.relay"]
+    # relay_host = "172.17.0.1"
+
+    [policy]                      # advisory tool policy; host_tools serves fs/* and terminal/*
+    # host_tools = true
+    # deny_paths = ["**/.env"]
 
     [env]
     OPENCLAW_HIDE_BANNER = "1"
@@ -36,6 +46,7 @@ from __future__ import annotations
 import argparse
 import os
 import shlex
+import sys
 import tomllib
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
@@ -43,6 +54,7 @@ from pathlib import Path
 from typing import Any, Final
 
 from ahp_host.provider.base import ModelInfo
+from ahp_host.provider.policy import PolicyError, ToolPolicy, policy_from_table
 
 from ahp_host_acp.mcp import TRANSPORTS, McpServer
 from ahp_host_acp.roots import Roots, parse_root_arg
@@ -65,6 +77,11 @@ _KEYS = frozenset(
         "provider_id",
         "description",
         "command",
+        "launcher",
+        "env_allow",
+        "relay_command",
+        "relay_host",
+        "policy",
         "env",
         "models",
         "model_command",
@@ -99,6 +116,12 @@ class Settings:
     model_command: str | None = None
     config_options: Mapping[str, str | bool] = field(default_factory=dict)
     mcp_servers: tuple[McpServer, ...] = ()
+    launcher: tuple[str, ...] = ()
+    env_allow: tuple[str, ...] | None = None
+    relay_command: tuple[str, ...] | None = None
+    relay_host: str | None = None
+    policy: ToolPolicy | None = None
+    client_methods: bool = False
     verbose: bool = False
 
 
@@ -151,6 +174,68 @@ def _command(flag: str | None, data: Mapping[str, Any]) -> tuple[str, ...]:
     ):
         raise ConfigError('no agent to run: give --command, or command = ["prog", "arg"]')
     return tuple(command)
+
+
+def _launcher(data: Mapping[str, Any]) -> tuple[str, ...]:
+    if "launcher" not in data:
+        return ()
+    launcher = data["launcher"]
+    if (
+        not isinstance(launcher, list)
+        or not launcher
+        or not all(isinstance(part, str) and part for part in launcher)
+    ):
+        raise ConfigError("launcher must be a list of non-empty strings")
+    if sys.platform == "win32" and any("{uid}" in part or "{gid}" in part for part in launcher):
+        raise ConfigError("launcher: {uid} and {gid} need a POSIX host")
+    return tuple(launcher)
+
+
+def _env_allow(data: Mapping[str, Any]) -> tuple[str, ...] | None:
+    if "env_allow" not in data:
+        return None
+    allow = data["env_allow"]
+    if not isinstance(allow, list) or not all(isinstance(name, str) and name for name in allow):
+        raise ConfigError("env_allow must be a list of variable names or glob patterns")
+    return tuple(allow)
+
+
+def _relay_command(data: Mapping[str, Any]) -> tuple[str, ...] | None:
+    if "relay_command" not in data:
+        return None
+    command = data["relay_command"]
+    if (
+        not isinstance(command, list)
+        or not command
+        or not all(isinstance(part, str) and part for part in command)
+    ):
+        raise ConfigError("relay_command must be a list of non-empty strings")
+    return tuple(command)
+
+
+def _relay_host(data: Mapping[str, Any]) -> str | None:
+    if "relay_host" not in data:
+        return None
+    host = data["relay_host"]
+    if not isinstance(host, str) or not host:
+        raise ConfigError("relay_host must be a non-empty string")
+    return host
+
+
+def _policy(data: Mapping[str, Any]) -> tuple[ToolPolicy | None, bool]:
+    """`[policy]`: the tool policy, and whether `host_tools` serves fs and terminal."""
+    if "policy" not in data:
+        return None, False
+    table = data["policy"]
+    if not isinstance(table, Mapping):
+        raise ConfigError("[policy] must be a table")
+    host_tools = table.get("host_tools", False)
+    if not isinstance(host_tools, bool):
+        raise ConfigError("[policy] host_tools must be true or false")
+    try:
+        return policy_from_table(table, extra={"host_tools"}), host_tools
+    except PolicyError as exc:
+        raise ConfigError(str(exc)) from exc
 
 
 def _strings(data: Mapping[str, Any], key: str) -> dict[str, str]:
@@ -316,6 +401,7 @@ def load(args: argparse.Namespace) -> Settings:
     ):
         raise ConfigError("model_command must be a string containing {model}")
     description = pick(None, "description", None)
+    policy, client_methods = _policy(data)
     return Settings(
         roots=roots,
         command=_command(args.command, data),
@@ -326,6 +412,12 @@ def load(args: argparse.Namespace) -> Settings:
         agent_name=str(pick(args.agent_name, "agent_name", DEFAULT_AGENT_NAME)),
         provider_id=str(pick(args.provider_id, "provider_id", DEFAULT_PROVIDER_ID)),
         description=str(description) if description is not None else None,
+        launcher=_launcher(data),
+        env_allow=_env_allow(data),
+        relay_command=_relay_command(data),
+        relay_host=_relay_host(data),
+        policy=policy,
+        client_methods=client_methods,
         env=_strings(data, "env"),
         config_options=_option_values(data),
         mcp_servers=_mcp_servers(data),

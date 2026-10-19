@@ -34,9 +34,11 @@ from __future__ import annotations
 import os
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Final
 
 from ahp_host.provider.base import ConfirmationOption, ToolConfirmationOutcome
+from ahp_host.provider.policy import Decision, ToolRequest
 from claude_agent_sdk import PermissionUpdate
 from claude_agent_sdk.types import PermissionRuleValue
 
@@ -155,6 +157,81 @@ def pre_tool_use_decision(tool_name: str, mode: str = ASK) -> dict[str, Any]:
         "hookSpecificOutput": {
             "hookEventName": "PreToolUse",
             "permissionDecision": "allow",
+        }
+    }
+
+
+# -- the host's tool policy -----------------------------------------------------
+#
+# Security-relevant. `ahp_host.provider.policy.ToolPolicy` judges commands and
+# paths; this table says which Claude Code tool is which kind of request and
+# which input key holds its command or path. Pinned by a test: a tool missing
+# here is judged by name only (`check`), never by what it touches.
+
+#: Tool name -> (request kind, input key).
+POLICY_TOOLS: Final[Mapping[str, tuple[str, str]]] = {
+    "Bash": ("command", "command"),
+    "Read": ("read", "file_path"),
+    "NotebookRead": ("read", "notebook_path"),
+    "LS": ("read", "path"),
+    "Glob": ("read", "path"),
+    "Grep": ("read", "path"),
+    "Write": ("write", "file_path"),
+    "Edit": ("write", "file_path"),
+    "MultiEdit": ("write", "file_path"),
+    "NotebookEdit": ("write", "notebook_path"),
+}
+
+#: Search tools that default to the working directory when given no path.
+_DEFAULT_TO_CWD: Final = frozenset({"LS", "Glob", "Grep"})
+
+#: Tool name -> input keys holding a glob that is searched under the tool's
+#: path (Glob's `pattern` may be absolute or climb out with `..`; Grep's
+#: `glob` narrows the files it reads). Each is judged as a path joined to the
+#: search folder. Pinned by the same test as `POLICY_TOOLS`.
+POLICY_GLOBS: Final[Mapping[str, tuple[str, ...]]] = {
+    "Glob": ("pattern",),
+    "Grep": ("glob",),
+}
+
+
+def tool_request(
+    name: str, tool_input: Mapping[str, Any], *, cwd: Path, roots: tuple[Path, ...]
+) -> ToolRequest:
+    """A Claude Code tool call as the policy's request."""
+    raw = dict(tool_input)
+    entry = POLICY_TOOLS.get(name)
+    if entry is None:
+        return ToolRequest(name, "tool", {}, cwd, roots, raw)
+    kind, key = entry
+    value = tool_input.get(key)
+    if kind == "command":
+        return ToolRequest(
+            name, kind, {"command": value if isinstance(value, str) else ""}, cwd, roots, raw
+        )
+    paths: list[str] = []
+    if isinstance(value, str) and value:
+        paths.append(value)
+    elif name in _DEFAULT_TO_CWD:
+        paths.append(".")
+    base = paths[0] if paths else "."
+    for glob_key in POLICY_GLOBS.get(name, ()):
+        pattern = tool_input.get(glob_key)
+        if isinstance(pattern, str) and pattern:
+            # An absolute (or `~`) pattern replaces the base, as os.path.join does.
+            paths.append(os.path.join(base, os.path.expanduser(pattern)))
+    return ToolRequest(name, kind, {"paths": tuple(paths)}, cwd, roots, raw)
+
+
+def policy_hook(decision: Decision) -> dict[str, Any] | None:
+    """The `PreToolUse` answer for a policy decision; None when it allows."""
+    if decision.action == "allow":
+        return None
+    return {
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": decision.action,
+            "permissionDecisionReason": decision.reason,
         }
     }
 

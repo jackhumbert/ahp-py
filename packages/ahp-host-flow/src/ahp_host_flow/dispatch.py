@@ -102,6 +102,32 @@ def named_chat(opts: Mapping[str, Any]) -> str | None:
     return value
 
 
+def call_directory(opts: Mapping[str, Any], roots: Sequence[Path]) -> Path | None:
+    """`opts.x.cwd` as a resolved directory inside the run's working directories, else None."""
+    x = x_opts(opts)
+    if "cwd" not in x:
+        return None
+    value = x["cwd"]
+    if not (isinstance(value, str) and value):
+        raise FlowAgentError("opts.x.cwd must be a non-empty string")
+    p = catalog.directory_of(value)
+    if p is None:
+        raise FlowAgentError(f"opts.x.cwd: {value} is not a local path")
+    if not p.is_absolute():
+        if not roots:
+            raise FlowAgentError("opts.x.cwd: needs a local working directory")
+        p = roots[0] / p
+    try:
+        resolved = p.resolve(strict=True)
+    except OSError as exc:
+        raise FlowAgentError(f"opts.x.cwd: {value} does not exist") from exc
+    if not resolved.is_dir():
+        raise FlowAgentError(f"opts.x.cwd: {value} is not a directory")
+    if not any(resolved.is_relative_to(r.resolve()) for r in roots):
+        raise FlowAgentError(f"opts.x.cwd: {value} is outside the run's working directories")
+    return resolved
+
+
 def message_attachments(opts: Mapping[str, Any], roots: Sequence[Path]) -> list[dict[str, Any]]:
     """`opts.x.attach` as AHP message attachments; raises FlowAgentError on a bad entry.
 
@@ -245,6 +271,8 @@ class _NamedChat:
     title: str
     #: The inner session's config (approval mode, effort), fixed by the first call.
     config: Mapping[str, Any] = field(default_factory=dict)
+    #: The folder (`opts.x.cwd`) the inner session was created in, fixed by the first call.
+    folder: Path | None = None
 
 
 class _TeeSession:
@@ -467,11 +495,23 @@ class ProviderDispatcher(StepDispatcher):
         if chat_name is not None and opts.get("isolation") == "worktree":
             raise FlowAgentError("opts.x.chat cannot be combined with isolation: 'worktree'")
         attachments = message_attachments(opts, self._roots())
+        folder = call_directory(opts, self._roots())
+        iso = opts.get("isolation")
+        if iso is not None and iso != "worktree":
+            self._note(f"agent() #{call.ordinal}: isolation {iso!r} is not supported; ignored")
         wt: Worktree | None = None
         if opts.get("isolation") == "worktree":
-            workdir = next(
-                (d for w in self.working_directories if (d := catalog.directory_of(w)) is not None),
-                None,
+            workdir = (
+                folder
+                if folder is not None
+                else next(
+                    (
+                        d
+                        for w in self.working_directories
+                        if (d := catalog.directory_of(w)) is not None
+                    ),
+                    None,
+                )
             )
             if workdir is None:
                 raise FlowAgentError("isolation 'worktree' needs a local working directory")
@@ -497,6 +537,7 @@ class ProviderDispatcher(StepDispatcher):
                     opened,
                     chat_name=None,
                     attachments=attachments,
+                    folder=folder,
                 )
             # Calls to one name are serialized: a session runs one turn at a time.
             async with self._named_locks.setdefault(chat_name, asyncio.Lock()):
@@ -510,6 +551,7 @@ class ProviderDispatcher(StepDispatcher):
                     opened,
                     chat_name=chat_name,
                     attachments=attachments,
+                    folder=folder,
                 )
         finally:
             # Every exit after the worktree exists (a failed or cancelled setup too) releases it.
@@ -584,6 +626,7 @@ class ProviderDispatcher(StepDispatcher):
         opened: list[str],
         chat_name: str | None = None,
         attachments: Sequence[dict[str, Any]] = (),
+        folder: Path | None = None,
     ) -> AgentResult:
         spec = self.config.providers[name]
         opts = call.opts
@@ -604,6 +647,13 @@ class ProviderDispatcher(StepDispatcher):
                     f"agent() #{call.ordinal}: opts.x.chat {chat_name!r} keeps its first call's "
                     f"config {json.dumps(dict(existing.config), sort_keys=True)}; "
                     f"{json.dumps(wanted, sort_keys=True)} ignored"
+                )
+            if folder != existing.folder:
+                first = str(existing.folder) if existing.folder is not None else "(the run's)"
+                later = str(folder) if folder is not None else "(the run's)"
+                self._note(
+                    f"agent() #{call.ordinal}: opts.x.chat {chat_name!r} keeps its first call's "
+                    f"folder {first}; {later} ignored"
                 )
         else:
             worker = await self.publisher.open_tool_chat(
@@ -648,19 +698,24 @@ class ProviderDispatcher(StepDispatcher):
             inner = existing.inner
         else:
             config = inner_config(spec, self.run_values(), opts)
+            directories = (
+                (wt.cwd.as_uri(),)
+                if wt
+                else ((folder.as_uri(),) if folder is not None else self.working_directories)
+            )
             inner = await provider.create_session(
                 AgentSessionContext(
                     session_uri=self.session_uri,
                     chat_uri=worker.resource,
                     provider_id=provider.agent.provider,
-                    working_directories=(wt.cwd.as_uri(),) if wt else self.working_directories,
+                    working_directories=directories,
                     model=model,
                     config=config,
                     publisher=ScopedPublisher(self.publisher, worker.resource),
                 )
             )
             if chat_name is not None:
-                self._named[chat_name] = _NamedChat(name, worker, inner, title, config)
+                self._named[chat_name] = _NamedChat(name, worker, inner, title, config, folder)
         self.workers[worker.resource] = inner
         pending = (
             self.pending_overlays.pop(worker.resource, None)

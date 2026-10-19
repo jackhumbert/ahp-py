@@ -183,6 +183,10 @@ is the design; milestones M0–M12 there say what exists and what's next.
   anything is dispatched. A client run id is used only when it is free.
 - `__main__` uses ahp-host's `is_loopback` and `bearer_token_validator`, never a private
   copy.
+- `opts.x.cwd` (`dispatch.call_directory`) is resolved strictly, must be a directory inside
+  `_roots()` (a relative one against `roots[0]`), and replaces the inner session's working
+  directories; with `isolation: 'worktree'` it is the worktree's base. Never loosen the
+  containment check.
 - Conventional commits, scope `ahp-host-flow`; `CHANGELOG.md` under
   `[Unreleased]`.
 

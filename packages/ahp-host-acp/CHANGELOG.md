@@ -2,6 +2,57 @@
 
 ## [Unreleased]
 
+### Added — [policy] host_tools (M14, security)
+
+- `[policy] host_tools = true` (config file and `acp` agent options;
+  `AgentSpec.client_methods`) offers the agent `fs/read_text_file`,
+  `fs/write_text_file` and `terminal/*`, served by the host in the new
+  `client_methods.py`. **A security decision:** every request is checked
+  against the roots jail first, never relaxed, and then the `ToolPolicy`; a
+  denial's reason is the JSON-RPC error message, and an *ask* goes to the
+  turn's user. Terminal output is capped at 1 MiB. An agent that ignores these
+  methods is bound only by the launcher and `env_allow`.
+- Each terminal command runs in its own process group (POSIX session); kill,
+  release and the session's end kill the group, grandchildren included
+  (Windows: `taskkill /T`).
+- A policy deny in `_request_permission` is shown to the user: the reason is
+  the call's invocation message and the first part of its result.
+
+### Added — host tool policy, advisory (M14, security)
+
+- `[policy]` (the `ahp-host` `ToolPolicy`: `deny_commands`, `deny_paths`,
+  `ask_paths`, `allow_paths_outside_roots`, `check`) in the config file, the
+  `acp` agent options and `AgentSpec.policy`. **A security decision in
+  `permissions.py`:** `_request_permission` asks the policy first, before the
+  relayed shortcut and before `confirm_tool_call`. A deny answers the agent's
+  reject option (`reject_once`, else `reject_always`, else `cancelled`) without
+  a prompt; an *ask* skips the relayed shortcut. `permissions.POLICY_KINDS`,
+  `tool_request` and `rejected_answer` are new; the kinds are pinned by a test.
+- Advisory only: an agent in its own allow-always mode never asks, and the
+  denial's reason cannot reach the agent through ACP; `host_tools` (below) fixes that.
+
+### Added — relay_command and relay_host (M14)
+
+- `relay_command` (the relay's command inside a container, such as
+  `["python3", "-m", "ahp_host_acp.relay"]`; not resolved on the host) and
+  `relay_host` (the address the tool bridge listens on, one the container can
+  reach; loopback when unset) in the config file, the `acp` agent options and
+  `AgentSpec`. `ToolBridge` takes `host` and `relay_command`; `McpServer` has
+  `resolve`; the relay takes `--host`. The token still travels only in the MCP
+  entry's environment.
+
+### Added — launcher and env_allow (M14)
+
+- `launcher` (a program and arguments the agent command runs behind, such as
+  `docker run -i --rm -v {cwd}:{cwd} -w {cwd} img`; `{cwd}`, `{uid}` and `{gid}`
+  are filled in per session) and `env_allow` (host variable names or globs the
+  agent may inherit) in the config file, the `acp` agent options and
+  `AgentSpec`. Paths map by identity only: mount each root at the same path.
+- `provider.launch_argv(spec, cwd)`; `AcpConnection.spawn` and `Connector` take
+  `inherit_env`.
+- Unset `env_allow` keeps today's behaviour (the agent inherits the host's whole
+  environment); setting it is recommended.
+
 ### Changed
 
 - The ACP transport and `session/update` parsing moved to the new `ahp-acp`

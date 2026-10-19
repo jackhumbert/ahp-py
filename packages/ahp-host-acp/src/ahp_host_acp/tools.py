@@ -69,6 +69,9 @@ class ToolCall:
     locations: Sequence[Mapping[str, Any]] = field(default_factory=tuple)
     content: Sequence[Mapping[str, Any]] = field(default_factory=tuple)
     status: str = "pending"
+    #: Text the host adds to the result, before the agent's own content (a
+    #: policy's reason for refusing the call); never replaced by an update.
+    notice: str | None = None
 
     def merge(self, update: Mapping[str, Any]) -> None:
         """Fold in a `tool_call` or `tool_call_update`: absent fields keep their value."""

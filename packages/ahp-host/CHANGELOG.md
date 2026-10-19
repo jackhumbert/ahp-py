@@ -10,6 +10,27 @@ versions each release speaks.
 
 ## [Unreleased]
 
+### Added — ToolPolicy (M14)
+
+- **`ahp_host.provider.policy`** (`ToolPolicy`, `ToolRequest`, `Decision`, `policy_from_table`,
+  `load_check`): a pure command and path policy (`deny_commands`, `deny_paths`, `ask_paths`,
+  `allow_paths_outside_roots`, an optional `check` callable). The most restrictive verdict wins and a
+  deny is final in every approval mode. Standard library only.
+- Command matching takes every reading and denies if any matches: an unknown option is tried
+  with and without an argument (`git --no-pager push`, `git -P push`), wrappers (`timeout`,
+  `xargs`, `nice`, `env -u`/`-S`, `sudo`, ...), `eval`, shell keywords and grouping are unwrapped,
+  and `$()`, backtick and `<()` bodies are parsed as commands. A command's words and redirection
+  targets are checked against `deny_paths` and `ask_paths` (`cat .env`, `cp ~/.ssh/id_rsa x`).
+  Path globs match case-insensitively on every platform. Best effort, documented in the README:
+  run-time paths (variables, `$()` output), shell-expanded globs and files a program opens itself
+  are not seen.
+
+### Added — child_env (M14)
+
+- **`ahp_host.provider.spawn.child_env` and `is_secret_name`**: build a spawned agent's environment
+  from an allowlist. Globs skip secret-shaped names; exact names keep them; the agent's own `extra`
+  env wins. Standard library only; the CLIs still inherit by default.
+
 ### Documentation
 
 - README, `docs/guide/deploying.md` and `docs/requests.md` entry 14: `principal_of`, `answered_by`, `bearer_token_validator`, `ping_interval` and `max_size`.

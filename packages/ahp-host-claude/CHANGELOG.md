@@ -2,6 +2,34 @@
 
 ## [Unreleased]
 
+### Added — host tool policy (M14, security)
+
+- **`policy`** (a `[policy]` config table, agent option, `ClaudeProvider(policy=...)`):
+  a security decision. The host's `ToolPolicy` (`ahp-host`) judges each tool
+  call through `permissions.POLICY_TOOLS` (Bash as a command, the file tools as
+  reads and writes by path; other tools by name through `check`). It is
+  consulted first in `ClaudeSession._pre_tool_use`, before the client/host tool
+  allow, so a deny is binding in every permission mode (including Accept edits,
+  Auto and bypass permissions, where `can_use_tool` is never called), and
+  again in `_can_use_tool`. The reason is sent back to the agent; an `ask`
+  forces the approval prompt. Tested in `tests/test_claudepolicy.py`.
+- `Glob`'s `pattern` and `Grep`'s `glob` (`permissions.POLICY_GLOBS`) are judged
+  as paths joined to the search folder, and `Bash` words as paths (`cat .env`).
+  Best effort: run-time paths, shell-expanded globs and files a program opens
+  itself are not seen.
+- A policy *ask* in `_pre_tool_use` still records the edit's before-image and a
+  client tool's call id, so an approved call keeps its diff and its id.
+
+### Added — `env_allow` (M14)
+
+- **`env_allow`** (config key, agent option, `ClaudeProvider(env_allow=...)`):
+  the host variables, as names or globs, Claude Code may see. The SDK builds
+  Claude Code's environment from `os.environ` first, so a variable cannot be
+  removed; each one not allowed is passed as the empty string. Include what
+  Claude Code needs to authenticate, e.g. `HOME` (and on Windows `SYSTEMROOT`,
+  `TEMP` and the profile variables). `CLAUDECODE` is never passed, as the SDK
+  drops it. Launching the SDK in a container is out of scope.
+
 ### Added — `from_config`
 
 - **`ahp_host_claude.from_config(config=None, *, roots=None, state_dir=None,

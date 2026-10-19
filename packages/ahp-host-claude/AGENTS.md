@@ -32,7 +32,11 @@ server's AGENTS.md requires ("Adding a provider adapter").
   (`LocalClaudeSession.chat_config_changed`, `_follow_mode`); host tools
   (`mcp__host__...`, the per-turn `StructuredOutput`) pass the approval gate
   like client tools, since they run in the host and touch nothing on this
-  machine (`ClaudeSession._pre_tool_use`, `client_tools.is_host_tool`).
+  machine (`ClaudeSession._pre_tool_use`, `client_tools.is_host_tool`); the
+  host `ToolPolicy` is consulted first in `_pre_tool_use` (before the
+  client/host tool allow) and in `_can_use_tool`; a deny is binding in every
+  mode, and an ask still does the call's bookkeeping; `permissions.POLICY_TOOLS`
+  and `POLICY_GLOBS` are pinned by a test.
 - `agent.py` is the `claude` agent type for `ahp-node` and `from_config`, a
   synchronous factory (`load = "ahp_host_claude:from_config"`) that shares
   `parse_agent_options` and `config.read_config_file` with it. It builds

@@ -30,9 +30,10 @@ server's AGENTS.md requires ("Adding a provider adapter"). It is the ACP
   `cancelled` (`AcpSession._cancel`), as ACP requires.
 - `client_tools.py` and `relay.py` give the agent a session's client tools (and
   the host's per-turn tools) as an MCP server, `ahp_client`. `relay.py` is a
-  stdio server the agent launches (`sys.executable -m ahp_host_acp.relay`;
-  standard library only, it imports nothing from this package); it connects
-  back over a loopback socket to `ToolBridge`, which answers with the tool list
+  stdio server the agent launches (`sys.executable -m ahp_host_acp.relay`, or
+  `relay_command` when set, which is not resolved on the host; standard library
+  only, it imports nothing from this package); it connects back over a socket
+  (loopback unless `relay_host` is set) to `ToolBridge`, which answers with the tool list
   and runs each call through `TurnSink.run_client_tool`. The socket is open to
   any local process, so a connection must open with the per-chat random token,
   passed in the server entry's environment and never in argv. ACP cannot change
@@ -63,6 +64,18 @@ server's AGENTS.md requires ("Adding a provider adapter"). It is the ACP
   in step: a new per-agent key goes in `AGENT_OPTIONS`; a new server-only file
   key in `config.SERVER_ONLY_KEYS`, which `from_config` ignores in the file and
   refuses as a keyword (like any unknown option).
+- **Security decision:** `ToolPolicy` is checked in `_request_permission` before
+  the relayed shortcut and before `confirm_tool_call`; a deny answers the reject
+  option without a prompt and shows the reason on the call (`ToolCall.notice`); `permissions.POLICY_KINDS` is pinned by a test
+  (`tests/test_acppolicy.py`).
+- `client_methods.py` serves fs/* and terminal/* only when `[policy] host_tools` is
+  set; the roots jail is checked before the policy and is never relaxed; a denial's
+  reason is the JSON-RPC error message. Each terminal runs in its own process
+  group and kill/release kill the group (mirroring `ahp_acp.connection`, whose
+  helpers are private); import `AcpError` from `ahp_acp`, not `jsonrpc`.
+- `launcher` and `env_allow` live in `AGENT_OPTIONS`, config `_KEYS` and
+  `AgentSpec`; keep the three in step. The agent command after a launcher is
+  never resolved on the host (only the launcher's program is).
 - Tests run `tests/fake_agent.py` as a real subprocess; no network, no real
   agent. `tests/test_host.py` drives it through a real `Host` over an
   in-memory transport (`tests/hosting.py`).

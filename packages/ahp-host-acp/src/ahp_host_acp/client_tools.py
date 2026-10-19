@@ -8,8 +8,8 @@ are served by `relay.py`, a stdio MCP server the agent launches. It connects
 back to `ToolBridge`, a loopback listener in this process, which lists the
 tools and runs each call through the provider (and so `run_client_tool`).
 
-The bridge listens on 127.0.0.1, which any local process can reach, so a
-connection must open with the session's random token (`token_for`); the
+The bridge listens on 127.0.0.1 (or the configured `relay_host`), which other
+processes can reach, so a connection must open with the session's random token (`token_for`); the
 relay gets it in the environment of the server entry, never in argv.
 
 Host tools (the per-turn `StructuredOutput`) ride the same relay: their
@@ -28,6 +28,7 @@ import json
 import logging
 import re
 import secrets
+import socket
 import sys
 from collections.abc import Awaitable, Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -249,18 +250,40 @@ def _line(message: dict[str, Any]) -> bytes:
 
 
 class ToolBridge:
-    """The loopback listener the relays connect back to, one key per session."""
+    """The listener the relays connect back to, one key per session.
 
-    def __init__(self, tools_for: ToolsFor, call: Call) -> None:
+    It listens on loopback unless `host` names an address (a container's
+    bridge gateway, say); `relay_command` replaces the relay's command for a
+    relay that runs where this machine's Python is not (inside a container).
+    """
+
+    def __init__(
+        self,
+        tools_for: ToolsFor,
+        call: Call,
+        *,
+        host: str | None = None,
+        relay_command: Sequence[str] | None = None,
+    ) -> None:
         self._tools_for = tools_for
         self._call = call
+        self._host = host
+        self._relay_command = tuple(relay_command) if relay_command else None
         self._server: asyncio.Server | None = None
         self._tokens: dict[str, str] = {}
         self._connections: dict[str, set[_Connection]] = {}
 
     async def start(self) -> None:
         if self._server is None:
-            self._server = await asyncio.start_server(self._serve, "127.0.0.1", 0, limit=MAX_LINE)
+            address = "127.0.0.1"
+            if self._host is not None:
+                # One address, so one socket and one port: binding a name can
+                # open a socket per address, each with its own port.
+                found = await asyncio.get_running_loop().getaddrinfo(
+                    self._host, None, type=socket.SOCK_STREAM
+                )
+                address = str(found[0][4][0])
+            self._server = await asyncio.start_server(self._serve, address, 0, limit=MAX_LINE)
 
     @property
     def port(self) -> int:
@@ -275,11 +298,16 @@ class ToolBridge:
 
     def server(self, key: str) -> McpServer:
         """The MCP server entry that gives an agent this key's tools."""
+        base = self._relay_command or (sys.executable, "-m", RELAY_MODULE)
+        command = (*base, "--port", str(self.port))
+        if self._host is not None:
+            command = (*command, "--host", self._host)
         return McpServer(
             name=SERVER,
             transport="stdio",
-            command=(sys.executable, "-m", RELAY_MODULE, "--port", str(self.port)),
+            command=command,
             env={TOKEN_ENV: self.token_for(key)},
+            resolve=self._relay_command is None,
         )
 
     def tools_changed(self, key: str | None = None) -> None:
@@ -292,12 +320,15 @@ class ToolBridge:
     async def aclose(self) -> None:
         if self._server is not None:
             self._server.close()
-            await self._server.wait_closed()
-            self._server = None
+        # Close the connections before waiting: from Python 3.12 wait_closed()
+        # also waits for every open connection, which a live relay would hold open.
         for connections in list(self._connections.values()):
             for connection in list(connections):
                 connection.close()
         self._connections.clear()
+        if self._server is not None:
+            await self._server.wait_closed()
+            self._server = None
 
     def _key_for(self, token: str) -> str | None:
         found = None

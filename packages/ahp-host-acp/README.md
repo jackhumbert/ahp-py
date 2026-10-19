@@ -97,8 +97,8 @@ Not yet: side chats (ACP has no way to give a session context outside its
 own conversation); annotation attachments (they live on a host channel this
 adapter does not read); telling the agent *why* a call was declined -- ACP's
 permission answer has no field for a reason or a suggestion, so they stay in
-the transcript. The client filesystem and terminal methods are deliberately
-not offered.
+the transcript. The client filesystem and terminal methods are offered only
+with `[policy] host_tools = true` (see Security).
 
 ## Run it
 
@@ -215,6 +215,65 @@ ollama.com with `OLLAMA_API_KEY`.
 Unknown settings are an error, so a typo cannot silently fall back to a
 default.
 
+## Running the agent in a container
+
+`launcher` runs the agent command behind a wrapper, typically `docker run`:
+
+```toml
+command = ["opencode", "acp"]
+launcher = ["docker", "run", "-i", "--rm", "-v", "{cwd}:{cwd}", "-w", "{cwd}", "img"]
+env_allow = ["PATH", "HOME", "LANG"]
+```
+
+The launcher's words are put in front of `command`, so the process started is
+`docker run ... img opencode acp`. In the launcher, `{cwd}` is the session's
+working directory, and `{uid}` and `{gid}` are the host user's ids (POSIX only;
+a launcher using them is refused on Windows). Only these three are replaced;
+other braces are left alone. Only the launcher's program is looked up on the
+host's PATH: the agent command after it belongs to the container and is never
+resolved on the host.
+
+`env_allow` lists the host variables (exact names, or globs such as `M14_*`)
+the agent may inherit; `[env]` is added on top. Setting it is recommended:
+left unset, the agent inherits the host's whole environment, API keys and
+tokens included. A glob never matches a secret-shaped name (`*_TOKEN`,
+`*_KEY`, `*SECRET*`, ...); name such a variable exactly to pass it. A
+container does not inherit the launcher's environment anyway, so to forward an
+allowed variable into it put `-e NAME` in the launcher. (The client-tool
+relay's token needs no `-e`: it is in the MCP entry's `env`, which the agent
+hands to the relay it starts inside the container.)
+
+With `env_allow` set the agent is started by `ahp_acp`'s
+`AcpConnection.spawn(inherit_env=False)`, in its own process group, with
+exactly the filtered variables plus `[env]`; unset, `inherit_env=True` keeps
+the whole environment. This package passes no `user`, `group` or `umask`, so the
+agent (or the launcher) runs as the host user. An embedder that calls
+`AcpConnection.spawn(user=...)` itself with a `child_env` result should know
+the filtered `HOME`, `USER` and `LOGNAME` are still the host user's: set the
+target user's in `env` or leave them out of the allowlist. Inside a container,
+drop privileges in the launcher (`docker run --user {uid}:{gid} ...`).
+
+`relay_command` and `relay_host` let the agent's client tools work from inside
+the container. The tools are served by a small relay the agent starts; by
+default that is this host's Python, which the container does not have. Install
+the relay in the image and name it, and give the address the host listens on:
+
+```toml
+relay_command = ["python3", "-m", "ahp_host_acp.relay"]
+relay_host = "172.17.0.1"
+```
+
+`relay_host` is an address the host can bind and the container can reach (for
+example the docker bridge gateway, `172.17.0.1`, or a name both sides
+resolve). The bridge listens there only when it is set; otherwise it listens on
+loopback. `relay_command` is not resolved on the host. The relay's token
+travels in the MCP entry's environment, never argv, so the launcher needs no
+`-e` for it.
+
+The supported path mapping is identity: mount each root at the same path
+(`-v {cwd}:{cwd}`), so paths the agent reports are paths on the host. A path
+map is not supported.
+
 ## Loading from Python (from_config)
 
 `ahp_host_acp.from_config` builds an `AcpProvider` without a node, for a
@@ -231,7 +290,7 @@ provider = from_config(roots={"work": "~/work"}, command=["opencode", "acp"])
 The file is the config file described under Run it; `port`, `bind`,
 `token_file` and `verbose` are ignored in it (as keywords they are refused, like
 any unknown option). Keyword options (`provider_id`,
-`agent_name`, `description`, `command`, `env`, `models`, `model_command`,
+`agent_name`, `description`, `command`, `launcher`, `env_allow`, `relay_command`, `relay_host`, `policy`, `env`, `models`, `model_command`,
 `config_options`, `mcp_servers`) override the file, `roots=` (a path, a list of
 paths or a name -> path table) overrides its root, and `state_dir=` its
 state directory.
@@ -281,6 +340,46 @@ the user is asked as for any call. A call counts as one of these when its title
 names a relayed tool. An agent could title another call to match, but an ACP
 agent already decides which calls it asks about, so this grants it nothing it
 could not take by not asking.
+
+**A host tool policy is advisory here.** `[policy]` (the `ahp-host` tool
+policy: `deny_commands`, `deny_paths`, `ask_paths`, `allow_paths_outside_roots`,
+`check`) is applied to each `session/request_permission` before anything else,
+the relayed-tool shortcut included. A denied call is answered with the agent's
+reject option, picked without a prompt; a call the policy marks *ask* is always
+put to the user. The reason cannot reach the agent through ACP in this path, so
+the agent only sees a rejection; the user sees it, under the call's name and in
+its result. The policy can only judge calls the agent asks
+about: an agent in its own allow-always mode never asks, so it is not bound.
+Hard enforcement is `[policy] host_tools = true`, below.
+
+```toml
+[policy]
+deny_commands = ["git push*"]
+deny_paths = ["**/.env"]
+```
+
+**The hard path: `[policy] host_tools = true`.** The agent is told, at
+`initialize`, that the host serves `fs/read_text_file`, `fs/write_text_file`
+and the `terminal/*` methods, and an agent that uses them has its reads,
+writes and commands run by the host. Each request is checked against the
+roots jail first (a path or terminal `cwd` outside the served folders is
+refused, even with `allow_paths_outside_roots`) and then against the policy:
+a denial is a JSON-RPC error whose message is the policy's reason, so the
+agent can show it to its model; an *ask* is put to the user in the turn.
+Terminal output is capped at 1 MiB (the agent's `outputByteLimit` may lower
+it). Each terminal command starts in its own process group (POSIX: its own
+session), and `terminal/kill`, `terminal/release` and the session's end kill
+the whole group, so what it started goes too (on Windows, `taskkill /T` while
+the command still runs). A command's words are judged as paths as well, so
+`cat .env` is denied by `**/.env`; that is best effort over the command text
+(see `ahp-host`'s README for what it cannot see). An agent that ignores these methods and uses its own file and shell tools
+is contained only by the launcher and `env_allow` sandbox, so pair them.
+
+```toml
+[policy]
+host_tools = true
+deny_commands = ["git push*"]
+```
 
 **Clients can change the agent's own settings.** Every config option and mode
 the agent reports is a session setting a client may change, and some loosen

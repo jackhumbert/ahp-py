@@ -295,7 +295,52 @@ error, so a typo cannot silently fall back to a default.
 | `remote_control` / `--[no-]remote-control` | Put new sessions on claude.ai (Remote Control). Default: whatever Claude Code does, i.e. your `remoteControlAtStartup` setting. |
 | `claude_ai_sessions` / `--claude-ai-sessions [all]` | Also list this machine's other Remote Control sessions, through claude.ai (default off; safe on every machine). `"all"`: every machine's, on one machine only. |
 | `chat_tools` / `--chat-tools A,B` | The web tools a session with no folder may use. Default `WebSearch` and `WebFetch`; may only narrow that list (empty leaves none). For a host whose sessions cannot reach the internet, `["WebSearch"]`. |
+| `env_allow` | Host variables (names or globs) Claude Code may see; default all. The SDK always starts Claude Code with the host's whole environment plus its own overrides, so a variable cannot be removed: each one not allowed is set to the empty string instead. Include what Claude Code needs to authenticate and run, e.g. `HOME` and `PATH`; on Windows also `SYSTEMROOT`, `TEMP`, `TMP`, `USERPROFILE`, `APPDATA`, `LOCALAPPDATA` and `COMSPEC`, without which processes fail to start or find their profile. `CLAUDECODE` is never passed (the SDK drops it). Launching the SDK in a container is out of scope. |
 | `provider_id` / `--provider-id` | The agent's id (default `claude`). Machines behind one gateway share it: the gateway merges them into one agent and the folder picks the machine. |
+
+### Host policy
+
+A `[policy]` table (a config-file table, or an agent's `policy` option) makes
+the host judge every command and path before any approval prompt:
+
+```toml
+[policy]
+deny_commands = ["git push*"]          # placeholders: your own patterns
+deny_paths = ["**/.env"]
+ask_paths = ["**/notes/*"]
+allow_paths_outside_roots = false
+# check = "my_pkg.policy:check"        # optional: a function over the request
+```
+
+The rules and their syntax are `ahp-host`'s `ToolPolicy`. Claude Code's tools
+map onto it like this; any other tool (`mcp__*`, `WebFetch`, `Task`, ...) is
+decided by name through `check` only.
+
+| Tool | Kind | Input key |
+| --- | --- | --- |
+| `Bash` | command | `command` |
+| `Read` | read | `file_path` |
+| `NotebookRead` | read | `notebook_path` |
+| `LS` | read | `path` (default: the working directory) |
+| `Glob` | read | `path` (default: the working directory), and `pattern` joined to it |
+| `Grep` | read | `path` (default: the working directory), and `glob` joined to it |
+| `Write`, `Edit`, `MultiEdit` | write | `file_path` |
+| `NotebookEdit` | write | `notebook_path` |
+
+A `deny` is binding in every approval mode, including Accept edits, Auto and
+bypass permissions: it is answered from the `PreToolUse` hook, which runs
+before the mode is consulted and before a client or host tool is let through,
+and again in the approval callback. The reason is sent back to the agent. An
+`ask` forces the approval prompt even where the mode would not ask.
+`host_tools` is not a key here (it belongs to ACP agents).
+
+`Bash` commands are matched as `ahp-host` describes, and their words and
+redirection targets are judged as paths too, so `cat .env` is denied by
+`**/.env` just as `Read` of `.env` is. That part is best effort over shell
+text: paths built at run time (variables, `$()` output), globs the shell
+expands (`cat .en*`) and files a program opens itself are not seen. A `Glob`
+pattern is judged as one path, so `**/.env` is caught but a pattern that only
+matches a denied file after expansion (`.en?`) is not.
 
 Authentication is Claude Code's own: the SDK uses whatever login `claude` has
 on this machine (or `ANTHROPIC_API_KEY` if set).

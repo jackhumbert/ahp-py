@@ -59,7 +59,9 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import logging
+import os
 import re
+import sys
 import uuid
 import weakref
 from collections.abc import Awaitable, Callable, Mapping, Sequence
@@ -104,8 +106,10 @@ from ahp_host.provider.base import (
     TurnSink,
     UserMessage,
 )
+from ahp_host.provider.policy import ToolPolicy
+from ahp_host.provider.spawn import child_env
 
-from ahp_host_acp import client_tools, permissions, prompts
+from ahp_host_acp import client_methods, client_tools, permissions, prompts
 from ahp_host_acp import commands as slash
 from ahp_host_acp import plan as plans
 from ahp_host_acp.catalogue import Catalogue
@@ -148,6 +152,7 @@ class Connector(Protocol):
         *,
         cwd: Path,
         env: Mapping[str, str] | None,
+        inherit_env: bool = True,
         on_notification: NotificationHandler,
         on_request: RequestHandler,
     ) -> AcpConnection: ...
@@ -167,6 +172,43 @@ class AgentSpec:
     config_options: Mapping[str, str | bool] = field(default_factory=dict)
     #: MCP servers the agent is given on every session.
     mcp_servers: Sequence[McpServer] = ()
+    #: A program and arguments the agent command is run behind, e.g. `docker run
+    #: -i --rm -v {cwd}:{cwd} -w {cwd} img`: see `launch_argv`.
+    launcher: tuple[str, ...] = ()
+    #: Host variables (names or globs) the agent may inherit; `None` keeps the
+    #: whole environment. See `ahp_host.provider.spawn.child_env`.
+    env_allow: tuple[str, ...] | None = None
+    #: The relay's command when it runs inside the container (the relay
+    #: installed in the image); not resolved on the host. `None` runs this
+    #: Python's `-m ahp_host_acp.relay`.
+    relay_command: tuple[str, ...] | None = None
+    #: The address the tool bridge listens on, one the container can reach;
+    #: `None` is loopback.
+    relay_host: str | None = None
+    #: The host's tool policy, advisory for this agent: see `permissions`.
+    policy: ToolPolicy | None = None
+    #: Offer the agent `fs/*` and `terminal/*`, served by the host under the
+    #: roots jail and `policy`: see :mod:`ahp_host_acp.client_methods`.
+    client_methods: bool = False
+
+
+def launch_argv(spec: AgentSpec, cwd: Path) -> tuple[str, ...]:
+    """What to execute: the agent command, behind the launcher if there is one.
+
+    In the launcher `{cwd}`, `{uid}` and `{gid}` are replaced (plain
+    `str.replace`: other braces stay). The agent command follows unchanged; it
+    is the launcher's (a container's), so only the launcher's program is looked
+    up on the host's PATH.
+    """
+    if not spec.launcher:
+        return spec.command
+    words = []
+    for word in spec.launcher:
+        word = word.replace("{cwd}", str(cwd))
+        if sys.platform != "win32":
+            word = word.replace("{uid}", str(os.getuid())).replace("{gid}", str(os.getgid()))
+        words.append(word)
+    return (*words, *spec.command)
 
 
 class _Chat:
@@ -319,7 +361,18 @@ class AcpSession:
             else []
         )
         self._client_tools = client_tools.offered(creator)
-        self._bridge = client_tools.ToolBridge(self._relay_tools, self._relay_call)
+        self._methods = client_methods.ClientMethods(
+            roots=self._roots,
+            policy=spec.policy,
+            env_allow=spec.env_allow,
+            cwd=lambda: self.directory or self._roots.primary,
+        )
+        self._bridge = client_tools.ToolBridge(
+            self._relay_tools,
+            self._relay_call,
+            host=spec.relay_host,
+            relay_command=spec.relay_command,
+        )
 
         # -- session config ----------------------------------------------------
         #: The session's config values, for the properties its schema has --
@@ -409,10 +462,13 @@ class AcpSession:
             cwd = self.working_directory()
             self.directory = cwd
             await self._bridge.start()
+            spec = self._spec
+            env = dict(spec.env) if spec.env_allow is None else child_env(spec.env_allow, spec.env)
             conn = await self._connect(
-                self._spec.command,
+                launch_argv(spec, cwd),
                 cwd=cwd,
-                env=self._spec.env,
+                env=env,
+                inherit_env=spec.env_allow is None,
                 on_notification=self._on_notification,
                 on_request=self._on_request,
             )
@@ -421,12 +477,15 @@ class AcpSession:
                     "initialize",
                     {
                         "protocolVersion": PROTOCOL_VERSION,
-                        # No client filesystem or terminal: the agent works with
-                        # its own tools, and every host-side read goes through
-                        # the jail.
+                        # Client filesystem and terminal only when the spec serves
+                        # them (`client_methods`, behind the jail and the policy);
+                        # otherwise the agent works with its own tools.
                         "clientCapabilities": {
-                            "fs": {"readTextFile": False, "writeTextFile": False},
-                            "terminal": False,
+                            "fs": {
+                                "readTextFile": spec.client_methods,
+                                "writeTextFile": spec.client_methods,
+                            },
+                            "terminal": spec.client_methods,
                         },
                         "clientInfo": {"name": "ahp-host-acp", "version": _version()},
                     },
@@ -549,6 +608,7 @@ class AcpSession:
 
     async def _drop_connection(self) -> None:
         conn, self._conn = self._conn, None
+        await self._methods.aclose()
         if conn is not None:
             try:
                 await conn.aclose()
@@ -557,6 +617,7 @@ class AcpSession:
 
     async def aclose(self) -> None:
         await self._drop_connection()
+        await self._methods.aclose()
         await self._bridge.aclose()
 
     # -- client tools ------------------------------------------------------------
@@ -1098,9 +1159,10 @@ class AcpSession:
                     shown.add(diff.path)
         elif diffs:
             self._edits.abandoned(diffs, self.directory)
+        notice = [{"type": "text", "text": call.notice}] if call.notice else []
         await sink.tool_call_completed(
             call.call_id,
-            {"content": [*text_of(call.content, shown=shown), *edits]},
+            {"content": [*notice, *text_of(call.content, shown=shown), *edits]},
             success=call.status != "failed",
             past_tense_message=call.past_tense(),
         )
@@ -1126,6 +1188,11 @@ class AcpSession:
     async def _on_request(self, method: str, params: Any) -> Any:
         if method == "session/request_permission":
             return await self._request_permission(_mapping(params))
+        if self._spec.client_methods and method in client_methods.METHODS:
+            chat = self._chat_of(_mapping(params).get("sessionId"))
+            return await self._methods.handle(
+                method, _mapping(params), chat.sink if chat is not None else None
+            )
         # fs/*, terminal/* were not offered in clientCapabilities.
         raise MethodNotFoundError(method)
 
@@ -1146,7 +1213,32 @@ class AcpSession:
         if not isinstance(call_id, str) or not call_id:
             return permissions.CANCELLED
         offered = permissions.acp_options(params.get("options"))
-        if self._is_relayed(chat, update) and (answer := permissions.relayed_answer(offered)):
+        ask_anyway = False
+        if self._spec.policy is not None:
+            decision = self._spec.policy.decide(
+                permissions.tool_request(
+                    update,
+                    cwd=self.directory or self._roots.primary,
+                    roots=tuple(self._roots.paths),
+                )
+            )
+            if decision.action == "deny":
+                reason = decision.reason or "denied by policy"
+                log.info("tool call %s denied by policy: %s", call_id, reason)
+                call = chat.calls.setdefault(call_id, ToolCall(call_id))
+                call.merge(update)
+                # The user sees why: under the call's name now, and in its
+                # result when it ends (the agent's failure, or the turn's end).
+                call.notice = reason
+                await self._announce(chat, call, sink)
+                await sink.tool_call_delta(call_id, invocation_message=reason)
+                return permissions.rejected_answer(offered)
+            ask_anyway = decision.action == "ask"
+        if (
+            not ask_anyway
+            and self._is_relayed(chat, update)
+            and (answer := permissions.relayed_answer(offered))
+        ):
             # A client's (or the host's) own tool: its owner decides, and
             # `run_client_tool` shows the call. See `permissions.relayed_answer`.
             chat.relayed.add(call_id)

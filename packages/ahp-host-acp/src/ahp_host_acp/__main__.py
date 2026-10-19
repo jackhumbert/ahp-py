@@ -89,6 +89,12 @@ async def _run(settings: Settings) -> None:
         settings.roots,
         AgentSpec(
             command=settings.command,
+            launcher=settings.launcher,
+            env_allow=settings.env_allow,
+            relay_command=settings.relay_command,
+            relay_host=settings.relay_host,
+            policy=settings.policy,
+            client_methods=settings.client_methods,
             env=settings.env,
             model_command=settings.model_command,
             config_options=settings.config_options,

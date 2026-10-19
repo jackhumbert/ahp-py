@@ -104,7 +104,7 @@ pip install -e ../ahp-protocol
 |---|---|---|
 | `ahp_protocol` *(dependency)* | wire types, the ten reducers, transports, the vendored corpora | stdlib only |
 | `src/ahp_host/core/` | sequencing, subscriptions, replay, policy, dispatch | the dependency |
-| `src/ahp_host/provider/` | `AgentProvider` protocol + echo provider | the dependency |
+| `src/ahp_host/provider/` | `AgentProvider` protocol + echo provider; `spawn.py` and `policy.py` are standard library only | the dependency |
 | `src/ahp_host/ws/` | WebSocket implementation | `core`, the dependency |
 | `scripts/` | `smoke_wheel.py` (checks an *installed* wheel) | — |
 

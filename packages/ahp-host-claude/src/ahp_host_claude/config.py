@@ -25,6 +25,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from ahp_host.provider.policy import PolicyError, ToolPolicy, policy_from_table
+
 from ahp_host_claude.claude_ai import scope_of
 from ahp_host_claude.roots import Roots, parse_root_arg
 
@@ -47,6 +49,8 @@ _KEYS = frozenset(
         "remote_control",
         "claude_ai_sessions",
         "chat_tools",
+        "env_allow",
+        "policy",
         "verbose",
     }
 )
@@ -78,6 +82,10 @@ class Settings:
     #: What a session with no folder may use; None keeps the default
     #: (`provider.CHAT_TOOLS`). May only narrow it.
     chat_tools: tuple[str, ...] | None = None
+    #: The host variables Claude Code may see (names or globs); None: all.
+    env_allow: tuple[str, ...] | None = None
+    #: Commands and paths the agent may not touch; None: only the approval gate.
+    policy: ToolPolicy | None = None
     verbose: bool = False
 
 
@@ -132,6 +140,25 @@ def _chat_tools(flag: str | None, value: Any) -> tuple[str, ...] | None:
     try:
         return chat_tools_subset(value)
     except ValueError as exc:
+        raise ConfigError(str(exc)) from exc
+
+
+def _env_allow(value: Any) -> tuple[str, ...] | None:
+    if value is None:
+        return None
+    if not isinstance(value, list) or not all(isinstance(v, str) and v for v in value):
+        raise ConfigError("env_allow must be a list of variable names or glob patterns")
+    return tuple(value)
+
+
+def _policy(value: Any) -> ToolPolicy | None:
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise ConfigError("policy must be a table")
+    try:
+        return policy_from_table(value)
+    except PolicyError as exc:
         raise ConfigError(str(exc)) from exc
 
 
@@ -218,5 +245,7 @@ def load(args: argparse.Namespace) -> Settings:
         remote_control=remote_control,
         claude_ai_sessions=claude_ai_sessions,
         chat_tools=chat_tools,
+        env_allow=_env_allow(data.get("env_allow")),
+        policy=_policy(data.get("policy")),
         verbose=bool(args.verbose or data.get("verbose", False)),
     )

@@ -5,8 +5,8 @@ support" the `stdio` transport, so this is the one way to give any ACP agent
 tools that run elsewhere (`client_tools.py` says which). The agent launches
 this module with `sys.executable -m ahp_host_acp.relay --port N` and speaks
 MCP's newline-delimited JSON-RPC to it; each `tools/list` and `tools/call` is
-forwarded over a loopback socket to the host (`client_tools.ToolBridge`),
-which answers with the tool list or the result.
+forwarded over a socket (loopback unless `--host` says otherwise) to the host
+(`client_tools.ToolBridge`), which answers with the tool list or the result.
 
 Any local process can reach a loopback port, so the first line this sends is a
 per-session random token, and the host answers nothing to a wrong one. The
@@ -113,6 +113,7 @@ def _forward(sock: socket.socket, request_id: Any, method: str, params: Any) -> 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="ahp_host_acp.relay")
     parser.add_argument("--port", type=int, required=True)
+    parser.add_argument("--host", default="127.0.0.1")
     args = parser.parse_args(argv)
     # MCP's stdio transport is UTF-8 with "\n" line ends. Python's defaults are
     # the locale code page (cp1252 on Windows) and "\r\n" there, which garble
@@ -124,7 +125,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if not token:
         sys.stderr.write(f"{TOKEN_ENV} is not set\n")
         return 2
-    sock = socket.create_connection(("127.0.0.1", args.port), timeout=10)
+    sock = socket.create_connection((args.host, args.port), timeout=10)
     sock.settimeout(None)
     reader = sock.makefile("r", encoding="utf-8", newline="\n")
     _send(sock, {"token": token})

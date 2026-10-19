@@ -7,7 +7,7 @@ an AHP session, and each `agent()` call is a **child chat** of it, so any AHP
 client can watch and steer the whole run. Extensions to the format are opt-in,
 and a script written for Claude Code runs unchanged.
 
-Status: M0-M13 done (M4b complete). M14-M18 are planned (§8, **Post-M12 plan**); M14 is next.
+Status: M0-M14 done (M4b complete). M15-M18 are planned (§8, **Post-M12 plan**); M15 is next.
 
 ## 1. Where it sits
 
@@ -586,7 +586,7 @@ A live GLM smoke test is opt-in, behind a marker.
 | M11 (done) | **Close the gaps** (the M11 spec below): the M4b remainder (`from_config` factories, the subagent preamble, watched workflow dirs, live corpus tests), operations as a provider capability (so `ahp-node` has them), changesets across a restart, `workflow()` reaching client workflows and qualified names, the delegation origin | every item's proving test passes on Linux and Windows; a flow.toml naming `ahp_host_claude:from_config` and `ahp_host_acp:from_config` runs the live fan-out, triage and GLM-routed Review tests |
 | M12 (done) | **Custom verbs and the resume-key hook** (the M12 spec below): host-side verbs a script calls like `agent()` but that run no model (`tool()`, `render()`, an `approve(person)` of the deployment's own), journaled and replayed like gates; an opt-in hook that adds the routed provider and model (or anything a callable returns) to each `agent()` call's resume key | the M12 proving tests pass on Linux and Windows; with no hook configured every journal key is byte-identical to M11's |
 | M13 (done) | **Identity, typed workflow calls, quick fixes** (the M13 spec below): the README and proxy fixes, `--ping-interval` and `--max-size`, a non-loopback bind with a token; an optional principal on sessions, messages and answers; `meta.x.args`, typed workflow starts and client-chosen run ids | the M13 proving tests in §8 pass |
-| M14 | Folders, sandboxes and host policy | the M14 proving tests in §8 pass |
+| M14 (done) | Folders, sandboxes and host policy | the M14 proving tests in §8 pass |
 | M15 | Approvals and changesets | the M15 proving tests in §8 pass |
 | M16 | Limits, timeouts and fallback | the M16 proving tests in §8 pass |
 | M17 | Sandboxed workflow hosts, client tools in workers, durable workers | the M17 proving tests in §8 pass |
@@ -738,7 +738,7 @@ Known limits. Queued, steered and host-started turns carry no principal. Absent 
    - `dispatch.call_directory(opts, roots)` is parsed like `message_attachments`: resolved strictly, a directory, inside `_roots()`, with a relative path resolved against `roots[0]`. It replaces `self.working_directories` in the inner `AgentSessionContext`.
    - With `isolation: 'worktree'`, the folder is the base of the worktree (`create_worktree(workdir=cwd)`), and the inner cwd is its relative path inside the worktree.
    - With `opts.x.chat`, the first call fixes the folder; a later different one logs a line, as config does.
-   - Fleet passes `folder` to `start_session`, and the node's roots decide. Remote passes `working_directories=[uri]` to `create_session`.
+   - Fleet passes `folder` to `start_session`, and the node's roots decide. Remote passes `working_directories=[uri]` to `create_session`. Both need an absolute path or a `file:` URI; a relative one fails the call with a line.
    - Unknown `isolation` values become one log line instead of being silently ignored. Fleet and remote log that `isolation: 'worktree'` is not applied there.
    - The key already covers `opts`.
    - Proving tests:
@@ -757,7 +757,7 @@ Known limits. Queued, steered and host-started turns carry no principal. Absent 
    - **Relay in a container.**
      - `relay_command` overrides `sys.executable -m ahp_host_acp.relay`, so the relay can be installed in the image.
      - `relay_host` (for example `host.docker.internal`) makes the bridge listen on that interface instead of loopback, and only when set.
-     - The bridge token reaches the relay through the launcher's environment (`-e NAME`), never argv.
+     - The bridge token reaches the relay through the MCP entry's environment, which the agent hands to the relay it starts inside the container, so the launcher needs no `-e NAME`; never argv.
    - ahp-host-claude gets `env_allow` only, through the SDK's `env`. Whether the SDK can be launched in a container is out of scope.
    - Proving tests:
      - `fake_agent.py` gains a scenario that reports its `os.environ` keys and argv: `env_allow` drops an unlisted variable and a secret-shaped one, keeps `PATH`, and the launcher prefix and placeholders reach argv.
@@ -768,9 +768,9 @@ Known limits. Queued, steered and host-started turns carry no principal. Absent 
 3. **Host-enforced command and path policy (ahp-host, ahp-host-claude, ahp-host-acp).**
    - `ahp_host.provider.policy.ToolPolicy` is pure: `decide(ToolRequest(name, kind, input, cwd, roots)) -> Decision(allow | deny | ask, reason)`. A deny is final in every approval mode, never downgraded by `acceptEdits` or `bypass`. `ask` forces a prompt.
    - Rules come from config as a `[policy]` table:
-     - `deny_commands`: shell-word patterns such as `git push*`, `git remote set-url*` and `curl * | sh`. Matching is on the parsed command (`shlex`), so `git  push` and `git -C x push` match.
+     - `deny_commands`: shell-word patterns such as `git push*`, `git remote set-url*` and `curl * | sh`. Matching is on the parsed command (`shlex`), so `git  push` and `git -C x push` match; an unknown option is tried with and without an argument, wrappers (`env`, `sudo`, `timeout`, `xargs`, `nice`, ...), `eval`, `sh -c`, shell keywords and `$()` bodies are unwrapped, and a command's words are judged against `deny_paths` and `ask_paths` too.
      - `deny_paths`: globs such as `**/.env`, `**/id_*` and `~/.ssh/**`. Matching happens after `resolve()`, so symlinks and `..` are caught.
-     - `ask_paths`: reads that need a prompt.
+     - `ask_paths`: reads, writes and commands naming a matching path that need a prompt.
      - `allow_paths_outside_roots = false`.
      - A callable by import path, for a deployment's own rules.
    - Each provider maps its tools to `ToolRequest`, and its mapping table is the security decision tested:
@@ -784,6 +784,14 @@ Known limits. Queued, steered and host-started turns carry no principal. Absent 
      - Claude: a denied `git push` is refused under `acceptEdits` and `bypassPermissions`, with the reason, using the fake SDK.
      - ACP: a permission request for a denied path is rejected without a prompt; with `host_tools`, a `fs/read_text_file` of `.env` returns an error, a read inside the roots works, and `terminal/create` of `git push` is refused (`fake_agent.py` gains these client calls).
      - Each mapping table is pinned by a test.
+
+**M14 result.** The three groups landed with no live model and no docker anywhere.
+
+1. **A call in a given folder.** `packages/ahp-host-flow/tests/integration/test_callcwd.py` (in-process: the inner session's folder, the roots check, the worktree base and the named chat), `packages/ahp-host-flow/tests/integration/test_callcwd_remote.py` (fleet and remote) and the conformance script `packages/ahp-host-flow/conformance/extensions/callcwd.js` with its twin `packages/ahp-host-flow/conformance/extensions/callcwd.py`.
+2. **Launcher and environment allowlist.** ahp-host `packages/ahp-host/tests/unit/test_childenv.py`; ahp-host-acp `packages/ahp-host-acp/tests/test_acplaunch.py` and `packages/ahp-host-acp/tests/test_acprelayhost.py`; ahp-host-claude `packages/ahp-host-claude/tests/test_claudeenv.py`.
+3. **Host-enforced command and path policy.** The pure policy in ahp-host `packages/ahp-host/tests/unit/test_toolpolicy.py`; Claude's mapping and its binding deny in ahp-host-claude `packages/ahp-host-claude/tests/test_claudepolicy.py`; the advisory ACP path in ahp-host-acp `packages/ahp-host-acp/tests/test_acppolicy.py`; and the hard path, `[policy] host_tools = true`, in `packages/ahp-host-acp/tests/test_acphostfs.py`.
+
+Known limits. Path mapping is identity only. The ACP permission path is advisory, and an agent's reason is not sent in it (M15 item 4). Claude's dropped variables arrive as empty strings, because the SDK merges `os.environ` (`CLAUDECODE` excepted, which the SDK drops). The command policy is best effort over shell text: a command's words, `--opt=value` values and redirection targets are checked as paths, but paths built at run time (variables, `$()` output, an earlier `cd`), globs the shell expands (`cat .en*`) and files a program opens itself are not, and a word that only looks like a denied path is denied. Claude's `Glob` pattern and `Grep` glob are judged as one path each, not expanded. On Windows a terminal's grandchildren are killed only while the command still runs (`taskkill /T`). No test uses docker.
 
 **M15: approvals and changesets.**
 

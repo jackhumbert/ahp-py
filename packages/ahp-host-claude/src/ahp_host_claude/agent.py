@@ -7,6 +7,10 @@
     remote_control = true      # default: whatever Claude Code does
     claude_ai_sessions = true  # this machine's other sessions; "all": every machine's
     chat_tools = ["WebSearch"] # default both web tools; may only narrow the list
+    env_allow = ["PATH", "HOME"]  # default: Claude Code sees every variable
+
+    [agents.policy]               # see the README, "Host policy"
+    deny_commands = ["git push*"]
 
 Registered as the `claude` entry in the `ahp_host.agents` group, so
 `ahp-node` can serve Claude beside other agents from one host.
@@ -22,6 +26,7 @@ from pathlib import Path
 from typing import Any
 
 from ahp_host.node import NodeContext
+from ahp_host.provider.policy import PolicyError, ToolPolicy, policy_from_table
 
 from ahp_host_claude.claude_ai import LOCAL, Api, scope_of
 from ahp_host_claude.config import (
@@ -46,7 +51,15 @@ from ahp_host_claude.provider import (
 from ahp_host_claude.roots import Roots
 
 AGENT_OPTIONS = frozenset(
-    {"provider_id", "agent_name", "remote_control", "claude_ai_sessions", "chat_tools"}
+    {
+        "provider_id",
+        "agent_name",
+        "remote_control",
+        "claude_ai_sessions",
+        "chat_tools",
+        "env_allow",
+        "policy",
+    }
 )
 
 
@@ -61,6 +74,10 @@ class AgentOptions:
     #: `claude_ai.scope_of`'s answer: falsy is off.
     claude_ai_sessions: str | None
     chat_tools: tuple[str, ...]
+    #: None: Claude Code sees every host variable.
+    env_allow: tuple[str, ...] | None
+    #: None: only the approval gate.
+    policy: ToolPolicy | None
 
 
 def parse_agent_options(options: Mapping[str, Any]) -> AgentOptions:
@@ -84,12 +101,30 @@ def parse_agent_options(options: Mapping[str, Any]) -> AgentOptions:
         claude_ai_sessions = scope_of(options.get("claude_ai_sessions", False))
     except ValueError as exc:
         raise ValueError(f"claude agent: {exc}") from exc
+    env_allow = options.get("env_allow")
+    if env_allow is not None and (
+        not isinstance(env_allow, list | tuple)
+        or not all(isinstance(v, str) and v for v in env_allow)
+    ):
+        raise ValueError(
+            "claude agent: env_allow must be a list of variable names or glob patterns"
+        )
+    policy = options.get("policy")
+    if policy is not None:
+        if not isinstance(policy, Mapping):
+            raise ValueError("claude agent: policy must be a table")
+        try:
+            policy = policy_from_table(policy)
+        except PolicyError as exc:
+            raise ValueError(f"claude agent: {exc}") from exc
     return AgentOptions(
         provider_id=provider_id,
         agent_name=str(options.get("agent_name", DEFAULT_AGENT_NAME)),
         remote_control=remote_control,
         claude_ai_sessions=claude_ai_sessions,
         chat_tools=tuple(chat_tools),
+        env_allow=tuple(env_allow) if env_allow is not None else None,
+        policy=policy,
     )
 
 
@@ -117,6 +152,8 @@ async def create(options: Mapping[str, Any], node: NodeContext) -> ClaudeProvide
         claude_ai_scope=opts.claude_ai_sessions or LOCAL,
         state_dir=node.state_dir,
         chat_tools=opts.chat_tools,
+        env_allow=opts.env_allow,
+        policy=opts.policy,
         commands=found.commands,
         # Start-up could not say: try again until it can.
         rediscover=not found.models,
@@ -179,6 +216,8 @@ def from_config(
         claude_ai_scope=opts.claude_ai_sessions or LOCAL,
         state_dir=state,
         chat_tools=opts.chat_tools,
+        env_allow=opts.env_allow,
+        policy=opts.policy,
         commands=(),
         rediscover=True,
         lazy_discovery=True,

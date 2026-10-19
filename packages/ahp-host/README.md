@@ -115,6 +115,78 @@ python -m ahp_host --token --wire-log /tmp/agent-host-demo.jsonl
 which writes [ahp-inspector](https://github.com/roblourens/ahp-inspector) JSONL —
 `npx ahp-inspector` picks up an `agent-host-*.jsonl` file with no arguments.
 
+## Starting agents with a filtered environment
+
+A provider that spawns an agent process can build the child's environment with
+`child_env` instead of inheriting the host's:
+
+```python
+from ahp_host.provider.spawn import child_env
+
+env = child_env(["PATH", "HOME", "LANG", "LC_*"], {"MY_AGENT_MODE": "x"})
+```
+
+Only variables matching the allowlist pass, then the second argument (the
+agent's own configured env) is merged on top. A pattern with `*`, `?` or `[` is
+a glob and never passes a secret-shaped name (one containing `TOKEN`, `SECRET`,
+`PASSWORD`, `AUTH`, `COOKIE`, `API_KEY`, or ending in `_KEY`, among others); a
+plain name is exact and passes even when secret-shaped, so a secret reaches the
+child only when named exactly. On Windows names match case-insensitively. The
+`ahp-host` and `ahp-host-claude` CLIs keep inheriting the full environment by
+default; this applies only when a provider's `env_allow` is set.
+
+## Tool policy
+
+`ahp_host.provider.policy` is a pure policy a provider asks before it runs a
+tool call. Describe the call as a `ToolRequest` (`name`, `kind` one of
+`"command"`, `"read"`, `"write"`, `"tool"`, `input`, `cwd`, `roots`, and the
+tool's own `raw` input) and `ToolPolicy.decide` returns a `Decision` whose
+`action` is `"allow"`, `"deny"` or `"ask"`, with a `reason`. Build a policy
+from a `[policy]` table with `policy_from_table`:
+
+```toml
+[policy]
+deny_commands = ["git push*", "git remote set-url*", "curl * | sh"]
+deny_paths = ["**/.env", "**/id_*", "~/.ssh/**"]
+ask_paths = ["**/secrets/*"]
+allow_paths_outside_roots = false
+check = "mypkg.policy:check"   # optional: fn(ToolRequest) -> Decision | None
+```
+
+In brief: a command pattern matches when the command begins with it. Options
+and their arguments are skipped, and an option the matcher does not know is
+tried both with and without an argument, so `git -C x push`, `git -c a=b push`
+and `git --no-pager push` all match `git push*`. Leading `NAME=value` words,
+wrappers (`env`, `sudo`, `doas`, `command`, `exec`, `nohup`, `time`, `nice`,
+`timeout`, `xargs`, `stdbuf`, `setsid`, with their options) and shell keywords
+and grouping (`if`, `then`, `do`, `while`, `{`, `!`, `( )`) are matched both as
+written and stripped. The program compares by basename without `.exe`;
+`bash -c`, `cmd /c`, `eval` and `env -S` scripts and the bodies of `$()`,
+backticks and `<()` are parsed again as commands; `;`, `&&`, `|` and newlines
+split a command into segments, so a pattern with `|` matches a pipeline.
+
+A path is checked both as written and after resolving symlinks and `..`; `*`
+stays within one folder, `**` crosses folders, a relative pattern matches at
+any depth, `~` expands, and matching ignores case on every platform. A path
+outside the session's folders (`roots`) is denied unless
+`allow_paths_outside_roots` is set. `deny_paths` covers reads, writes and
+commands; `ask_paths` asks before a read, a write or a command that names a
+matching path. A command's words that are not options (and an option's
+`=value`, and redirection targets) are judged as paths too, resolved against
+`cwd`, so `cat .env`, `cat ~/.ssh/id_rsa` and `cp .env /tmp/x` are denied by
+`**/.env` and `~/.ssh/**`; the roots check does not apply to them. Commands that
+cannot be parsed are denied; commands with `$()`, backticks or `<()` ask.
+
+Known limits (best effort over shell text, not a sandbox): paths built at run
+time (variables, `$()` output, an earlier `cd` in the same command), globs the
+shell expands (`cat .en*`), and files a program opens on its own are not seen. A
+word that merely looks like a denied path (`grep id_ file` under `**/id_*`) is
+denied too.
+
+A deny is final. `decide` combines every verdict and the most restrictive wins
+(deny over ask over allow), and a provider must never downgrade a deny in any
+approval mode.
+
 ## What this is for
 
 AHP turns "an agent session" from a thing trapped inside one application into a

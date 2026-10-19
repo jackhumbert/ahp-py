@@ -5,6 +5,7 @@ The prompt text picks the behaviour:
 - ``/model X -s``  switch model (as OpenClaw's bridge does); reply "Model set to X"
 - ``hello``        a thought, two text chunks, a usage update
 - ``tool``         an `execute` call that asks permission, then runs or not
+- ``environ``      reply ``{"env": sorted(os.environ), "argv": sys.argv}``
 - ``whoami``       reply with the session id, model, cwd, options and how it was opened
 - ``slow``         stream nothing until `session/cancel`, then stop `cancelled`
 - ``crash``        exit mid-turn
@@ -29,6 +30,13 @@ The prompt text picks the behaviour:
                    ``K`` (``none`` for no kind) and raw input ``J``, as a model
                    titling a local call after a relayed tool would; never calls
                    the relay; reply ``{"chose": id}``
+- ``permission J``  J is a toolCall object (the rest of the first line): ask permission for
+                   it with all of PERMISSION_OPTIONS; reply ``chose <optionId>``
+- ``caps``         reply the ``clientCapabilities`` the client sent at initialize, as JSON
+- ``clients J``    J is a JSON array of ``{method, params}``: send each to the client as a
+                   request (with this session's id; a string ``"$terminal"`` in params
+                   becomes the last reply's ``terminalId``); reply a JSON array of each
+                   ``result``, or ``{"error": ...}``
 - ``structured J``  J is a JSON array of argument objects. List the relay's tools; if
                    ``StructuredOutput`` is not among them, reply "no StructuredOutput
                    tool". Otherwise call it once per object (a call titled
@@ -87,6 +95,7 @@ state: dict[str, Any] = {
     "mcp": {},
     "mcp_calls": 0,
     "clients": {},
+    "client_caps": None,
 }
 OPTIONS = os.environ.get("FAKE_ACP_CONFIG_OPTIONS") == "1"
 MODES = os.environ.get("FAKE_ACP_MODES") == "1"
@@ -418,11 +427,37 @@ def store(load: bool = False) -> None:
         json.dump(kept, f)
 
 
+def client_requests(session_id: str, items: list[dict[str, Any]]) -> list[Any]:
+    """Send each ``{method, params}`` to the client; collect results (or errors)."""
+    replies: list[Any] = []
+    terminal: Any = None
+    for item in items:
+        params = {
+            key: terminal if value == "$terminal" else value
+            for key, value in item.get("params", {}).items()
+        }
+        reply = ask(item["method"], {**params, "sessionId": session_id})
+        result = reply.get("result")
+        if isinstance(result, dict) and "terminalId" in result:
+            terminal = result["terminalId"]
+        replies.append(result if "error" not in reply else {"error": reply["error"]})
+    return replies
+
+
 def prompt(session_id: str, words: str) -> dict[str, Any]:
     if words != "whoami":
         state["histories"].setdefault(session_id, []).append(words)
         store()
     cwd = Path(state["cwd"] or ".")
+    if words.startswith("permission "):
+        asked = json.loads(words.split("\n", 1)[0][len("permission ") :])
+        update(session_id, {"sessionUpdate": "tool_call", **asked})
+        reply = ask(
+            "session/request_permission",
+            {"sessionId": session_id, "toolCall": asked, "options": PERMISSION_OPTIONS},
+        )
+        text(session_id, f"chose {chosen(reply)}")
+        return {"stopReason": "end_turn"}
     if (answer := mcp_scenario(session_id, words.split("\n", 1)[0])) is not None:
         return answer
     if (answer := structured_scenario(session_id, words.split("\n", 1)[0])) is not None:
@@ -430,6 +465,15 @@ def prompt(session_id: str, words: str) -> dict[str, Any]:
     if words.startswith("/model "):
         state["model"] = words.split()[1]
         text(session_id, f"Model set to {state['model']}")
+        return {"stopReason": "end_turn"}
+    if words == "caps":
+        text(session_id, json.dumps(state["client_caps"]))
+        return {"stopReason": "end_turn"}
+    if words.startswith("clients "):
+        text(session_id, json.dumps(client_requests(session_id, json.loads(words[8:]))))
+        return {"stopReason": "end_turn"}
+    if words == "environ":
+        text(session_id, json.dumps({"env": sorted(os.environ), "argv": sys.argv}))
         return {"stopReason": "end_turn"}
     if words == "hello":
         text(session_id, "thinking…", "agent_thought_chunk")
@@ -575,17 +619,17 @@ def prompt(session_id: str, words: str) -> dict[str, Any]:
         path = cwd / "notes.txt"
         old = read_exact(path)
         diff = {"path": str(path), "oldText": old, "newText": old + "asked\n"}
-        asked: dict[str, Any] = {
+        edit_asked: dict[str, Any] = {
             "toolCallId": "edit_5",
             "title": "Edit notes.txt",
             "kind": "edit",
             "status": "pending",
             "content": [{"type": "diff", **diff}],
         }
-        update(session_id, {"sessionUpdate": "tool_call", **asked})
+        update(session_id, {"sessionUpdate": "tool_call", **edit_asked})
         reply = ask(
             "session/request_permission",
-            {"sessionId": session_id, "toolCall": asked, "options": PERMISSION_OPTIONS[:3]},
+            {"sessionId": session_id, "toolCall": edit_asked, "options": PERMISSION_OPTIONS[:3]},
         )
         if chosen(reply) in ("once", "always"):
             write_exact(path, diff["newText"])
@@ -644,6 +688,7 @@ def main() -> None:
         result: Any
         after: list[dict[str, Any]] = []
         if method == "initialize":
+            state["client_caps"] = params.get("clientCapabilities")
             capabilities: dict[str, Any] = {
                 "loadSession": True,
                 "sessionCapabilities": {"resume": {}},

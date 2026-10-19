@@ -16,6 +16,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import os
 import re
 import uuid
 import weakref
@@ -56,6 +57,8 @@ from ahp_host.provider.base import (
     UserMessage,
 )
 from ahp_host.provider.changes import FileChange
+from ahp_host.provider.policy import Decision, ToolPolicy
+from ahp_host.provider.spawn import child_env
 from ahp_protocol.types import AHP_ERROR_CODES
 from claude_agent_sdk import (
     AssistantMessage,
@@ -119,8 +122,10 @@ from ahp_host_claude.permissions import (
     denial_message,
     describe,
     past_tense,
+    policy_hook,
     pre_tool_use_decision,
     progress_line,
+    tool_request,
 )
 from ahp_host_claude.remote_control import CONFIG_KEY as RC_CONFIG_KEY
 from ahp_host_claude.remote_control import (
@@ -459,6 +464,11 @@ REWOUND_NOTE: Final = (
 )
 
 
+#: Variables the SDK removes from Claude Code's environment itself; `_env`
+#: must never set them, not even to the empty string.
+_SDK_DROPS: Final = frozenset({"CLAUDECODE"})
+
+
 class ClaudeSession:
     def __init__(
         self,
@@ -478,6 +488,8 @@ class ClaudeSession:
         chat_dir: Path | None = None,
         status_on_claude_ai: Callable[[str], Awaitable[str | None]] | None = None,
         chat_tools: Sequence[str] = CHAT_TOOLS,
+        env_allow: Sequence[str] | None = None,
+        policy: ToolPolicy | None = None,
         effort: str | None = None,
         marks: Sequence[TurnMark] = (),
         rewind: Rewind | None = None,
@@ -494,6 +506,10 @@ class ClaudeSession:
         #: What a session with no folder may use (`CHAT_TOOLS`, or the subset the
         #: host was configured with).
         self._chat_tools = tuple(chat_tools)
+        #: The host variables Claude Code may see (names or globs); None: all.
+        self._env_allow = tuple(env_allow) if env_allow is not None else None
+        #: Judges every command and path before the approval gate (`_policy_decision`).
+        self._policy = policy
         #: Asks claude.ai whether a session is archived there (`start`).
         self._status_on_claude_ai = status_on_claude_ai
         #: The folders the session has now: the context's are only the ones it
@@ -726,6 +742,26 @@ class ClaudeSession:
         except PermissionError:
             return True
 
+    def _env(self) -> dict[str, str]:
+        """What the SDK adds to Claude Code's environment.
+
+        The SDK builds the process's environment as `os.environ`, then
+        `CLAUDE_CODE_ENTRYPOINT`, then these, so a variable can be overridden
+        but never removed. With `env_allow`, each one it would drop is set to
+        the empty string instead, which is how it reaches Claude Code.
+        `CLAUDECODE` is never emitted: the SDK drops it on purpose (it marks a
+        process as running inside Claude Code), and an empty one would put it
+        back.
+        """
+        env = {"CLAUDE_CODE_ENTRYPOINT": ENTRYPOINT}
+        if self._env_allow is not None:
+            kept = child_env(self._env_allow)
+            blanked = {
+                name: "" for name in os.environ if name not in kept and name not in _SDK_DROPS
+            }
+            env = {**blanked, **env}
+        return env
+
     def _options(self) -> ClaudeAgentOptions:
         if self.mirror_of is not None:
             # Claude Code runs on the session's own machine, with its own
@@ -789,7 +825,7 @@ class ClaudeSession:
             # tells our own messages from ones typed elsewhere.
             extra_args=extra_args,
             system_prompt=prompt,  # type: ignore[arg-type]
-            env={"CLAUDE_CODE_ENTRYPOINT": ENTRYPOINT},
+            env=self._env(),
             **options,
         )
 
@@ -1345,31 +1381,55 @@ class ClaudeSession:
         if not self._lock.locked() and self._turn is None:
             await self._restart_client()
 
+    def _policy_decision(self, name: str, tool_input: Any) -> Decision | None:
+        """The host policy's verdict on a call; None when there is no policy."""
+        if self._policy is None:
+            return None
+        request = tool_request(
+            name,
+            tool_input if isinstance(tool_input, dict) else {},
+            cwd=self._cwd() or self._root,
+            roots=tuple(self._roots.paths),
+        )
+        return self._policy.decide(request)
+
     async def _pre_tool_use(self, hook_input: Any, tool_use_id: str | None, context: Any) -> Any:
         name = str(hook_input.get("tool_name", ""))
+        # Security-relevant, and first: a hook deny binds in every permission
+        # mode (can_use_tool is never called in acceptEdits, auto or bypass),
+        # and it beats the client/host tool allow below.
+        decision = self._policy_decision(name, hook_input.get("tool_input"))
+        if decision is not None and decision.action == "deny":
+            return policy_hook(decision)
+        # An ask still runs the bookkeeping below (the edit's before-image,
+        # the client call's id), since the user may approve the call; only
+        # the answer it returns changes.
+        asked = policy_hook(decision) if decision is not None else None
+        call_id = tool_use_id or hook_input.get("tool_use_id")
+        tool_input = hook_input.get("tool_input")
         if is_client_tool(name) or is_host_tool(name):
             # Security-relevant: allowed without this host's approval. The
             # client that runs a client tool owns that decision, and a host
             # tool runs in the host and touches nothing here (`client_tools.py`).
-            call_id = tool_use_id or hook_input.get("tool_use_id")
-            tool_input = hook_input.get("tool_input")
             if isinstance(call_id, str):
                 self._client_calls.setdefault(name, []).append(
                     (call_id, tool_input if isinstance(tool_input, dict) else {})
                 )
+            if asked is not None:
+                return asked
             return {
                 "hookSpecificOutput": {
                     "hookEventName": "PreToolUse",
                     "permissionDecision": "allow",
                 }
             }
-        call_id = tool_use_id or hook_input.get("tool_use_id")
-        tool_input = hook_input.get("tool_input")
         if name in edits.EDIT_TOOLS and isinstance(call_id, str) and isinstance(tool_input, dict):
             # The file as it is just before the call runs, for its diff.
             cwd = self._cwd()
             if cwd is not None:
                 self._edits.starting(call_id, name, tool_input, cwd)
+        if asked is not None:
+            return asked
         return pre_tool_use_decision(name, self._gate())
 
     def _cwd(self) -> Path | None:
@@ -1498,6 +1558,11 @@ class ClaudeSession:
     async def _can_use_tool(
         self, tool_name: str, tool_input: dict[str, Any], context: ToolPermissionContext
     ) -> PermissionResultAllow | PermissionResultDeny:
+        # Security-relevant: defence in depth behind the hook; the reason
+        # reaches the agent.
+        decision = self._policy_decision(tool_name, tool_input)
+        if decision is not None and decision.action == "deny":
+            return PermissionResultDeny(message=decision.reason or "denied by policy")
         call_id = context.tool_use_id
         worker = await self._worker_asking(call_id, context)
         sink: TurnSink | None
@@ -2678,6 +2743,8 @@ class LocalClaudeSession(ClaudeSession):
             archived=self.archived,
             chat_dir=self._chat_dir,
             chat_tools=self._chat_tools,
+            env_allow=self._env_allow,
+            policy=self._policy,
             commands=self._sources.commands or (),
             on_model_usage=self._on_model_usage,
         )
@@ -3251,6 +3318,8 @@ class ClaudeProvider:
         running_here: Callable[[], Mapping[str, str]] = running_here,
         status_on_claude_ai: Callable[[str], Awaitable[str | None]] | None = None,
         chat_tools: Sequence[str] = CHAT_TOOLS,
+        env_allow: Sequence[str] | None = None,
+        policy: ToolPolicy | None = None,
         commands: Sequence[Mapping[str, Any]] = (),
         rediscover: bool = False,
         lazy_discovery: bool = False,
@@ -3300,6 +3369,10 @@ class ClaudeProvider:
         #: May only narrow `CHAT_TOOLS`: a session with no folder must never be
         #: handed a tool that touches the machine.
         self.chat_tools = chat_tools_subset(chat_tools)
+        #: The host variables Claude Code may see; None: all (`ClaudeSession._env`).
+        self.env_allow: tuple[str, ...] | None = tuple(env_allow) if env_allow is not None else None
+        #: The host's tool policy; None: only the approval gate.
+        self.policy = policy
         self._dismissed: set[str] = self._load_dismissed()
         #: Slash commands from start-up (`Discovery.commands`), for a session
         #: whose own Claude client has not said yet.
@@ -3487,6 +3560,8 @@ class ClaudeProvider:
             client_factory=self._client_factory,
             chat_dir=self.chat_dir,
             chat_tools=self.chat_tools,
+            env_allow=self.env_allow,
+            policy=self.policy,
             commands=self._commands,
             on_model_usage=self._learned_from,
             on_chat=self._register_chat,
@@ -3824,6 +3899,8 @@ class ClaudeProvider:
             on_disposed=dismissed,
             chat_dir=self.chat_dir,
             chat_tools=self.chat_tools,
+            env_allow=self.env_allow,
+            policy=self.policy,
         )
         self._mirrors[remote_id] = session
         self._by_chat[context.chat_uri] = session
