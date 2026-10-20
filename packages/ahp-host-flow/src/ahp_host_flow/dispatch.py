@@ -5,11 +5,14 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextlib
+import contextvars
+import itertools
 import json
 import logging
+import math
 import mimetypes
 from abc import ABC, abstractmethod
-from collections.abc import Awaitable, Callable, Mapping, MutableMapping, Sequence
+from collections.abc import Awaitable, Callable, Iterator, Mapping, MutableMapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Final, cast
@@ -37,7 +40,7 @@ from ahp_protocol.ext.structured import OUTPUT_SCHEMA_META_KEY
 
 from ahp_host_flow import catalog
 from ahp_host_flow.approvals import Approver
-from ahp_host_flow.bridge import MaskingSink, ScopedPublisher, TurnTee
+from ahp_host_flow.bridge import MaskingSink, ScopedPublisher, TurnTee, Watchdog
 from ahp_host_flow.config import (
     APPROVAL_KEY,
     APPROVAL_MODES,
@@ -49,22 +52,33 @@ from ahp_host_flow.config import (
     make_redactor,
 )
 from ahp_host_flow.engine import (
+    PROVIDER_LOAD,
     AgentCall,
     AgentResult,
     Dispatcher,
+    DispatchError,
     DispatchHandle,
+    ErrorKind,
     Redactor,
     RemoteAnswer,
     RemoteConfirmation,
     RemoteDecision,
     RemoteOut,
     RemoteQuestion,
+    StopCause,
+    begin_usage_attempt,
+    classify,
+    end_usage_attempt,
     preamble_text,
     report_dispatch,
     schema_error,
+    stop_cause,
+    usage_reporter,
     with_preamble,
 )
-from ahp_host_flow.routing import route, x_opts
+from ahp_host_flow.engine.dispatcher import _STOP_CAUSE
+from ahp_host_flow.limits import ProviderSlotsRegistry
+from ahp_host_flow.routing import fallback_chain, route, x_opts
 from ahp_host_flow.worktree import (
     Worktree,
     WorktreeChangesets,
@@ -82,10 +96,26 @@ TITLE_MAX: Final = 60
 ABORT_GRACE: Final = 5.0
 # How often the session's `inputNeeded` is read for the steps in flight, in seconds.
 WAIT_POLL: Final = 0.05
+#: Which attempt of a call the dispatcher below is running (0 first); `RoutingDispatcher` sets it
+#: per `retry_empty` attempt and per fallback provider so each attempt gets its own main-chat
+#: tool call id.
+_ATTEMPT: contextvars.ContextVar[int] = contextvars.ContextVar("flow_attempt", default=0)
+#: The provider a fallback attempt runs on, in place of the call's route (None: route as usual),
+#: so the step descriptor names the provider actually used.
+_ROUTE_OVERRIDE: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "flow_route_override", default=None
+)
+#: Error kinds another provider might cure; a transient 'failed' walks too.
+_FALLBACK_KINDS: Final = frozenset({"unavailable", "rate_limited", "timeout", "empty"})
 
 
-class FlowAgentError(RuntimeError):
+class FlowAgentError(DispatchError):
     """An `agent()` call failed (its worker turn errored or could not start)."""
+
+    def __init__(
+        self, message: str, *, kind: ErrorKind = "failed", transient: bool = False
+    ) -> None:
+        super().__init__(kind, transient, message)
 
 
 def worker_title(call: AgentCall) -> str:
@@ -261,8 +291,14 @@ class _Worker:
     task: asyncio.Task[Any] | None = None
     aborting: bool = False
     skipped: bool = False
+    #: The idle watchdog expired and cancelled the turn.
+    timed_out: bool = False
     started: bool = False
     error: str | None = None
+    kind: ErrorKind = "failed"
+    transient: bool = False
+    #: The turn's cost in USD when the inner agent reported one.
+    cost_usd: float | None = None
     #: Set when the host has ended the turn (`done` is set a little before).
     over: asyncio.Event = field(default_factory=asyncio.Event)
 
@@ -284,6 +320,9 @@ class _NamedChat:
     config: Mapping[str, Any] = field(default_factory=dict)
     #: The folder (`opts.x.cwd`) the inner session was created in, fixed by the first call.
     folder: Path | None = None
+    #: The session's running cost (ACP's `acpUsage.cost`) after the last call, so the next
+    #: call counts only what it adds.
+    session_cost: float = 0.0
 
 
 class _TeeSession:
@@ -404,10 +443,30 @@ class StepDispatcher(ABC):
         else:
             _log.info("%s", line)
 
+    def _call_limit(self, call: AgentCall, name: str) -> tuple[float | None, str]:
+        """Seconds one call may run and where the limit came from: `opts.x.timeout`, else the
+        provider's `call_timeout`; None means no limit."""
+        x = x_opts(call.opts)
+        if "timeout" in x:
+            value = x["timeout"]
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, int | float)
+                or not math.isfinite(value)
+                or value <= 0
+            ):
+                raise FlowAgentError("opts.x.timeout must be a positive number of seconds")
+            return float(value), "opts.x.timeout"
+        spec = self.config.providers.get(name)
+        return (None if spec is None else spec.call_timeout), "call_timeout"
+
     async def run_agent(self, call: AgentCall) -> AgentResult:
-        name = route(self.config.routing, call)
+        name = _ROUTE_OVERRIDE.get() or route(self.config.routing, call)
+        limit, limit_source = self._call_limit(call, name)
         title = worker_title(call)
         call_id = f"{self.call_id_prefix}-{call.ordinal}"
+        if attempt := _ATTEMPT.get():
+            call_id += f"-a{attempt}"
         started = flow.step_started(
             ordinal=call.ordinal,
             label=call.label,
@@ -424,8 +483,52 @@ class StepDispatcher(ABC):
             display_name=title,
             meta=flow.meta(flow.step(started)),
         )
+        # The timeout scope goes on the call's stop cause, so a dispatcher cancelled by it can
+        # tell its own stop (stop the node session) from the host stopping (leave it running).
+        cause = stop_cause()
+        cause_token = None
+        if cause is None:
+            cause = StopCause()
+            cause_token = _STOP_CAUSE.set(cause)
+        outer_timeout = cause.timeout
         try:
-            return await self._run_call(call, name, title, call_id)
+            try:
+                # On expiry the cancellation reaches `_run_call`, which stops the worker turn
+                # (the inner session's cancel, the remote chat's, the node session's).
+                async with asyncio.timeout(limit) as scope:
+                    cause.timeout = scope
+                    return await self._run_call(call, name, title, call_id)
+            except TimeoutError:
+                if not scope.expired():
+                    raise
+                raise FlowAgentError(
+                    f"agent() #{call.ordinal}: provider {name!r} took longer than "
+                    f"{limit:g}s ({limit_source})",
+                    kind="timeout",
+                    transient=True,
+                ) from None
+            finally:
+                cause.timeout = outer_timeout
+        except asyncio.CancelledError:
+            # The Scheduler's hard cap stopped the call: the tool call ends as an error naming
+            # the budget, not left `running` (an abort or the host stopping ends the turn).
+            if cause.reason is not None and call_id not in self._completed:
+                stopped = self.redactor.mask(f"stopped: {cause.reason}")
+                with contextlib.suppress(Exception):
+                    await self._complete(
+                        call_id,
+                        {"content": [{"type": "text", "text": f"agent() {stopped}"}]},
+                        success=False,
+                        message="agent() stopped",
+                        finished=flow.step_finished(
+                            status="error",
+                            result=None,
+                            input_tokens=0,
+                            output_tokens=0,
+                            error=stopped,
+                        ),
+                    )
+            raise
         except Exception as exc:
             # Every way out reports the call: a tool call left `running` would
             # show a call that is long gone. (A skip and a result complete it
@@ -454,6 +557,8 @@ class StepDispatcher(ABC):
                     )
             raise
         finally:
+            if cause_token is not None:
+                _STOP_CAUSE.reset(cause_token)
             self._completed.discard(call_id)
             self._steps.pop(call_id, None)
             self._links.pop(call_id, None)
@@ -554,8 +659,11 @@ class ProviderDispatcher(StepDispatcher):
         try:
             provider = self.providers[name]
         except ConfigError as exc:
+            kind, transient = classify(PROVIDER_LOAD)
             _log.warning("agent() #%s: provider %r is unavailable: %s", call.ordinal, name, exc)
-            raise FlowAgentError(f"provider {name!r} is unavailable: {exc}") from exc
+            raise FlowAgentError(
+                f"provider {name!r} is unavailable: {exc}", kind=kind, transient=transient
+            ) from exc
         except KeyError:
             raise FlowAgentError(f"provider {name!r} is not an in-process provider") from None
         opts = call.opts
@@ -797,6 +905,7 @@ class ProviderDispatcher(StepDispatcher):
             )
             if chat_name is not None:
                 self._named[chat_name] = _NamedChat(name, worker, inner, title, config, folder)
+        named = self._named.get(chat_name) if chat_name else None
         self.workers[worker.resource] = inner
         pending = (
             self.pending_overlays.pop(worker.resource, None)
@@ -807,8 +916,10 @@ class ProviderDispatcher(StepDispatcher):
             await forward_overlay(inner, worker.resource, pending)
 
         state = _Worker()
-        usage = {"input_tokens": 0, "output_tokens": 0}
+        usage = {"input_tokens": 0, "output_tokens": 0, "cache_read_tokens": 0}
         value: Any = None
+        # The turn runs in the host's task: take the hook from this (the scheduler's) context.
+        reporter = usage_reporter()
 
         async def on_waiting(waiting: bool) -> None:
             await self.sink.tool_call_output(
@@ -836,15 +947,27 @@ class ProviderDispatcher(StepDispatcher):
                 on_log=self._note,
             )
 
+        def idle_expired() -> None:
+            state.timed_out = True
+            if state.task is not None:
+                state.task.cancel()
+
         async def run(sink: TurnSink) -> None:
             nonlocal value
             state.started = True
             state.task = asyncio.current_task()
+            watchdog: Watchdog | None = None
+            if spec.idle_timeout is not None:
+                watchdog = Watchdog(spec.idle_timeout, idle_expired)
+                watchdog.start()
             tee = TurnTee(
                 sink,
                 redactor=self.redactor,
                 on_waiting=on_waiting if self.session_view is None else None,
                 approver=approver,
+                on_usage=reporter,
+                watchdog=watchdog,
+                cost_base=named.session_cost if named is not None else 0.0,
             )
             try:
                 if schema is None:
@@ -866,8 +989,14 @@ class ProviderDispatcher(StepDispatcher):
                     value = self.redactor.mask_value(turn.value)
                 if tee.failed:
                     state.error = tee.failure
+                    state.kind, state.transient = classify(
+                        tee.error_type or "", resumable=tee.resumable, message=tee.failure or ""
+                    )
             except asyncio.CancelledError:
-                if not state.aborting:
+                if state.timed_out:
+                    with contextlib.suppress(Exception):
+                        await inner.cancel("idle timeout")
+                elif not state.aborting:
                     state.skipped = True
                     with contextlib.suppress(Exception):
                         await inner.cancel("skipped")
@@ -876,10 +1005,23 @@ class ProviderDispatcher(StepDispatcher):
                 state.error = self.redactor.mask(str(exc))
                 raise
             finally:
+                if watchdog is not None:
+                    watchdog.stop()
                 with contextlib.suppress(Exception):
                     await tee.flush()
-                usage["input_tokens"] = tee.input_tokens
-                usage["output_tokens"] = tee.output_tokens
+                # Requests not yet covered by a turn report count: a stopped turn spent them.
+                totals = tee.totals()
+                usage["input_tokens"] = totals["input_tokens"]
+                usage["output_tokens"] = totals["output_tokens"]
+                usage["cache_read_tokens"] = totals["cache_read_tokens"]
+                state.cost_usd = tee.cost_usd
+                if named is not None and tee.session_cost is not None:
+                    named.session_cost = tee.session_cost
+                # The attempt's final figures, also when it failed: the Scheduler counts them.
+                final: dict[str, Any] = dict(usage)
+                if tee.cost_usd is not None:
+                    final["cost_usd"] = tee.cost_usd
+                reporter(final)
                 state.done.set()
 
         def turn_ended() -> None:
@@ -934,6 +1076,20 @@ class ProviderDispatcher(StepDispatcher):
                 call_id, link, success=False, message="agent() skipped", finished=finished
             )
             raise asyncio.CancelledError
+        if state.timed_out:
+            idle = f"provider {name!r}: no activity for {spec.idle_timeout:g}s (idle_timeout); "
+            idle += "stopped the turn"
+            finished = flow.step_finished(
+                status="error",
+                result=None,
+                error=idle,
+                input_tokens=in_tok,
+                output_tokens=out_tok,
+            )
+            await self._complete(
+                call_id, link, success=False, message="agent() failed", finished=finished
+            )
+            raise FlowAgentError(idle, kind="timeout", transient=True)
         if state.error is not None:
             finished = flow.step_finished(
                 status="error",
@@ -945,7 +1101,7 @@ class ProviderDispatcher(StepDispatcher):
             await self._complete(
                 call_id, link, success=False, message="agent() failed", finished=finished
             )
-            raise FlowAgentError(state.error)
+            raise FlowAgentError(state.error, kind=state.kind, transient=state.transient)
         if value is None:
             finished = flow.step_finished(
                 status="null", result=None, input_tokens=in_tok, output_tokens=out_tok
@@ -962,7 +1118,7 @@ class ProviderDispatcher(StepDispatcher):
             await self._complete(
                 call_id, link, success=False, message="agent() failed", finished=finished
             )
-            return AgentResult(value, usage=usage)
+            return AgentResult(value, usage=usage, cost_usd=state.cost_usd)
         else:
             finished = flow.step_finished(
                 status="ok", result=value, input_tokens=in_tok, output_tokens=out_tok
@@ -970,7 +1126,7 @@ class ProviderDispatcher(StepDispatcher):
         await self._complete(
             call_id, link, success=True, message="agent() returned", finished=finished
         )
-        return AgentResult(value, usage=usage)
+        return AgentResult(value, usage=usage, cost_usd=state.cost_usd)
 
 
 class _WorkerOut:
@@ -1083,7 +1239,7 @@ class RemoteWorkerChats(StepDispatcher):
         self._watch(call_id, link_item)
 
         state = _Worker()
-        usage = {"input_tokens": 0, "output_tokens": 0}
+        usage = {"input_tokens": 0, "output_tokens": 0, "cache_read_tokens": 0}
         value: Any = None
 
         async def run(sink: TurnSink) -> None:
@@ -1106,6 +1262,8 @@ class RemoteWorkerChats(StepDispatcher):
                 raise
             except Exception as exc:
                 state.error = self.redactor.mask(str(exc))
+                if isinstance(exc, DispatchError):
+                    state.kind, state.transient = exc.kind, exc.transient
                 raise
             finally:
                 state.done.set()
@@ -1150,7 +1308,7 @@ class RemoteWorkerChats(StepDispatcher):
             await self._complete(
                 call_id, link, success=False, message="agent() failed", finished=finished
             )
-            raise FlowAgentError(state.error)
+            raise FlowAgentError(state.error, kind=state.kind, transient=state.transient)
         result = AgentResult(value, usage=usage)
         if value is None:
             finished = flow.step_finished(
@@ -1191,8 +1349,12 @@ class RoutingDispatcher:
         inprocess: Dispatcher,
         fleet: Dispatcher | None = None,
         remote: Callable[[str, ProviderConfig], Dispatcher] | None = None,
+        slots: ProviderSlotsRegistry | None = None,
     ) -> None:
         self.config = config
+        #: Per-provider concurrency, shared with every other run; held inside this run's own
+        #: Scheduler slot, never instead of it.
+        self._slots = slots
         self._by_kind: dict[str, Dispatcher | None] = {"inprocess": inprocess, "fleet": fleet}
         #: Makes the dispatcher of a remote provider, on its first call.
         self._remote = remote
@@ -1217,13 +1379,53 @@ class RoutingDispatcher:
                 dispatcher.run_id = value
 
     async def run_agent(self, call: AgentCall) -> AgentResult:
-        name = route(self.config.routing, call)
-        if name not in self.config.providers:
+        chain = fallback_chain(self.config, call)
+        if chain[0] not in self.config.providers:
             configured = ", ".join(sorted(self.config.providers))
             raise FlowAgentError(
-                f"provider {name!r} is not configured (opts.x.provider); configured: {configured}"
+                f"provider {chain[0]!r} is not configured (opts.x.provider); "
+                f"configured: {configured}"
             )
-        spec = self.config.providers[name]
+        in_process_only = named_chat(call.opts) is not None or "attach" in x_opts(call.opts)
+        attempts = itertools.count()
+        failed = chain[0]
+        error: DispatchError | None = None
+        for index, name in enumerate(chain):
+            spec = self.config.providers[name]
+            if index:
+                assert error is not None
+                if in_process_only and spec.kind != "inprocess":
+                    self._note(
+                        f"agent() #{call.ordinal}: fallback to {name} skipped ({name} is a "
+                        f"{spec.kind} provider; opts.x.chat/attach need an in-process one)"
+                    )
+                    continue
+                self._note(
+                    f"agent() #{call.ordinal}: fell back from {failed} to {name} ({error.kind})"
+                )
+            token = _ROUTE_OVERRIDE.set(name if index else None)
+            try:
+                return await self._run_on(name, spec, call, attempts)
+            except DispatchError as exc:
+                if not (exc.kind in _FALLBACK_KINDS or (exc.kind == "failed" and exc.transient)):
+                    raise
+                error, failed = exc, name
+            finally:
+                _ROUTE_OVERRIDE.reset(token)
+        assert error is not None
+        raise error
+
+    def _note(self, line: str) -> None:
+        _log.info("%s", line)
+
+    async def _run_on(
+        self,
+        name: str,
+        spec: ProviderConfig,
+        call: AgentCall,
+        attempts: Iterator[int],
+    ) -> AgentResult:
+        """One provider's turn at *call*, with its `retry_empty` attempts."""
         kind = spec.kind
         chat = named_chat(call.opts)
         if (chat is not None or "attach" in x_opts(call.opts)) and kind != "inprocess":
@@ -1242,7 +1444,88 @@ class RoutingDispatcher:
             dispatcher = self._by_kind.get(kind)
         if dispatcher is None:
             raise FlowAgentError(f"provider {name!r}: {kind} dispatch is not available here")
-        return await dispatcher.run_agent(call)
+        if spec.retry_empty <= 0:
+            return await self._attempt(dispatcher, call, name, attempts)
+        return await self._run_retrying(dispatcher, call, name, spec.retry_empty, attempts)
+
+    async def _attempt(
+        self, dispatcher: Dispatcher, call: AgentCall, name: str, attempts: Iterator[int]
+    ) -> AgentResult:
+        """One dispatch inside the provider's concurrency slot; a busy provider halves the limit.
+
+        Each dispatch of a call takes the next attempt number, so its tool call id is its own,
+        and a usage slot of its own, so the Scheduler counts a failed attempt's usage too.
+        """
+        token = _ATTEMPT.set(next(attempts))
+        reporter, usage_token = begin_usage_attempt()
+        try:
+            if self._slots is None:
+                result = await dispatcher.run_agent(call)
+            else:
+                slots = self._slots.for_name(name)
+                async with slots.hold():
+                    try:
+                        result = await dispatcher.run_agent(call)
+                    except DispatchError as exc:
+                        if exc.kind == "rate_limited" or (
+                            exc.kind == "unavailable" and exc.transient
+                        ):
+                            slots.on_busy(self._slots.on_log, exc.kind)
+                        raise
+            # The attempt's result is its settled usage (it replaces what it reported live).
+            settled: dict[str, Any] = dict(result.usage)
+            if result.cost_usd is not None:
+                settled["cost_usd"] = result.cost_usd
+            reporter(settled)
+            return result
+        finally:
+            end_usage_attempt(usage_token)
+            _ATTEMPT.reset(token)
+
+    async def _run_retrying(
+        self,
+        dispatcher: Dispatcher,
+        call: AgentCall,
+        name: str,
+        retries: int,
+        attempts: Iterator[int],
+    ) -> AgentResult:
+        """Dispatches *call* again while its reply is empty, up to *retries* more times.
+
+        The Scheduler sees one result: the last attempt's value, with the usage and cost of every
+        attempt summed (one ordinal, one key, one journal record).
+        """
+        schema = call.opts.get("schema")
+        usage: dict[str, int] = {}
+        cost: float | None = None
+        attempt = 0
+        while True:
+            result = await self._attempt(dispatcher, call, name, attempts)
+            for key, count in result.usage.items():
+                usage[key] = usage.get(key, 0) + count
+            if result.cost_usd is not None:
+                cost = (cost or 0.0) + result.cost_usd
+            empty = (
+                result.value is None
+                if isinstance(schema, Mapping)
+                else isinstance(result.value, str) and result.value.strip() == ""
+            )
+            if not empty:
+                return AgentResult(result.value, usage=usage, cost_usd=cost)
+            if attempt >= retries:
+                raise FlowAgentError(
+                    f"agent() #{call.ordinal}: {name} returned an empty reply {retries + 1} times",
+                    kind="empty",
+                    transient=True,
+                )
+            attempt += 1
+            _log.info(
+                "agent() #%d: empty reply from %s; retrying (%d of %d)",
+                call.ordinal,
+                name,
+                attempt,
+                retries,
+            )
 
     async def aclose(self) -> None:
         for dispatcher in self._inner():

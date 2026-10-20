@@ -284,8 +284,9 @@ class JournalRun:
                         "no cached call can match, so every agent() call runs live"
                     )
             else:
+                # A call the hard cap stopped is never replayed as null: it runs live.
                 replay = Replay(
-                    old.agents,
+                    [a for a in old.agents if a.kind != "budget"],
                     on_log=on_log,
                     prefix_only=not options.continue_run,
                     unfinished=old.unfinished if options.continue_run else (),

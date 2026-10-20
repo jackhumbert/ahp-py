@@ -46,11 +46,15 @@ from ahp_protocol.transport import Transport
 from ahp_host_flow.engine.dispatcher import (
     AgentCall,
     AgentResult,
+    DispatchError,
     DispatchHandle,
+    ErrorKind,
     reattach_handle,
     report_dispatch,
 )
+from ahp_host_flow.engine.errorkinds import REMOTE_IDLE, REMOTE_LOST, classify
 from ahp_host_flow.engine.preamble import with_preamble
+from ahp_host_flow.engine.usage import read_usage
 
 _log = logging.getLogger(__name__)
 
@@ -62,8 +66,13 @@ TITLE_MAX: Final = 60
 IDLE_TIMEOUT: Final = 600.0
 
 
-class RemoteAgentError(RuntimeError):
+class RemoteAgentError(DispatchError):
     """A remote `agent()` call failed."""
+
+    def __init__(
+        self, message: str, *, kind: ErrorKind = "failed", transient: bool = False
+    ) -> None:
+        super().__init__(kind, transient, message)
 
 
 @dataclass(frozen=True)
@@ -357,16 +366,24 @@ class ClientDispatcher:
         except TimeoutError:
             raise RemoteAgentError(
                 f"provider {self.spec.name!r}: nobody answered the remote agent's request on "
-                f"the worker chat within approval_timeout ({limit:g}s); stopped the remote turn"
+                f"the worker chat within approval_timeout ({limit:g}s); stopped the remote turn",
+                kind="timeout",
             ) from None
 
     async def _body(self, call: AgentCall, out: RemoteOut, title: str) -> AgentResult:
         spec = self.spec
         folder = folder_uri(call.opts)
-        client = await self._connected()
-        session = await client.create_session(
-            provider=spec.agent, working_directories=[folder] if folder is not None else None
-        )
+        try:
+            client = await self._connected()
+            session = await client.create_session(
+                provider=spec.agent, working_directories=[folder] if folder is not None else None
+            )
+        except Exception as exc:
+            raise RemoteAgentError(
+                f"provider {spec.name!r}: cannot reach the remote host: {exc}",
+                kind="unavailable",
+                transient=True,
+            ) from exc
         if session.capabilities.get("multipleChats") is not None:
             chat = await session.create_chat(title=title)
         else:
@@ -425,26 +442,51 @@ class ClientDispatcher:
         except (TimeoutError, UnansweredToolCallError) as exc:
             with contextlib.suppress(Exception):
                 await chat.cancel()
+            kind, transient = classify(REMOTE_IDLE)
             raise RemoteAgentError(
                 f"the remote turn on {session.uri} waited {spec.idle_timeout:g}s with nothing "
                 "happening (an approval or question there cannot be answered from this run); "
-                f"stopped it: {exc}"
+                f"stopped it: {exc}",
+                kind=kind,
+                transient=transient,
             ) from exc
         finally:
             await stream.aclose()
         if isinstance(event, TurnFailed):
-            raise RemoteAgentError(event.reason or "the remote turn failed")
+            # The chat/error action, or the envelope's action wrapper around it.
+            inner = event.action.get("action")
+            part = (inner if isinstance(inner, Mapping) else event.action).get("part")
+            resumable = isinstance(part, Mapping) and part.get("resumable") is True
+            if event.error_type:
+                kind, transient = classify(
+                    event.error_type, resumable=resumable, message=event.reason
+                )
+            else:
+                kind, transient = classify(REMOTE_LOST)
+            raise RemoteAgentError(
+                event.reason or "the remote turn failed", kind=kind, transient=transient
+            )
         if isinstance(event, TurnCancelled) or not isinstance(event, TurnCompleted):
             return AgentResult(None)
         # The authoritative text, not the deltas, which miss a turn's opening characters.
         await out.text(event.text)
-        usage = {"input_tokens": 0, "output_tokens": 0}
+        usage = {"input_tokens": 0, "output_tokens": 0, "cache_read_tokens": 0}
+        cost: float | None = None
         recorded: list[Mapping[str, Any]] = [
             u for t in chat.turns() if isinstance(u := t.get("usage"), Mapping)
         ]
         if recorded:
             last = recorded[-1]
-            for key, wire in (("input_tokens", "inputTokens"), ("output_tokens", "outputTokens")):
-                count = last.get(wire)
-                usage[key] = count if isinstance(count, int) else 0
-        return AgentResult(event.structured if schema is not None else event.text, usage=usage)
+            reading = read_usage(
+                input_tokens=last.get("inputTokens"),
+                output_tokens=last.get("outputTokens"),
+                cache_read_tokens=last.get("cacheReadTokens"),
+                meta=last.get("_meta"),
+            )
+            usage["input_tokens"] = reading.input_tokens
+            usage["output_tokens"] = reading.output_tokens
+            usage["cache_read_tokens"] = reading.cache_read_tokens
+            cost = reading.cost_usd
+        return AgentResult(
+            event.structured if schema is not None else event.text, usage=usage, cost_usd=cost
+        )

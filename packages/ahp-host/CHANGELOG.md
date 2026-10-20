@@ -10,6 +10,14 @@ versions each release speaks.
 
 ## [Unreleased]
 
+### Added — chat activity with `_meta` (M16)
+
+- **`PublishesChatActivity`** (`ahp_host.provider`): the publisher's `chat_activity_changed(chat,
+  activity, *, meta=None)` publishes `chat/activityChanged` on one of the session's chats, `meta`
+  riding as the action's `_meta`; a chat the session does not own is ignored. A separate protocol, so
+  existing `SessionPublisher` implementations are untouched. Documented in the README and
+  `docs/guide/writing-a-provider.md`.
+
 ### Added — session view, worker chat reopening, confirmation hints (M15)
 
 - **`ObservesSessionState`** (`ahp_host.provider`): the publisher's `session_state()` returns the session

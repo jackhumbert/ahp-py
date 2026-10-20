@@ -195,6 +195,35 @@ assert start == {"workflow": "host:nightly", "args": {"day": "mon"}, "runId": "r
 assert flow.parse_workflow_start(flow.meta(start)).run_id == "r1"
 ```
 
+A host running a workflow also keeps a client attached while its steps are silent: every
+few seconds it sends a `chat/activityChanged` on the run's chat whose `_meta["ahp-py/flow"]`
+is a heartbeat descriptor, `{heartbeat: {running, tick}}` (`flow.HEARTBEAT_KIND` is its one
+key; `running` is the steps in flight, `tick` counts from 1). A client that resets an idle
+timer on activity changes stays attached; a stock one shows the activity text.
+
+```python
+from ahp_protocol.ext import flow
+
+beat = flow.heartbeat(running=2, tick=1)
+assert beat == {flow.HEARTBEAT_KIND: {"running": 2, "tick": 1}}
+assert flow.descriptor_of(flow.meta(beat)) == beat
+```
+
+`ahp_protocol.ext.usage` marks a `TurnSink.usage` report that is one model request's
+usage rather than the turn's: a provider that reports per request puts
+`request_usage_meta()` (`{"ahp-py/usage": {"scope": "request"}}`, key `USAGE_META_KEY`) in
+the report's `_meta`, and a reader that sums a turn's usage checks `is_request_scoped(meta)`
+so it neither adds the request twice nor takes it for the turn. A reader that does not know
+the key treats the report as an ordinary one.
+
+```python
+from ahp_protocol.ext.usage import USAGE_META_KEY, is_request_scoped, request_usage_meta
+
+meta = request_usage_meta()
+assert USAGE_META_KEY in meta and is_request_scoped(meta)
+assert not is_request_scoped({}) and not is_request_scoped(None)
+```
+
 `ahp_protocol.ext.delegation` is the origin of a session started on another
 session's behalf: `delegation_origin(session, chat, tool_call_id)` builds
 `{kind: "ahp-py/delegation", session, chat, toolCallId}` (`SessionOrigin.kind` is

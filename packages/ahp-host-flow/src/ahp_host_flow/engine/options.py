@@ -15,6 +15,7 @@ from ahp_host_flow.engine.verbnames import verb_name_error
 
 if TYPE_CHECKING:
     from ahp_host_flow.engine.dispatcher import AgentCall
+    from ahp_host_flow.engine.quota import RunQuota
     from ahp_host_flow.engine.verbs import VerbHandler
 
 # plan §3 caps
@@ -46,6 +47,20 @@ class RunOptions:
     concurrency: int | None = None
     max_agents: int = MAX_AGENTS_PER_RUN
     budget_total: int | None = None
+    # More counters (M16), none journaled: a resume uses the resuming run's values.
+    input_budget: int | None = None
+    cost_budget: float | None = None
+    # Whether cache-read tokens count toward input_budget.
+    count_cache: bool = True
+    # Seconds of wall time; unlike `timeout` it kills nothing: later steps stop in-flight calls
+    # and refuse new ones.
+    wall_budget: float | None = None
+    # Output tokens reserved per live call at admission while budget_total is set, so parallel
+    # calls cannot overshoot it. None (the default) means the mean output tokens of this run's
+    # finished live calls, else 0; 0 reserves nothing.
+    reserve: int | None = None
+    # The principal's quota (M16): admission refuses at its limits, live usage stops calls at them.
+    quota: RunQuota | None = field(default=None, compare=False, repr=False)
     timeout: float | None = None
     workflow_dirs: tuple[Path | WorkflowDir, ...] = ()
     # Workflows a client published, as plain data; `.js` only (plan §4.3).
@@ -85,6 +100,28 @@ class RunOptions:
             _is_int(self.budget_total) and self.budget_total >= 0
         ):
             raise ValueError("budget_total must be an integer >= 0")
+        if self.input_budget is not None and not (
+            _is_int(self.input_budget) and self.input_budget >= 0
+        ):
+            raise ValueError("input_budget must be an integer >= 0")
+        if self.cost_budget is not None and not (
+            isinstance(self.cost_budget, int | float)
+            and not isinstance(self.cost_budget, bool)
+            and math.isfinite(self.cost_budget)
+            and self.cost_budget >= 0
+        ):
+            raise ValueError("cost_budget must be a number >= 0")
+        if not isinstance(self.count_cache, bool):
+            raise ValueError("count_cache must be a bool")
+        if self.wall_budget is not None and not (
+            isinstance(self.wall_budget, int | float)
+            and not isinstance(self.wall_budget, bool)
+            and math.isfinite(self.wall_budget)
+            and self.wall_budget > 0
+        ):
+            raise ValueError("wall_budget must be a number > 0")
+        if self.reserve is not None and not (_is_int(self.reserve) and self.reserve >= 0):
+            raise ValueError("reserve must be an integer >= 0 or None")
         if self.timeout is not None and not (
             isinstance(self.timeout, int | float)
             and not isinstance(self.timeout, bool)

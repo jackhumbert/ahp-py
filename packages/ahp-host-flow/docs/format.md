@@ -135,9 +135,12 @@ kinds: a run header (script snapshot, filename, args, the call cap and budget);
 one workflow snapshot per ref, written when the ref is first resolved; one
 start record per live call (ordinal, key, and the dispatch handle: the provider
 name and worker chat URI, or null when the dispatcher cannot say), written when
-the call is dispatched and before its agent record; and one
+the call is dispatched and before its agent record (a fallback to another
+provider repeats it under that provider: the last one wins); and one
 agent record per completed call (ordinal, key, status `ok`, `null` or `error`,
-value and output tokens); ahp-py adds a verb record per custom verb call and
+value and output tokens; an error record may also carry `kind`, one of
+`unavailable`, `rate_limited`, `refused`, `timeout`, `empty`, `failed` or `budget`,
+an ahp-py extension old readers ignore); ahp-py adds a verb record per custom verb call and
 the header's `keyMode` (see Extensions). The key is the sha256 of the canonical JSON (sorted
 keys, no whitespace) of `{prompt, opts, phase, label}`.
 
@@ -156,7 +159,10 @@ deterministic. Calls with identical keys are interchangeable, since they are
 the same request. Cached calls count toward the 1000-call cap and
 add their recorded output tokens to `budget.spent()`, but take no concurrency
 slot, never reach the dispatcher or progress listeners, and log nothing. A
-recorded null or error replays as null. Calls in flight when a run is killed keep
+recorded null or error replays as null, except an error record of kind `budget` (a call
+the hard cap stopped): it is never replayed, so on resume the call misses the cache and
+runs live (a prefix resume's cache ends there; with `continue_run` only that call runs live).
+Calls in flight when a run is killed keep
 a start record without an agent record: they are not replayed and rerun, and
 resume logs `resume: agent() #N started on <provider> (<chat>) but never
 finished; not replayed` for each (`resume: agent() #N started but never
@@ -383,8 +389,13 @@ alternative is `const ask = globalThis.ask ?? (async () => null)`.
 
 - `pipeline`'s first stage gets `prev` equal to the item.
 - A non-function element of `parallel()` resolves to `null`, because calling it throws.
-- The agent and budget caps are checked when `agent()` is issued, so spend may
-  overshoot by the calls already issued. A refused call consumes no ordinal.
+- The agent and budget caps are checked when `agent()` is issued. With a budget, each
+  live call also reserves `reserve` output tokens (default `None`: the mean of this run's
+  finished live calls, else 0, so a sequential script is unaffected; 0 reserves nothing) and a call is refused once
+  spent plus the other calls' reservations reaches the budget. A usage report or the wall
+  budget that passes a limit stops the calls in flight, which throw like refused ones; with
+  no report, spend can still overshoot by what the in-flight calls use. A refused call
+  consumes no ordinal.
 - `phase()` is global to the run, so a child workflow's `phase()` carries into
   the parent.
 - A child workflow runs in a `node:vm` context of its own. It has its own copy

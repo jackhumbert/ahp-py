@@ -298,8 +298,10 @@ built; a handler may take a fourth `OperationContext(params, principal)` argumen
 `{message, followUp}` for the result. A `ResumesOnRestore` provider names the
 restored sessions that need their agent at once instead of on the first turn.
 The session publisher is also `ObservesSessionState` (`session_state()`, the
-session channel's reduced state) and `ReopensToolChats` (`worker_chat(resource)`,
-a worker chat opened earlier, also after a restart), and a `ToolConfirmation`
+session channel's reduced state), `ReopensToolChats` (`worker_chat(resource)`,
+a worker chat opened earlier, also after a restart) and `PublishesChatActivity`
+(`chat_activity_changed(chat, activity, meta=)`, a `chat/activityChanged` on one of
+the session's own chats with an optional `_meta`, e.g. a liveness tick), and a `ToolConfirmation`
 carries hints for automatic answerers (`read_only`, `read_only_from_agent`,
 `policy_asked`, `locations`) that are never published. All of it is in
 [the provider guide](https://github.com/jackhumbert/ahp-py/blob/main/packages/ahp-host/docs/guide/writing-a-provider.md).

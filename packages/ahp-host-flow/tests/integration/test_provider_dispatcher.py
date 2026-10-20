@@ -223,7 +223,8 @@ async def test_config_reaches_inner_session(tmp_path: Path) -> None:
     host, wire, serving, default = await boot(config)
     try:
         reply = await ask(wire, default, request("hi", opts={"model": "big", "effort": "high"}))
-        assert reply["usage"] == {"input_tokens": 1, "output_tokens": 5}
+        # The usage carries cache reads since M16 item 2 (input/cache budgets).
+        assert reply["usage"] == {"input_tokens": 1, "output_tokens": 5, "cache_read_tokens": 0}
         session = RecordingProvider.instances[0].sessions[0]
         assert session.messages[0].model is not None
         assert session.messages[0].model.id == "rec-large"

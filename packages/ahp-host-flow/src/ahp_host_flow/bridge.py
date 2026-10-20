@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 import inspect
+import time
 from collections import Counter, deque
 from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from typing import TYPE_CHECKING, Any, Final
@@ -24,6 +26,7 @@ from ahp_host.provider.base import (
 )
 
 from ahp_host_flow.engine import Redactor
+from ahp_host_flow.engine.usage import has_cost_usd, read_usage
 
 if TYPE_CHECKING:
     from ahp_host_flow.approvals import Approver
@@ -268,6 +271,52 @@ class MaskingSink:
         return getattr(self._sink, name)
 
 
+class Watchdog:
+    """Calls *on_expire* once when *seconds* pass without a `touch`.
+
+    One task sleeps until `last touch + seconds`, re-sleeping after each touch. While paused it
+    never fires; `resume` counts as a touch, so the clock restarts when the pause ends.
+    """
+
+    def __init__(self, seconds: float, on_expire: Callable[[], None]) -> None:
+        self.seconds = seconds
+        self._on_expire = on_expire
+        self._last = time.monotonic()
+        self._running = asyncio.Event()
+        self._running.set()
+        self._task: asyncio.Task[None] | None = None
+
+    def start(self) -> None:
+        self._last = time.monotonic()
+        if self._task is None:
+            self._task = asyncio.get_running_loop().create_task(self._watch())
+
+    def touch(self) -> None:
+        self._last = time.monotonic()
+
+    def pause(self) -> None:
+        self._running.clear()
+
+    def resume(self) -> None:
+        self.touch()
+        self._running.set()
+
+    def stop(self) -> None:
+        if self._task is not None:
+            self._task.cancel()
+            self._task = None
+
+    async def _watch(self) -> None:
+        while True:
+            await self._running.wait()
+            remaining = self._last + self.seconds - time.monotonic()
+            if remaining > 0:
+                await asyncio.sleep(remaining)
+                continue
+            self._on_expire()
+            return
+
+
 class TurnTee:
     """Wraps a `TurnSink`: records the text and usage `agent()` needs, forwards the rest.
 
@@ -277,7 +326,8 @@ class TurnTee:
     back to the inner session changes. *on_waiting* hears `True` when the first
     confirmation or input request opens and `False` when the last one closes. An *approver*
     answers a confirmation itself when the policy or a rule decides it, on the agent's unmasked
-    call and without publishing anything; otherwise the confirmation goes to the sink.
+    call and without publishing anything; otherwise the confirmation goes to the sink. Every
+    event forwarded touches the *watchdog*; an open confirmation or input request pauses it.
     """
 
     def __init__(
@@ -287,23 +337,52 @@ class TurnTee:
         redactor: Redactor | None = None,
         on_waiting: Callable[[bool], Awaitable[None]] | None = None,
         approver: Approver | None = None,
+        on_usage: Callable[[Mapping[str, Any]], None] | None = None,
+        watchdog: Watchdog | None = None,
+        cost_base: float = 0.0,
     ) -> None:
         self.sink = sink
+        self.watchdog = watchdog
         self.text: list[str] = []
         self.input_tokens: int = 0
         self.output_tokens: int = 0
+        self.cache_read_tokens: int = 0
+        self.cost_usd: float | None = None
+        #: ACP's running session cost when the call began (a reused session's earlier calls).
+        self.cost_base = cost_base
+        #: The last running session total ACP reported, for the next call on the same session.
+        self.session_cost: float | None = None
         self.failed: bool = False
         self.failure: str | None = None
+        self.error_type: str | None = None
+        self.resumable: bool = False
         self._redactor = redactor if redactor is not None and redactor.enabled else None
         self._text_stream = self._redactor.stream() if self._redactor else None
         self._reasoning_stream = self._redactor.stream() if self._redactor else None
         self._on_waiting = on_waiting
         self._approver = approver
+        self._on_usage = on_usage
+        # Request-scoped readings not yet covered by a turn report: (in, out, cache read).
+        self._pending = (0, 0, 0)
         self._open = 0
 
     @property
     def reply(self) -> str:
         return "".join(self.text)
+
+    def totals(self) -> dict[str, Any]:
+        """What the call has used so far: the turn reports plus the requests not yet reported."""
+        in_pending, out_pending, cache_pending = self._pending
+        return {
+            "input_tokens": self.input_tokens + in_pending,
+            "output_tokens": self.output_tokens + out_pending,
+            "cache_read_tokens": self.cache_read_tokens + cache_pending,
+            "cost_usd": self.cost_usd or 0.0,
+        }
+
+    def _touch(self) -> None:
+        if self.watchdog is not None:
+            self.watchdog.touch()
 
     def _mask(self, value: Any) -> Any:
         return self._redactor.mask_value(value) if self._redactor else value
@@ -319,6 +398,7 @@ class TurnTee:
             await self.sink.reasoning_delta(out)
 
     async def text_delta(self, text: str) -> None:
+        self._touch()
         self.text.append(text)
         if self._text_stream is None:
             await self.sink.text_delta(text)
@@ -329,6 +409,7 @@ class TurnTee:
             await self.sink.text_delta(out)
 
     async def reasoning_delta(self, text: str) -> None:
+        self._touch()
         if self._reasoning_stream is None or self._text_stream is None:
             await self.sink.reasoning_delta(text)
             return
@@ -347,6 +428,7 @@ class TurnTee:
         intention: str | None = None,
         meta: Mapping[str, Any] | None = None,
     ) -> None:
+        self._touch()
         await self.flush()
         await self.sink.tool_call_started(
             call_id,
@@ -365,6 +447,7 @@ class TurnTee:
         invocation_message: str | None = None,
         meta: Mapping[str, Any] | None = None,
     ) -> None:
+        self._touch()
         await self.flush()
         await self.sink.tool_call_delta(
             call_id,
@@ -380,6 +463,7 @@ class TurnTee:
         *,
         meta: Mapping[str, Any] | None = None,
     ) -> None:
+        self._touch()
         await self.flush()
         await self.sink.tool_call_output(call_id, self._mask(content), meta=meta)
 
@@ -391,6 +475,7 @@ class TurnTee:
         success: bool = True,
         past_tense_message: str | None = None,
     ) -> None:
+        self._touch()
         await self.flush()
         await self.sink.tool_call_completed(
             call_id,
@@ -402,6 +487,7 @@ class TurnTee:
     async def system_notification(
         self, text: str, *, markdown: bool = False, meta: Mapping[str, Any] | None = None
     ) -> None:
+        self._touch()
         await self.flush()
         await self.sink.system_notification(
             self._mask_str(text) or "", markdown=markdown, meta=meta
@@ -416,11 +502,36 @@ class TurnTee:
         model: str | None = None,
         meta: Mapping[str, Any] | None = None,
     ) -> None:
+        self._touch()
         await self.flush()
-        if input_tokens is not None:
-            self.input_tokens += input_tokens
-        if output_tokens is not None:
-            self.output_tokens += output_tokens
+        reading = read_usage(
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            cache_read_tokens=cache_read_tokens,
+            meta=meta,
+        )
+        if reading.request_scoped:
+            in_pending, out_pending, cache_pending = self._pending
+            self._pending = (
+                in_pending + reading.input_tokens,
+                out_pending + reading.output_tokens,
+                cache_pending + reading.cache_read_tokens,
+            )
+        else:
+            # The turn report covers the requests seen so far.
+            self._pending = (0, 0, 0)
+            self.input_tokens += reading.input_tokens
+            self.output_tokens += reading.output_tokens
+            self.cache_read_tokens += reading.cache_read_tokens
+            if reading.cost_usd is not None:
+                if has_cost_usd(meta):
+                    # Claude's per-turn cost: turns add up.
+                    self.cost_usd = (self.cost_usd or 0.0) + reading.cost_usd
+                else:
+                    # ACP's cost is the session's running total: this call's share is what it
+                    # added since the call began.
+                    self.session_cost = reading.cost_usd
+                    self.cost_usd = max(0.0, reading.cost_usd - self.cost_base)
         await self.sink.usage(
             input_tokens=input_tokens,
             output_tokens=output_tokens,
@@ -428,6 +539,8 @@ class TurnTee:
             model=model,
             meta=meta,
         )
+        if self._on_usage is not None:
+            self._on_usage(self.totals())
 
     async def turn_failed(
         self,
@@ -437,15 +550,23 @@ class TurnTee:
         *,
         resumable: bool = False,
     ) -> None:
+        self._touch()
         await self.flush()
         self.failed = True
         self.failure = self._mask_str(message)
+        self.error_type = error_type
+        self.resumable = resumable
         await self.sink.turn_failed(
             self.failure or "", error_type, duration_ms, resumable=resumable
         )
 
     async def _waiting(self, delta: int) -> None:
         self._open += delta
+        if self.watchdog is not None:
+            if delta > 0 and self._open == 1:
+                self.watchdog.pause()
+            elif delta < 0 and self._open == 0:
+                self.watchdog.resume()
         if self._on_waiting is not None and self._open == (1 if delta > 0 else 0):
             await self._on_waiting(delta > 0)
 
@@ -536,6 +657,7 @@ class TurnTee:
             return attr
 
         async def forward(*args: Any, **kwargs: Any) -> Any:
+            self._touch()
             await self.flush()
             return await attr(*args, **kwargs)
 

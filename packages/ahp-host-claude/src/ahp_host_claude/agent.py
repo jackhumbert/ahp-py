@@ -59,6 +59,7 @@ AGENT_OPTIONS = frozenset(
         "chat_tools",
         "env_allow",
         "policy",
+        "usage_per_message",
     }
 )
 
@@ -78,6 +79,8 @@ class AgentOptions:
     env_allow: tuple[str, ...] | None
     #: None: only the approval gate.
     policy: ToolPolicy | None
+    #: Report each model request's usage as it arrives, not only the turn's.
+    usage_per_message: bool
 
 
 def parse_agent_options(options: Mapping[str, Any]) -> AgentOptions:
@@ -109,6 +112,9 @@ def parse_agent_options(options: Mapping[str, Any]) -> AgentOptions:
         raise ValueError(
             "claude agent: env_allow must be a list of variable names or glob patterns"
         )
+    usage_per_message = options.get("usage_per_message", False)
+    if not isinstance(usage_per_message, bool):
+        raise ValueError("claude agent: usage_per_message must be true or false")
     policy = options.get("policy")
     if policy is not None:
         if not isinstance(policy, Mapping):
@@ -125,6 +131,7 @@ def parse_agent_options(options: Mapping[str, Any]) -> AgentOptions:
         chat_tools=tuple(chat_tools),
         env_allow=tuple(env_allow) if env_allow is not None else None,
         policy=policy,
+        usage_per_message=usage_per_message,
     )
 
 
@@ -154,6 +161,7 @@ async def create(options: Mapping[str, Any], node: NodeContext) -> ClaudeProvide
         chat_tools=opts.chat_tools,
         env_allow=opts.env_allow,
         policy=opts.policy,
+        usage_per_message=opts.usage_per_message,
         commands=found.commands,
         # Start-up could not say: try again until it can.
         rediscover=not found.models,
@@ -231,6 +239,7 @@ def from_config(
         chat_tools=opts.chat_tools,
         env_allow=opts.env_allow,
         policy=opts.policy,
+        usage_per_message=opts.usage_per_message,
         commands=(),
         rediscover=True,
         lazy_discovery=True,

@@ -2,10 +2,37 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable, Mapping
-from contextvars import ContextVar
+from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Final, Literal, Protocol, runtime_checkable
+
+ErrorKind = Literal[
+    "unavailable", "rate_limited", "refused", "timeout", "empty", "failed", "budget"
+]
+ERROR_KINDS: Final = (
+    "unavailable",
+    "rate_limited",
+    "refused",
+    "timeout",
+    "empty",
+    "failed",
+    "budget",
+)
+
+
+class DispatchError(RuntimeError):
+    """A dispatcher's failure, classified. `str(exc)` is the message alone.
+
+    `kind` says what went wrong and `transient` whether a retry could help. Only the
+    Scheduler sets 'budget'; a dispatcher never does.
+    """
+
+    def __init__(self, kind: ErrorKind, transient: bool, message: str) -> None:
+        super().__init__(message)
+        self.kind: ErrorKind = kind
+        self.transient = transient
 
 
 @dataclass(frozen=True)
@@ -27,8 +54,10 @@ class AgentCall:
 class AgentResult:
     # JSON value handed back to the script; None means agent() returns null.
     value: Any
-    # Token counts; usage["output_tokens"] is summed into the budget.
+    # Token counts ('input_tokens', 'output_tokens', 'cache_read_tokens'); the budget sums them.
     usage: Mapping[str, int] = field(default_factory=dict)
+    # The call's cost in USD when the agent reported one; summed into the cost budget.
+    cost_usd: float | None = None
 
 
 @dataclass(frozen=True)
@@ -63,6 +92,76 @@ def report_dispatch(handle: DispatchHandle) -> None:
     report = _DISPATCH_REPORT.get()
     if report is not None:
         report(handle)
+
+
+_USAGE_REPORT: ContextVar[Callable[[Mapping[str, Any]], None] | None] = ContextVar(
+    "_USAGE_REPORT", default=None
+)
+#: Opens a fresh usage slot of the current call (one per dispatch attempt); set by the Scheduler.
+_USAGE_ATTEMPT: ContextVar[Callable[[], Callable[[Mapping[str, Any]], None]] | None] = ContextVar(
+    "_USAGE_ATTEMPT", default=None
+)
+
+
+def _no_usage_report(usage: Mapping[str, Any]) -> None:
+    return None
+
+
+def usage_reporter() -> Callable[[Mapping[str, Any]], None]:
+    """The hook that tells the scheduler what this attempt has used so far; a no-op elsewhere.
+
+    Capture it in the dispatch task (the context the Scheduler set) and call it from anywhere,
+    e.g. a worker turn's callback that runs in the host's task. The mapping is the attempt's
+    cumulative usage so far (keys output_tokens, input_tokens, cache_read_tokens ints,
+    cost_usd float); the hard budget cap stops the call when a counter passes its limit.
+    Each attempt opened with `begin_usage_attempt` has a slot of its own and the Scheduler
+    sums the slots, so a retried or fallen-back call counts every attempt.
+    """
+    report = _USAGE_REPORT.get()
+    return report if report is not None else _no_usage_report
+
+
+def begin_usage_attempt() -> tuple[Callable[[Mapping[str, Any]], None], Token[Any] | None]:
+    """Open a new usage slot for one attempt of the current call and make it the reporter.
+
+    Returns the slot's reporter and the token to `end_usage_attempt` with. Outside a
+    Scheduler dispatch the reporter is a no-op and the token None.
+    """
+    opener = _USAGE_ATTEMPT.get()
+    if opener is None:
+        return _no_usage_report, None
+    report = opener()
+    return report, _USAGE_REPORT.set(report)
+
+
+def end_usage_attempt(token: Token[Any] | None) -> None:
+    if token is not None:
+        _USAGE_REPORT.reset(token)
+
+
+@dataclass
+class StopCause:
+    """Why a call's task is being cancelled, set before the cancellation reaches it.
+
+    The Scheduler sets `reason` when its hard cap (a budget, the wall clock, a quota) stops the
+    call; a dispatcher's own `call_timeout` scope is `timeout`. A cancellation with neither (and
+    no abort) is the host stopping. Read it with `stop_cause()` inside the dispatch task.
+    """
+
+    reason: str | None = None
+    timeout: asyncio.Timeout | None = None
+
+    def stopped(self) -> bool:
+        """True when this run itself stopped the call (budget, quota, wall time or timeout)."""
+        return self.reason is not None or (self.timeout is not None and self.timeout.expired())
+
+
+_STOP_CAUSE: ContextVar[StopCause | None] = ContextVar("_STOP_CAUSE", default=None)
+
+
+def stop_cause() -> StopCause | None:
+    """The current call's `StopCause`, else None (outside a Scheduler dispatch)."""
+    return _STOP_CAUSE.get()
 
 
 _REATTACH: ContextVar[DispatchHandle | None] = ContextVar("_REATTACH", default=None)

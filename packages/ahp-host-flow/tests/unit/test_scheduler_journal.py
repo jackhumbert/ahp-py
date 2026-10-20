@@ -203,8 +203,52 @@ async def test_scheduler_start_record_reported_handle(
     s = Scheduler(_ReportingDispatcher(report=True), journal=writer)
     await _run(s, _call(0, "a"))
     recs = _raw_records(tmp_path)
-    assert [r["type"] for r in recs] == ["started", "agent"]
+    # Two providers named (a fallback moved the call): each gets a started record, and the
+    # last one is the provider actually used (M16 item 4).
+    assert [r["type"] for r in recs] == ["started", "started", "agent"]
     assert recs[0]["handle"] == {"provider": "p", "chat": "chat:/w"}
+    assert recs[1]["handle"] == {"provider": "q", "chat": "chat:/other"}
+
+
+class _HandlesDispatcher:
+    reports_dispatch = True
+
+    def __init__(self, *handles: DispatchHandle) -> None:
+        self._handles = handles
+
+    async def run_agent(self, call: AgentCall) -> AgentResult:
+        for handle in self._handles:
+            report_dispatch(handle)
+        return AgentResult(value="v")
+
+
+async def test_scheduler_start_record_retry_attempt_on_the_same_provider(
+    tmp_path: Path, writer: JournalWriter
+) -> None:
+    # A retry attempt on the same provider opens another chat and node session: the later
+    # handle is recorded too, so a reattach points at the attempt that was live.
+    s = Scheduler(
+        _HandlesDispatcher(
+            DispatchHandle("p", "chat:/a0", "node:/s0"),
+            DispatchHandle("p", "chat:/a0", "node:/s0"),
+            DispatchHandle("p", "chat:/a1", "node:/s1"),
+        ),
+        journal=writer,
+    )
+    await _run(s, _call(0, "a"))
+    recs = _raw_records(tmp_path)
+    assert [r["type"] for r in recs] == ["started", "started", "agent"]
+    assert recs[1]["handle"] == {"provider": "p", "chat": "chat:/a1", "session": "node:/s1"}
+    # A later handle naming only another session (same provider and chat) is recorded too.
+    s2 = Scheduler(
+        _HandlesDispatcher(
+            DispatchHandle("p", "chat:/w", "node:/s0"), DispatchHandle("p", "chat:/w", "node:/s1")
+        ),
+        journal=writer,
+    )
+    await _run(s2, _call(1, "b"))
+    started = [r for r in _raw_records(tmp_path) if r["type"] == "started" and r["ordinal"] == 1]
+    assert [r["handle"]["session"] for r in started] == ["node:/s0", "node:/s1"]
 
 
 async def test_scheduler_start_record_without_report(tmp_path: Path, writer: JournalWriter) -> None:

@@ -6,6 +6,12 @@ Every release states the protocol versions it speaks.
 
 ## [Unreleased]
 
+### Changed — idle timeout liveness (M16)
+
+- `TurnStream`'s `idle_timeout` is also reset by a `chat/activityChanged` on its chat and by
+  `session/inputNeededSet` / `inputNeededRemoved` for its chat (a host's heartbeat during a long
+  silent step, or a pending approval). Those envelopes are not yielded.
+
 ### Added — M15
 
 - `ToolCallReady.deny()` and `InputResponder.confirm_tool()` take `reason_message=`

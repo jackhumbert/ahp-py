@@ -44,6 +44,7 @@ import json
 import logging
 import re
 import uuid
+import zlib
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath, PureWindowsPath
@@ -118,8 +119,14 @@ class OrchestratorConfig:
     flow_agents: tuple[str, ...] = ("flow",)
     #: Seconds a flow `start_session` waits for a free slot under `max_running`.
     slot_wait: float = 600.0
+    #: How many sessions of one principal may run at once across all its flow sessions
+    #: (the engine-facing start path only). None: only `max_running` per flow session.
+    max_running_per_principal: int | None = None
 
     def __post_init__(self) -> None:
+        cap = self.max_running_per_principal
+        if cap is not None and (isinstance(cap, bool) or not isinstance(cap, int) or cap < 1):
+            raise ValueError("max_running_per_principal must be an integer >= 1")
         if self.agent in self.flow_agents:
             raise ValueError(f"{self.agent!r} cannot be both the orchestrator and a flow agent")
 
@@ -336,6 +343,21 @@ class _Spawned:
 
 
 @dataclass
+class _PrincipalGate:
+    """One principal's flow-start bookkeeping for `max_running_per_principal`."""
+
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    #: Starts inside the lock or waiting for it.
+    users: int = 0
+    #: Slots reserved by starts that have counted but not yet registered their child.
+    pending: int = 0
+
+
+def _sessions(n: int) -> str:
+    return f"{n} session" if n == 1 else f"{n} sessions"
+
+
+@dataclass
 class _Adopted:
     """An orchestrator session, and whose it is."""
 
@@ -362,6 +384,10 @@ class Orchestrator:
         self._clients: dict[tuple[str, str], Client] = {}
         self._connecting: dict[tuple[str, str], asyncio.Lock] = {}
         self._adopted: dict[str, _Adopted] = {}
+        #: Per principal while any of its flow starts is counting or holds a reservation:
+        #: `max_running_per_principal` is counted and a slot reserved atomically across its
+        #: flow sessions. Dropped when idle.
+        self._principal_gates: dict[Principal, _PrincipalGate] = {}
         #: Each worker session, subscribed with its default chat, once.
         self._sessions: dict[str, tuple[Client, Session]] = {}
         self._tasks: set[asyncio.Task[None]] = set()
@@ -902,67 +928,124 @@ class Orchestrator:
             and origin_call
             else None
         )
+        cap = self.config.max_running_per_principal
         async with adopted.lock:
             # An engine, not a model, is calling: wait for a free slot, don't refuse.
-            # The limit is this flow session's, as `max_running` is one orchestrator
-            # session's: it bounds one run session (all its runs), alongside the
-            # engine's own concurrency cap (ahp-host-flow plan §2), not everything
-            # the principal runs.
+            # `max_running` is this flow session's, as it is one orchestrator session's: it
+            # bounds one run session (all its runs), alongside the engine's own concurrency
+            # cap (ahp-host-flow plan §2). `max_running_per_principal`, when set, also bounds
+            # what the principal runs across all its flow sessions: counted and reserved under
+            # the principal's lock, never waited for inside it, so one flow session waiting for
+            # its own slot does not hold back the principal's others.
             loop = asyncio.get_running_loop()
             deadline = loop.time() + self.config.slot_wait
+            reserved: _PrincipalGate | None = None
             while True:
-                running = [
-                    c
-                    for c in list(adopted.children.values())
-                    if await self._flow_running(adopted, c)
-                ]
-                if len(running) < self.config.max_running:
-                    break
+                own = await self._running_in(adopted)
+                total = own
+                if own < self.config.max_running:
+                    if cap is None:
+                        break
+                    gate = self._gate(adopted.principal)
+                    try:
+                        async with gate.lock:
+                            total = own + gate.pending + await self._running_beside(adopted)
+                            if total < cap:
+                                gate.pending += 1
+                                reserved = gate
+                    finally:
+                        gate.users -= 1
+                        self._prune_gate(adopted.principal)
+                    if reserved is not None:
+                        break
                 if loop.time() >= deadline:
+                    if own >= self.config.max_running:
+                        verb = "is" if own == 1 else "are"
+                        raise ToolError(
+                            f"{own} of your sessions {verb} still running after waiting "
+                            f"{self.config.slot_wait:g}s"
+                        )
+                    verb = "is" if total == 1 else "are"
                     raise ToolError(
-                        f"{len(running)} of your sessions are still running after waiting "
-                        f"{self.config.slot_wait:g}s"
+                        f"{_sessions(total)} of yours {verb} still running across your runs "
+                        f"after waiting {self.config.slot_wait:g}s"
                     )
                 await asyncio.sleep(FLOW_POLL)
-            # The principal recorded with the flow session: the node is dialed and
-            # admitted as whoever started the run.
-            client = await self._client(adopted.principal, node_id)
-            session = await client.create_session(
-                provider=agent,
-                uri=f"{agent}:/{uuid.uuid4()}",
-                working_directories=[_folder_uri(folder)] if folder else None,
-                config=config,
-                origin=origin,
-            )
-            title = arguments.get("title")
-            title = title if isinstance(title, str) and title else prompt.splitlines()[0][:60]
-            spawned = _Spawned(
-                uri=session.uri,
-                node=node_id,
-                parent=adopted.uri,
-                title=title,
-                tool_call_id=str(action.get("toolCallId") or "") or None,
-            )
-            adopted.children[session.uri] = spawned
-            self._save()
-            chat = await session.chat()
-            spawned.chat = chat.uri
-            self._save()
-            self._sessions[session.uri] = (client, session)
-            client.protocol.dispatch(
-                chat.uri,
-                actions.turn_started(
-                    str(uuid.uuid4()),
-                    text=prompt,
-                    model=model,
-                    meta={OUTPUT_SCHEMA_META_KEY: dict(schema)} if schema else None,
-                ),
-            )
-            with contextlib.suppress(Exception):
-                client.protocol.dispatch(
-                    session.uri, {"type": "session/titleChanged", "title": title}
+            try:
+                # The principal recorded with the flow session: the node is dialed and
+                # admitted as whoever started the run.
+                client = await self._client(adopted.principal, node_id)
+                session = await client.create_session(
+                    provider=agent,
+                    uri=f"{agent}:/{uuid.uuid4()}",
+                    working_directories=[_folder_uri(folder)] if folder else None,
+                    config=config,
+                    origin=origin,
                 )
+                title = arguments.get("title")
+                title = title if isinstance(title, str) and title else prompt.splitlines()[0][:60]
+                spawned = _Spawned(
+                    uri=session.uri,
+                    node=node_id,
+                    parent=adopted.uri,
+                    title=title,
+                    tool_call_id=str(action.get("toolCallId") or "") or None,
+                )
+                adopted.children[session.uri] = spawned
+                self._save()
+                chat = await session.chat()
+                spawned.chat = chat.uri
+                self._save()
+                self._sessions[session.uri] = (client, session)
+                client.protocol.dispatch(
+                    chat.uri,
+                    actions.turn_started(
+                        str(uuid.uuid4()),
+                        text=prompt,
+                        model=model,
+                        meta={OUTPUT_SCHEMA_META_KEY: dict(schema)} if schema else None,
+                    ),
+                )
+                with contextlib.suppress(Exception):
+                    client.protocol.dispatch(
+                        session.uri, {"type": "session/titleChanged", "title": title}
+                    )
+            finally:
+                if reserved is not None:
+                    # The child is registered now (or the start failed): it counts itself.
+                    reserved.pending -= 1
+                    self._prune_gate(adopted.principal)
         return {"session": session.uri, "chat": chat.uri}
+
+    async def _running_in(self, adopted: _Adopted) -> int:
+        """How many of *adopted*'s children may still be running."""
+        return len(
+            [c for c in list(adopted.children.values()) if await self._flow_running(adopted, c)]
+        )
+
+    async def _running_beside(self, adopted: _Adopted) -> int:
+        """How many children of the principal's other flow sessions may still be running."""
+        total = 0
+        for other in list(self._adopted.values()):
+            if other is adopted or other.kind != "flow" or other.principal != adopted.principal:
+                continue
+            for c in list(other.children.values()):
+                if await self._flow_running(other, c):
+                    total += 1
+        return total
+
+    def _gate(self, principal: Principal) -> _PrincipalGate:
+        """The principal's gate, counted as used until the caller decrements `users`."""
+        gate = self._principal_gates.get(principal)
+        if gate is None:
+            gate = self._principal_gates[principal] = _PrincipalGate()
+        gate.users += 1
+        return gate
+
+    def _prune_gate(self, principal: Principal) -> None:
+        gate = self._principal_gates.get(principal)
+        if gate is not None and gate.users <= 0 and gate.pending <= 0:
+            del self._principal_gates[principal]
 
     def _flow_status(self, client: Client, child: _Spawned) -> dict[str, Any]:
         """A flow child's status for the engine: `done` says it will not change by itself.
@@ -1047,8 +1130,26 @@ class Orchestrator:
             ]
             finished = all(s["done"] for s in statuses)
             if finished or loop.time() >= deadline:
+                for c, row in zip(children, statuses, strict=True):
+                    if c.uri in clients:
+                        row["activity"] = self._flow_activity(clients[c.uri], c)
                 return {"sessions": statuses, "timed_out": not finished}
             await asyncio.sleep(FLOW_POLL)
+
+    def _flow_activity(self, client: Client, child: _Spawned) -> int:
+        """An opaque fingerprint of a flow child's chat: it changes when the session makes
+        progress (a delta, reasoning, a tool call moving, a turn ending), so an engine can
+        tell a busy session from a silent one between status changes."""
+        chat = self._chat_state(client, child.uri)
+        turns = chat.get("turns") or []
+        active = chat.get("activeTurn")
+        seen = json.dumps(
+            [len(turns), active if isinstance(active, Mapping) else None],
+            sort_keys=True,
+            default=str,
+            separators=(",", ":"),
+        )
+        return zlib.crc32(seen.encode("utf-8"))
 
     async def _flow_read(
         self, adopted: _Adopted, arguments: dict[str, Any], action: Mapping[str, Any]

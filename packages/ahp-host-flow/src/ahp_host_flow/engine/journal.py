@@ -6,7 +6,8 @@ adds a gate record (open when asked, answered when it has an answer), and each c
 verb call adds a verb record (open when called, done or error when it finished). A torn
 final line (a killed process) is ignored on read. Record types other than
 run/workflow/agent/started/gate/verb are ignored on load, on purpose, so a later record
-kind stays readable by this code; keep it so.
+kind stays readable by this code; keep it so. An error agent record may carry `kind`
+(an ErrorKind); readers before M16 ignore it, so JOURNAL_VERSION stays 1.
 """
 
 from __future__ import annotations
@@ -170,6 +171,8 @@ class AgentRecord:
     error: str | None = None
     # Set once the value was redacted after publishing: {"reason", "redactedAt"}.
     redacted: Mapping[str, str] | None = None
+    # Error records only: the ErrorKind of the failure (any string is kept on load).
+    kind: str | None = None
 
 
 @dataclass(frozen=True)
@@ -330,6 +333,8 @@ class JournalWriter:
         if record.status == "error":
             error = record.error if record.error is not None else ""
             wire["error"] = mask(error) if mask is not None else error
+            if record.kind is not None:
+                wire["kind"] = record.kind
         if record.redacted is not None:
             wire["redacted"] = dict(record.redacted)
         self._write(wire)
@@ -481,12 +486,14 @@ def load_journal(state_dir: Path, run_id: str) -> LoadedJournal:
         elif kind == "agent":
             ordinal, key, status = rec.get("ordinal"), rec.get("key"), rec.get("status")
             tokens, error = rec.get("outputTokens"), rec.get("error")
+            err_kind = rec.get("kind")
             if (
                 not _is_count(ordinal)
                 or not isinstance(key, str)
                 or status not in _STATUSES
                 or not _is_count(tokens)
                 or (error is not None and not isinstance(error, str))
+                or (err_kind is not None and not isinstance(err_kind, str))
             ):
                 raise JournalError(f"journal line {n}: bad agent record")
             # Written by redact_agent_record; readers before M9 ignore the key, so
@@ -504,6 +511,7 @@ def load_journal(state_dir: Path, run_id: str) -> LoadedJournal:
                     output_tokens=tokens,
                     error=error,
                     redacted=redacted or None,
+                    kind=err_kind,
                 ),
             )
         elif kind == "started":
@@ -521,7 +529,8 @@ def load_journal(state_dir: Path, run_id: str) -> LoadedJournal:
                 or (session is not None and not isinstance(session, str))
             ):
                 raise JournalError(f"journal line {n}: bad started record")
-            started.setdefault(ordinal, StartRecord(ordinal, key, provider, chat, session))
+            # A fallback repeats the record under the provider it moved to; the last wins.
+            started[ordinal] = StartRecord(ordinal, key, provider, chat, session)
         elif kind == "gate":
             ordinal, key = rec.get("ordinal"), rec.get("key")
             gate_kind, status = rec.get("kind"), rec.get("status")

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed — input gauge marked (M16)
+
+- A turn report with no `inputTokens`, whose input is the context size standing in, says so in its `_meta`: `acpUsage.inputGauge = true`. It is how full the context is, not what the turn consumed, so a reader that sums usage (ahp-host-flow's budgets and quotas) counts it as no input. `tests/test_session_updates.py`.
+
 ### Added — decline feedback and confirmation hints (M15)
 
 - `decline_feedback` (default true; config file, `acp` agent options,

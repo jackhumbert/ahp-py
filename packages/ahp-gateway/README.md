@@ -70,7 +70,13 @@ What holds for a flow session, whatever the engine asks:
   once, counted per flow session (all its runs), as an orchestrator session's
   are, not per principal. A `start_session` over the limit waits for a slot, up
   to `slot_wait` seconds (default 600), then fails. The count is read from the
-  nodes, so it holds across a gateway restart. Nothing answers an approval: a
+  nodes, so it holds across a gateway restart. `OrchestratorConfig.
+  max_running_per_principal` (default none) also bounds what one principal runs
+  across all its flow sessions: a flow `start_session` waits, up to `slot_wait`,
+  until both counts are under their limits, then fails with "N sessions of yours
+  are still running across your runs"; one principal's starts are serialised, so
+  two of its flow sessions cannot both pass. The orchestrator's own start path is
+  unchanged. Nothing answers an approval: a
   prompt raised in a started session waits for a person, in any client.
 - **Restarts.** Flow sessions and what they started are kept in `state_path`;
   a restarted gateway rejoins each flow session with its tools, and a link that

@@ -353,7 +353,7 @@ no turn is running. Hold it for the life of the session.
 | `external_turn(text, run, *, chat=None)` | A turn that happened somewhere else, on the default chat or one of the session's own chats (never a worker chat). |
 | `progress(progress, total=, message=)` | Report against `createSession.progressToken`. |
 
-The host's publisher implements two more protocols; check with `isinstance`, since
+The host's publisher implements three more protocols; check with `isinstance`, since
 a test double or another host may not:
 
 - **`ObservesSessionState`** — `session_state()` is the session channel's current
@@ -363,6 +363,12 @@ a test double or another host may not:
   opened with `open_tool_chat`, also after a host restart (the host knows them by
   their `tool` origin), so a late notification can still run a turn on it; `None`
   for any other chat.
+- **`PublishesChatActivity`** — `chat_activity_changed(chat, activity, meta=None)`
+  publishes `chat/activityChanged` on one of the session's own chats (the default
+  chat or one it opened); `activity=None` clears it, and `meta` rides as the action's
+  `_meta`, a namespaced extension a stock client ignores. A chat the session does not
+  own is ignored. ahp-host-flow uses it for its heartbeat: a client that resets an
+  idle timer on activity changes stays attached through a silent step.
 
 **Background work** is a shell left running or a subagent still going: work
 that outlives the turn that started it, so it goes through the publisher, not

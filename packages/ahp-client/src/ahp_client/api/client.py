@@ -1602,6 +1602,13 @@ class TurnStream:
     ``await`` drains the stream applying the approval policy and returns the
     final text; ``async for`` hands over every event. ``__await__`` delegates to
     the same drain that iteration uses, so the two cannot diverge.
+
+    ``idle_timeout`` (seconds, default 300; ``None`` disables it) is how long the stream waits
+    for the next sign of life. Three things reset it: every event the stream yields for the
+    turn; a ``chat/activityChanged`` on this chat (a host's heartbeat during a long silent
+    step); and an input-needed change for this chat (``session/inputNeededSet`` whose
+    ``request.chat`` is this chat, and the matching ``session/inputNeededRemoved``). The last
+    two are not yielded.
     """
 
     def __init__(
@@ -1635,6 +1642,8 @@ class TurnStream:
         self._model = model
         self._started = False
         self._reader: Any = None
+        #: Ids of this chat's `session/inputNeededSet` requests, to match their removal.
+        self._input_ids: set[str] = set()
         #: Held so the terminal event is *yielded* before iteration stops. A
         #: `StopAsyncIteration` carrying a payload is invisible to `async for`,
         #: so the caller would never see the turn end.
@@ -1771,6 +1780,11 @@ class TurnStream:
             if not isinstance(tagged.event, ActionEvent):
                 continue
             envelope = tagged.event.envelope
+            if self._is_liveness(envelope, tagged.event.rejection_reason):
+                # Not yielded: it only proves the host is alive, so the deadline restarts.
+                if self._idle_timeout is not None:
+                    deadline = loop.time() + self._idle_timeout
+                continue
             if envelope.get("channel") != self._chat.uri:
                 continue
             action = envelope.get("action")
@@ -1807,6 +1821,35 @@ class TurnStream:
                 await self._finish()
                 return event
             return event
+
+    def _is_liveness(self, envelope: Mapping[str, Any], rejection: str | None) -> bool:
+        """Whether this envelope only shows the host is alive: it resets the idle deadline.
+
+        A ``chat/activityChanged`` on this chat, or a ``session/inputNeededSet`` for this chat
+        (its id is remembered) and the ``session/inputNeededRemoved`` of a remembered id.
+        """
+        if rejection is not None:
+            return False
+        action = envelope.get("action")
+        if not isinstance(action, Mapping):
+            return False
+        kind = action.get("type")
+        channel = envelope.get("channel")
+        if channel == self._chat.uri:
+            return kind == "chat/activityChanged"
+        if channel != self._session.uri:
+            return False
+        if kind == "session/inputNeededSet":
+            request = action.get("request")
+            if isinstance(request, Mapping) and request.get("chat") == self._chat.uri:
+                request_id = request.get("id")
+                if isinstance(request_id, str):
+                    self._input_ids.add(request_id)
+                return True
+        elif kind == "session/inputNeededRemoved":
+            request_id = action.get("id")
+            return isinstance(request_id, str) and request_id in self._input_ids
+        return False
 
     async def _next_tagged(self) -> Any:
         return await _next_or_none(self._reader)

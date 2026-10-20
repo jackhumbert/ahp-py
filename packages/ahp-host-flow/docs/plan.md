@@ -7,7 +7,7 @@ an AHP session, and each `agent()` call is a **child chat** of it, so any AHP
 client can watch and steer the whole run. Extensions to the format are opt-in,
 and a script written for Claude Code runs unchanged.
 
-Status: M0-M15 done (M4b complete). M16-M18 are planned (§8, **Post-M12 plan**); M16 is next.
+Status: M0-M16 done (M4b complete). M17-M18 are planned (§8, **Post-M12 plan**); M17 is next.
 
 ## 1. Where it sits
 
@@ -900,6 +900,8 @@ Known limits. A relayed remote request waits until the run is aborted unless the
      - A cycle is a config error.
      - Pinned key hashes stay byte-identical under the default `[resume]`.
      - The step descriptor names the used provider.
+
+**M16 result.** The four items landed with no live model. Shipped: error kinds on every dispatcher and journal error records; named budget counters (output, input, cost, wall, cache reads) with admission reservations (`reserve` now defaults to the mean output tokens of the run's finished calls) and a live stop on usage reports and wall time, recorded as kind `budget` and re-run on resume; per-request usage in ahp-host-claude behind a flag; `[limits]`, per-call timeouts and `call_timeout`; per-user quotas and the gateway's per-principal `max_running`; the idle watchdog, `retry_empty` and the heartbeat; per-provider `concurrency` with `probe`; and the fallback chain. The proving tests are `packages/ahp-host-flow/tests/unit/test_errkind_table.py`, `packages/ahp-host-flow/tests/unit/test_errkind_journal.py`, `packages/ahp-host-flow/tests/integration/test_errkind_dispatch.py`, `packages/ahp-host-flow/tests/unit/test_budgetctr.py`, `packages/ahp-host-flow/tests/unit/test_livestop_reserve.py`, `packages/ahp-host-flow/tests/unit/test_livestop_engine.py`, `packages/ahp-host-flow/tests/unit/test_reservemean_default.py`, `packages/ahp-host-claude/tests/test_claudereq_usage.py`, `packages/ahp-host-flow/tests/integration/test_calltimeout.py`, `packages/ahp-host-flow/tests/unit/test_quota_ledger.py`, `packages/ahp-gateway/tests/test_quota_gateway.py`, `packages/ahp-host-flow/tests/integration/test_idlewatch.py`, `packages/ahp-host-flow/tests/integration/test_retryempty.py`, `packages/ahp-client/tests/client/test_heartbeat_turnstream.py`, `packages/ahp-host-flow/tests/unit/test_provslots.py` and `packages/ahp-host-flow/tests/integration/test_fallchain_dispatch.py`; the review fixes added `packages/ahp-host-flow/tests/integration/test_fleet_stopcause.py`, `packages/ahp-host-flow/tests/integration/test_fleet_idlewatch.py`, `packages/ahp-host-flow/tests/integration/test_provslots_probe_hosted.py`, `packages/ahp-host-flow/tests/unit/test_attempt_usage.py` and `packages/ahp-host-flow/tests/unit/test_claudereq_budget.py`. Known limits: replayed calls add only output tokens to the counters; input/cost/wall budgets, reserve and count_cache are not journaled; Claude's 429 is recognised from error text; the anonymous quota bucket is shared by every run without a principal; fleet idle_timeout sees status changes and the gateway's `activity` fingerprint only, never deltas (status changes alone from a gateway that reports no `activity`); ACP cachedReadTokens is assumed to be separate from inputTokens; an ACP turn without `inputTokens` reports its context size as a gauge (`acpUsage.inputGauge`), which counts no input; ACP's `acpUsage.cost` is read as the session's running total and counted per call as a delta.
 
 **M17: sandboxed workflow hosts, client tools in workers, durable workers.**
 

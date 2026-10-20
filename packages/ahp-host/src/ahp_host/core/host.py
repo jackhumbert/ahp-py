@@ -1178,6 +1178,20 @@ class _Publisher:
         await self._host.sequencer.publish(self._session.uri, action)
         await self._host._mirror_summary(self._session)
 
+    async def chat_activity_changed(
+        self, chat: str, activity: str | None, *, meta: Mapping[str, Any] | None = None
+    ) -> None:
+        """`PublishesChatActivity`: a chat the session does not own is ignored."""
+        if chat != self._session.chat_uri and chat not in self._session.chat_uris:
+            return
+        action: dict[str, Any] = {"type": "chat/activityChanged"}
+        if activity is not None:
+            action["activity"] = activity
+        if meta:
+            action["_meta"] = dict(meta)
+        await self._host.sequencer.publish(chat, action)
+        await self._host._mirror_summary(self._session)
+
     async def mcp_server_changed(
         self, customization_id: str, state: Mapping[str, Any], channel: str | None = None
     ) -> None:

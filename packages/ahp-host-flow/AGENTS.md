@@ -15,6 +15,7 @@ is the design; milestones M0–M12 there say what exists and what's next.
   (parsing the message that starts a run), `dispatch` (`ProviderDispatcher`,
   worker chats), `worktree` (git worktrees for `isolation: 'worktree'`), `redaction`
   (`flow redact`: `redact_step`, the request spool),
+  `limits` (`ProviderSlots`, the concurrency probe and `ProviderSlotsRegistry`, one per `FlowProvider`),
   `provider` (`FlowProvider`/`FlowSession`), `gates` (`MainChatGates`: ask, approve and canvas on the main chat), `inprocess` (an
   in-memory host for `flow run --config`) and `__main__` (the server). They may
   import `ahp_host`; `engine/` and `sandbox/` may not. `library` (`run`, `FlowRun`) and `verbs`
@@ -41,11 +42,14 @@ is the design; milestones M0–M12 there say what exists and what's next.
   `engine/remote.py` holds `ClientDispatcher`, which dials another host with
   `ahp_client` (so it is engine code: no `ahp_host`). `agent` is the `flow`
   agent type for `ahp-node` (the `ahp_host.agents` entry point).
-- Only an abort (`cancel_chat`/`cancel`, the run's `AbortSignal`) or a skip
-  stops a fleet call's node session. A cancellation without an abort is the
-  host stopping, and the node session is left running for the resumed run to
-  reattach to (`FleetDispatcher(aborted=...)`). Keep it so: a stop sent at
-  shutdown makes reattach impossible.
+- A fleet call's node session is stopped by an abort (`cancel_chat`/`cancel`, the run's
+  `AbortSignal`), a skip, or a stop the run itself made: the Scheduler's hard cap (budget,
+  wall time, quota) and the call's `call_timeout`/`opts.x.timeout`, which the dispatcher reads
+  from the call's `StopCause` (`engine.stop_cause()`; the Scheduler sets `reason` before it
+  cancels, `StepDispatcher.run_agent` puts its timeout scope on it). Only a cancellation with no
+  abort and no stop cause is the host stopping, and then the node session is left running for
+  the resumed run to reattach to (`FleetDispatcher(aborted=...)`). Keep it so: a stop sent at
+  shutdown makes reattach impossible, and a run-made stop left detached keeps spending.
 - Every fleet tool call goes through `FleetDispatcher._call`, which watches it
   (the offering client leaving, `reply_timeout`) and retries once on the
   rejoined gateway. `start_session` is never retried.
@@ -145,6 +149,9 @@ is the design; milestones M0–M12 there say what exists and what's next.
   `GateRunner.issue`): a script can make its runner send anything (`toJSON`, a
   replaced `JSON.stringify`), so a runner's own checks are never the authority.
 - A continued run's tool-call ids use the prefix `agent-r<k>`.
+- An open approval pauses the idle watchdog (`TurnTee._waiting`; a fleet row in `waiting`
+  does too); retry attempts (`retry_empty`) keep one ordinal, key and journal record, and
+  attempt k's main-chat tool call id is `agent-<n>-a<k>`.
 - A `.py` workflow from a client is never read or loaded (plan §4.10 trust);
   `python_sources` refuses `client`.
 - Client workflows reach the engine as plain data: `RunOptions.client_workflows`
@@ -200,6 +207,19 @@ is the design; milestones M0–M12 there say what exists and what's next.
   `_roots()` (a relative one against `roots[0]`), and replaces the inner session's working
   directories; with `isolation: 'worktree'` it is the worktree's base. Never loosen the
   containment check.
+- Provider semaphores (`limits.ProviderSlots`, `RoutingDispatcher`) are held inside the run's own
+  Scheduler slot, never instead of it. Only a number from flow.toml is explicit: `on_busy` never
+  changes it, and always halves a probed or unset limit down to 1, never 0.
+- Budget-stopped calls (live usage, wall time, quota) are journaled with kind `budget` and are never
+  replayed: a resume runs them live. The step descriptor and the last `started` record name the
+  provider actually used (a fallback writes a second `started`). Resume keys stay on the primary
+  route, so a fallback never changes a key.
+- Usage is reported per attempt: `RoutingDispatcher._attempt` opens a slot with
+  `begin_usage_attempt` and settles it with the attempt's result, and the Scheduler sums the
+  slots (a finished call takes, per counter, the larger of its result and that sum), so a failed
+  retry or fallback attempt is counted by the budget and the quota.
+- `RunOptions.reserve` defaults to `None` (the mean output tokens of the run's finished live calls,
+  else 0); the admission check counts only other in-flight calls' reservations.
 - Conventional commits, scope `ahp-host-flow`; `CHANGELOG.md` under
   `[Unreleased]`.
 

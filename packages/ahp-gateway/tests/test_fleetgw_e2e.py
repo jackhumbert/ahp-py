@@ -82,6 +82,8 @@ async def test_fleetgw_e2e_each_tool_through_a_real_client_tool_call(tmp_path: P
                     surface, RUN, "wait_for_sessions", sessions=[started["session"]]
                 )
             )
+            # `activity` is an opaque fingerprint of the session's chat (see test_fleetgw_wait).
+            assert isinstance(waited["sessions"][0].pop("activity"), int)
             assert waited == {
                 "sessions": [{"session": started["session"], "status": "done", "done": True}],
                 "timed_out": False,

@@ -8,6 +8,23 @@ the spec revision it targets.
 
 ## [Unreleased]
 
+### Documentation (M16)
+
+- The README documents `ahp_protocol.ext.usage` (`USAGE_META_KEY`, `request_usage_meta`, `is_request_scoped`) and the flow heartbeat descriptor (`flow.heartbeat`, `HEARTBEAT_KIND`), each with an executed example.
+
+### Added — heartbeat (M16)
+
+- **`flow.heartbeat(running=, tick=)`** and `HEARTBEAT_KIND`: the descriptor a host puts in the
+  `_meta` of a `chat/activityChanged` action while a run has steps in flight; `flow.schema.json`
+  gains the `heartbeat` branch.
+
+### Added — usage scope (M16)
+
+- **`ahp_protocol.ext.usage`** (`USAGE_META_KEY`, `REQUEST_SCOPE`, `request_usage_meta`,
+  `is_request_scoped`): a `TurnSink.usage` report carrying `_meta['ahp-py/usage'] = {'scope':
+  'request'}` is one model request's usage, not the turn's; a reader that does not know the key
+  may treat it as an ordinary report.
+
 ### Added — waiting entries and operation params (M15)
 
 - **`flow.step(..., waiting=[{kind, chat?}])`** adds `waiting` entries (and `awaitingInput`)

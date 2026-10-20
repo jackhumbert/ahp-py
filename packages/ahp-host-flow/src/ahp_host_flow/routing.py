@@ -66,3 +66,35 @@ def resolved_route(
     else:
         model = None
     return {"provider": provider, "model": model}
+
+
+def fallback_chain(config: FlowConfig, call: AgentCall) -> tuple[str, ...]:
+    """The providers to try for `call`, in order: the primary, then its fallbacks.
+
+    The direct list is the matching rule's `fallback` when that rule sets one, else the
+    primary's own (a call pinned by `opts.x.provider` uses the provider's). Each fallback is
+    followed by its own, depth first; duplicates and the primary are dropped.
+    """
+    primary = route(config.routing, call)
+    direct: tuple[str, ...] = ()
+    rule = None
+    if pinned_provider(call) is None:
+        rule = next((r for r in config.routing.rules if _matches(r, call)), None)
+    if rule is not None and rule.fallback is not None:
+        direct = rule.fallback
+    else:
+        spec = config.providers.get(primary)
+        direct = spec.fallback if spec is not None else ()
+    chain = [primary]
+
+    def expand(names: tuple[str, ...]) -> None:
+        for name in names:
+            if name in chain:
+                continue
+            chain.append(name)
+            spec = config.providers.get(name)
+            if spec is not None:
+                expand(spec.fallback)
+
+    expand(direct)
+    return tuple(chain)

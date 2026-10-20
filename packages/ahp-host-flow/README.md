@@ -235,10 +235,18 @@ async with ahp_host_flow.run(dispatcher, RunOptions(budget_total=50_000)) as r:
   `run_view` folds a chat's state into phases, steps and their status;
   `ahp-client` gives it as `session.flow_view()` (and `chat.flow_view()`).
 - A run's main chat is quiet while a step runs; the step's work is on its
-  worker chat. `ahp-client`'s `prompt()` gives up on a turn that produces
-  nothing for `idle_timeout` (300 s by default), so a client driving a run
-  passes `idle_timeout=None` (and bounds the run itself) or a value longer
-  than its slowest step.
+  worker chat. So that a client's idle timeout does not fire, the host sends a
+  heartbeat while at least one `agent()` step is in flight: every
+  `[limits] heartbeat` seconds (default 30, below `ahp-client`'s 300 s default
+  `idle_timeout`) a `chat/activityChanged` on the main chat ("Running 2 steps")
+  carrying `_meta['ahp-py/flow'] = {'heartbeat': {'running': k, 'tick': n}}`;
+  the activity is cleared when the run ends. A stock client ignores the `_meta`
+  and shows the activity text. In `ahp-client`'s `prompt()`, `idle_timeout` is
+  reset by every event the stream yields for the turn, by a
+  `chat/activityChanged` on its chat, and by input-needed changes for its chat,
+  so the default needs no change; a step silent for longer than `heartbeat`
+  and the timeout together (a host without the heartbeat, or a larger
+  `heartbeat`) still needs a longer `idle_timeout` or `None`.
 - `agent()` accepts `isolation: 'worktree'`. When the run's working directory is
   a git repository, the inner session runs in a new git worktree under
   `<state_dir>/runs/<runId>/worktrees/<ordinal>`. It is removed afterwards if it
@@ -499,7 +507,7 @@ reply_timeout = 900                   # seconds a fleet tool may take to answer 
 url = "wss://my-mac-mini.example.com"
 token_file = "~/.config/ahp/mac.token"
 agent = "claude"
-idle_timeout = 600                    # seconds the remote turn may go quiet (default 600)
+idle_timeout = 600                    # seconds the remote turn may go quiet (default 600; all kinds)
 # approval_timeout = 3600             # seconds a relayed approval may wait (default: no limit)
 
 [routing]
@@ -557,6 +565,153 @@ sources = ["client", "workspace", "user", "host"]
 load = "ahp_host_claude:from_config"
 interactive = true
 ```
+
+### Limits
+
+```toml
+[limits]
+budget = 200000        # output tokens for the whole run
+input_budget = 2000000 # input tokens (cache reads count unless count_cache = false)
+cost_budget = 5.0      # USD, from the cost the provider reports
+wall_budget = 1800     # seconds: stop in-flight calls, refuse new ones
+timeout = 3600         # seconds: kill the run
+concurrency = 4        # most agent() calls in flight at once
+heartbeat = 30         # seconds between main-chat heartbeats while a step runs
+reserve = "mean"       # output tokens held per admitted call: a count, or "mean"
+count_cache = true
+
+[providers.claude]
+load = "ahp_host_claude:from_config"
+call_timeout = 600     # seconds one agent() call to this provider may run
+```
+
+`[limits]` applies to every run the provider starts, and to `flow run --config`. `budget`,
+`input_budget` and `cost_budget` are ceilings on output tokens, input tokens and USD (0 is a
+ceiling of nothing); a call that would pass one is refused, and one running when it is passed is
+stopped. `reserve` is the output tokens an admitted call is assumed to need, so parallel calls
+cannot overshoot `budget` together: a count, or `"mean"` for the mean output of the run's
+finished calls (absent: the same mean, which is also the `RunOptions` default; `0` reserves nothing). `count_cache = false` leaves cache-read tokens out of
+`input_budget`. `concurrency` caps the calls in flight. A continued run keeps the `budget` its
+journal was started with.
+
+`timeout` kills the run, like `flow run --timeout`. `wall_budget` is gentler: when it is spent,
+calls in flight are stopped and recorded as `budget` errors, new calls are refused, and the
+script carries on (it can still return a result).
+
+`call_timeout` (a provider table key, all three kinds) and `opts.x.timeout` (per call, seconds,
+`agent('...', {x: {timeout: 120}})`) limit one call. When it passes, the worker turn is stopped
+and the call fails with kind `timeout` (transient): `agent()` throws, or returns null where the
+script catches failures. `opts.x.timeout` wins over `call_timeout`; a value that is not a
+positive number is an error before the call starts. A fleet call's node session is stopped when
+the run stops the call (a timeout, a budget, `wall_budget` or quota stop) or is aborted; only the
+host stopping leaves it running, for the resumed run to reattach to.
+
+`idle_timeout` (a provider table key, all three kinds) is a watchdog on silence rather than on
+total time: a call whose provider produces no event for that many seconds is stopped and fails
+with kind `timeout` (transient). A remote provider defaults to 600 s; in-process and fleet
+providers have no watchdog unless it is set. Any text, reasoning (thinking output is the
+heartbeat), tool-call, notification or usage event resets it. An open approval or question pauses
+it, so a slow human never trips it, and it restarts when the answer arrives (a confirmation the
+approval rules answer themselves does not pause it). A fleet call sees no deltas: it reads the
+node session's row at least twice per `idle_timeout`, and a change of its status or of its
+`activity` (ahp-gateway's fingerprint of the node session's chat, which moves with every delta,
+reasoning or tool call) resets the clock; `waiting` pauses it, and on expiry the node session is
+stopped. A gateway whose rows carry no `activity` shows status changes only, so a busy node
+session there can still trip it.
+
+`concurrency` (a provider table key, all three kinds; the unrelated `[limits] concurrency` caps
+one run) limits the calls of one provider across every run of the flow provider: a number >= 1,
+or, for an in-process provider, `"probe"`. A call holds the provider's slot inside its run's own
+slot, so a run still counts against `[limits] concurrency`. With `"probe"` the first call runs
+two minimal turns in parallel on two throwaway sessions and compares timings: if the second's
+first event only arrives after the first turn is nearly over, the provider serves one turn at a
+time and gets `concurrency 1` (logged `provider <name>: probe found a single slot; concurrency 1`),
+otherwise no limit. Calls that arrive while the probe runs wait for it, and a probe whose
+caller was cancelled runs again on the next call. A parallel provider that sends nothing until a
+turn ends (no streaming, its first event is the reply) reads as single-slot, since its second
+turn's first event comes about as late as the first turn's end; give such a provider a number
+instead. A failed probe is logged and leaves no limit. A provider that answers
+`rate_limited`, or `unavailable` and transient, halves a probed or unset limit (never below 1;
+logged `provider <name>: busy (rate_limited); concurrency 4 -> 2`); a number written in
+flow.toml is never changed ("explicit numbers win").
+
+`retry_empty` (a provider table key, all three kinds; default 0) dispatches a call again when its
+reply is empty: no text (reasoning alone counts as empty), or no value when `opts.schema` is set.
+Each retry is logged as `agent() #n: empty reply from <provider>; retrying (1 of N)`. The script
+sees one call: one ordinal, one resume key, one journal record, with the usage and cost of every
+attempt summed (also when every attempt was empty, and a failed attempt before a fallback counts
+too). Each extra attempt has its own worker chat and its own tool call in the main chat
+(`agent-0`, `agent-0-a1`, ...). If every attempt is empty the call fails with kind `empty`
+(transient); with `retry_empty = 0` an empty string is returned, as Claude Code does.
+
+A running call is stopped live when a budget counter passes its limit; the overshoot
+is bounded by how often its provider reports usage. Claude with
+`usage_per_message = true` in its provider table (`[providers.claude]`) reports after
+every model request, so a call can overshoot by one model request. Claude without it,
+ACP, fleet and remote providers report when a turn ends, so the bound is one turn.
+`wall_budget` reads a timer, not usage: it overshoots by nothing beyond the cancel
+latency. Claude's per-request reports count a request's uncached input plus its cache
+creation as input and its cache reads apart, as its turn report does, so the live and the
+settled counters agree. ACP's cost (`acpUsage.cost`) is the ACP session's running total: each
+call counts what it added, which matters for a named chat reusing one session. An ACP turn that
+reports no `inputTokens` shows its context size instead, marked as a gauge
+(`acpUsage.inputGauge`), and counts no input tokens: `input_budget` and the token quotas see
+only ACP agents that report per-turn input.
+
+### Quotas
+
+```toml
+[quotas]
+tokens_per_day = 2000000   # output + input tokens one user may use per UTC day
+tokens_per_run = 500000    # ... in one run
+cost_per_day = 20.0        # USD, from the cost the provider reports
+cost_per_run = 5.0
+```
+
+`[quotas]` caps what one user spends, by the principal of the turn that starts the run (never
+the session creator's). Tokens are output plus input (cache reads count unless
+`count_cache = false`). A call that would start at a reached limit is refused, `agent()` throws
+`quota tokens_per_day reached: 2000000 of 2000000`, and the host logs
+`<that text>; agent() #<n> refused`; a call running when a limit is passed is stopped like a
+budget stop (kind `budget`). The text names no user and no other run. Each key is optional; the
+day counters live in `<state_dir>/quotas.json` and survive a restart, and a user's day starts
+again at 0 on the next UTC date. A run with no principal (a queued, steered or host-started turn)
+is charged under one shared anonymous bucket. A call is charged once, when it ends.
+
+### Fallback
+
+```toml
+[providers.claude]
+load = "ahp_host_claude:from_config"
+fallback = ["codex"]       # tried when claude is unavailable, rate limited, times out or is empty
+
+[providers.codex]
+load = "ahp_host_acp:from_config"
+fallback = ["local"]
+
+[providers.local]
+load = "ahp_host_acp:from_config"
+
+[routing]
+default = "claude"
+
+[[routing.rules]]
+label = "review*"
+provider = "claude"
+fallback = ["codex", "local"]   # replaces claude's own list for these calls
+```
+
+When a call fails with kind `unavailable`, `rate_limited`, `timeout` or `empty`, or `failed` and
+transient, the next provider in its chain runs it (a provider's `retry_empty` and `concurrency`
+apply to each attempt) and the host logs `agent() #<n>: fell back from <a> to <b> (<kind>)`.
+The chain is the matching rule's `fallback` if the rule sets one, else the routed provider's,
+each followed by its own, duplicates dropped; a call pinned by `opts.x.provider` uses that
+provider's. `refused` and `budget` errors, a cancellation and a schema failure never fall back.
+A call with `opts.x.chat` or `opts.x.attach` skips fleet and remote fallbacks (logged), and the
+last error is thrown when the chain runs out. Names must be configured providers and the
+fallback graph must have no cycle (`fallback cycle: a -> b -> a`). Resume keys use the routed
+provider, not the one that answered, so a resume replays a fallback's result; the journal's
+start record and the run view name the provider that answered.
 
 ### Automations
 

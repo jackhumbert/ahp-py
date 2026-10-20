@@ -345,8 +345,16 @@ async def test_usage_carries_the_context_window_and_cost(
     finally:
         await session.aclose()
     assert [e for e in sink.events if e[0] == "usage"] == [("usage", 10, None, None, None)]
+    # The turn reported no inputTokens: the context size stands in, marked as a gauge.
     assert sink.usage_meta == [
-        {"acpUsage": {"used": 10, "size": 200000, "cost": {"amount": 0.25, "currency": "USD"}}}
+        {
+            "acpUsage": {
+                "used": 10,
+                "size": 200000,
+                "cost": {"amount": 0.25, "currency": "USD"},
+                "inputGauge": True,
+            }
+        }
     ]
     # Remembered as the window of the model the agent was on.
     assert provider.catalogue.context_windows == {"a": 200000}

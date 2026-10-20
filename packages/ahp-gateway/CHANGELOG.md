@@ -10,6 +10,21 @@ Under construction. `docs/plan.md` is the design and its §7 is the build order.
 
 ### Added
 
+- **Per-principal running cap (M16).** `OrchestratorConfig.max_running_per_principal`
+  (default none, `>= 1` when set): a flow `start_session` also waits until the sessions
+  the principal still has running across all its flow sessions are under the cap, and
+  gives up after `slot_wait` with "N sessions of yours are still running across your
+  runs after waiting Ns" ("1 session of yours is ...", and "1 of your sessions is ..."
+  for the per-session cap). The principal's count is taken and a slot reserved under a
+  per-principal lock (`Orchestrator._principal_gates`, dropped when idle), but no start
+  waits inside it: a flow session waiting for its own `max_running` slot does not hold
+  back the principal's other flow sessions. The model-facing orchestrator start path is
+  unchanged. `tests/test_quota_gateway.py`.
+- **`activity` on flow `wait_for_sessions` rows (M16).** Each row of a session the
+  gateway could open carries `activity`, an opaque fingerprint of the session's chat (its
+  turn count and active turn) that changes with every delta, reasoning or tool call, so
+  an engine's idle watchdog can tell a busy session from a silent one between status
+  changes. `tests/test_fleetgw_wait.py`.
 - **Delegation origin on flow-started sessions.** The flow `start_session` tool takes
   optional `originChat` and `originToolCall`; with both, the node session is created
   with a delegation `origin` naming the flow session, that chat and that tool call

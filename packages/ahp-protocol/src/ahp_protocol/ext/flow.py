@@ -43,6 +43,7 @@ __all__ = [
     "DESCRIPTOR_SCHEMA",
     "EMPTY_RUN",
     "FLOW_META_KEY",
+    "HEARTBEAT_KIND",
     "NOTIFICATION_KINDS",
     "RUN_FINISHED_STATUSES",
     "RUN_ID_PATTERN",
@@ -58,6 +59,7 @@ __all__ = [
     "WorkflowInfo",
     "WorkflowStart",
     "descriptor_of",
+    "heartbeat",
     "meta",
     "offered_schedule",
     "parse_workflow_start",
@@ -93,6 +95,8 @@ RUN_FINISHED_STATUSES: Final = ("ok", "error")
 VERB_STATUSES: Final = ("ok", "error")
 #: :attr:`StepView.kind`: a model step or a custom verb.
 STEP_KINDS: Final = ("agent", "verb")
+#: The one key of a heartbeat descriptor (``chat/activityChanged`` ``_meta``).
+HEARTBEAT_KIND: Final = "heartbeat"
 #: The id of the schedule trigger :func:`with_offered_schedule` adds.
 SCHEDULE_TRIGGER_ID: Final = "ahp-py/flow-schedule"
 
@@ -118,8 +122,23 @@ DESCRIPTOR_SCHEMA: Final[Mapping[str, Any]] = {
         {"$ref": "#/$defs/verb"},
         {"$ref": "#/$defs/workflow"},
         {"$ref": "#/$defs/workflowStart"},
+        {
+            "type": "object",
+            "required": ["heartbeat"],
+            "properties": {"heartbeat": {"$ref": "#/$defs/heartbeat"}},
+            "additionalProperties": False,
+        },
     ],
     "$defs": {
+        "heartbeat": {
+            "type": "object",
+            "required": ["running", "tick"],
+            "properties": {
+                "running": {"type": "integer", "minimum": 0},
+                "tick": {"type": "integer", "minimum": 1},
+            },
+            "additionalProperties": False,
+        },
         "usage": {
             "type": "object",
             "required": ["inputTokens", "outputTokens"],
@@ -357,6 +376,15 @@ def step(
     if entries:
         body["waiting"] = entries
     return body
+
+
+def heartbeat(*, running: int, tick: int) -> dict[str, Any]:
+    """A liveness tick: ``running`` steps in flight, the ``tick``-th (from 1) of the run."""
+    if running < 0:
+        raise ValueError(f"running must be >= 0, got {running!r}")
+    if tick < 1:
+        raise ValueError(f"tick must be >= 1, got {tick!r}")
+    return {HEARTBEAT_KIND: {"running": running, "tick": tick}}
 
 
 def verb_started(*, name: str, ordinal: int, phase: str | None) -> dict[str, Any]:

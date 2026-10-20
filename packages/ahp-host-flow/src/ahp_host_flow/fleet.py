@@ -14,17 +14,22 @@ from ahp_host import TurnSink
 from ahp_host.provider.base import ClientToolCall, SessionPublisher
 from ahp_protocol.ext import flow
 
+from ahp_host_flow.bridge import Watchdog
 from ahp_host_flow.config import APPROVAL_KEY, FlowConfig, ProviderConfig
 from ahp_host_flow.dispatch import ABORT_GRACE, FlowAgentError, StepDispatcher, inner_config
 from ahp_host_flow.engine import (
     AgentCall,
     AgentResult,
+    DispatchError,
     DispatchHandle,
+    ErrorKind,
     Redactor,
     preamble_text,
     reattach_handle,
     report_dispatch,
     schema_error,
+    stop_cause,
+    usage_reporter,
     with_preamble,
 )
 from ahp_host_flow.routing import x_opts
@@ -38,6 +43,14 @@ WAIT_SLICE: Final = 60.0
 #: covers the gateway's default `slot_wait` (600 s), the longest a `start_session` waits for a
 #: free slot under `max_running`; flow.toml's `reply_timeout` changes it per provider.
 REPLY_TIMEOUT: Final = 900.0
+
+
+def _slice_of(args: Mapping[str, Any]) -> float:
+    """The seconds a `wait_for_sessions` call asked the gateway to wait."""
+    value = args.get("timeout")
+    if isinstance(value, int | float) and not isinstance(value, bool) and value > 0:
+        return float(value)
+    return WAIT_SLICE
 
 
 def _offers_fleet(client: Mapping[str, Any]) -> bool:
@@ -114,7 +127,11 @@ class _FleetWorker:
     sink: TurnSink | None = None
     aborting: bool = False
     skipped: bool = False
+    #: The idle watchdog expired; `stop` is set and the node session is stopped.
+    timed_out: bool = False
     started: bool = False
+    error_kind: ErrorKind = "failed"
+    error_transient: bool = False
     #: The node session has finished or a stop for it has been sent.
     settled: bool = False
     #: The host is stopping, not the run being aborted: the node session is left
@@ -241,10 +258,12 @@ class FleetDispatcher(StepDispatcher):
             if client_id is None:
                 raise FlowAgentError(
                     f"{name}: no gateway offers the fleet tools to this session "
-                    f"(waited {self.rejoin_wait:g}s)"
+                    f"(waited {self.rejoin_wait:g}s)",
+                    kind="unavailable",
+                    transient=True,
                 )
             generation = self.clients.generation
-            bound = reply_timeout + (WAIT_SLICE if name == "wait_for_sessions" else 0.0)
+            bound = reply_timeout + (_slice_of(args) if name == "wait_for_sessions" else 0.0)
             pending = asyncio.ensure_future(
                 self._tool(
                     sink, client_id, call_id, name, args, suffix if attempt == 0 else f"{suffix}-r"
@@ -269,7 +288,7 @@ class FleetDispatcher(StepDispatcher):
                 if not pending.done():
                     pending.cancel()
             if not retry or attempt:
-                raise FlowAgentError(f"{name}: {lost}")
+                raise FlowAgentError(f"{name}: {lost}", kind="unavailable", transient=True)
             self._note(f"{name}: {lost}; trying once more when the gateway offers the tools again")
         raise AssertionError("unreachable")
 
@@ -324,7 +343,9 @@ class FleetDispatcher(StepDispatcher):
                 f"agent() #{call.ordinal}: no gateway offers fleet tools to this session; "
                 f"provider {name!r} needs one"
             )
-            raise FlowAgentError("no gateway offers fleet tools to this session")
+            raise FlowAgentError(
+                "no gateway offers fleet tools to this session", kind="unavailable", transient=True
+            )
         reply_timeout = spec.reply_timeout if spec.reply_timeout is not None else REPLY_TIMEOUT
         opts = call.opts
         iso = opts.get("isolation")
@@ -350,13 +371,16 @@ class FleetDispatcher(StepDispatcher):
 
         # Read here: the worker callback runs in a task of its own.
         before = reattach_handle()
+        # Set by the Scheduler's hard cap or this call's timeout before they cancel it.
+        cause = stop_cause()
+        reporter = usage_reporter()
         old = (
             before.session
             if before is not None and before.provider == name and before.session
             else None
         )
         state = _FleetWorker()
-        usage = {"input_tokens": 0, "output_tokens": 0}
+        usage = {"input_tokens": 0, "output_tokens": 0, "cache_read_tokens": 0}
         value: Any = None
         session: str | None = None
 
@@ -427,11 +451,22 @@ class FleetDispatcher(StepDispatcher):
                     retry=False,
                 )
 
+        def idle_expired() -> None:
+            state.timed_out = True
+            state.stop.set()
+
         async def run(worker_sink: TurnSink) -> None:
             nonlocal value, session
             state.started = True
             state.task = asyncio.current_task()
             state.sink = worker_sink
+            watchdog: Watchdog | None = None
+            wait_slice = WAIT_SLICE
+            if spec.idle_timeout is not None:
+                watchdog = Watchdog(spec.idle_timeout, idle_expired)
+                watchdog.start()
+                # Sampled often enough that progress inside the slice resets the watchdog.
+                wait_slice = min(WAIT_SLICE, max(spec.idle_timeout / 2, 0.05))
             try:
                 if old is not None:
                     await worker_sink.text_delta(f"Reattaching to {old}\n")
@@ -505,17 +540,36 @@ class FleetDispatcher(StepDispatcher):
                     )
                     await worker_sink.text_delta(f"Node session: {session}\n")
                 i = 0
+                # A fleet call sees no deltas: a row whose status or `activity` (the gateway's
+                # fingerprint of the node session's current turn) differs from the last one is
+                # the activity. A gateway that reports no `activity` shows status changes only.
+                last_status: object = None
+                last_activity: object = None
                 while True:
                     waited = await call_tool(
                         f"wait-{i}",
                         "wait_for_sessions",
-                        {"sessions": [session], "timeout": WAIT_SLICE},
+                        {"sessions": [session], "timeout": wait_slice},
                     )
                     i += 1
                     entries = waited.get("sessions")
                     first = entries[0] if isinstance(entries, list) and entries else None
                     if not isinstance(first, Mapping):
                         raise FlowAgentError("wait_for_sessions: no session in the result")
+                    if watchdog is not None:
+                        now = first.get("status")
+                        activity = first.get("activity")
+                        if now != last_status:
+                            if now == "waiting":
+                                watchdog.pause()
+                            elif last_status == "waiting":
+                                watchdog.resume()
+                            else:
+                                watchdog.touch()
+                            last_status = now
+                        elif activity is not None and activity != last_activity:
+                            watchdog.touch()
+                        last_activity = activity
                     if first.get("done") is True:
                         break
                 data = await call_tool("read", "read_session", {"session": session})
@@ -538,6 +592,8 @@ class FleetDispatcher(StepDispatcher):
                     for key in usage:
                         count = raw.get(key)
                         usage[key] = count if isinstance(count, int) else 0
+                # Also a failed node session's: the Scheduler counts every attempt's usage.
+                reporter(dict(usage))
                 await worker_sink.usage(
                     input_tokens=usage["input_tokens"], output_tokens=usage["output_tokens"]
                 )
@@ -553,8 +609,12 @@ class FleetDispatcher(StepDispatcher):
                 raise
             except Exception as exc:
                 state.error = self.redactor.mask(str(exc))
+                if isinstance(exc, DispatchError):
+                    state.error_kind, state.error_transient = exc.kind, exc.transient
                 raise
             finally:
+                if watchdog is not None:
+                    watchdog.stop()
                 state.done.set()
 
         def turn_ended() -> None:
@@ -571,11 +631,13 @@ class FleetDispatcher(StepDispatcher):
             if state.skipped and not state.settled:
                 await stop_node(self.sink)
         except asyncio.CancelledError:
-            # The run is going down (a worker skip cancels only the callback): aborted, or
-            # the host stopping. Only an abort stops the node session; the host stopping
-            # leaves it running, so the run resumed after the restart reattaches to it.
+            # The call is going down (a worker skip cancels only the callback): aborted, stopped
+            # by the run (its budget, wall time or quota, or this call's timeout: the
+            # `StopCause`), or the host stopping. Only the host stopping leaves the node session
+            # running, so the run resumed after the restart reattaches to it.
             state.aborting = True
-            state.detached = not self.aborted()
+            stopped_by_run = cause is not None and cause.stopped()
+            state.detached = not (self.aborted() or stopped_by_run)
             state.stop.set()
             with contextlib.suppress(TimeoutError):
                 await asyncio.wait_for(state.done.wait(), ABORT_GRACE)
@@ -597,6 +659,20 @@ class FleetDispatcher(StepDispatcher):
                 call_id, link, success=False, message="agent() skipped", finished=finished
             )
             raise asyncio.CancelledError
+        if state.timed_out:
+            idle = f"provider {name!r}: no activity for {spec.idle_timeout:g}s (idle_timeout); "
+            idle += "stopped the turn"
+            finished = flow.step_finished(
+                status="error",
+                result=None,
+                error=idle,
+                input_tokens=in_tok,
+                output_tokens=out_tok,
+            )
+            await self._complete(
+                call_id, link, success=False, message="agent() failed", finished=finished
+            )
+            raise FlowAgentError(idle, kind="timeout", transient=True)
         if state.error is not None:
             finished = flow.step_finished(
                 status="error",
@@ -608,7 +684,9 @@ class FleetDispatcher(StepDispatcher):
             await self._complete(
                 call_id, link, success=False, message="agent() failed", finished=finished
             )
-            raise FlowAgentError(state.error)
+            raise FlowAgentError(
+                state.error, kind=state.error_kind, transient=state.error_transient
+            )
         value = self.redactor.mask_value(value)
         result = AgentResult(value, usage=usage)
         if value is None:

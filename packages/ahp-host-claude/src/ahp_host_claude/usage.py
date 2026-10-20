@@ -33,7 +33,9 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
-__all__ = ["Report", "report"]
+from ahp_protocol.ext.usage import request_usage_meta
+
+__all__ = ["Report", "report", "request_report"]
 
 _PROMPT_KEYS = ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")
 
@@ -127,4 +129,26 @@ def report(
         cache_read_tokens=_int(request.get("cache_read_input_tokens")),
         model=model,
         meta=meta or None,
+    )
+
+
+def request_report(request: Mapping[str, Any] | None, *, model: str | None) -> Report | None:
+    """One model request's usage (an `AssistantMessage.usage`), marked request-scoped.
+
+    ``input_tokens`` is the request's uncached prompt plus its cache creation, and
+    ``cache_read_tokens`` its cache reads, kept apart: the same split a reader takes from
+    the turn report's ``turnTotals``, so summing requests and reading the settled turn
+    agree whether or not cache reads are counted. (It is not the gauge the turn report's
+    ``input_tokens`` is.) ``None`` when the request carries no usage.
+    """
+    if not request:
+        return None
+    parts = [_int(request.get(key)) for key in ("input_tokens", "cache_creation_input_tokens")]
+    known = [part for part in parts if part is not None]
+    return Report(
+        input_tokens=sum(known) if known else None,
+        output_tokens=_int(request.get("output_tokens")),
+        cache_read_tokens=_int(request.get("cache_read_input_tokens")),
+        model=model,
+        meta=request_usage_meta(),
     )

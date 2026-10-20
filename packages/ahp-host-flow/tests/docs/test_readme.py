@@ -128,3 +128,28 @@ def test_readme_approve_person_example_runs() -> None:
 
     with pytest.raises(RuntimeError, match="no principal"):
         asyncio.run(approve(call_with([None], [])))
+
+
+def test_flowlimits_readme_example_parses(tmp_path: Path) -> None:
+    """The README's Limits block parses: all eight [limits] keys and a provider call_timeout."""
+    text = (ROOT / "README.md").read_text(encoding="utf-8")
+    section = text[text.index("### Limits") :]
+    block = re.search(r"```toml\n(.*?)```", section, re.DOTALL)
+    assert block is not None
+    config = parse_config(tomllib.loads(block.group(1)), base=tmp_path)
+    limits = config.limits
+    assert (limits.budget, limits.input_budget, limits.cost_budget) == (200000, 2000000, 5.0)
+    assert (limits.wall_budget, limits.timeout, limits.concurrency) == (1800.0, 3600.0, 4)
+    assert (limits.reserve, limits.count_cache) == ("mean", True)
+    assert config.providers["claude"].call_timeout == 600.0
+
+
+def test_fallchain_readme_example_parses(tmp_path: Path) -> None:
+    """The README's Fallback block parses: a provider fallback and a rule fallback."""
+    text = (ROOT / "README.md").read_text(encoding="utf-8")
+    section = text[text.index("### Fallback") :]
+    block = re.search(r"```toml\n(.*?)```", section, re.DOTALL)
+    assert block is not None
+    config = parse_config(tomllib.loads(block.group(1)), base=tmp_path)
+    assert config.providers["claude"].fallback == ("codex",)
+    assert config.routing.rules[0].fallback == ("codex", "local")

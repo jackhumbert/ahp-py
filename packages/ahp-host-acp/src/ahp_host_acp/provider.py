@@ -1473,13 +1473,18 @@ class AcpSession:
         a context window or a cost. So ACP's own `UsageUpdate` goes there under
         one key, `acpUsage` (`used`, `size`, `cost: {amount, currency}`),
         verbatim, where a client that knows ACP can read it and none can
-        mistake it for something the spec defines.
+        mistake it for something the spec defines. When the turn has no
+        `inputTokens` and the context size stands in for it, `acpUsage` says so
+        (`inputGauge: true`): the figure is how full the context is, not what the
+        turn consumed, and a reader that sums usage (a budget) must not count it.
         """
         usage = _mapping(result.get("usage"))
         input_tokens = usage.get("inputTokens")
+        gauge = False
         if not isinstance(input_tokens, int):
             # No per-turn usage: the agent's context size is the best gauge.
             input_tokens = chat.context_used
+            gauge = input_tokens is not None
         output_tokens = usage.get("outputTokens")
         cached = usage.get("cachedReadTokens")
         acp_usage: dict[str, Any] = {}
@@ -1490,6 +1495,8 @@ class AcpSession:
         ):
             if value is not None:
                 acp_usage[key] = value
+        if gauge:
+            acp_usage["inputGauge"] = True
         if input_tokens is None and not isinstance(output_tokens, int) and not acp_usage:
             return
         await sink.usage(

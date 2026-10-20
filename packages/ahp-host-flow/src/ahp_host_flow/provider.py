@@ -26,6 +26,7 @@ from ahp_host.provider.base import (
     IdentifiesTurn,
     ModelInfo,
     ObservesSessionState,
+    PublishesChatActivity,
     ReadsClientPlugins,
     SessionDescription,
     SteersTurns,
@@ -64,12 +65,15 @@ from ahp_host_flow.dispatch import (
 )
 from ahp_host_flow.engine import (
     IDLE_TIMEOUT,
+    QUOTA_FILE,
     RUN_ID,
     AbortSignal,
+    AgentCall,
     ClientDispatcher,
     ClientWorkflow,
     Dispatcher,
     JournalError,
+    QuotaLedger,
     RemoteSpec,
     RunOptions,
     VerbHandler,
@@ -81,6 +85,7 @@ from ahp_host_flow.engine import (
 )
 from ahp_host_flow.fleet import FleetClients, FleetDispatcher
 from ahp_host_flow.gates import MainChatGates, MainChatVerbs
+from ahp_host_flow.limits import ProviderSlotsRegistry, probe
 from ahp_host_flow.loading import LazyProviders, lazy_verbs, resume_key_hook
 from ahp_host_flow.sandbox import (
     NO_ARGS,
@@ -327,6 +332,17 @@ class FlowProvider:
         #: fleet tool call whose gateway left waits for it to come back to try once more.
         self.fleet_client_wait = fleet_client_wait
         self.redactor = make_redactor(config.redact)
+        #: What each principal used today, shared by every run; None without `[quotas]`.
+        self.quotas: QuotaLedger | None = (
+            QuotaLedger(config.state_dir / QUOTA_FILE, config.quotas) if config.quotas.any else None
+        )
+        #: Per-provider concurrency (`providers.<name>.concurrency`), shared by every session and
+        #: run of this provider.
+        self.provider_slots = ProviderSlotsRegistry(
+            config, on_log=_log.info, prober=self._probe_provider
+        )
+        #: Numbers the throwaway sessions of a probe.
+        self._probe_count = 0
         #: Kept worktrees published as changesets; the provider declares their operations.
         self.worktree_changesets = WorktreeChangesets(
             branch=config.changesets.branch,
@@ -348,6 +364,26 @@ class FlowProvider:
         self._sessions: weakref.WeakSet[FlowSession] = weakref.WeakSet()
         #: Client-chosen run ids claimed by a run that has not yet created its journal.
         self._reserved_run_ids: set[str] = set()
+
+    async def _probe_provider(self, name: str) -> int | None:
+        """Runs the concurrency probe on in-process provider *name* (two throwaway sessions)."""
+        try:
+            provider = self.providers[name]
+        except Exception as exc:
+            _log.warning("provider %s: probe cannot load it (%s); no limit", name, exc)
+            return None
+
+        def context() -> AgentSessionContext:
+            self._probe_count += 1
+            uri = f"flow-probe:/{name}/{self._probe_count}"
+            return AgentSessionContext(
+                session_uri=uri,
+                chat_uri=f"{uri}/chat",
+                provider_id=provider.agent.provider,
+                publisher=None,
+            )
+
+        return await probe(provider, context, self.provider_slots.on_log, name=name)
 
     def live_run_ids(self) -> frozenset[str]:
         """The run id of every run live now (not the ones a restart left to resume)."""
@@ -809,6 +845,11 @@ class FlowSession:
             self.provider._reserved_run_ids.add(reserved)
         try:
             key_extra, key_mode = resume_key_hook(config, model)
+            limits = config.limits
+            # 'mean' is RunOptions' None; an absent reserve keeps its default.
+            reserve: dict[str, Any] = {}
+            if limits.reserve is not None:
+                reserve["reserve"] = None if limits.reserve == "mean" else limits.reserve
             options = RunOptions(
                 state_dir=config.state_dir,
                 workflow_dirs=tuple(WorkflowDir(d.source, d.path) for d in dirs if d.path.is_dir()),
@@ -826,6 +867,17 @@ class FlowSession:
                 resume_from=resume_from,
                 continue_run=resume_from is not None,
                 run_id=run_id,
+                budget_total=limits.budget,
+                input_budget=limits.input_budget,
+                cost_budget=limits.cost_budget,
+                wall_budget=limits.wall_budget,
+                timeout=limits.timeout,
+                concurrency=limits.concurrency,
+                count_cache=limits.count_cache,
+                quota=None
+                if self.provider.quotas is None
+                else self.provider.quotas.for_run(principal),
+                **reserve,
             )
         except ValueError as exc:
             if reserved is not None:
@@ -945,6 +997,7 @@ class FlowSession:
 
         dispatcher = RoutingDispatcher(
             config,
+            slots=self.provider.provider_slots,
             inprocess=ProviderDispatcher(
                 config=config,
                 providers=self.provider.providers,
@@ -982,6 +1035,38 @@ class FlowSession:
             ),
             remote=remote_for,
         )
+
+        # Liveness for a client's idle timeout: a tick on the main chat while a step is in flight.
+        running = 0
+        beat_task: asyncio.Task[None] | None = None
+        beating = False
+
+        def on_agent_start(_call: AgentCall) -> None:
+            nonlocal running
+            running += 1
+
+        def on_agent_end(_call: AgentCall, _value: Any) -> None:
+            nonlocal running
+            running -= 1
+
+        async def beat(chat_activity: PublishesChatActivity) -> None:
+            nonlocal beating
+            tick = 0
+            while True:
+                await asyncio.sleep(limits.heartbeat)
+                k = running
+                if k < 1:
+                    continue
+                tick += 1
+                beating = True
+                try:
+                    await chat_activity.chat_activity_changed(
+                        chat,
+                        f"Running {k} step" + ("s" if k != 1 else ""),
+                        meta=flow.meta(flow.heartbeat(running=k, tick=tick)),
+                    )
+                except Exception:
+                    _log.debug("heartbeat for %s failed", chat, exc_info=True)
 
         def on_run_start(run_id: str) -> None:
             dispatcher.run_id = run_id
@@ -1040,6 +1125,8 @@ class FlowSession:
             await finish()
             await sink.turn_failed(message, reason)
 
+        if isinstance(publisher, PublishesChatActivity):
+            beat_task = asyncio.create_task(beat(publisher))
         try:
             try:
                 value = await run_script(
@@ -1053,6 +1140,8 @@ class FlowSession:
                     abort=abort,
                     on_log=on_log,
                     on_phase=on_phase,
+                    on_agent_start=on_agent_start,
+                    on_agent_end=on_agent_end,
                     on_run_start=on_run_start,
                     gates=gates,
                     verb_host=verb_host,
@@ -1070,6 +1159,12 @@ class FlowSession:
             await sink.text_delta(f"```json\n{body}\n```")
         finally:
             # Also reached on cancellation: the run is over, so stop the notifier.
+            if beat_task is not None:
+                beat_task.cancel()
+                await asyncio.gather(beat_task, return_exceptions=True)
+                if beating and isinstance(publisher, PublishesChatActivity):
+                    with contextlib.suppress(Exception):
+                        await publisher.chat_activity_changed(chat, None)
             if reserved is not None:
                 self.provider._reserved_run_ids.discard(reserved)
             self._aborts.pop(chat, None)

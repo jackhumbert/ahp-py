@@ -146,6 +146,7 @@ from ahp_host_claude.sessions import (
 )
 from ahp_host_claude.transcripts import transcript
 from ahp_host_claude.usage import report as usage_report
+from ahp_host_claude.usage import request_report
 
 log = logging.getLogger(__name__)
 
@@ -431,6 +432,8 @@ class _Turn:
     client: Any = None
     #: The API error Claude Code reported on the turn's last answer, if any.
     api_error: str | None = None
+    #: The usage already reported per request (`message_id`), for `usage_per_message`.
+    requests: dict[str, Mapping[str, Any]] = field(default_factory=dict)
 
 
 def _turn_id_of(sink: TurnSink) -> str | None:
@@ -499,6 +502,7 @@ class ClaudeSession:
         disabled: Sequence[str] = (),
         commands: Sequence[Mapping[str, Any]] = (),
         on_model_usage: Callable[[Any], None] | None = None,
+        usage_per_message: bool = False,
     ) -> None:
         self.context = context
         #: Chosen at creation (or restored on resume); a client may change it
@@ -622,6 +626,9 @@ class ClaudeSession:
             cost_baseline = 0.0  # a new conversation has cost nothing yet
         self.cost_baseline: float | None = cost_baseline
         self._on_model_usage = on_model_usage
+        #: Report each main-loop request's usage as it arrives (`usage.request_report`),
+        #: not only the turn's at its end.
+        self._usage_per_message = usage_per_message
         #: What Claude Code has said about the session's skills, agents,
         #: plugins and MCP servers, and the tree last published from it.
         self._sources = customizations.Sources(commands=list(commands) or None)
@@ -2366,6 +2373,8 @@ class ClaudeSession:
             turn.model = item.model or turn.model
             if item.parent_tool_use_id is None and isinstance(item.usage, Mapping):
                 turn.last_request = item.usage
+                if self._usage_per_message:
+                    await self._report_request(item, turn, sink)
             if item.parent_tool_use_id is None and item.error is not None:
                 turn.api_error = str(item.error)
             await self._on_assistant(item, sink)
@@ -2527,6 +2536,39 @@ class ClaudeSession:
                 {"content": content},
                 success=not failed,
                 past_tense_message=past_tense(name, tool_input, failed=failed),
+            )
+
+    async def _report_request(self, item: AssistantMessage, turn: _Turn, sink: TurnSink) -> None:
+        """Report one main-loop request's usage once.
+
+        One API response arrives as several `AssistantMessage`s (one per content block)
+        sharing its `message_id` and its usage: only what a later one adds to the figures
+        already reported for that id is reported again, so a request is never counted twice.
+        """
+        usage: Mapping[str, Any] = item.usage or {}
+        if item.message_id is not None:
+            before = turn.requests.get(item.message_id)
+            turn.requests[item.message_id] = usage
+            if before is not None:
+                grown = {
+                    key: value - prior
+                    for key, value in usage.items()
+                    if isinstance(value, int)
+                    and not isinstance(value, bool)
+                    and isinstance(prior := before.get(key, 0), int)
+                    and value > prior
+                }
+                if not grown:
+                    return
+                usage = grown
+        reported = request_report(usage, model=turn.model)
+        if reported is not None:
+            await sink.usage(
+                input_tokens=reported.input_tokens,
+                output_tokens=reported.output_tokens,
+                cache_read_tokens=reported.cache_read_tokens,
+                model=reported.model,
+                meta=reported.meta,
             )
 
     async def _on_result(
@@ -2750,6 +2792,7 @@ class LocalClaudeSession(ClaudeSession):
             policy=self._policy,
             commands=self._sources.commands or (),
             on_model_usage=self._on_model_usage,
+            usage_per_message=self._usage_per_message,
         )
         child._parent = self
         child._scope = context.chat_uri
@@ -3326,6 +3369,7 @@ class ClaudeProvider:
         commands: Sequence[Mapping[str, Any]] = (),
         rediscover: bool = False,
         lazy_discovery: bool = False,
+        usage_per_message: bool = False,
     ) -> None:
         if not is_valid_provider_id(provider_id):
             raise ValueError(f"invalid provider id: {provider_id!r}")
@@ -3376,6 +3420,8 @@ class ClaudeProvider:
         self.env_allow: tuple[str, ...] | None = tuple(env_allow) if env_allow is not None else None
         #: The host's tool policy; None: only the approval gate.
         self.policy = policy
+        #: Sessions report each model request's usage (`usage.request_report`).
+        self.usage_per_message = usage_per_message
         self._dismissed: set[str] = self._load_dismissed()
         #: Slash commands from start-up (`Discovery.commands`), for a session
         #: whose own Claude client has not said yet.
@@ -3567,6 +3613,7 @@ class ClaudeProvider:
             policy=self.policy,
             commands=self._commands,
             on_model_usage=self._learned_from,
+            usage_per_message=self.usage_per_message,
             on_chat=self._register_chat,
             **fields,
         )

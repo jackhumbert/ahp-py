@@ -52,6 +52,7 @@ async def test_fleetgw_wait_structured_result_text_and_usage(tmp_path: Path) -> 
         waited = await run_tool(fleet, "flow:/r1", "wait_for_sessions", sessions=[first["session"]])
         body = waited["structuredContent"]
         assert body["timed_out"] is False
+        assert isinstance(body["sessions"][0].pop("activity"), int)
         assert body["sessions"] == [{"session": first["session"], "status": "done", "done": True}]
 
         read = (await run_tool(fleet, "flow:/r1", "read_session", session=first["session"]))[
@@ -158,3 +159,27 @@ async def test_fleetgw_wait_another_user_cannot_prompt_the_flow_session(tmp_path
             assert isinstance(await chat.prompt("hi"), TurnCompleted)
     finally:
         await _close(fleet)
+
+
+async def test_fleetgw_wait_activity_changes_with_the_session(tmp_path: Path) -> None:
+    """`activity` lets an engine see progress between status changes (its idle watchdog)."""
+    fleet = flow_fleet(tmp_path)
+    try:
+        await start_flow(fleet)
+        held = (await _start(fleet, node="asker", prompt="wait"))["structuredContent"]
+
+        async def row() -> Any:
+            waited = await run_tool(
+                fleet, "flow:/r1", "wait_for_sessions", sessions=[held["session"]], timeout=0.1
+            )
+            return waited["structuredContent"]["sessions"][0]
+
+        before = await row()
+        assert before["activity"] == (await row())["activity"]
+        await run_tool(fleet, "flow:/r1", "stop_session", session=held["session"])
+        after = await row()
+        assert after["done"] is True
+        assert after["activity"] != before["activity"]
+    finally:
+        await fleet.gateway.aclose()
+        await fleet.aclose()

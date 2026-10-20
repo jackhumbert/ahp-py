@@ -96,9 +96,15 @@ class FakeFleet:
                 await asyncio.sleep(0.01)
         finally:
             self.waiting -= 1
-        statuses = [
-            {"session": u, "status": self.status(u), "done": self.status(u) in _DONE} for u in uris
-        ]
+        statuses: list[dict[str, Any]] = []
+        for u in uris:
+            row: dict[str, Any] = {"session": u, "status": self.status(u)}
+            row["done"] = row["status"] in _DONE
+            entry = self.sessions.get(u)
+            # Like the gateway's fingerprint of the session's chat, when a test sets one.
+            if entry is not None and "activity" in entry:
+                row["activity"] = entry["activity"]
+            statuses.append(row)
         return {"sessions": statuses, "timed_out": not all(s["done"] for s in statuses)}
 
     def read(self, args: Mapping[str, Any]) -> dict[str, Any]:

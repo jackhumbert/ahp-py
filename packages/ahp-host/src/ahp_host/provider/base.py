@@ -66,6 +66,7 @@ __all__ = [
     "OpensSessions",
     "ProviderTerminal",
     "ProvidesOperations",
+    "PublishesChatActivity",
     "ReadsClientPlugins",
     "ReconfiguresChats",
     "ResolvesInput",
@@ -1175,6 +1176,21 @@ class ObservesSessionState(Protocol):
 
     def session_state(self) -> Mapping[str, Any]:
         """The session channel's current reduced state, read-only; poll it, never mutate it."""
+        ...
+
+
+@runtime_checkable
+class PublishesChatActivity(Protocol):
+    """A publisher that can set a chat's activity, with a ``_meta`` riding on the action."""
+
+    async def chat_activity_changed(
+        self, chat: str, activity: str | None, *, meta: Mapping[str, Any] | None = None
+    ) -> None:
+        """Publish ``chat/activityChanged`` on one of the session's chats.
+
+        ``meta`` rides as the action's ``_meta`` (a namespaced extension a stock client ignores);
+        a chat the session does not own is ignored.
+        """
         ...
 
 

@@ -319,7 +319,7 @@ def test_provider_kinds_parse(tmp_path: Path) -> None:
         ({"agent": "claude"}, r"providers.a needs one of load, via, url"),
         ({**_FLEET, "load": "m:C"}, r"providers.a: load, via and url are exclusive"),
         ({**_FLEET, "reply_timeout": 0}, r"providers.a.reply_timeout must be a positive"),
-        ({**_FLEET, "idle_timeout": 5}, r"unknown key\(s\) in providers.a: idle_timeout"),
+        ({**_FLEET, "idle_timeout": 0}, r"providers.a.idle_timeout must be a positive"),
         ({**_REMOTE, "idle_timeout": "1"}, r"providers.a.idle_timeout must be a positive"),
         ({**_REMOTE, "reply_timeout": 5}, r"unknown key\(s\) in providers.a: reply_timeout"),
     ],
@@ -335,6 +335,8 @@ def test_provider_kinds_timeouts(tmp_path: Path) -> None:
             "providers": {
                 "f": {**_FLEET, "reply_timeout": 30},
                 "r": {**_REMOTE, "idle_timeout": 1.5},
+                # Allowed for every provider kind since M16 item 3 (fleet: status and activity).
+                "fi": {**_FLEET, "idle_timeout": 5},
                 "plain": _FLEET,
             },
             "routing": {"default": "f"},
@@ -343,6 +345,7 @@ def test_provider_kinds_timeouts(tmp_path: Path) -> None:
     )
     assert cfg.providers["f"].reply_timeout == 30.0
     assert cfg.providers["r"].idle_timeout == 1.5
+    assert cfg.providers["fi"].idle_timeout == 5.0
     assert (cfg.providers["plain"].reply_timeout, cfg.providers["plain"].idle_timeout) == (
         None,
         None,

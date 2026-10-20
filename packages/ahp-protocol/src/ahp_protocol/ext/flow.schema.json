@@ -17,9 +17,39 @@
     },
     {
       "$ref": "#/$defs/workflowStart"
+    },
+    {
+      "type": "object",
+      "required": [
+        "heartbeat"
+      ],
+      "properties": {
+        "heartbeat": {
+          "$ref": "#/$defs/heartbeat"
+        }
+      },
+      "additionalProperties": false
     }
   ],
   "$defs": {
+    "heartbeat": {
+      "type": "object",
+      "required": [
+        "running",
+        "tick"
+      ],
+      "properties": {
+        "running": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "tick": {
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "additionalProperties": false
+    },
     "usage": {
       "type": "object",
       "required": [

@@ -12,6 +12,7 @@ from typing import Any, Final, Literal
 
 from ahp_host.provider.policy import PolicyError, ToolPolicy, policy_from_table
 
+from ahp_host_flow.engine.quota import QuotaLimits
 from ahp_host_flow.engine.redact import Redactor
 from ahp_host_flow.engine.registry import WORKFLOW_SOURCES
 from ahp_host_flow.engine.verbnames import verb_name_error
@@ -45,6 +46,9 @@ class RoutingRule:
     model: str | None = None
     phase: str | None = None
     label: str | None = None
+    # Providers tried, in order, when the rule's provider fails in a way another could cure; None:
+    # the provider's own `fallback`.
+    fallback: tuple[str, ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -77,12 +81,27 @@ class ProviderConfig:
     # Fleet: seconds a fleet tool may take to answer before the call is retried once on the
     # rejoined gateway, then failed. None: `fleet.REPLY_TIMEOUT`.
     reply_timeout: float | None = None
-    # Remote: seconds the remote turn may go without an event (a question or an approval
-    # nobody can answer from here) before the call fails. None: `remote.IDLE_TIMEOUT`.
+    # Seconds a call may go without any event (reasoning counts; an open approval pauses the
+    # clock) before it is stopped and fails with kind 'timeout'. Remote: None is
+    # `remote.IDLE_TIMEOUT`. In-process and fleet: None is no watchdog (a fleet call sees status
+    # changes only, not deltas).
     idle_timeout: float | None = None
     # Remote: seconds a relayed approval or question may wait for an answer on the worker
     # chat before the call fails. None: wait until the run is aborted.
     approval_timeout: float | None = None
+    # Seconds one agent() call to this provider may run before it is stopped and fails with kind
+    # 'timeout'; `opts.x.timeout` overrides it per call. None: no limit.
+    call_timeout: float | None = None
+    # Extra attempts after an empty reply (no text, or no value for a schema); 0 returns the
+    # empty reply as it is.
+    retry_empty: int = 0
+    # Calls of this provider that may run at once, across every run of the flow provider: an
+    # integer >= 1, or 'probe' (in-process only: two trial turns decide between 1 and no limit).
+    # None: no limit.
+    concurrency: int | Literal["probe"] | None = None
+    # Providers tried in order, each with its own fallback, when a call to this one fails as
+    # unavailable, rate limited, timed out, empty or transiently failed.
+    fallback: tuple[str, ...] = ()
     # In-process: worker chats of this provider take steering (plan §4.5).
     interactive: bool = False
     # Text put before every prompt the inner agent is sent: True for the default, a string for
@@ -147,6 +166,28 @@ class ApprovalsConfig:
 
 
 @dataclass(frozen=True)
+class LimitsConfig:
+    """`[limits]`: run-wide caps for runs started through the provider (plan M16)."""
+
+    # Output tokens, input tokens and USD a run may use; None: no cap.
+    budget: int | None = None
+    input_budget: int | None = None
+    cost_budget: float | None = None
+    # Seconds of wall clock before in-flight calls are stopped and new ones refused.
+    wall_budget: float | None = None
+    # Seconds before the whole run is killed (like `flow run --timeout`).
+    timeout: float | None = None
+    concurrency: int | None = None
+    # Output tokens reserved per admitted call: a count, or 'mean' for the run's mean so far.
+    # None: the RunOptions default.
+    reserve: int | Literal["mean"] | None = None
+    count_cache: bool = True
+    # Seconds between the main chat's heartbeat while a step is in flight (below a client's idle
+    # timeout, 300 s by default).
+    heartbeat: float = 30.0
+
+
+@dataclass(frozen=True)
 class FlowConfig:
     # In TOML order.
     providers: Mapping[str, ProviderConfig]
@@ -162,6 +203,9 @@ class FlowConfig:
     # Checked before the approval rules and always wins over them.
     policy: ToolPolicy | None = None
     changesets: ChangesetsConfig = ChangesetsConfig()
+    limits: LimitsConfig = LimitsConfig()
+    #: `[quotas]`: per-principal caps, kept in `<state_dir>/quotas.json`.
+    quotas: QuotaLimits = field(default_factory=QuotaLimits)
 
 
 def _table(value: Any, where: str) -> Mapping[str, Any]:
@@ -223,6 +267,11 @@ def _parse_provider(name: str, raw: Any, base: Path) -> ProviderConfig:
             "effort",
             "interactive",
             "preamble",
+            "idle_timeout",
+            "call_timeout",
+            "retry_empty",
+            "concurrency",
+            "fallback",
         )
     elif "via" in table:
         kind = "fleet"
@@ -235,6 +284,11 @@ def _parse_provider(name: str, raw: Any, base: Path) -> ProviderConfig:
             "effort",
             "reply_timeout",
             "preamble",
+            "idle_timeout",
+            "call_timeout",
+            "retry_empty",
+            "concurrency",
+            "fallback",
         )
     else:
         kind = "remote"
@@ -246,6 +300,10 @@ def _parse_provider(name: str, raw: Any, base: Path) -> ProviderConfig:
             "idle_timeout",
             "approval_timeout",
             "preamble",
+            "call_timeout",
+            "retry_empty",
+            "concurrency",
+            "fallback",
         )
     _check_keys(table, allowed, where)
     load = via = node = agent = url = None
@@ -301,6 +359,18 @@ def _parse_provider(name: str, raw: Any, base: Path) -> ProviderConfig:
     preamble = table.get("preamble", True)
     if not isinstance(preamble, bool) and (not isinstance(preamble, str) or not preamble.strip()):
         raise ConfigError(f"{where}.preamble must be true, false or a non-empty string")
+    retry_empty = table.get("retry_empty", 0)
+    if isinstance(retry_empty, bool) or not isinstance(retry_empty, int) or retry_empty < 0:
+        raise ConfigError(f"{where}.retry_empty must be an integer >= 0")
+    concurrency = table.get("concurrency")
+    if concurrency == "probe":
+        if kind != "inprocess":
+            raise ConfigError(f'{where}.concurrency = "probe" needs an in-process provider (load)')
+    elif concurrency is not None and (
+        isinstance(concurrency, bool) or not isinstance(concurrency, int) or concurrency < 1
+    ):
+        raise ConfigError(f'{where}.concurrency must be an integer >= 1 or "probe"')
+    fallback = tuple(_str_list(table.get("fallback", []), f"{where}.fallback"))
     return ProviderConfig(
         name,
         load,
@@ -316,6 +386,10 @@ def _parse_provider(name: str, raw: Any, base: Path) -> ProviderConfig:
         reply_timeout=_seconds(table, "reply_timeout", where),
         idle_timeout=_seconds(table, "idle_timeout", where),
         approval_timeout=_seconds(table, "approval_timeout", where),
+        call_timeout=_seconds(table, "call_timeout", where),
+        retry_empty=retry_empty,
+        concurrency=concurrency,
+        fallback=fallback,
         interactive=interactive,
         preamble=preamble,
     )
@@ -338,7 +412,7 @@ def _parse_routing(raw: Any, providers: Mapping[str, ProviderConfig]) -> Routing
     for i, raw_rule in enumerate(raw_rules):
         where = f"routing.rules[{i}]"
         rule = _table(raw_rule, where)
-        _check_keys(rule, ("provider", "model", "phase", "label"), where)
+        _check_keys(rule, ("provider", "model", "phase", "label", "fallback"), where)
         provider = _str(rule, "provider", where)
         if provider is None:
             raise ConfigError(f"{where}.provider is required")
@@ -349,8 +423,45 @@ def _parse_routing(raw: Any, providers: Mapping[str, ProviderConfig]) -> Routing
         label = _str(rule, "label", where)
         if model is None and phase is None and label is None:
             raise ConfigError(f"{where} needs at least one of model, phase, label")
-        rules.append(RoutingRule(provider, model, phase, label))
+        fallback = (
+            tuple(_str_list(rule["fallback"], f"{where}.fallback")) if "fallback" in rule else None
+        )
+        if fallback is not None:
+            for target in fallback:
+                if target not in providers:
+                    raise ConfigError(f"{where}.fallback names unknown provider {target!r}")
+        rules.append(RoutingRule(provider, model, phase, label, fallback))
     return Routing(default, tuple(rules))
+
+
+def _check_fallbacks(providers: Mapping[str, ProviderConfig], routing: Routing) -> None:
+    """Every fallback names a configured provider, and the fallback edges (each provider's, and
+    each rule's from its provider) have no cycle."""
+    edges: dict[str, list[str]] = {}
+    for name, spec in providers.items():
+        for target in spec.fallback:
+            if target not in providers:
+                raise ConfigError(f"providers.{name}.fallback names unknown provider {target!r}")
+            if target == name:
+                raise ConfigError(f"providers.{name}.fallback lists {name!r} itself")
+        edges.setdefault(name, []).extend(spec.fallback)
+    for rule in routing.rules:
+        if rule.fallback:
+            edges.setdefault(rule.provider, []).extend(rule.fallback)
+    done: set[str] = set()
+
+    def visit(node: str, path: list[str]) -> None:
+        if node in path:
+            cycle = [*path[path.index(node) :], node]
+            raise ConfigError(f"fallback cycle: {' -> '.join(cycle)}")
+        if node in done:
+            return
+        for target in edges.get(node, ()):
+            visit(target, [*path, node])
+        done.add(node)
+
+    for name in edges:
+        visit(name, [])
 
 
 def _parse_workflows(raw: Any, base: Path) -> WorkflowsConfig:
@@ -446,6 +557,86 @@ def _parse_changesets(raw: Any) -> ChangesetsConfig:
     return ChangesetsConfig(branch, trailer)
 
 
+def _count(table: Mapping[str, Any], key: str, minimum: int) -> int | None:
+    value = table.get(key)
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
+        raise ConfigError(f"limits.{key} must be an integer >= {minimum}")
+    return value
+
+
+def _parse_limits(raw: Any) -> LimitsConfig:
+    table = _table(raw, "limits")
+    _check_keys(
+        table,
+        (
+            "budget",
+            "input_budget",
+            "cost_budget",
+            "wall_budget",
+            "timeout",
+            "concurrency",
+            "reserve",
+            "count_cache",
+            "heartbeat",
+        ),
+        "limits",
+    )
+    cost = table.get("cost_budget")
+    if cost is not None and (
+        isinstance(cost, bool)
+        or not isinstance(cost, int | float)
+        or not math.isfinite(cost)
+        or cost < 0
+    ):
+        raise ConfigError("limits.cost_budget must be a number >= 0")
+    reserve: int | Literal["mean"] | None
+    reserve = "mean" if table.get("reserve") == "mean" else _count(table, "reserve", 0)
+    count_cache = table.get("count_cache", LimitsConfig.count_cache)
+    if not isinstance(count_cache, bool):
+        raise ConfigError("limits.count_cache must be true or false")
+    return LimitsConfig(
+        budget=_count(table, "budget", 0),
+        input_budget=_count(table, "input_budget", 0),
+        cost_budget=None if cost is None else float(cost),
+        wall_budget=_seconds(table, "wall_budget", "limits"),
+        timeout=_seconds(table, "timeout", "limits"),
+        concurrency=_count(table, "concurrency", 1),
+        reserve=reserve,
+        count_cache=count_cache,
+        heartbeat=_seconds(table, "heartbeat", "limits") or LimitsConfig.heartbeat,
+    )
+
+
+def _parse_quotas(raw: Any) -> QuotaLimits:
+    table = _table(raw, "quotas")
+    keys = ("tokens_per_day", "tokens_per_run", "cost_per_day", "cost_per_run")
+    _check_keys(table, keys, "quotas")
+    for key in keys[:2]:
+        value = table.get(key)
+        if value is not None and (
+            isinstance(value, bool) or not isinstance(value, int) or value < 1
+        ):
+            raise ConfigError(f"quotas.{key} must be an integer >= 1")
+    for key in keys[2:]:
+        value = table.get(key)
+        if value is not None and (
+            isinstance(value, bool)
+            or not isinstance(value, int | float)
+            or not math.isfinite(value)
+            or value <= 0
+        ):
+            raise ConfigError(f"quotas.{key} must be a number > 0")
+    cost_day, cost_run = table.get("cost_per_day"), table.get("cost_per_run")
+    return QuotaLimits(
+        tokens_per_day=table.get("tokens_per_day"),
+        tokens_per_run=table.get("tokens_per_run"),
+        cost_per_day=None if cost_day is None else float(cost_day),
+        cost_per_run=None if cost_run is None else float(cost_run),
+    )
+
+
 def _parse_approvals(raw: Any, providers: Mapping[str, ProviderConfig]) -> ApprovalsConfig:
     table = _table(raw, "approvals")
     _check_keys(table, ("rules",), "approvals")
@@ -525,6 +716,8 @@ def parse_config(data: Mapping[str, Any], *, base: Path) -> FlowConfig:
             "approvals",
             "policy",
             "changesets",
+            "limits",
+            "quotas",
         ),
         "flow.toml",
     )
@@ -538,6 +731,7 @@ def parse_config(data: Mapping[str, Any], *, base: Path) -> FlowConfig:
         raise ConfigError("providers needs at least one entry")
     providers = {name: _parse_provider(name, raw, base) for name, raw in raw_providers.items()}
     routing = _parse_routing(data.get("routing", {}), providers)
+    _check_fallbacks(providers, routing)
     workflows = _parse_workflows(data.get("workflows", {}), base)
     redact = _parse_redact(data.get("redact", {}))
     verbs = _parse_verbs(data.get("verbs", {}))
@@ -545,6 +739,8 @@ def parse_config(data: Mapping[str, Any], *, base: Path) -> FlowConfig:
     approvals = _parse_approvals(data.get("approvals", {}), providers)
     policy = _parse_policy(data["policy"]) if "policy" in data else None
     changesets = _parse_changesets(data.get("changesets", {}))
+    limits = _parse_limits(data.get("limits", {}))
+    quotas = _parse_quotas(data.get("quotas", {}))
     return FlowConfig(
         providers,
         routing,
@@ -557,6 +753,8 @@ def parse_config(data: Mapping[str, Any], *, base: Path) -> FlowConfig:
         approvals,
         policy,
         changesets,
+        limits,
+        quotas,
     )
 
 
