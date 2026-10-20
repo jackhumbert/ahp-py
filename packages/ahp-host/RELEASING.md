@@ -16,6 +16,12 @@ There is no index upload, no trusted publisher, no `pypi` environment — and
 nothing here uses a long-lived token. What follows is the part a workflow
 cannot do: the order of operations around it.
 
+## Release order
+
+Release in dependency order: ahp-protocol, ahp-host, ahp-client, ahp-acp, then ahp-gateway,
+ahp-host-claude, ahp-host-acp and ahp-host-flow. A package's `~=` pins resolve against siblings
+already tagged. Tagging and pushing tags is done by the maintainer, not by a build run.
+
 ## One-time, before the first release
 
 **The repository must be public**: users' `pip install git+https://…` lines
@@ -24,16 +30,19 @@ configure on any index.
 
 ## Per release
 
-1. **Flip the claims that releasing makes true.** These are guarded by
+1. **First release only: flip the claims that releasing makes true.** These are guarded by
    `tests/docs/`, so a flip is a test change in the same commit — that is the
    design, not an obstacle. The install block is already in its final form
    (git installs work before and after a tag); what moves is the status
-   banner's maturity claim and the tag named in the pinning example.
-2. **Set the version and the date.** `__version__` in
-   `src/ahp_host/__init__.py` is the single source (`pyproject.toml`
-   reads it dynamically); the tag must be `ahp-host/v<that>` or the workflow refuses.
-   The CHANGELOG section for the version currently reads `## [0.1.0] —
-   pending`: replace `pending` with the real release date, and point the
+   banner's maturity claim ("working, but pre-alpha") and the tag named in the pinning example.
+   Whether the first release claims more than pre-alpha is the maintainer's decision; the
+   `Development Status` classifier already reads `3 - Alpha`.
+2. **Date the changelog section; this is done by the maintainer when tagging.**
+   `__version__` in `src/ahp_host/__init__.py` is the single source (`pyproject.toml`
+   reads it dynamically) and already reads `0.1.0`; the tag must be `ahp-host/v<that>` or the
+   workflow refuses. The CHANGELOG section reads `## [0.1.0] - unreleased`: set it to the
+   tag's day, `## [0.1.0] - YYYY-MM-DD`.
+   Point the
    changelog's two link definitions at the `releases/tag/ahp-host/v0.1.0` and
    `compare/ahp-host/v0.1.0...HEAD` URLs — they deliberately point at `commits/main`
    while no tag exists, because both of those URLs 404 until it does.

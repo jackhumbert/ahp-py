@@ -1,8 +1,9 @@
 # Agent guide
 
 An `ahp-host` provider that runs Claude Code workflow scripts. `docs/plan.md`
-is the design; milestones M0–M18 there say what exists and what's next (M0–M17 are done).
+is the design; milestones M0–M18 there say what exists (all done).
 
+- `tests/docs/support_matrix.py` and `test_supportmatrix.py` check the root README's support matrix and import every provider on purpose (test code only; `src/` never imports `ahp_host_acp` or `ahp_host_claude` statically).
 - `engine/` and `sandbox/` never import `ahp_host` (an import-linter
   contract), so the engine can move into its own distribution later. They
   reach remote agents through `ahp_client` only.

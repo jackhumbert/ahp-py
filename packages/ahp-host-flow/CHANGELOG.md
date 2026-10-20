@@ -2,6 +2,29 @@
 
 ## [Unreleased]
 
+## [0.1.0] - unreleased
+
+### Added — release preparation (M18)
+
+- `scripts/smoke_wheel.py` checks an installed wheel from outside the checkout (CI's wheels job and release.yml run it).
+- `RELEASING.md`: the release procedure and the release order.
+- `tests/docs/test_compatmd.py` checks the root `COMPATIBILITY.md`.
+- `tests/docs/test_releasing.py` checks that each package's CHANGELOG has one `## [<__version__>] - unreleased` (or dated) section and that `release.yml`'s extractor finds it non-empty, by a Python port of its awk and by running the awk itself where there is one.
+
+### Changed — release preparation (M18)
+
+- The version is 0.1.0 (was 0.1.0.dev0).
+- Sibling pins are `~=0.1.0` (ahp-client, ahp-host-claude, ahp-host-acp; ahp-gateway for tests); the root `[tool.uv.sources]` lists ahp-host-flow.
+
+### Added — the support matrix check (M18)
+
+- `tests/docs/support_matrix.py` renders the root README's support matrix from the provider classes (`issubclass` against the `ahp_host.provider.base` protocols for the detected columns, stated cells for the rest) and `tests/docs/test_supportmatrix.py` fails when the README table, the classes or the "ACP agents known to work" section drift; the detected cells are also pinned by hand (`test_supportmatrix_detected_columns_match_the_pinned_table`), and the ACP rows' Session resume cells say whether the agent's own conversation survives (host-side only for the reference agent). Test code only: `src/` still imports no provider statically.
+
+### Added — the reference agent (M18)
+
+- `engine.errorkinds.classify` reads an ACP agent's rate limit: an `acp.<code>` failure whose message says `rate limit` or `too many requests`, or has `429` next to an HTTP status word (`HTTP 429`, `status code: 429`; a bare 429 elsewhere, such as a line number, does not count), is `rate_limited` and transient, so `fallback` and `on_busy` apply to the reference agent's HTTP 429. `ERROR_TABLE` gains the row `acp.* (rate-limit text)`. `tests/unit/test_errkind_table.py`.
+- `tests/integration/test_refflow.py`: a phase routed to the reference agent (against ahp-host-acp's stub server) answers the call, a 429 is journalled as `rate_limited`, and the README's "An OpenAI-compatible endpoint" block parses.
+
 ### Added — secrets out of the run log (M17)
 
 - With `RunOptions.redact` set and `keep_source` left False (new, default), the journal header stores the script and its args masked, and each child `workflow` record its source masked. The header carries `sourceSha` and `argsSha` and a workflow record `sourceSha`, always the sha256 of the real text (`engine.text_sha`; args by the canonical JSON); old readers ignore them (`JOURNAL_VERSION` stays 1). `engine.source_masked`/`args_masked` tell a masked header apart. Resuming such a run needs the real script (a different one is refused) and the same args (`has_args`); a masked child workflow is resolved from the registry again and refused if its sha256 changed, as a failing `workflow()` call. `keep_source=True` keeps the raw text. `tests/unit/test_maskjournal.py`.

@@ -12,3 +12,4 @@ ahp-gateway = { workspace = true }
 ahp-host-claude = { workspace = true }
 ahp-host-acp = { workspace = true }
 ahp-acp = { workspace = true }
+ahp-host-flow = { workspace = true }

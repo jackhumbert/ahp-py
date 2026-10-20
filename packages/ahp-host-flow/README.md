@@ -991,6 +991,36 @@ another host, under that host's own policy, so an approve-all there is not check
 inner policy ask is honoured only when the provider sets `policy_asked`, as `ahp-host-claude`
 and `ahp-host-acp` do.
 
+## An OpenAI-compatible endpoint
+
+ahp-host-acp's reference agent (`ahp-acp-openai`) speaks to any `/v1/chat/completions` server,
+such as Ollama, so a phase can run on a local or third-party model. The key, if the endpoint
+needs one, goes in the host's own environment as `AHP_OPENAI_API_KEY`, never in flow.toml or
+argv. A 429 from the endpoint is kind `rate_limited`, so `fallback` and `on_busy` apply to it
+like any other provider.
+
+```toml
+[providers.claude]
+load = "ahp_host_claude:from_config"
+
+[providers.local]
+load = "ahp_host_acp:from_config"
+
+[providers.local.config]
+command = ["ahp-acp-openai"]
+
+[providers.local.config.env]
+AHP_OPENAI_BASE_URL = "http://localhost:11434/v1"
+AHP_OPENAI_MODEL = "my-model"
+
+[routing]
+default = "claude"
+
+[[routing.rules]]
+provider = "local"
+phase = "Review"
+```
+
 ## flow.toml
 
 ```toml

@@ -146,8 +146,8 @@ original list:
    single-source it and pick `0.1.0`.
 2. **A populated CHANGELOG.** `[Unreleased]` is empty after a very large amount
    of work.
-3. **A publish workflow** using PyPI trusted publishing (OIDC), not a
-   long-lived token. Tag-triggered, building the same wheel CI already tests.
+3. **A release workflow**, tag-triggered, building the same wheel CI already tests and
+   publishing a GitHub release with no long-lived token (this family is deliberately not on PyPI).
 4. **`SECURITY.md`.** This ships a filesystem jail and a pty backend. It needs
    a disclosure path.
 5. **Interop in CI.** `tests/interop` drives the real TypeScript client and runs
@@ -417,8 +417,10 @@ client work settles.
    partitioning example; 0.4 is documentation with a test.
 2. **2A**, because it is where every hand-reported bug has landed and the top
    two are small.
-3. **Tier 1**, and cut `0.1.0`.
-4. **2B, 2C, 2D, 2E** after the release, as `0.2.0`.
+3. **Tier 1**, then the 0.1.0 releases in dependency order (ahp-protocol, ahp-host, ahp-client,
+   ahp-acp, then ahp-gateway and the providers), each tag pushed by the maintainer and released by
+   `release.yml` (see `RELEASING.md`).
+4. **2B, 2C, 2D, 2E** landed before the first release, so they ship in 0.1.0, not 0.2.0.
 
 The wire-schema harness gates all of it: every new frame added below is
 validated against the vendored schemas as a matter of course, which is how the

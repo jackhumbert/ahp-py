@@ -12,8 +12,8 @@ other ACP agent), and any AHP client (VS Code's Agent Sessions view, the Python
 client, a gateway in front of several hosts) can then start and follow sessions
 with it.
 
-Status: pre-alpha. Tested against opencode (`opencode acp`) and OpenClaw's ACP
-bridge (`openclaw acp`).
+Status: pre-alpha. Tested against opencode (`opencode acp`), OpenClaw's ACP
+bridge (`openclaw acp`) and the package's own reference agent (`ahp-acp-openai`).
 
 ## What a client sees
 
@@ -308,6 +308,48 @@ opened and only its tool list moves: the relay answers every `tools/list` from
 the current state and sends `notifications/tools/list_changed` when it
 changes. An agent that caches its tools and ignores `list_changed` keeps the
 set it first listed.
+
+## The reference agent
+
+The package ships a small ACP *agent*, written with the standard library only,
+that talks to any OpenAI-compatible `/v1/chat/completions` endpoint (Ollama at
+`http://localhost:11434/v1`, for one). It is the non-Claude agent the support
+matrix is checked against. Run it as `ahp-acp-openai` or
+`python -m ahp_host_acp.reference`; it is configured from the environment:
+
+| Variable | Meaning |
+| --- | --- |
+| `AHP_OPENAI_BASE_URL` | The endpoint's base URL, e.g. `http://localhost:11434/v1` |
+| `AHP_OPENAI_MODEL` | The model name sent with every request |
+| `AHP_OPENAI_API_KEY` | Bearer key, if the endpoint wants one; environment only, never argv, never logged |
+| `AHP_OPENAI_TIMEOUT` | Seconds to wait on the endpoint (300) |
+| `AHP_OPENAI_MAX_STEPS` | Model calls per turn before it stops (25) |
+| `AHP_OPENAI_SYSTEM` | Replaces the default system prompt |
+
+```toml
+command = ["ahp-acp-openai"]
+
+[env]
+AHP_OPENAI_BASE_URL = "http://localhost:11434/v1"
+AHP_OPENAI_MODEL = "qwen3"
+# The key, if any, stays in the host's own environment (AHP_OPENAI_API_KEY).
+```
+
+It streams text and reasoning (`reasoning_content` or `reasoning`), offers the
+client-tool relay's tools to the model as OpenAI tools (so `StructuredOutput`
+works), cancels a turn by dropping the request, reports token usage at the end
+of a turn, and has one built-in tool, `write_file`, which goes through
+`fs/write_text_file` when `[policy] host_tools` offers it. It asks
+`session/request_permission` before every tool call, so the host's policy always
+runs.
+
+It does not load, resume or fork sessions: after a host restart the AHP session
+and its transcript come back (host-side resume), but the agent starts a new
+conversation. It does not take images, has no HTTP proxy support and reports no cost. A `429` from the endpoint ends the turn with
+an error whose text says it was rate limited (`429`).
+
+Its tests use a packaged loopback stub, never a real endpoint. To try a live
+one: `AHP_OPENAI_BASE_URL=... AHP_OPENAI_MODEL=... uv run --no-sync pytest tests/test_refhosted_live.py`.
 
 ## Security
 

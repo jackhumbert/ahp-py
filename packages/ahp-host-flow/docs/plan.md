@@ -7,7 +7,7 @@ an AHP session, and each `agent()` call is a **child chat** of it, so any AHP
 client can watch and steer the whole run. Extensions to the format are opt-in,
 and a script written for Claude Code runs unchanged.
 
-Status: M0-M17 done (M4b complete). M18 is planned (§8, **Post-M12 plan**); M18 is next.
+Status: M0-M18 done. No milestone is next; what remains open is listed under **Open after M10.** in §8. The releases are prepared; tagging and publishing them is the maintainer's.
 
 ## 1. Where it sits
 
@@ -590,7 +590,7 @@ A live GLM smoke test is opt-in, behind a marker.
 | M15 (done) | Approvals and changesets | the M15 proving tests in §8 pass |
 | M16 | Limits, timeouts and fallback | the M16 proving tests in §8 pass |
 | M17 (done) | Sandboxed workflow hosts, client tools in workers, durable workers | the M17 proving tests in §8 pass |
-| M18 | A reference non-Claude agent, the support matrix, releases | the M18 proving tests in §8 pass |
+| M18 (done) | A reference non-Claude agent, the support matrix, releases | the M18 proving tests in §8 pass |
 
 **M0 spike result.** `tests/integration/test_spike_worker_chat.py` showed:
 
@@ -647,7 +647,7 @@ Open for M4 (structured turns):
 
 **M11 result.** Every item is closed, each by its own tests. The `from_config` factories: the acp, claude and flow `from_config` tests (a flow.toml loads both through the fakes). The preamble: the `preamble` tests (each dispatch kind, `false`, a custom string, identical journal keys). Watched workflow dirs: `flow_watch`. Operations as a provider capability and eager resume: `provider_operations` and `resume_on_restore` in ahp-host, `flow_node_operations` in ahp-host-flow. Changesets across a restart: `restart_changesets`. `workflow()` reaching client workflows and qualified names: the `workflow_sources` conformance script and `client_workflows`. The delegation origin: the `delegation` tests in all five packages. The live runs are opt-in (`AHP_FLOW_LIVE_CONFIG`); on 2026-10-18 the smoke tests, the fan-out and triage corpus scripts against Claude and a Review phase routed to GLM (opencode on `ollama/glm-5.3-flash:cloud`) all passed through a flow.toml naming both `from_config` factories. They found three things the fakes could not: a plugin Claude Code reports with a relative path failed ahp-host-claude's whole customization tree (fixed); a client driving a run with ahp-client's default 300 s `idle_timeout` gives up while a slow step runs, since the main chat is quiet (the live tests pass `idle_timeout=None`, and the README says so); and an agent with nothing to read reaches for a shell, which under `acceptEdits` waits on an approval (the live triage test gives it files). Building M11 also found `PollingResourceWatcher` reporting nothing on Windows (fixed in ahp-host with `native_path_from_file_uri`). The phone, VS Code and iOS checks stay by hand.
 
-**Open after M10.** What M11 left: a phone round trip of `ask()` and watching a run from VS Code or iOS (both by hand), and raising the §10 upstream requests.
+**Open after M10.** What M11 left: a phone round trip of `ask()` and watching a run from VS Code or iOS (both by hand), and raising the §10 upstream requests. After M18: tagging and publishing each package's first release (the maintainer's decision, per each `RELEASING.md`).
 
 **M11 spec.** Each item names its proving test; none is a live test (live ones are extra, opt-in). The items are ordered so a later one can build on an earlier one: 1 before 8, 4 before 5.
 
@@ -967,6 +967,8 @@ Known limits. A relayed remote request waits until the run is aborted unless the
    - Release in dependency order: `ahp-protocol/v0.1.0`, `ahp-host/v0.1.0`, `ahp-client/v0.1.0`, then gateway and the providers. Each tag goes through `release.yml`.
    - Tagging and pushing tags is done by the maintainer, not by a build run.
    - Proving tests: the compatibility test; `release.yml`'s version check against each wheel (it exists); and the wheel smoke importing every package.
+
+**M18 result.** The three items landed with no tag pushed. The reference agent (`ahp_host_acp.reference`, console script `ahp-acp-openai`; standard library only) runs a chat-completions SSE tool loop with reasoning, the relay's tools and `StructuredOutput`, honours cancel (also a cancel that arrives before the turn starts, during connect, or during a relayed MCP call), and has one write tool confined to the session folder after resolving symlinks; MCP servers it starts get its environment minus `AHP_OPENAI_*` and other secret-shaped names. A 429 is an error that flow classifies `rate_limited`. Deviation from item 1: it asks `session/request_permission` before *every* tool call, not only the file write, so the host's policy always runs; relayed calls are then auto-allowed by ahp-host-acp's relayed shortcut, so the person is asked only about the write. The support matrix is in the root README, its capability columns built from the provider classes by a docs test. Release preparation: every package is at version 0.1.0 with `~=0.1.0` sibling pins, ahp-host-flow is in the uv sources, every package has `scripts/smoke_wheel.py` and `RELEASING.md`, CI smokes every wheel, release-plan.md is fixed, the root `COMPATIBILITY.md` is checked against the sources, and each CHANGELOG has a 0.1.0 section moved out of `[Unreleased]`. Deviation from item 3: the section reads `## [0.1.0] - unreleased` rather than a date, because the date is the tag's day, which the maintainer sets when tagging (`release.yml` matches on `## [0.1.0]`, and `test_releasing.py` runs its extractor on every CHANGELOG). The proving tests are `packages/ahp-host-acp/tests/test_refchat.py`, `packages/ahp-host-acp/tests/test_refmcp.py`, `packages/ahp-host-acp/tests/test_refagent.py`, `packages/ahp-host-acp/tests/test_refhosted.py`, `packages/ahp-host-acp/tests/test_refhosted_live.py`, `packages/ahp-host-flow/tests/integration/test_refflow.py`, `packages/ahp-host-flow/tests/unit/test_errkind_table.py`, `packages/ahp-host-flow/tests/docs/test_supportmatrix.py`, `packages/ahp-host-flow/tests/docs/test_compatmd.py` and `packages/ahp-host-flow/tests/docs/test_releasing.py`. Known limits: the reference agent has no session load/resume/fork (a restored AHP session keeps its transcript, but the agent starts a new conversation), images, HTTP proxy or cost; an ACP agent's 429 is recognised from its error text only (ACP errors carry no HTTP status): "rate limit", "too many requests", or 429 next to an HTTP status word, so a bare 429 elsewhere in a message is not `rate_limited` and an agent that words it otherwise is not either; the 'in practice' column of the support matrix is prose as of its date; the tags are not yet pushed.
 
 **Not in M13-M18.**
 - A container path map for ACP: identity mounts only.

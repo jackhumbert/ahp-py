@@ -10,6 +10,27 @@ versions each release speaks.
 
 ## [Unreleased]
 
+## [0.1.0] - unreleased
+
+The first release. It offers protocol versions **1.0.0, 0.9.0, 0.8.0, 0.7.0 and 0.6.0**
+(`DEFAULT_SUPPORTED_VERSIONS` in `ahp-protocol`), answers the client→host commands plus the
+reverse `resource*` direction, and is driven by the published TypeScript client in CI.
+[`RELEASING.md`](RELEASING.md) is the procedure that tags it; the maintainer sets this
+heading's date to the tag's day.
+
+It is released on GitHub, deliberately not on PyPI: install the protocol package from its
+repository first, then
+`pip install "ahp-host[ws] @ git+https://github.com/jackhumbert/ahp-py@ahp-host/v0.1.0#subdirectory=packages/ahp-host"`.
+The built wheel and sdist are attached to the GitHub release.
+
+What it is: a library you embed, and a demo host that exercises every surface so
+you can see what a client does with each one. What it is not: an agent. There is
+no model in here — you write a provider, and routing is yours.
+
+### Changed — docs (M18)
+
+- `RELEASING.md` gains the release order for the whole family; `docs/release-plan.md` no longer lists PyPI trusted publishing (the family is deliberately not on PyPI) and its sequencing ships 2B-2E in 0.1.0.
+
 ### Added — chat view and a wire-log content masker (M17)
 
 - **`ObservesChatState`** (`ahp_host.provider`): the publisher's `chat_state(chat=None)` returns one
@@ -826,24 +847,6 @@ asked the user.
 - A `toolClientExecution` input entry no longer raises the session's
   `InputNeeded` bit (a 0.8.0 reducer change, from the dependency); the test
   that asserted the old behaviour now asserts the new.
-
-## [0.1.0] — pending
-
-The first release, staged: **no `v0.1.0` tag exists yet**, and
-[`RELEASING.md`](RELEASING.md) is the procedure that cuts it — which also sets
-this heading's real date. It speaks protocol versions **0.7.0 and 0.6.0**,
-answers all 29 client→host commands plus the reverse `resource*` direction,
-and is driven by the real VS Code client and the published TypeScript client
-in CI.
-
-It will be released on GitHub, deliberately not on PyPI: install the protocol
-package from its repository first, then
-`pip install "ahp-host[ws] @ git+https://github.com/jackhumbert/ahp-py@ahp-host/v0.1.0#subdirectory=packages/ahp-host"`.
-The built wheel and sdist will be attached to the GitHub release.
-
-What it is: a library you embed, and a demo host that exercises every surface so
-you can see what a client does with each one. What it is not: an agent. There is
-no model in here — you write a provider, and routing is yours.
 
 ### Added — the protocol surface
 

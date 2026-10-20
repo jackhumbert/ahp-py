@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+## [0.1.0] - unreleased
+
+### Added — release preparation (M18)
+
+- `scripts/smoke_wheel.py` checks an installed wheel from outside the checkout (CI's wheels job and release.yml run it).
+- `RELEASING.md`: the release procedure and the release order.
+
 ### Added
 
 - First release: `AcpConnection` (JSON-RPC over an agent's stdio, with exact

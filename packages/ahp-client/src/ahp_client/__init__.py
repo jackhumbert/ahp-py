@@ -111,7 +111,7 @@ from ahp_client.serve.inputs import WaitingEntry
 
 # The one place the version is written. `pyproject.toml` declares `version` as
 # dynamic and hatch reads it from this line at build time.
-__version__ = "0.1.0.dev0"
+__version__ = "0.1.0"
 
 __all__ = [
     "AhpClient",

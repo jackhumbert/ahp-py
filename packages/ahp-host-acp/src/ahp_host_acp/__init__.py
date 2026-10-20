@@ -3,6 +3,6 @@
 from ahp_host_acp.agent import from_config
 from ahp_host_acp.provider import AcpProvider, AcpSession
 
-__version__ = "0.1.0.dev0"
+__version__ = "0.1.0"
 
 __all__ = ["AcpProvider", "AcpSession", "__version__", "from_config"]

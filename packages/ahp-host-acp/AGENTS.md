@@ -87,6 +87,15 @@ server's AGENTS.md requires ("Adding a provider adapter"). It is the ACP
   agent. `tests/test_host.py` drives it through a real `Host` over an
   in-memory transport (`tests/hosting.py`).
 - Conventional commits; `CHANGELOG.md` under `[Unreleased]`.
+- `reference/` is an ACP agent, not a provider. It uses the standard library only and imports
+  nothing else from this package (`test_refchat_reference_is_stdlib_only`). The API key comes
+  only from the environment and is redacted from every log and error. It asks
+  `session/request_permission` before every tool call so the host's policy always runs.
+  Security decisions, each tested: MCP servers it starts never inherit `AHP_OPENAI_*` or
+  secret-shaped names (`mcp.child_env`), and `write_file` checks confinement on `realpath`.
+  A prompt's cancel token is made on the reading thread; never clear it at turn start. Its
+  tests use the packaged loopback stub (`reference.stub`), never a real endpoint; that loopback
+  socket is the one exception to "no network".
 
 ## Keep it generic
 

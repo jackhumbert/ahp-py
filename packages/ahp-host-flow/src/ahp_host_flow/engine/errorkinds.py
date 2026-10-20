@@ -18,6 +18,15 @@ REMOTE_IDLE: Final = "flow.remoteIdle"
 # ahp-host-claude marks 408/429/5xx/529, rate_limit/overloaded/server_error resumable but
 # does not pass the status through the sink, so 429 is read from Claude Code's error text.
 RATE_LIMIT_TEXT: Final = re.compile(r"\b429\b|rate[ _-]?limit", re.IGNORECASE)
+# ahp-host-acp reports an agent's JSON-RPC error as `acp.<code>` with the agent's free-form
+# message (the reference agent's says "rate limited: the endpoint answered HTTP 429"). Any agent
+# can put a bare 429 in unrelated text (a line number, a count), so for ACP a 429 counts only
+# next to an HTTP status word; "rate limit" and "too many requests" count on their own.
+ACP_RATE_LIMIT_TEXT: Final = re.compile(
+    r"rate[ _-]?limit|too many requests"
+    r"|\bHTTP(?:/\d(?:\.\d)?)?\s*:?\s*429\b|\bstatus(?:\s+code)?\s*[:=]?\s*429\b",
+    re.IGNORECASE,
+)
 
 #: The rows of `classify`, first match wins, as (pattern, kind) for the README.
 ERROR_TABLE: Final[tuple[tuple[str, str], ...]] = (
@@ -25,6 +34,7 @@ ERROR_TABLE: Final[tuple[tuple[str, str], ...]] = (
     ("acp.agentExited", "unavailable"),
     ("acp.refusal", "refused"),
     ("acp.max_tokens", "failed"),
+    ("acp.* (rate-limit text)", "rate_limited"),
     ("claude.exited", "unavailable"),
     ("claude.* (resumable, rate-limit text)", "rate_limited"),
     ("claude.* (resumable)", "unavailable"),
@@ -46,6 +56,8 @@ def classify(
         return "refused", False
     if error_type == "acp.max_tokens":
         return "failed", False
+    if error_type.startswith("acp.") and ACP_RATE_LIMIT_TEXT.search(message):
+        return "rate_limited", True
     if error_type.startswith("claude."):
         if not resumable:
             return "failed", False

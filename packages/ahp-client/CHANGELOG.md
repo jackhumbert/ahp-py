@@ -6,6 +6,12 @@ Every release states the protocol versions it speaks.
 
 ## [Unreleased]
 
+## [0.1.0] - unreleased
+
+### Changed — release preparation (M18)
+
+- The version is 0.1.0 (was 0.1.0.dev0).
+
 ### Added — wire-log content masker
 
 - `WireLog(mask=)` (`ahp_client.wirelog`): an optional content masker, a `Callable[[str], str]` or

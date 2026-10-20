@@ -2,6 +2,57 @@
 
 ## [Unreleased]
 
+## [0.1.0] - unreleased
+
+### Added — release preparation (M18)
+
+- `scripts/smoke_wheel.py` checks an installed wheel from outside the checkout (CI's wheels job and release.yml run it).
+- `RELEASING.md`: the release procedure and the release order.
+
+### Changed — release preparation (M18)
+
+- The version is 0.1.0 (was 0.1.0.dev0).
+
+### Added — a reference agent on an OpenAI-compatible endpoint (M18)
+
+- `ahp_host_acp.reference` (standard library only, an ACP *agent* rather than a provider):
+  `reference.chat` is a blocking streaming `/v1/chat/completions` client on `http.client`
+  (text, reasoning in both spellings, tool-call drafts, usage, `429` reported as rate limited,
+  the API key redacted from errors, and `ChatClient.abort` to cancel from another thread);
+  `reference.stub` is a scripted loopback chat-completions server (`StubServer`, `say`,
+  `call`, `refuse`, `Reply`) for tests and demos. `tests/test_refchat.py`.
+- `reference.mcp` is a stdio MCP client (`McpClient`: `start`, `list_tools` following
+  `nextCursor`, `call_tool` with no timeout, `close`; `McpError`; `from_acp_entry` turns an ACP
+  `McpServerStdio` entry into a client and anything else into `None`). It answers the server's
+  `ping`, refuses its other requests, and fails every waiter when the process exits.
+  `tests/fake_mcp_server.py`, `tests/test_refmcp.py`.
+- `reference.agent` and the console script `ahp-acp-openai` (`python -m ahp_host_acp.reference`)
+  are the agent itself: ACP over stdio (`initialize`, `session/new` with stdio MCP servers,
+  `session/prompt`, `session/cancel`) in front of a streaming chat-completions endpoint, with
+  text and reasoning streamed as message and thought chunks and token usage reported on the
+  prompt response (cached input counted apart, as the host expects). It is configured from
+  `AHP_OPENAI_BASE_URL`, `AHP_OPENAI_MODEL`, `AHP_OPENAI_API_KEY`, `AHP_OPENAI_TIMEOUT`,
+  `AHP_OPENAI_MAX_STEPS` and `AHP_OPENAI_SYSTEM`; the key is read only from the environment
+  (there is no option for it) and is redacted from everything it logs. Every tool call, its
+  own `write_file` (confined to the session folder) and the MCP tools, asks the client for
+  permission first; a decline or a failed endpoint call is reported to the model or the
+  client, and `session/cancel` aborts the request in flight. `tests/test_refagent.py`.
+- Review fixes: an MCP server the agent starts gets its environment minus every `AHP_OPENAI_*`
+  variable and any name containing `KEY`, `TOKEN`, `SECRET` or `PASSWORD` (the entry's own `env`
+  still sets any of them; `reference.mcp.child_env`); `write_file` checks confinement on
+  `realpath`, so a symlinked file or directory inside the folder that points outside is refused,
+  and the permission prompt, diff and write use the resolved path; a prompt's cancel token is
+  made when the request is read, so a `session/cancel` read before the turn starts still cancels
+  it; `ChatClient.abort` during connect or send takes effect once the socket exists; and
+  `McpClient.call_tool(cancel=, timeout=)` gives up a relayed call on cancel (`McpCancelled`,
+  with `notifications/cancelled` to the server). `tests/test_refmcp.py`, `tests/test_refchat.py`,
+  `tests/test_refagent.py`.
+- `tests/test_refhosted.py` hosts the reference agent through `AcpProvider` against the stub:
+  text and reasoning, the client-tool relay, `StructuredOutput`, decline reasons on the next
+  prompt, a policy denial with its reason, cancel mid-stream and a `429`. No source change was
+  needed. `tests/test_refhosted_live.py` is the opt-in live lane (`AHP_OPENAI_BASE_URL` and
+  `AHP_OPENAI_MODEL`). README section "The reference agent".
+
 ### Added — serving off loopback with a token (M17)
 
 - `--bind` (or `bind` in the config file) may name a non-loopback address. It needs

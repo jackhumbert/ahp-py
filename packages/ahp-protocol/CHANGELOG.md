@@ -8,6 +8,12 @@ the spec revision it targets.
 
 ## [Unreleased]
 
+## [0.1.0] - unreleased
+
+### Added — release preparation (M18)
+
+- `RELEASING.md`: the release procedure and the release order.
+
 ### Documentation (M16)
 
 - The README documents `ahp_protocol.ext.usage` (`USAGE_META_KEY`, `request_usage_meta`, `is_request_scoped`) and the flow heartbeat descriptor (`flow.heartbeat`, `HEARTBEAT_KIND`), each with an executed example.

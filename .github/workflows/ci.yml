@@ -151,7 +151,9 @@ jobs:
       - name: Smoke-test from outside the checkout
         run: |
           cd /tmp
-          for package in ahp-protocol ahp-host ahp-client; do
-            /tmp/fresh/bin/python "$GITHUB_WORKSPACE/packages/$package/scripts/smoke_wheel.py"
+          status=0
+          for script in "$GITHUB_WORKSPACE"/packages/*/scripts/smoke_wheel.py; do
+            /tmp/fresh/bin/python "$script" || status=1
           done
-          /tmp/fresh/bin/python -c "import ahp_gateway, ahp_host_claude, ahp_host_acp"
+          /tmp/fresh/bin/python -c "import ahp_protocol, ahp_host, ahp_client, ahp_acp, ahp_gateway, ahp_host_claude, ahp_host_acp, ahp_host_flow" || status=1
+          exit $status

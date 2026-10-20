@@ -33,6 +33,18 @@ from ahp_host_flow.engine.errorkinds import ERROR_TABLE, PROVIDER_LOAD, REMOTE_I
         ("agent.turn", True, "", ("failed", True)),
         ("acp.-32603", False, "", ("failed", False)),
         ("acp.max_turn_requests", False, "", ("failed", False)),
+        (
+            "acp.-32603",
+            False,
+            "rate limited: the endpoint answered HTTP 429: Rate limit exceeded",
+            ("rate_limited", True),
+        ),
+        ("acp.-32603", False, "Too Many Requests: rate limit", ("rate_limited", True)),
+        ("acp.-32603", False, "HTTP/1.1 429 Too Many Requests", ("rate_limited", True)),
+        ("acp.-32603", False, "upstream status code: 429", ("rate_limited", True)),
+        ("acp.-32603", False, "SyntaxError at line 429 of build.py", ("failed", False)),
+        ("acp.-32603", False, "read 429 files, then failed", ("failed", False)),
+        ("acp.-32603", False, "HTTP 4290 tokens", ("failed", False)),
     ],
 )
 def test_errkind_table_row(
@@ -55,6 +67,7 @@ _ROW_SAMPLES: dict[str, tuple[str, bool, str]] = {
     "acp.agentExited": ("acp.agentExited", False, ""),
     "acp.refusal": ("acp.refusal", False, ""),
     "acp.max_tokens": ("acp.max_tokens", False, ""),
+    "acp.* (rate-limit text)": ("acp.-32603", False, "HTTP 429"),
     "claude.exited": ("claude.exited", False, ""),
     "claude.* (resumable, rate-limit text)": ("claude.x", True, "rate limit reached"),
     "claude.* (resumable)": ("claude.x", True, "overloaded"),

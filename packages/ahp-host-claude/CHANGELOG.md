@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+## [0.1.0] - unreleased
+
+### Added — release preparation (M18)
+
+- `scripts/smoke_wheel.py` checks an installed wheel from outside the checkout (CI's wheels job and release.yml run it).
+- `RELEASING.md`: the release procedure and the release order.
+
+### Changed — release preparation (M18)
+
+- The version is 0.1.0 (was 0.1.0.dev0).
+
 ### Added — per-request usage (M16)
 
 - **`usage_per_message`** (agent option, `ClaudeProvider(usage_per_message=True)`, default off): each main-loop `AssistantMessage` with usage also sends a usage report of its own, marked request-scoped (`ahp_protocol.ext.usage.request_usage_meta`); the turn-end report is unchanged. `usage.request_report`: a request's `input_tokens` is its uncached prompt plus its cache creation, with cache reads apart in `cache_read_tokens` (the split a reader takes from the turn report's `turnTotals`), so summing requests never counts a cache read twice. One API response arrives as several `AssistantMessage`s sharing a `message_id` and its usage: it is reported once, and a later message with that id reports only what its figures grew by. `tests/test_claudereq_usage.py`.

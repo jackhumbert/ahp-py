@@ -27,6 +27,7 @@ dependencies = [
 
 [project.scripts]
 ahp-host-acp = "ahp_host_acp.__main__:main"
+ahp-acp-openai = "ahp_host_acp.reference.__main__:main"
 
 [project.entry-points."ahp_host.agents"]
 acp = "ahp_host_acp.agent:create"

@@ -21,6 +21,9 @@ one for every package you touch.
 - `scripts/check.sh [package…]` is the CI gate; run it for every package a
   change touches (all of them, for anything in `ahp-protocol`).
 
+- Root docs, the README support matrix and COMPATIBILITY.md, are checked by
+  `packages/ahp-host-flow/tests/docs` (that package's dev environment installs every provider).
+
 ## Keep it generic
 
 This repository is public. It is a library for anyone to embed or run against
