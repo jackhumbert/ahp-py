@@ -229,3 +229,17 @@ async def test_tool_relay_speaks_utf8_whatever_the_locale(harness: Harness) -> N
         if process.returncode is None:
             process.kill()
         await asyncio.wait_for(process.wait(), 10)
+
+
+async def test_tool_relay_bridge_closes_with_a_connection_in_its_handshake() -> None:
+    # A connection that never sends its token is closed by `aclose` too, so the
+    # server's wait for its connections cannot hold teardown up (Windows proactor).
+    bridge = ToolBridge(lambda key: [_TOOL], _unused)
+    await bridge.start()
+    reader, writer = await asyncio.open_connection("127.0.0.1", bridge.port)
+    await asyncio.sleep(0.05)
+    try:
+        await asyncio.wait_for(bridge.aclose(), 3)
+        assert await asyncio.wait_for(reader.read(), 3) == b""
+    finally:
+        writer.close()

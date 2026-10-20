@@ -45,6 +45,10 @@ log = logging.getLogger(__name__)
 SERVER: Final = "ahp_client"
 RELAY_MODULE: Final = "ahp_host_acp.relay"
 HANDSHAKE_TIMEOUT: Final = 10.0
+#: How long `aclose` waits for the server to finish closing. On Windows the proactor
+#: loop can miss a transport's `connection_lost`, and `Server.wait_closed()` (which
+#: from Python 3.12 waits for every accepted connection) would then wait for ever.
+CLOSE_TIMEOUT: Final = 5.0
 MAX_LINE: Final = 16 * 1024 * 1024
 _UNSAFE: Final = re.compile(r"[^A-Za-z0-9_-]")
 _MAX_NAME: Final = 64
@@ -272,6 +276,8 @@ class ToolBridge:
         self._server: asyncio.Server | None = None
         self._tokens: dict[str, str] = {}
         self._connections: dict[str, set[_Connection]] = {}
+        #: Every accepted connection, including one still in its handshake.
+        self._accepted: set[_Connection] = set()
 
     async def start(self) -> None:
         if self._server is None:
@@ -322,12 +328,15 @@ class ToolBridge:
             self._server.close()
         # Close the connections before waiting: from Python 3.12 wait_closed()
         # also waits for every open connection, which a live relay would hold open.
-        for connections in list(self._connections.values()):
-            for connection in list(connections):
-                connection.close()
+        for connection in list(self._accepted):
+            connection.close()
+        self._accepted.clear()
         self._connections.clear()
         if self._server is not None:
-            await self._server.wait_closed()
+            try:
+                await asyncio.wait_for(self._server.wait_closed(), CLOSE_TIMEOUT)
+            except TimeoutError:
+                log.warning("the client-tool bridge did not finish closing in %ss", CLOSE_TIMEOUT)
             self._server = None
 
     def _key_for(self, token: str) -> str | None:
@@ -339,6 +348,7 @@ class ToolBridge:
 
     async def _serve(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         connection = _Connection(writer)
+        self._accepted.add(connection)
         key: str | None = None
         tasks: set[asyncio.Task[None]] = set()
         try:
@@ -370,6 +380,7 @@ class ToolBridge:
                 task.cancel()
             if key is not None:
                 self._connections.get(key, set()).discard(connection)
+            self._accepted.discard(connection)
             connection.close()
 
     async def _handle(self, key: str, connection: _Connection, request: dict[str, Any]) -> None:

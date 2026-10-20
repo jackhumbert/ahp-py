@@ -4,6 +4,14 @@
 
 ## [0.1.0] - unreleased
 
+### Fixed — the client-tool bridge's close
+
+- `ToolBridge.aclose` closes every accepted connection, including one still in its
+  token handshake, and waits at most `CLOSE_TIMEOUT` (5 s) for the server to finish
+  closing, logging if it does not. On Windows the proactor loop could miss a
+  connection's close, and `Server.wait_closed()` (which from Python 3.12 waits for
+  every accepted connection) then never returned, hanging the host's teardown.
+
 ### Added — release preparation (M18)
 
 - `scripts/smoke_wheel.py` checks an installed wheel from outside the checkout (CI's wheels job and release.yml run it).
