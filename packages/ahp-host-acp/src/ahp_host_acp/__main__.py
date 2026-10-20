@@ -5,8 +5,11 @@
         --model ollama/glm-5.3-flash:cloud --model-command "/model {model} -s"
 
 Settings come from the config file (see `ahp_host_acp.config`), with
-flags taking precedence. Binds loopback only. The token is read from a file,
-never taken on the command line, so it stays out of process listings and logs.
+flags taking precedence. Binds loopback by default; any other `--bind` (or `bind`
+in the file) needs `--token-file`, and then the host accepts remote connections.
+The token is read from a file, never taken on the command line, so it stays out
+of process listings and logs. A client sends it as `?tkn=` or as
+`Authorization: Bearer <token>`; the header keeps it out of a proxy's access log.
 """
 
 from __future__ import annotations
@@ -18,12 +21,13 @@ import logging
 import os
 import signal
 import sys
+from collections.abc import Callable
 from pathlib import Path
 
 from ahp_host.core import Host, HostInfo, LoopbackSingleUserPolicy
 from ahp_host.core.resources import ResourceProvider, RootedFilesystemResourceProvider
 from ahp_host.core.store import FileSessionStore
-from ahp_host.ws import serve_websocket
+from ahp_host.ws import bearer_token_validator, is_loopback, serve_websocket
 
 from ahp_host_acp import __version__
 from ahp_host_acp.config import ConfigError, Settings, load
@@ -57,7 +61,11 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help='a prompt that switches the agent\'s model, e.g. "/model {model} -s"',
     )
     parser.add_argument("--port", type=int)
-    parser.add_argument("--bind")
+    parser.add_argument(
+        "--bind",
+        help="the address to listen on (default: 127.0.0.1); a non-loopback one needs "
+        "--token-file and accepts remote connections",
+    )
     parser.add_argument("--token-file", type=Path, help="require this connection token")
     parser.add_argument(
         "--state-dir", type=Path, help="where sessions and the sequence counter persist"
@@ -77,14 +85,12 @@ def _resources(settings: Settings) -> ResourceProvider | None:
     return RootedFilesystemResourceProvider(settings.roots.primary)
 
 
-async def _run(settings: Settings) -> None:
+def build_host(settings: Settings) -> Host:
+    """The ACP host *settings* describe: the provider, the store and the folder browsing."""
     if not is_valid_provider_id(settings.provider_id):
         raise SystemExit(f"provider id {settings.provider_id!r}: use letters, digits, '-' and '_'")
-    token = settings.token_file.read_text().strip() if settings.token_file else None
     state = settings.state_dir
     state.mkdir(parents=True, exist_ok=True, mode=0o700)
-    log = logging.getLogger(__name__)
-
     provider = AcpProvider(
         settings.roots,
         AgentSpec(
@@ -107,7 +113,7 @@ async def _run(settings: Settings) -> None:
         description=settings.description or DEFAULT_DESCRIPTION,
         catalogue_file=state / CATALOGUE_FILE,
     )
-    host = Host(
+    return Host(
         provider,
         LoopbackSingleUserPolicy(),
         info=HostInfo(name="ahp-host-acp", version=__version__),
@@ -118,34 +124,81 @@ async def _run(settings: Settings) -> None:
         # No `completion_trigger_characters`: the provider declares `/` for
         # its slash commands, and the host advertises what providers declare.
     )
-    stop = asyncio.Event()
-    loop = asyncio.get_running_loop()
-    for sig in (signal.SIGTERM, signal.SIGINT):
-        # Windows' event loops have no signal handlers; there Ctrl-C arrives
-        # as KeyboardInterrupt and a service manager simply ends the process.
-        with contextlib.suppress(NotImplementedError):
-            loop.add_signal_handler(sig, stop.set)
+
+
+def read_token(settings: Settings) -> str | None:
+    """The connection token, or None; refuses an off-loopback bind without one."""
+    if settings.token_file is None:
+        if not is_loopback(settings.bind):
+            raise SystemExit(
+                f"ahp-host-acp: refusing to serve on {settings.bind} without --token-file; "
+                "bind a loopback address or require a connection token"
+            )
+        return None
+    token = settings.token_file.expanduser().read_text().strip()
+    if not token:
+        raise SystemExit(f"ahp-host-acp: the token file {settings.token_file} is empty")
+    return token
+
+
+async def serve(
+    host: Host,
+    *,
+    bind: str,
+    port: int,
+    token: str | None,
+    stop: asyncio.Event | None = None,
+    on_ready: Callable[[int], None] | None = None,
+    banner: str = "",
+) -> None:
+    """Serve *host* on *bind*:*port* until *stop* (default: SIGTERM or SIGINT), then close it.
+
+    A non-loopback *bind* needs a *token* and accepts remote connections; the token is
+    accepted as `?tkn=` or as an `Authorization: Bearer` header (`bearer_token_validator`).
+    """
+    if not is_loopback(bind) and token is None:
+        raise ValueError(f"refusing to serve on {bind} without a token")
+    log = logging.getLogger(__name__)
+    if stop is None:
+        # A caller-supplied event means an embedder or test owns shutdown.
+        stop = asyncio.Event()
+        loop = asyncio.get_running_loop()
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            # Windows' event loops have no signal handlers; there Ctrl-C arrives
+            # as KeyboardInterrupt and a service manager simply ends the process.
+            with contextlib.suppress(NotImplementedError):
+                loop.add_signal_handler(sig, stop.set)
     async with serve_websocket(
-        host, bind=settings.bind, port=settings.port, connection_token=token
+        host,
+        bind=bind,
+        port=port,
+        connection_token=bearer_token_validator(token) if token is not None else None,
+        allow_remote=not is_loopback(bind),
     ) as server:
-        roots = settings.roots
-        served = (
-            ", ".join(f"{n}={p}" for n, p in zip(roots.names, roots.paths, strict=True))
-            if roots.is_named
-            else str(roots.primary)
-        )
-        log.info(
-            "serving %s (%s) on %s:%s, root %s, models: %s",
-            settings.agent_name,
-            " ".join(settings.command),
-            settings.bind,
-            server.bound_port,
-            served,
-            ", ".join(m.id for m in settings.models) or "agent default",
-        )
+        log.info("serving %s on %s:%s", banner or "ahp-host-acp", bind, server.bound_port)
+        if on_ready is not None:
+            on_ready(server.bound_port)
         with contextlib.suppress(asyncio.CancelledError):
             await stop.wait()
     await host.aclose()
+
+
+async def _run(settings: Settings) -> None:
+    token = read_token(settings)
+    host = build_host(settings)
+    roots = settings.roots
+    served = (
+        ", ".join(f"{n}={p}" for n, p in zip(roots.names, roots.paths, strict=True))
+        if roots.is_named
+        else str(roots.primary)
+    )
+    banner = "{} ({}), root {}, models: {}".format(
+        settings.agent_name,
+        " ".join(settings.command),
+        served,
+        ", ".join(m.id for m in settings.models) or "agent default",
+    )
+    await serve(host, bind=settings.bind, port=settings.port, token=token, banner=banner)
 
 
 def _jail_supported() -> bool:
@@ -179,6 +232,8 @@ def main(argv: list[str] | None = None) -> None:
         level=logging.DEBUG if settings.verbose else logging.INFO,
         format="%(asctime)s %(levelname)-7s %(name)s: %(message)s",
     )
+    # Before anything starts: an off-loopback bind with no token is refused outright.
+    read_token(settings)
     with contextlib.suppress(KeyboardInterrupt):
         asyncio.run(_run(settings))
 

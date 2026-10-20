@@ -99,7 +99,9 @@ class FlowRun:
 
     def log(self, message: str) -> None:
         if self._state.on_log is not None:
-            self._state.on_log(str(message))
+            # Masked as a script's log() line is (plan §8 M17 item 4).
+            text, mask = str(message), self._state.options.redact
+            self._state.on_log(str(mask(text)) if mask is not None else text)
 
     def workflow(
         self, name_or_ref: str | Mapping[str, str], args: Any = pyrunner.MISSING

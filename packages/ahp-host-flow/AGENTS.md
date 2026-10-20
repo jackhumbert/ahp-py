@@ -1,7 +1,7 @@
 # Agent guide
 
 An `ahp-host` provider that runs Claude Code workflow scripts. `docs/plan.md`
-is the design; milestones M0–M12 there say what exists and what's next.
+is the design; milestones M0–M18 there say what exists and what's next (M0–M17 are done).
 
 - `engine/` and `sandbox/` never import `ahp_host` (an import-linter
   contract), so the engine can move into its own distribution later. They
@@ -10,7 +10,8 @@ is the design; milestones M0–M12 there say what exists and what's next.
   `agent()` call is a worker chat (`ChatOrigin` kind `tool`). Inner providers
   are loaded by import path from config and never imported statically.
 - The top-level modules are `config` (flow.toml), `routing` (rule matching),
-  `loading` (inner providers by import path), `bridge` (`ScopedPublisher`,
+  `loading` (inner providers by import path), `clienttools` (`ClientTools`: the session's
+  client tools filtered by `[workflows] client_tools`, never the fleet tools), `bridge` (`ScopedPublisher`,
   `TurnTee`), `catalog` (workflow sources as customizations), `commands`
   (parsing the message that starts a run), `dispatch` (`ProviderDispatcher`,
   worker chats), `worktree` (git worktrees for `isolation: 'worktree'`), `redaction`
@@ -132,8 +133,28 @@ is the design; milestones M0–M12 there say what exists and what's next.
   `FlowSession.restore_worktrees` republishes them from `resume_session`.
   `FlowProvider` is `ResumesOnRestore` only for a session holding any, so the
   host resumes it eagerly and the changesets reappear without a client opening it.
+- Run entries may carry `namedChats` and `inflight` (`DurableWorkers`; `RESUME_STATE_VERSION` stays 1).
+  Named chats are rebuilt through the inner provider's `resume_session` on the old worker chat
+  (`ReopensToolChats.worker_chat`); a cut-off unnamed schema-less call on a `ResumesTurns` session
+  is resumed in place; everything else is dispatched again. Record named state inside the turn
+  callback before `done` is set. An in-process call's dispatch handle names its worker chat in
+  `DispatchHandle.worker_chat` (journal `started` handle `workerChat`), a fleet or remote call's
+  its `session`; each dispatcher reads only its own field (`fleet.reattach_session`,
+  `ProviderDispatcher._resume_inflight`). A worker turn stays in `inflight` only when a host
+  shutdown cancelled it: an abort, a skip, the idle watchdog or a stop the run made (`stop_cause`)
+  drops it.
 - Continuing a run uses `RunOptions.continue_run`, never the `--resume` prefix
   rule (plan §3 is unchanged).
+- The journal stores the script, its args and child workflow sources masked (`RunOptions.redact`)
+  with `sourceSha`/`argsSha`, unless `keep_source` (`[journal] keep_source`, `flow run
+  --keep-source`). A resume must get the real ones and check them against the hashes, never run
+  something else: `FlowSession._recover_start` re-resolves the workflow and re-parses the turn's
+  message from the stored chat (`ObservesChatState`, the same `_parse_start` as a new turn), the
+  CLI takes the path and `--args`, the library `RunOptions.resume_source`/`resume_args`. A
+  mismatch fails with a line naming what changed. The sandbox masks `log()` lines and script
+  errors itself, so every caller gets them masked; a wire log the flow host builds
+  (`build_host(wire_log=)`, `--wire-log`, `flow run --config --wire-log`) gets the provider's
+  `Redactor` as ahp-host's `wire_log_mask`.
 - Journal readers know run/workflow/agent/started/gate records and still
   ignore unknown types. Gate ordinals come from their own host-side counter,
   never the `agent()` one. A continued run's gate call ids use `gate-r<k>`.

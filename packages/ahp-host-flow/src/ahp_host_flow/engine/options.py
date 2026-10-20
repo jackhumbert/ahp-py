@@ -30,6 +30,17 @@ MAX_ITEMS_PER_CALL: Final = 4096
 RUN_ID: Final = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}")
 
 
+class _NoResumeArgs:
+    """`RunOptions.resume_args` when none are given (None is a valid args value)."""
+
+    def __repr__(self) -> str:
+        return "NO_RESUME_ARGS"
+
+
+#: `RunOptions.resume_args` left unset.
+NO_RESUME_ARGS: Final = _NoResumeArgs()
+
+
 def default_concurrency(cpu_count: int | None = None) -> int:
     """`min(16, CPUs - 2)`, at least 1; an unknown CPU count counts as 1."""
     cpus = os.cpu_count() if cpu_count is None else cpu_count
@@ -81,6 +92,14 @@ class RunOptions:
     continue_run: bool = False
     # Masks every value the journal stores (plan §4.9); None stores values as they are.
     redact: Callable[[Any], Any] | None = field(default=None, compare=False, repr=False)
+    # When False and `redact` is set, the journal stores the script, its args and child
+    # workflow sources masked (with their sha256, so a resume can check the real ones).
+    keep_source: bool = False
+    # Resuming a masked journal: the real script and args the run started with, used when the
+    # caller passes none, and checked against the journal's sha256 (plan §8 M17 item 4). Kept
+    # out of repr and equality, as they hold what the journal masked.
+    resume_source: str | None = field(default=None, compare=False, repr=False)
+    resume_args: Any = field(default=NO_RESUME_ARGS, compare=False, repr=False)
     # Custom verbs (plan M12): name -> handler, run by the host with no model.
     verbs: Mapping[str, VerbHandler] = field(default_factory=dict, compare=False, repr=False)
     # Resume-key hook (plan M12): the value it returns for a call joins that call's key, so a
@@ -158,6 +177,14 @@ class RunOptions:
             raise ValueError("client_workflows must be a tuple of ClientWorkflow")
         if self.redact is not None and not callable(self.redact):
             raise ValueError("redact must be callable")
+        if not isinstance(self.keep_source, bool):
+            raise ValueError("keep_source must be a bool")
+        if self.resume_source is not None and not isinstance(self.resume_source, str):
+            raise ValueError("resume_source must be a string")
+        if (
+            self.resume_source is not None or self.resume_args is not NO_RESUME_ARGS
+        ) and self.resume_from is None:
+            raise ValueError("resume_source and resume_args need resume_from")
         if not isinstance(self.verbs, Mapping):
             raise ValueError("verbs must be a mapping of verb name to handler")
         for name, handler in self.verbs.items():

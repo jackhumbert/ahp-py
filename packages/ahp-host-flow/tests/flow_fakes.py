@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import json
 import subprocess
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, ClassVar
@@ -275,6 +276,97 @@ class RestartHoldProvider:
     async def create_session(self, context: AgentSessionContext) -> RestartHoldSession:
         RestartHoldProvider.sessions_created += 1
         return RestartHoldSession(context)
+
+
+@dataclass
+class TurnlessHoldSession:
+    """Remembers its turns (`memory`); a prompt starting `hold` waits while `holding`.
+
+    Resumes as a session (its provider is resumable) but not a turn: no `resume_turn`.
+    """
+
+    context: AgentSessionContext
+    memory: list[str] = field(default_factory=list)
+
+    async def send_user_message(self, message: UserMessage, sink: TurnSink) -> None:
+        text = stripped(message).text
+        ResumableHoldProvider.prompts.append(text)
+        if text.startswith("hold") and ResumableHoldProvider.holding:
+            await asyncio.Event().wait()
+        self.memory.append(text)
+        await sink.text_delta("mem: " + " | ".join(self.memory))
+        await sink.usage(input_tokens=1, output_tokens=5)
+
+    async def cancel(self, reason: str | None = None) -> None:
+        pass
+
+    async def aclose(self) -> None:
+        pass
+
+
+#: What `ResumableHoldSession.resume_turn` answers, so a test tells a turn resumed in place from
+#: one sent again (`mem: ...`).
+RESUMED_IN_PLACE = "turn resumed in place"
+
+
+@dataclass
+class ResumableHoldSession(TurnlessHoldSession):
+    """A `TurnlessHoldSession` that also resumes a cut-off turn in place (`ResumesTurns`)."""
+
+    async def resume_turn(self, chat_uri: str, turn_id: str, sink: TurnSink) -> None:
+        ResumableHoldProvider.turn_resumes.append((chat_uri, turn_id))
+        await sink.text_delta(RESUMED_IN_PLACE)
+
+
+class ResumableHoldProvider:
+    """`RestartHoldProvider` whose sessions resume after a restart with their memory.
+
+    The class flags make the negative cases: `resumes_turns` False hands back sessions without
+    `resume_turn`, `records_state` False makes `resume_state_of` say None, and `fail_resume`
+    makes `resume_session` raise. `reset_fakes` restores them.
+    """
+
+    prompts: ClassVar[list[str]] = []
+    holding: ClassVar[bool] = True
+    sessions_created: ClassVar[int] = 0
+    sessions_resumed: ClassVar[int] = 0
+    turn_resumes: ClassVar[list[tuple[str, str]]] = []
+    resumes_turns: ClassVar[bool] = True
+    records_state: ClassVar[bool] = True
+    fail_resume: ClassVar[bool] = False
+
+    def __init__(self, *, provider_id: str = "rh") -> None:
+        self.provider_id = provider_id
+
+    @property
+    def agent(self) -> AgentInfo:
+        return AgentInfo(
+            provider=self.provider_id,
+            display_name="Resumable hold",
+            description="Holds `hold...` prompts; its sessions resume after a restart.",
+            models=(),
+        )
+
+    @staticmethod
+    def _session(context: AgentSessionContext, memory: list[str]) -> TurnlessHoldSession:
+        kind = ResumableHoldSession if ResumableHoldProvider.resumes_turns else TurnlessHoldSession
+        return kind(context, memory=memory)
+
+    async def create_session(self, context: AgentSessionContext) -> TurnlessHoldSession:
+        ResumableHoldProvider.sessions_created += 1
+        return self._session(context, [])
+
+    async def resume_session(self, context: AgentSessionContext) -> TurnlessHoldSession:
+        if ResumableHoldProvider.fail_resume:
+            raise RuntimeError("the old session is gone")
+        ResumableHoldProvider.sessions_resumed += 1
+        state = context.resume_state or {}
+        return self._session(context, list(state.get("memory", [])))
+
+    async def resume_state_of(self, session: AgentSession) -> dict[str, Any] | None:
+        if not ResumableHoldProvider.records_state or not isinstance(session, TurnlessHoldSession):
+            return None
+        return {"memory": list(session.memory)}
 
 
 AWS = "AKIA" + "TESTONLY" * 2
@@ -773,7 +865,94 @@ def not_a_provider() -> object:
     return object()
 
 
+class ClientToolSession:
+    """Calls a client's tool on request: `list`, `call:<name>` or `wait:<name>`."""
+
+    def __init__(self, context: AgentSessionContext) -> None:
+        self.context = context
+        self.clients: list[dict[str, Any]] = (
+            [{"clientId": context.active_client_id, "tools": list(context.client_tools)}]
+            if context.active_client_id
+            else []
+        )
+        self.changed = asyncio.Event()
+
+    async def active_clients_changed(self, clients: Any) -> None:
+        self.clients = [dict(c) for c in clients]
+        self.changed.set()
+
+    def _owner(self, name: str) -> str | None:
+        for client in self.clients:
+            if any(t.get("name") == name for t in client.get("tools") or ()):
+                return str(client["clientId"])
+        return None
+
+    async def send_user_message(self, message: UserMessage, sink: TurnSink) -> None:
+        text = stripped(message).text
+        if text == "list":
+            names = sorted(str(t["name"]) for t in self.context.client_tools)
+            await sink.text_delta(json.dumps(names))
+            return
+        verb, _, name = text.partition(":")
+        owner = self._owner(name)
+        if verb == "wait":
+            while owner is None:
+                self.changed.clear()
+                try:
+                    await asyncio.wait_for(self.changed.wait(), 5.0)
+                except TimeoutError:
+                    break
+                owner = self._owner(name)
+        if owner is None:
+            await sink.text_delta(f"no client offers {name}")
+            return
+        result = await sink.run_client_tool(
+            ClientToolCall(
+                call_id=f"ct-{uuid.uuid4().hex[:8]}",
+                name=name,
+                client_id=owner,
+                tool_input={"q": "x"},
+                display_name=name,
+            )
+        )
+        if result.accepted:
+            first = result.value["content"][0]["text"]
+            await sink.text_delta(f"{name}: {first}")
+        else:
+            await sink.text_delta(f"{name} refused: {result.reason}")
+
+    async def cancel(self, reason: str | None = None) -> None:
+        pass
+
+    async def aclose(self) -> None:
+        pass
+
+
+class ClientToolProvider:
+    """Sessions that call the tools of the clients they are told about."""
+
+    instances: ClassVar[list[ClientToolSession]] = []
+
+    def __init__(self, *, provider_id: str = "ctool") -> None:
+        self.provider_id = provider_id
+
+    @property
+    def agent(self) -> AgentInfo:
+        return AgentInfo(
+            provider=self.provider_id,
+            display_name="Client tools",
+            description="Calls the clients' tools.",
+            models=(),
+        )
+
+    async def create_session(self, context: AgentSessionContext) -> ClientToolSession:
+        session = ClientToolSession(context)
+        ClientToolProvider.instances.append(session)
+        return session
+
+
 def reset_fakes() -> None:
+    ClientToolProvider.instances.clear()
     RecordingProvider.instances.clear()
     HangingProvider.instances.clear()
     GatedProvider.instances.clear()
@@ -787,6 +966,14 @@ def reset_fakes() -> None:
     RestartHoldProvider.prompts.clear()
     RestartHoldProvider.holding = True
     RestartHoldProvider.sessions_created = 0
+    ResumableHoldProvider.prompts.clear()
+    ResumableHoldProvider.holding = True
+    ResumableHoldProvider.sessions_created = 0
+    ResumableHoldProvider.sessions_resumed = 0
+    ResumableHoldProvider.turn_resumes.clear()
+    ResumableHoldProvider.resumes_turns = True
+    ResumableHoldProvider.records_state = True
+    ResumableHoldProvider.fail_resume = False
 
 
 class BrokenSessionProvider:

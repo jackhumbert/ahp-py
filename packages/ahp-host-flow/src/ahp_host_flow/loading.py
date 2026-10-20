@@ -22,6 +22,7 @@ from ahp_host.provider.policy import (
 
 from ahp_host_flow.config import ConfigError, FlowConfig, ProviderConfig
 from ahp_host_flow.engine import AgentCall, VerbCall, VerbHandler
+from ahp_host_flow.engine.remote import Launcher
 from ahp_host_flow.routing import resolved_route
 
 _log = logging.getLogger(__name__)
@@ -47,6 +48,15 @@ def import_object(path: str, where: str) -> Any:
 def _import_factory(spec: ProviderConfig) -> Any:
     assert spec.load is not None
     return import_object(spec.load, f"providers.{spec.name}.load")
+
+
+def load_launcher(spec: ProviderConfig) -> Launcher:
+    """The async launcher factory a remote provider's `launch` names."""
+    assert spec.launch is not None
+    launcher = import_object(spec.launch, f"providers.{spec.name}.launch")
+    if not callable(launcher):
+        raise ConfigError(f"providers.{spec.name}.launch: {spec.launch!r} is not callable")
+    return launcher  # type: ignore[no-any-return]
 
 
 def provider_roots(host_roots: Roots | None, state_dir: Path) -> Roots:

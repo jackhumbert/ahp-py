@@ -6,6 +6,14 @@ Every release states the protocol versions it speaks.
 
 ## [Unreleased]
 
+### Added — wire-log content masker
+
+- `WireLog(mask=)` (`ahp_client.wirelog`): an optional content masker, a `Callable[[str], str]` or
+  an object with `mask(str) -> str` (`ContentMasker`, `MasksText`), applied to every string value
+  of every frame written, after the credential-key redaction; keys and the `_ahpLog` sidecar are
+  untouched and the frame on the wire is never changed. Same contract as ahp-host's
+  `WireLog(mask=)`. `tests/client/test_wirelog_mask.py`.
+
 ### Changed — idle timeout liveness (M16)
 
 - `TurnStream`'s `idle_timeout` is also reset by a `chat/activityChanged` on its chat and by

@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+### Added — serving off loopback with a token (M17)
+
+- `--bind` (or `bind` in the config file) may name a non-loopback address. It needs
+  `--token-file` (`token_file`): without one, or with an empty one, `python -m ahp_host_acp`
+  refuses before starting; with one, the host accepts remote connections (`allow_remote`) and
+  takes the token as `?tkn=` or as an `Authorization: Bearer` header
+  (`ahp_host.ws.bearer_token_validator`), as `python -m ahp_host_flow` does since its M13.
+  It is how ahp-host-flow's "Running on sandboxed hosts" serves an agent from inside a
+  container. `__main__` now has `build_host`, `read_token` and `serve`.
+  `tests/test_acpbind.py`.
+
 ### Changed — input gauge marked (M16)
 
 - A turn report with no `inputTokens`, whose input is the context size standing in, says so in its `_meta`: `acpUsage.inputGauge = true`. It is how full the context is, not what the turn consumed, so a reader that sums usage (ahp-host-flow's budgets and quotas) counts it as no input. `tests/test_session_updates.py`.

@@ -21,21 +21,28 @@ flag somebody eventually sets on a machine they do not control -- and the client
 is the party that sends ``authenticate{token}``, so this matters more on this
 side than on the host's. The log still contains every message of every session,
 which is a transcript, not a trace.
+
+**Content masking is opt-in.** Credential keys cannot see a secret in ordinary text. An
+application that already masks its own output passes ``mask``: a ``Callable[[str], str]``, or
+an object with a ``mask(str) -> str`` method. It is applied to every string value of every
+frame written, at any depth, after the credential redaction; keys and the ``_ahpLog`` sidecar
+are left alone, and the frame on the wire is never touched. Same contract as the sibling
+host's ``WireLog(mask=)``.
 """
 
 from __future__ import annotations
 
 import json
 import os
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Final, Literal
+from typing import Any, Final, Literal, Protocol, runtime_checkable
 
 from ahp_protocol.transport import Transport
 from ahp_protocol.types import JsonObject
 
-__all__ = ["WireLog", "logged", "read_jsonl"]
+__all__ = ["ContentMasker", "MasksText", "WireLog", "logged", "read_jsonl"]
 
 #: Key names whose values never reach the file, at any depth. Matched
 #: case-insensitively on a substring, because hosts spell these several ways.
@@ -64,8 +71,33 @@ def _redact(value: Any) -> Any:
     return value
 
 
+@runtime_checkable
+class MasksText(Protocol):
+    """An object that masks text."""
+
+    def mask(self, text: str) -> str: ...
+
+
+#: What `WireLog(mask=)` takes: a function of a string, or an object with a `mask` method.
+ContentMasker = Callable[[str], str] | MasksText
+
+
+def _mask_strings(value: Any, mask: Callable[[str], str]) -> Any:
+    """Copy *value* with *mask* applied to every string value (keys untouched)."""
+    if isinstance(value, str):
+        return mask(value)
+    if isinstance(value, Mapping):
+        return {key: _mask_strings(inner, mask) for key, inner in value.items()}
+    if isinstance(value, list | tuple):
+        return [_mask_strings(item, mask) for item in value]
+    return value
+
+
 class WireLog:
-    """Appends frames to a file. Owner-readable only."""
+    """Appends frames to a file. Owner-readable only.
+
+    *mask*, when given, masks every string value written (see the module docstring).
+    """
 
     def __init__(
         self,
@@ -73,7 +105,16 @@ class WireLog:
         *,
         connection_id: str = "client",
         transport: str = "websocket",
+        mask: ContentMasker | None = None,
     ) -> None:
+        if mask is None:
+            self._mask: Callable[[str], str] | None = None
+        elif isinstance(mask, MasksText):
+            self._mask = mask.mask
+        elif callable(mask):
+            self._mask = mask
+        else:
+            raise TypeError("mask must be a Callable[[str], str] or have a mask(str) method")
         self.path = Path(path) if path is not None else Path(f"ahp-client-{os.getpid()}.jsonl")
         self._connection_id = connection_id
         self._transport = transport
@@ -85,6 +126,8 @@ class WireLog:
 
     def record(self, direction: Literal["c2s", "s2c"], message: Mapping[str, Any]) -> None:
         entry: JsonObject = dict(_redact(message))
+        if self._mask is not None:
+            entry = dict(_mask_strings(entry, self._mask))
         entry["_ahpLog"] = {
             # A string, never epoch milliseconds: the inspector's
             # `extractWireMeta` requires `typeof ts === "string"` and rejects

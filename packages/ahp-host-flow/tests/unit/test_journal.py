@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import json
 from pathlib import Path
@@ -24,6 +25,7 @@ from ahp_host_flow.engine import (
     load_journal,
     new_run_id,
     run_dir,
+    text_sha,
 )
 
 
@@ -83,8 +85,16 @@ def test_journal_round_trip(tmp_path: Path) -> None:
     assert b"\r" not in w.path.read_bytes()
     loaded = load_journal(tmp_path, "r1")
     assert loaded.agents == (r0, r1)
-    assert loaded.workflows == {canonical_json({"scriptPath": "c.js"}): snap}
-    assert loaded.header == header
+    # The writer records the sha256 of the real text beside it (M17 item 4), and the reader
+    # returns it: a masked copy is told from the real one only by that hash, so it takes part
+    # in equality and the expected values carry it too.
+    expected_snap = dataclasses.replace(snap, source_sha=text_sha("return 2"))
+    assert loaded.workflows == {canonical_json({"scriptPath": "c.js"}): expected_snap}
+    assert loaded.header == dataclasses.replace(
+        header,
+        source_sha=text_sha("return 1"),
+        args_sha=text_sha(canonical_json({"a": [1, 2]})),
+    )
 
 
 def test_journal_create_twice(tmp_path: Path) -> None:

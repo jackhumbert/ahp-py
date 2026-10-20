@@ -458,7 +458,9 @@ class Scheduler:
             if self._journal is not None:
                 h = handle if handle is not None else DispatchHandle()
                 written = h
-                self._journal.append_started(StartRecord(n, key, h.provider, h.chat, h.session))
+                self._journal.append_started(
+                    StartRecord(n, key, h.provider, h.chat, h.session, h.worker_chat)
+                )
 
         reports = (
             isinstance(self._dispatcher, ReportsDispatch) and self._dispatcher.reports_dispatch

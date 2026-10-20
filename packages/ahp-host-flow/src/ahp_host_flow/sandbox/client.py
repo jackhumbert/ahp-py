@@ -25,6 +25,7 @@ from ahp_host_flow.engine import (
     GateRunner,
     Gates,
     GateUnavailableError,
+    JournalError,
     JournalRun,
     Registry,
     ResolvedScript,
@@ -115,6 +116,21 @@ class MetaError(SandboxError):
 
 class ScriptSyntaxError(SandboxError):
     """The source did not parse, or used import/export."""
+
+
+def _masked(exc: SandboxError, mask: Callable[[Any], Any] | None) -> SandboxError:
+    """*exc* with its message, stderr and stack masked (plan §8 M17 item 4), in place.
+
+    A script's error can quote what it was given -- its args, a line of its source -- and the
+    message reaches a log, a terminal or a failed turn, so it is masked like a log line.
+    """
+    if mask is None:
+        return exc
+    exc.args = tuple(str(mask(a)) if isinstance(a, str) else a for a in exc.args)
+    exc.stderr = str(mask(exc.stderr))
+    if isinstance(exc, ScriptError) and exc.stack is not None:
+        exc.stack = str(mask(exc.stack))
+    return exc
 
 
 def _error_from(error: Mapping[str, Any], stderr: str) -> SandboxError:
@@ -552,7 +568,7 @@ class Sandbox:
             else:
                 value = await run_workflow_child(state, resolved, params.get("args", NO_ARGS))
                 result = {"value": value}
-        except (WorkflowRefError, WorkflowRunError) as exc:
+        except (WorkflowRefError, WorkflowRunError, JournalError) as exc:
             await self._write_error(msg["id"], protocol.WORKFLOW_ERROR, str(exc))
             return
         result["spent"] = state.scheduler.budget.spent
@@ -565,7 +581,11 @@ class Sandbox:
         if state is None:
             return
         if method == "log" and state.on_log is not None:
-            state.on_log(str(params.get("message", "")))
+            # Masked here, so every caller of the sandbox (provider, CLI, library) gets the
+            # same masked line; masking twice changes nothing.
+            message = str(params.get("message", ""))
+            mask = state.options.redact
+            state.on_log(str(mask(message)) if mask is not None else message)
         elif method == "canvas":
             task = asyncio.create_task(state.gates.canvas(params.get("url"), params.get("title")))
             self._canvas_tasks.add(task)
@@ -770,6 +790,9 @@ class Sandbox:
                 try:
                     async with asyncio.timeout(options.timeout):
                         result = await self._request("run", params)
+                except SandboxError as exc:
+                    _masked(exc, options.redact)
+                    raise
                 except TimeoutError:
                     # A busy loop blocks Node's event loop, so only a kill stops it.
                     error = RunTimeoutError(

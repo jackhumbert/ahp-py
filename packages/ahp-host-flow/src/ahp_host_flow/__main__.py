@@ -8,7 +8,9 @@ Providers, routing and workflow sources come from the config file (see
 so it stays out of process listings and logs. A client sends it as `?tkn=` or as
 `Authorization: Bearer <token>`; the header keeps it out of a proxy's access log.
 `--ping-interval` sets the keepalive ping in seconds (0 turns pings off) and
-`--max-size` the largest incoming message in bytes (0 means no limit).
+`--max-size` the largest incoming message in bytes (0 means no limit). `--wire-log` writes
+every frame as ahp-inspector JSONL, with credentials redacted and every text masked by the
+flow.toml's `[redact]` rules, as the journal is.
 """
 
 from __future__ import annotations
@@ -67,6 +69,11 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="largest incoming message in bytes; 0 means no limit (default: %(default)s)",
     )
     parser.add_argument(
+        "--wire-log",
+        type=Path,
+        help="append every frame as ahp-inspector JSONL, masked by the [redact] rules",
+    )
+    parser.add_argument(
         "--no-store",
         action="store_true",
         help="keep no sessions on disk: nothing survives a restart",
@@ -82,9 +89,14 @@ def build_host(
     store: bool = True,
     policy: Policy | None = None,
     session_store: SessionStore | None = None,
+    wire_log: Path | None = None,
 ) -> Host:
     """The flow host. An embedder passes its own *policy* (default: loopback, one user) and
-    *session_store* (default: files under ``state_dir`` unless *store* is false)."""
+    *session_store* (default: files under ``state_dir`` unless *store* is false).
+
+    *wire_log* is masked by the provider's `Redactor` (the `[redact]` rules), beside ahp-host's
+    own credential redaction: a secret in a script or its args reaches neither the journal
+    nor the wire log."""
     # The store is what makes a restart resumable: `Host.restore()` reads back the sessions,
     # their resume state (runs, kept worktrees) and the sequence counter.
     stored: dict[str, Any] = {}
@@ -106,6 +118,8 @@ def build_host(
         provider,
         policy if policy is not None else LoopbackSingleUserPolicy(),
         info=HostInfo(name="ahp-host-flow", version=__version__),
+        wire_log=wire_log,
+        wire_log_mask=provider.redactor,
         **stored,
     )
 
@@ -180,7 +194,9 @@ def main(argv: list[str] | None = None) -> None:
     token = args.token_file.read_text().strip() if args.token_file else None
     if args.token_file is not None and not token:
         raise SystemExit(f"ahp-host-flow: the token file {args.token_file} is empty")
-    host = build_host(config, roots=args.root or (), store=not args.no_store)
+    host = build_host(
+        config, roots=args.root or (), store=not args.no_store, wire_log=args.wire_log
+    )
     with contextlib.suppress(KeyboardInterrupt):
         asyncio.run(
             _serve(

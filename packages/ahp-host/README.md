@@ -298,7 +298,8 @@ built; a handler may take a fourth `OperationContext(params, principal)` argumen
 `{message, followUp}` for the result. A `ResumesOnRestore` provider names the
 restored sessions that need their agent at once instead of on the first turn.
 The session publisher is also `ObservesSessionState` (`session_state()`, the
-session channel's reduced state), `ReopensToolChats` (`worker_chat(resource)`,
+session channel's reduced state), `ObservesChatState` (`chat_state(chat)`, one of
+its chats as reduced, turns and their messages included, also after a restart), `ReopensToolChats` (`worker_chat(resource)`,
 a worker chat opened earlier, also after a restart) and `PublishesChatActivity`
 (`chat_activity_changed(chat, activity, meta=)`, a `chat/activityChanged` on one of
 the session's own chats with an optional `_meta`, e.g. a liveness tick), and a `ToolConfirmation`
@@ -726,7 +727,10 @@ This library's position:
 - The jail **walks** — `openat` with `O_NOFOLLOW`, one component at a time, each
   resolved symlink re-checked against the root — rather than resolving a path
   and then opening it, which has a window in which a component can be swapped.
-- `--wire-log` redacts credentials and writes owner-only. It still contains
+- `--wire-log` redacts credentials and writes owner-only. An embedder that masks its
+  own output can mask the log's text too: `Host(wire_log=..., wire_log_mask=...)` takes a
+  `Callable[[str], str]` or an object with a `mask(str)` method, applied to every string
+  written (ahp-host-flow passes its `Redactor`). It still contains
   every message of every session, which is a transcript, not a trace.
   `FileSessionStore` and `FileAutomationStore` directories are owner-only too:
   `0o700`/`0o600` on POSIX, and on Windows — where `chmod` only sets the

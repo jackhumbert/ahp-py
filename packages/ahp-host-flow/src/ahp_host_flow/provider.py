@@ -8,7 +8,7 @@ import json
 import logging
 import weakref
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Final
 
@@ -23,8 +23,10 @@ from ahp_host.provider.base import (
     ConfigRequest,
     ConfigResolution,
     ConfigValue,
+    FollowsActiveClients,
     IdentifiesTurn,
     ModelInfo,
+    ObservesChatState,
     ObservesSessionState,
     PublishesChatActivity,
     ReadsClientPlugins,
@@ -37,6 +39,7 @@ from ahp_protocol.ext import flow
 from ahp_protocol.transport import Transport
 
 from ahp_host_flow import __version__, catalog
+from ahp_host_flow.clienttools import ClientTools
 from ahp_host_flow.commands import (
     BadRequest,
     Help,
@@ -57,6 +60,7 @@ from ahp_host_flow.config import (
     make_redactor,
 )
 from ahp_host_flow.dispatch import (
+    DurableWorkers,
     FlowAgentError,
     ProviderDispatcher,
     RemoteWorkerChats,
@@ -75,18 +79,23 @@ from ahp_host_flow.engine import (
     JournalError,
     QuotaLedger,
     RemoteSpec,
+    RunHeader,
     RunOptions,
     VerbHandler,
     WorkflowDir,
     args_error,
+    args_masked,
     load_journal,
     preamble_text,
     run_dir,
+    source_masked,
+    text_sha,
 )
+from ahp_host_flow.engine.journal import value_sha
 from ahp_host_flow.fleet import FleetClients, FleetDispatcher
 from ahp_host_flow.gates import MainChatGates, MainChatVerbs
 from ahp_host_flow.limits import ProviderSlotsRegistry, probe
-from ahp_host_flow.loading import LazyProviders, lazy_verbs, resume_key_hook
+from ahp_host_flow.loading import LazyProviders, lazy_verbs, load_launcher, resume_key_hook
 from ahp_host_flow.sandbox import (
     NO_ARGS,
     NodeNotFoundError,
@@ -234,6 +243,9 @@ class RunEntry:
     # Who the run is for: the turn's principal only (None for a queued, steered or host-started
     # turn); never the session creator's.
     principal: str | None = None
+    # The run's named chats and in-flight worker turns, shared with its dispatcher (which
+    # updates them as it goes); not part of the entry's identity.
+    durable: DurableWorkers | None = field(default=None, compare=False)
 
     def to_json(self) -> dict[str, Any]:
         entry: dict[str, Any] = {
@@ -248,7 +260,81 @@ class RunEntry:
         }
         if self.principal is not None:
             entry["principal"] = self.principal
+        if self.durable is not None:
+            entry.update(self.durable.to_json())
         return entry
+
+
+def _named_record(item: object) -> dict[str, Any] | None:
+    """A persisted named chat record when it has the shape `DurableWorkers` writes."""
+    if not isinstance(item, Mapping):
+        return None
+    folder, inner_state, config = item.get("folder"), item.get("innerState"), item.get("config")
+    if (
+        isinstance(item.get("provider"), str)
+        and isinstance(item.get("workerChat"), str)
+        and isinstance(item.get("title"), str)
+        and isinstance(config, Mapping)
+        and (folder is None or isinstance(folder, str))
+        and (inner_state is None or isinstance(inner_state, Mapping))
+    ):
+        return {
+            "provider": item["provider"],
+            "workerChat": item["workerChat"],
+            "title": item["title"],
+            "config": dict(config),
+            "folder": folder,
+            "innerState": dict(inner_state) if inner_state is not None else None,
+        }
+    return None
+
+
+def _inflight_record(item: object) -> dict[str, Any] | None:
+    """A persisted in-flight worker turn when it has the shape `DurableWorkers` writes."""
+    if not isinstance(item, Mapping):
+        return None
+    inner_state = item.get("innerState")
+    if (
+        isinstance(item.get("provider"), str)
+        and isinstance(item.get("turnId"), str)
+        and isinstance(inner_state, Mapping)
+    ):
+        return {
+            "provider": item["provider"],
+            "turnId": item["turnId"],
+            "innerState": dict(inner_state),
+        }
+    return None
+
+
+def _parse_durable(item: Mapping[str, Any]) -> DurableWorkers | None:
+    """The run entry's optional `namedChats` and `inflight`; malformed items are dropped."""
+    named: dict[str, dict[str, Any]] = {}
+    inflight: dict[str, dict[str, Any]] = {}
+    for key, parse, found in (
+        ("namedChats", _named_record, named),
+        ("inflight", _inflight_record, inflight),
+    ):
+        raw = item.get(key)
+        if raw is None:
+            continue
+        if not isinstance(raw, Mapping):
+            _log.warning("ignoring a malformed named chat in the flow resume state")
+            continue
+        for name, record in raw.items():
+            parsed = parse(record) if isinstance(name, str) else None
+            if parsed is None:
+                _log.warning("ignoring a malformed named chat in the flow resume state")
+            else:
+                found[name] = parsed
+    if not named and not inflight:
+        return None
+    return DurableWorkers(
+        named=dict(named),
+        inflight=dict(inflight),
+        restored_named=dict(named),
+        restored_inflight=dict(inflight),
+    )
 
 
 def _count(item: Mapping[str, Any], key: str) -> int | None:
@@ -286,7 +372,16 @@ def _parse_runs(state: Mapping[str, Any] | None) -> dict[str, RunEntry]:
             ):
                 resumes, started, finished = (int(c or 0) for c in counts)
                 found[chat] = RunEntry(
-                    chat, turn_id, run_id, workflow, model, resumes, started, finished, principal
+                    chat,
+                    turn_id,
+                    run_id,
+                    workflow,
+                    model,
+                    resumes,
+                    started,
+                    finished,
+                    principal,
+                    _parse_durable(item),
                 )
                 continue
         _log.warning("ignoring a malformed run entry in the flow resume state")
@@ -491,14 +586,24 @@ class FlowSession:
         self._watcher: PollingResourceWatcher | None = None
         self._watched: list[WatchRequest] = []
         #: The active clients that offer the fleet tools (a gateway joined to this session).
-        self._fleet = FleetClients(
+        initial = (
             [{"clientId": context.active_client_id, "tools": list(context.client_tools)}]
             if context.active_client_id
             else []
         )
+        self._fleet = FleetClients(initial)
+        #: The same clients' tools as in-process workers may use (`[workflows] client_tools`).
+        self._client_tools = ClientTools(provider.config.workflows.client_tools, initial)
 
     async def active_clients_changed(self, clients: Sequence[Mapping[str, Any]]) -> None:
         self._fleet.update(clients)
+        self._client_tools.update(clients)
+        for inner in list(self._workers.values()):
+            if isinstance(inner, FollowsActiveClients):
+                try:
+                    await inner.active_clients_changed(self._client_tools.clients())
+                except Exception:
+                    _log.warning("a worker session did not take the client list", exc_info=True)
         if "client" in self.provider.config.workflows.sources:
             # Never read inline: this runs in the publishing client's notification handler,
             # and a read back to that client would deadlock.
@@ -679,14 +784,28 @@ class FlowSession:
         try:
             # The cached client workflows: a resume never reads a client.
             entries, _ = await self._catalog(node, read_clients=False)
+            source: str | None = None
+            args: object = NO_ARGS
+            if source_masked(header) or args_masked(header):
+                recovered = self._recover_start(chat_uri, turn_id, entry.run_id, header, entries)
+                if isinstance(recovered, str):
+                    # Dropped: nothing can continue it, so it must not ride along forever.
+                    _log.warning("cannot continue run %s, dropping it: %s", entry.run_id, recovered)
+                    self._runs.pop(chat_uri, None)
+                    await sink.turn_failed(self.provider.redactor.mask(recovered), "flow.run")
+                    return
+                if source_masked(header):
+                    source = recovered[0]
+                if args_masked(header):
+                    args = recovered[1]
             # The calls the restart cut off were closed (cancelled) when the
             # host failed the turn; the re-dispatched ones get ids of their own.
             await self._run_workflow(
                 chat=chat_uri,
                 sink=sink,
-                source=None,
+                source=source,
                 filename=header.filename,
-                args=NO_ARGS,
+                args=args,
                 workflow=resumed.workflow,
                 model=resumed.model,
                 node=node,
@@ -704,6 +823,91 @@ class FlowSession:
         _, self._published = await self._catalog(self._node(), read_clients=False)
         return SessionDescription(customizations=self._published)
 
+    @staticmethod
+    def _parse_start(
+        raw: Mapping[str, Any],
+    ) -> tuple[Help | BadRequest | StartRun, str | None, bool]:
+        """What a run-starting message asks for, the run id a typed start asked for, and
+        whether the start was typed (`_meta`) rather than text.
+
+        The one parser for a new turn and for a resume re-reading the turn's stored message,
+        so both read the same script and args out of it. Raises `ValueError` for a malformed
+        typed start (`flow.parse_workflow_start`).
+        """
+        start = flow.parse_workflow_start(raw.get("_meta"))
+        if start is None:
+            text = raw.get("text")
+            return parse_message(text if isinstance(text, str) else ""), None, False
+        # A typed start wins over the text (which stays `/name {json}` for stock hosts).
+        ref_parts = parse_ref(start.workflow)
+        if isinstance(ref_parts, BadRequest):
+            return BadRequest("bad workflow start: " + ref_parts.message), None, True
+        args = start.args if start.has_args else NO_ARGS
+        return StartRun(ref_parts[1], ref_parts[0], None, args), start.run_id, True
+
+    def _turn_message(self, chat: str, turn_id: str) -> Mapping[str, Any] | None:
+        """The message turn *turn_id* on *chat* was started with, from the stored chat state."""
+        publisher = self.context.publisher
+        if not isinstance(publisher, ObservesChatState):
+            return None
+        state = publisher.chat_state(chat)
+        active = state.get("activeTurn")
+        turns = state.get("turns")
+        candidates = [*(turns if isinstance(turns, list) else []), active]
+        for turn in candidates:
+            if isinstance(turn, Mapping) and turn.get("id") == turn_id:
+                message = turn.get("message")
+                return message if isinstance(message, Mapping) else None
+        return None
+
+    def _recover_start(
+        self,
+        chat: str,
+        turn_id: str,
+        run_id: str,
+        header: RunHeader,
+        entries: Sequence[catalog.WorkflowEntry],
+    ) -> tuple[str, object] | str:
+        """The real script and args of a run whose journal holds them masked; else why not.
+
+        The journal keeps only their sha256 (plan §8 M17 item 4). The script comes from
+        re-resolving the run's workflow, named by the turn's own message (the session store
+        holds it), and the args from re-parsing that message; both must hash to the journal's
+        values, so a resume never runs a different script or different args.
+        """
+        why = f"cannot continue run {run_id}: its journal is masked"
+        raw = self._turn_message(chat, turn_id)
+        if raw is None:
+            return f"{why} and the message that started it is gone"
+        try:
+            parsed, _, _ = self._parse_start(raw)
+        except ValueError as exc:
+            return f"{why} and the message that started it no longer parses: {exc}"
+        if not isinstance(parsed, StartRun):
+            return f"{why} and the message that started it no longer starts a run"
+        if parsed.script is not None:
+            source = parsed.script
+        else:
+            ref = f"{parsed.source}:{parsed.name}" if parsed.source else str(parsed.name)
+            found = catalog.resolve(entries, ref)
+            if found is None:
+                return f"{why} and its workflow {ref!r} is gone"
+            source = found.source_text()
+        if header.source_sha is not None and text_sha(source) != header.source_sha:
+            return (
+                f"{why}: the workflow changed since the run started (the script no longer "
+                "matches the sha256 its journal recorded)"
+            )
+        args = parsed.args
+        if header.has_args and (
+            args is NO_ARGS or header.args_sha is None or value_sha(args) != header.args_sha
+        ):
+            return (
+                f"{why}: the args changed since the run started (they no longer match the "
+                "sha256 its journal recorded)"
+            )
+        return source, args
+
     async def send_user_message(self, message: UserMessage, sink: TurnSink) -> None:
         context = self.context
         chat = message.chat_uri or context.chat_uri
@@ -712,29 +916,15 @@ class FlowSession:
         self._restored.pop(chat, None)
         redactor = self.provider.redactor
         try:
-            start = flow.parse_workflow_start(message.raw.get("_meta"))
+            parsed, run_id, typed = self._parse_start(message.raw)
         except ValueError as exc:
             await sink.turn_failed(
                 redactor.mask(f"bad workflow start: {exc}"), flow.BAD_ARGS_ERROR_TYPE
             )
             return
-        run_id: str | None = None
-        parsed: Help | BadRequest | StartRun
-        if start is not None:
-            # A typed start wins over the text (which stays `/name {json}` for stock hosts).
-            ref_parts = parse_ref(start.workflow)
-            if isinstance(ref_parts, BadRequest):
-                await sink.turn_failed(
-                    redactor.mask("bad workflow start: " + ref_parts.message),
-                    flow.BAD_ARGS_ERROR_TYPE,
-                )
-                return
-            parsed = StartRun(
-                ref_parts[1], ref_parts[0], None, start.args if start.has_args else NO_ARGS
-            )
-            run_id = start.run_id
-        else:
-            parsed = parse_message(message.text)
+        if isinstance(parsed, BadRequest) and typed:
+            await sink.turn_failed(redactor.mask(parsed.message), flow.BAD_ARGS_ERROR_TYPE)
+            return
         if isinstance(parsed, BadRequest):
             await sink.text_delta(parsed.message)
             return
@@ -861,6 +1051,7 @@ class FlowSession:
                 python_dirs=python_dirs,
                 run_root=workspace,
                 redact=redactor.mask_value,
+                keep_source=config.journal.keep_source,
                 verbs=self.provider.verbs,
                 key_extra=key_extra,
                 key_mode=key_mode,
@@ -964,6 +1155,7 @@ class FlowSession:
             on_log=on_log,
             call_id_prefix=call_id_prefix,
             session_view=view,
+            client_tools=self._client_tools,
         )
 
         def remote_for(name: str, spec: ProviderConfig) -> Dispatcher:
@@ -976,13 +1168,23 @@ class FlowSession:
                         f"provider {name!r}: cannot read token_file: {exc}"
                     ) from exc
             dialer = self.provider.remote_dialer
+            launch = None
+            if spec.launch is not None:
+                try:
+                    launch = load_launcher(spec)
+                except ConfigError as exc:
+                    raise FlowAgentError(str(exc), kind="unavailable") from exc
             return ClientDispatcher(
                 RemoteSpec(
                     name,
                     str(spec.agent),
                     spec.url,
                     token,
-                    transport_factory=dialer(spec) if dialer is not None else None,
+                    transport_factory=(
+                        dialer(spec) if dialer is not None and launch is None else None
+                    ),
+                    launch=launch,
+                    per_call=spec.per_call,
                     models=spec.models,
                     run_model=model,
                     idle_timeout=(
@@ -995,6 +1197,11 @@ class FlowSession:
                 on_log=on_log,
             )
 
+        durable = (
+            resumed.durable
+            if resumed is not None and resumed.durable is not None
+            else DurableWorkers()
+        )
         dispatcher = RoutingDispatcher(
             config,
             slots=self.provider.provider_slots,
@@ -1017,6 +1224,9 @@ class FlowSession:
                 worker_providers=self._worker_providers,
                 session_view=view,
                 principal=principal,
+                client_tools=self._client_tools,
+                durable=durable,
+                aborted=lambda: abort.aborted,
             ),
             fleet=FleetDispatcher(
                 config=config,
@@ -1083,6 +1293,7 @@ class FlowSession:
                     published[0],
                     published[1],
                     principal,
+                    durable,
                 )
             if resume_from is None:
                 notes.put_nowait((f"Run {run_id}", flow.meta(flow.run_started(run_id, workflow))))

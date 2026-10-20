@@ -2,6 +2,6 @@
 
 from __future__ import annotations
 
-from ahp_client.wirelog.jsonl import WireLog, logged, read_jsonl
+from ahp_client.wirelog.jsonl import ContentMasker, MasksText, WireLog, logged, read_jsonl
 
-__all__ = ["WireLog", "logged", "read_jsonl"]
+__all__ = ["ContentMasker", "MasksText", "WireLog", "logged", "read_jsonl"]

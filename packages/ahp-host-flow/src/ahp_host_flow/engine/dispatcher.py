@@ -68,6 +68,10 @@ class DispatchHandle:
     chat: str | None = None
     # The node session URI of a fleet call, or the remote session of a remote call.
     session: str | None = None
+    # An in-process call's worker chat, set only when the run keeps that chat's inner state so
+    # a restarted host can resume the call in place (`DurableWorkers`); fleet and remote
+    # dispatchers never read it, and the in-process one reads nothing else.
+    worker_chat: str | None = None
 
 
 @runtime_checkable

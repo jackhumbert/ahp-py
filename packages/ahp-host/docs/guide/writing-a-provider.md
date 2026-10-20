@@ -353,12 +353,17 @@ no turn is running. Hold it for the life of the session.
 | `external_turn(text, run, *, chat=None)` | A turn that happened somewhere else, on the default chat or one of the session's own chats (never a worker chat). |
 | `progress(progress, total=, message=)` | Report against `createSession.progressToken`. |
 
-The host's publisher implements three more protocols; check with `isinstance`, since
+The host's publisher implements four more protocols; check with `isinstance`, since
 a test double or another host may not:
 
 - **`ObservesSessionState`** — `session_state()` is the session channel's current
   reduced state (read-only; poll it, never mutate it), e.g. to see which of your
   worker chats has an entry in `inputNeeded`.
+- **`ObservesChatState`** — `chat_state(chat=None)` is one of the session's chats as
+  currently reduced (read-only; `{}` for a chat the session does not own). It is what
+  the store persists, so after a restart its `turns` still carry each turn's `message`
+  as the client sent it: `resume_turn` gets only a turn id, and this is how it reads
+  what that turn asked for.
 - **`ReopensToolChats`** — `worker_chat(resource)` hands back a worker chat you
   opened with `open_tool_chat`, also after a host restart (the host knows them by
   their `tool` origin), so a late notification can still run a turn on it; `None`

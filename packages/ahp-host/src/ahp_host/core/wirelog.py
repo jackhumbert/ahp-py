@@ -48,6 +48,15 @@ written after it -- the extension action on opted-in connections, every later
 snapshot -- carry only the redacted state. Delete or rotate a wire log that
 captured a secret.
 
+## Content masking
+
+Credential-key redaction cannot see a secret in ordinary text -- a script a user pasted, a
+tool's output. An embedder that already masks its own output (ahp-host-flow's `Redactor`)
+passes it as ``mask``: a ``Callable[[str], str]``, or an object with a ``mask(str) -> str``
+method. It is applied to every string value of every frame written, at any depth, after the
+credential redaction; keys and the ``_ahpLog`` sidecar are left alone. Like the redaction, it
+never touches the frame that goes on the wire.
+
 The key list is deliberately broader than AHP's own surface (`token` is the only
 one the protocol defines today) because a provider adapter may put its own
 credentials in `_meta`, and a log is the wrong place to discover that it did.
@@ -56,14 +65,14 @@ credentials in `_meta`, and a log is the wrong place to discover that it did.
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Final
+from typing import Any, Final, Protocol, runtime_checkable
 
 from ahp_host.core.private_files import make_owner_only
 
-__all__ = ["REDACTED", "WireLog", "redact"]
+__all__ = ["REDACTED", "ContentMasker", "MasksText", "WireLog", "mask_strings", "redact"]
 
 #: Replaces a credential value. Distinctive enough to grep a log for.
 REDACTED: Final = "<redacted by ahp-host>"
@@ -115,12 +124,53 @@ def redact(value: Any) -> Any:
     return value
 
 
-class WireLog:
-    """Appends frames to a JSONL file. Best-effort: never breaks the connection."""
+@runtime_checkable
+class MasksText(Protocol):
+    """An object that masks text, such as ahp-host-flow's `Redactor`."""
 
-    def __init__(self, path: Path, *, transport: str = "ws") -> None:
+    def mask(self, text: str) -> str: ...
+
+
+#: What `WireLog(mask=)` takes: a function of a string, or an object with a `mask` method.
+ContentMasker = Callable[[str], str] | MasksText
+
+
+def mask_strings(value: Any, mask: Callable[[str], str]) -> Any:
+    """Return `value` with `mask` applied to every string value at any depth (keys untouched).
+
+    Rebuilds containers, as `redact` does: the caller's mapping is the live outbound frame.
+    """
+    if isinstance(value, str):
+        return mask(value)
+    if isinstance(value, Mapping):
+        return {key: mask_strings(item, mask) for key, item in value.items()}
+    if isinstance(value, Sequence) and not isinstance(value, bytes | bytearray):
+        return [mask_strings(item, mask) for item in value]
+    return value
+
+
+def _masker(mask: ContentMasker | None) -> Callable[[str], str] | None:
+    if mask is None:
+        return None
+    if isinstance(mask, MasksText):
+        return mask.mask
+    if callable(mask):
+        return mask
+    raise TypeError("mask must be a Callable[[str], str] or have a mask(str) method")
+
+
+class WireLog:
+    """Appends frames to a JSONL file. Best-effort: never breaks the connection.
+
+    *mask*, when given, masks every string value written (see the module's "Content masking").
+    """
+
+    def __init__(
+        self, path: Path, *, transport: str = "ws", mask: ContentMasker | None = None
+    ) -> None:
         self.path = path
         self.transport = transport
+        self._mask = _masker(mask)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         # Truncate on open so a run's log is its own, matching how the VS Code
         # host writes a fresh log per agent-host process. Owner-only: a wire log
@@ -136,6 +186,12 @@ class WireLog:
         if self._handle.closed:
             return
         entry: dict[str, Any] = redact(message)
+        if self._mask is not None:
+            try:
+                entry = mask_strings(entry, self._mask)
+            except Exception:
+                # A masker that fails must not write the frame unmasked, nor break the session.
+                return
         entry["_ahpLog"] = {
             "ts": datetime.now(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z"),
             "dir": direction,

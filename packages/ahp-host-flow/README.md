@@ -30,6 +30,10 @@ address that is not loopback is refused unless `--token-file` is given.
 `--root PATH` (repeatable) names a folder the inner providers may work in; see
 [flow.toml](#flowtoml).
 
+`--wire-log PATH` appends every frame as ahp-inspector JSONL; besides ahp-host's
+credential redaction, every text in it is masked by the flow.toml's `[redact]`
+rules, so a secret in a script or its args reaches neither the journal nor the log.
+
 `--ping-interval SECONDS` (default 20, `0` = off) sends a WebSocket ping that
 often so an idle connection survives a proxy. `--max-size BYTES` (default 16 MiB,
 matching ahp-client; `0` = no limit) caps one frame. A non-loopback `--bind` with
@@ -70,6 +74,7 @@ From ahp-client, `session.workflows()` lists them and
 
 ```sh
 flow run script.js|script.py --config flow.toml [--args JSON] [--root DIR]
+         [--keep-source] [--wire-log PATH]
 ```
 
 With `--config`, the script runs through the configured providers on an
@@ -86,10 +91,22 @@ call, rather than waiting forever. It is never auto-approved: set
 `approval_mode` on the provider in `flow.toml` (for example `"acceptEdits"` or
 `"auto"`) so the session does not ask.
 
+`--wire-log PATH` writes the in-process host's frames as ahp-inspector JSONL,
+masked by the flow.toml's `[redact]` rules as well as ahp-host's credential
+redaction (it needs `--config`); `python -m ahp_host_flow --wire-log PATH` does
+the same for a served host. `--keep-source` keeps the script and its args in the
+journal as they are (see "The journal holds the script masked" below); with
+`--config` it overrides `[journal] keep_source`.
+
 `flow run` takes a `.js` or a `.py` script. Without `--config`, it is echo-only: every `agent()` call returns its
 prompt, which is enough to try the engine without a model. It also takes
 `[--concurrency N] [--budget TOKENS] [--timeout SECONDS] [--workflows DIR]
-[--state-dir DIR] [--run-id ID] [--resume RUN_ID]`.
+[--state-dir DIR] [--run-id ID] [--resume RUN_ID] [--keep-source]`. Its log
+lines, errors and journal are masked by the builtin credential shapes. A journal
+it wrote masked is resumed with the script path and the same `--args` again
+(`flow run script.py --resume RUN_ID --args JSON ...`): both are checked against
+the sha256 the journal recorded, and a different script or different args are
+refused with a line naming which. `--budget` still comes from the journal.
 
 ## Starting a run from a client
 
@@ -276,11 +293,30 @@ same turn id (`RunOptions.continue_run`):
   log line naming it, under a tool call id of its own (`agent-r<k>-…`); the
   cut-off one was cancelled when the host failed the turn.
 
+Named chats (`opts.x.chat`) keep their session across a restart on providers
+that resume sessions (Claude by session id, ACP by `session/load`): the run
+records each named chat's provider, worker chat, config, folder and the inner
+session's resume state at the end of every turn, and the first live call that
+names the chat after the restart resumes that session in the same worker chat,
+so the agent still remembers the earlier turns. A log line says so
+(`agent() #N: opts.x.chat 'name' resumed its session on provider 'p' after the
+restart`). On any other provider, or when the chat or its state is gone, or the
+session cannot be resumed, the chat is recreated and starts without the earlier
+turns, with a log line saying so. The state is optional in the resume state
+(`namedChats` on the run entry; `RESUME_STATE_VERSION` stays 1).
+
+A call without a name that a restart cut off continues in its worker chat rather
+than starting over, on a provider that resumes sessions and turns, when the run
+recorded the inner session's state at the start of the turn (`inflight` on the
+run entry): the session is resumed on the old worker chat and the turn picked up
+where it stopped, with a log line saying so. A call with a schema or a worktree,
+or one with no recorded state, or on any other provider, is dispatched again.
+
 What does not continue:
 
-- Worker chats: each is failed by the restart like any interrupted turn, and
-  `resume_turn` declines it if it is offered. The re-dispatched call opens a new
-  worker chat.
+- Other worker chats: each is failed by the restart like any interrupted turn,
+  and `resume_turn` declines it if it is offered. The re-dispatched call opens a
+  new worker chat.
 - Approvals and questions an in-process inner session had open are withdrawn
   by the host with a notice naming them, because the inner session is gone;
   the call runs again live and asks again.
@@ -554,6 +590,133 @@ Limits of a remote call, which a gateway's fleet dispatch does not have:
 - It is not reattached after a restart (above).
 - A run's skip or abort stops the remote turn, and so does the flow host
   stopping.
+
+### Client tools in worker chats
+
+In-process workers see the tools of the session's active clients (an editor
+that joined the run session): a worker's agent can call them, and the client
+runs them. `[workflows] client_tools` sets which: `true` (the default), `false`,
+or a list of tool names. The gateway's fleet tools are never offered. A client
+that joins, leaves or republishes its tools while a run is going reaches the
+running workers too, and a named chat (`opts.x.chat`) is refreshed before each
+call. Fleet workers use their node session's own clients.
+
+Remote workers get the same tools advertised on their remote session, and the
+remote agent's calls of them run on the worker chat through the run's own
+clients (the answer goes back to the remote session).
+
+## Running on sandboxed hosts
+
+A provider can run its agent inside a container or VM that your own code
+starts. Give the provider a `launch` function instead of a `url`; with
+`per_call = true` every `agent()` call gets a fresh host, started for that
+call's folder and torn down when the call ends.
+
+```toml
+[providers.sandbox]
+launch = "my_launchers.container:launch"
+agent = "opencode"
+per_call = true
+
+[routing]
+default = "sandbox"
+```
+
+The launcher is an async function that starts the host and returns a
+transport to it with a coroutine that tears it down:
+
+```python
+import asyncio
+import socket
+from collections.abc import Awaitable, Callable
+from pathlib import Path
+from urllib.parse import unquote, urlparse
+
+from ahp_client.ws.transport import WebSocketClientTransport
+from ahp_host_flow.engine.remote import LaunchRequest
+from ahp_protocol.transport import Transport
+
+TOKEN_FILE = Path("/srv/flow/ahp-token")
+# The port the ACP host listens on inside the container (its default).
+INNER_PORT = 4322
+
+
+def _free_port() -> int:
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
+
+
+async def _wait_for_port(port: int, proc: asyncio.subprocess.Process) -> None:
+    for _ in range(100):
+        if proc.returncode is not None:
+            raise RuntimeError("the container exited before it listened")
+        try:
+            _, writer = await asyncio.open_connection("127.0.0.1", port)
+        except OSError:
+            await asyncio.sleep(0.1)
+        else:
+            writer.close()
+            return
+    raise TimeoutError("the container did not start listening")
+
+
+async def launch(request: LaunchRequest) -> tuple[Transport, Callable[[], Awaitable[None]]]:
+    port = _free_port()
+    folder = unquote(urlparse(request.folder).path) if request.folder else "/srv/flow/work"
+    proc = await asyncio.create_subprocess_exec(
+        "docker", "run", "--rm",
+        # Published on the outside's loopback only: nothing off this machine reaches it.
+        "-p", f"127.0.0.1:{port}:{INNER_PORT}",
+        "-v", f"{folder}:/work",
+        "-v", f"{TOKEN_FILE}:/run/secrets/ahp-token:ro",
+        "registry.example.com/agents/ahp-host-acp:latest",
+        "python", "-m", "ahp_host_acp",
+        "--root", "/work",
+        "--command", "opencode acp",
+        # Inside the container the published port arrives on its own interface, not
+        # loopback, so the host binds every interface; that needs the token file.
+        "--bind", "0.0.0.0",
+        "--port", str(INNER_PORT),
+        "--token-file", "/run/secrets/ahp-token",
+    )  # fmt: skip
+
+    async def close() -> None:
+        if proc.returncode is None:
+            proc.terminate()
+        await proc.wait()
+
+    try:
+        await _wait_for_port(port, proc)
+        transport = await WebSocketClientTransport.connect(
+            f"ws://127.0.0.1:{port}", token=TOKEN_FILE.read_text().strip()
+        )
+    except BaseException:
+        await close()
+        raise
+    return transport, close
+```
+
+What crosses into the sandbox: the prompt, the call's folder (`opts.x.cwd`,
+mounted as the agent's working folder), the run's client tools, and the
+approvals and questions the agent raises, which are relayed to the worker chat
+and answered by the run's clients as in the Fleet section (a question nobody
+answers within `approval_timeout` is declined). Nothing else is shared: the
+worktree option `isolation: 'worktree'` is ignored for remote providers, named
+chats (`opts.x.chat`) and `attach` never route to them, and a call a restart cut
+off is run again on a fresh host rather than reattached.
+
+Set `env_allow` in the ACP host's config so only the variables the agent needs
+reach the container's agent process; unset, it passes them all. With
+`per_call = false` (the default) one host is launched for the run, on first use,
+and closed when the run ends. That shared host is started before any call, so its
+`LaunchRequest` has no folder and no client tools: only a `per_call` launch is given
+the call's folder and the run's client tools.
+
+Don't share the host's network with the container (`--network host`): the ACP host
+would then listen on the machine's own interfaces. Publish its port on `127.0.0.1`
+as above, and keep `--bind 0.0.0.0` and the token file inside the container
+(`python -m ahp_host_acp` refuses a non-loopback bind without one).
 
 ## Operations
 
@@ -852,9 +1015,13 @@ rules = [ { model = "glm", provider = "glm" }, { phase = "Review", provider = "g
 [workflows]
 dirs = ["~/flows"]
 sources = ["workspace", "user", "host"]   # the default; add "client" to opt in
+client_tools = true                       # or false, or ["lookup"]: client tools workers get
 
 [redact]
 patterns = ['sekrit-[0-9]+']
+
+[journal]
+keep_source = false   # the default: the script and its args are journaled masked
 ```
 
 Inner providers are loaded lazily, by import path, from `load = "module:attr"`:
@@ -940,6 +1107,8 @@ Known gaps (not covered):
 - A secret split across a tool-call boundary mid-stream (the first half in one
   chunk, the rest after a tool call started) is not joined; the same
   after-publishing layer (`flow redact`) is the answer.
+- Client tool calls a worker makes are published with their input as the agent
+  sent it (the client needs the real input, and the agent the real result).
 - Changeset file contents (per-child worktree changesets) are published
   verbatim: masking them would corrupt the diff.
 - The built-in list is best effort, not a guarantee. It does not match, for
@@ -991,15 +1160,28 @@ returned value block, runs resumed from this run (they are listed as
 descendants; redact them by their own run id), and wire logs written before the
 redaction.
 
-**A secret written into the script itself survives.** The journal header keeps
-the script's source and `args`, a `workflow` record keeps the source of any
-workflow the run called, and the main chat's user message holds the script text
-as it was sent. `flow redact` touches none of these, so a literal secret in a
-script (or in `--args`) stays in the journal, in the stored session and in every
-resume. Pass secrets to a script at run time from somewhere the script reads
-(an environment variable through a tool, say), not as literals, and use
-`Host.redact_message` on the main chat's turn for the shared view; the journal
-header cannot be redacted with this tool.
+**The journal holds the script masked.** The journal header's script source and
+`args`, and each `workflow` record's source, are stored masked by the same rules
+(`[redact]`; the builtin shapes for a CLI run), beside the sha256 of the real
+text (`sourceSha`, `argsSha`). A resume needs the real script and args, so it
+gets them elsewhere and checks them against those hashes: the provider
+re-resolves the run's workflow and re-parses the turn's own message, which the
+session store holds (`ObservesChatState`); `flow run --resume` takes the script
+path and `--args`; the library takes `RunOptions(resume_source=, resume_args=)`
+(or `run_script`'s own `source` and `args`); a child workflow is re-resolved
+when the resumed run reaches it. Anything that no longer hashes the same is
+refused with a line saying what changed ("the workflow changed since the run
+started", or the args), never run. `[journal] keep_source = true` in flow.toml
+(`flow run --keep-source`) keeps them as they are, as before, and a journal
+then resumes on its own.
+
+What still holds a literal secret from a script: the main chat's user message
+(the script text or args as they were sent, in the stored session and on the
+wire to clients), and the inner agent's own context. `flow redact` touches
+neither; pass secrets at run time from somewhere the script reads (an
+environment variable through a tool, say), not as literals, and use
+`Host.redact_message` on the main chat's turn for the shared view. A wire log the
+flow host writes (`--wire-log`) is masked by the `[redact]` rules too.
 
 A live client sees the change only if it opted in (ahp-client
 `connect(..., redaction=True)`); any other client gets the redacted state on its

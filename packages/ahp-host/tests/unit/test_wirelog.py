@@ -117,3 +117,87 @@ class TestRedaction:
         log = WireLog(path)
         log.close()
         assert_owner_only(path, directory=False)
+
+
+class TestContentMask:
+    """`WireLog(mask=)` masks every string value written, beside the credential redaction."""
+
+    SECRET = "sk-" + "live" * 6
+
+    @staticmethod
+    def _mask(text: str) -> str:
+        return text.replace(TestContentMask.SECRET, "[masked]")
+
+    def _frame(self) -> dict[str, object]:
+        return {
+            "jsonrpc": "2.0",
+            "method": "action",
+            "params": {
+                "action": {"type": "chat/delta", "content": f"key {self.SECRET} here"},
+                "list": ["plain", self.SECRET],
+                "token": "abc",
+                self.SECRET: 1,
+            },
+        }
+
+    def _written(self, tmp_path: Path, mask: object) -> dict[str, object]:
+        path = tmp_path / "agent-host-mask.jsonl"
+        log = WireLog(path, mask=mask)  # type: ignore[arg-type]
+        frame = self._frame()
+        log.record("s2c", frame, "c")
+        log.close()
+        # The outbound frame is untouched.
+        assert frame == self._frame()
+        entry: dict[str, object] = json.loads(path.read_text().strip())
+        return entry
+
+    def test_a_callable_masks_every_string_value(self, tmp_path: Path) -> None:
+        entry = self._written(tmp_path, self._mask)
+        params = entry["params"]
+        assert isinstance(params, dict)
+        assert params["action"]["content"] == "key [masked] here"
+        assert params["list"] == ["plain", "[masked]"]
+        # The credential redaction still applies, and keys are left alone.
+        assert params["token"] == REDACTED
+        assert self.SECRET in params
+        assert entry["_ahpLog"]["dir"] == "s2c"  # type: ignore[index]
+
+    def test_an_object_with_a_mask_method_is_accepted(self, tmp_path: Path) -> None:
+        class Masker:
+            def mask(self, text: str) -> str:
+                return TestContentMask._mask(text)
+
+        entry = self._written(tmp_path, Masker())
+        text = json.dumps(entry["params"]["action"])  # type: ignore[index]
+        assert self.SECRET not in text
+
+    def test_a_failing_masker_writes_nothing(self, tmp_path: Path) -> None:
+        def broken(text: str) -> str:
+            raise RuntimeError("no")
+
+        path = tmp_path / "agent-host-mask.jsonl"
+        log = WireLog(path, mask=broken)
+        log.record("s2c", self._frame(), "c")
+        log.close()
+        assert path.read_text() == ""
+
+    def test_not_a_masker_is_refused(self, tmp_path: Path) -> None:
+        with pytest.raises(TypeError, match="mask must be"):
+            WireLog(tmp_path / "x.jsonl", mask=42)  # type: ignore[arg-type]
+
+    def test_the_host_passes_its_wire_log_mask(self, tmp_path: Path) -> None:
+        from ahp_host.core import Host, LoopbackSingleUserPolicy
+        from ahp_host.provider import EchoProvider
+
+        host = Host(
+            EchoProvider(),
+            LoopbackSingleUserPolicy(),
+            wire_log=tmp_path / "agent-host-h.jsonl",
+            wire_log_mask=self._mask,
+        )
+        assert host.wire_log is not None
+        host.wire_log.record("s2c", self._frame(), "c")
+        host.wire_log.close()
+        assert self.SECRET not in json.dumps(
+            json.loads((tmp_path / "agent-host-h.jsonl").read_text())["params"]["action"]
+        )

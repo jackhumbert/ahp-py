@@ -18,12 +18,17 @@ from ahp_host_flow.engine.journal import (
     StartRecord,
     VerbRecord,
     WorkflowSnapshot,
+    args_masked,
     call_key,
     canonical_json,
     load_journal,
     new_run_id,
+    snapshot_masked,
+    source_masked,
+    text_sha,
+    value_sha,
 )
-from ahp_host_flow.engine.options import RunOptions
+from ahp_host_flow.engine.options import NO_RESUME_ARGS, RunOptions
 from ahp_host_flow.engine.registry import ResolvedScript
 
 # The journal filename of a library run (`ahp_host_flow.run`), which has no script.
@@ -59,13 +64,14 @@ class Replay:
         self._by_key: dict[str, deque[AgentRecord]] = {}
         for rec in sorted(records, key=lambda r: r.ordinal):
             self._by_key.setdefault(rec.key, deque()).append(rec)
-        # Cut-off calls that recorded a session, per call key in ordinal order: a
-        # continued run hands the handle to the dispatcher so it can reattach.
+        # Cut-off calls that recorded a session (fleet, remote) or a resumable worker chat
+        # (in-process), per call key in ordinal order: a continued run hands the handle to the
+        # dispatcher so it can reattach.
         self._reattach: dict[str, deque[DispatchHandle]] = {}
         for start in sorted(unfinished, key=lambda r: r.ordinal):
-            if start.session is not None:
+            if start.session is not None or start.worker_chat is not None:
                 self._reattach.setdefault(start.key, deque()).append(
-                    DispatchHandle(start.provider, start.chat, start.session)
+                    DispatchHandle(start.provider, start.chat, start.session, start.worker_chat)
                 )
         self._on_log = on_log
         self._live = False
@@ -194,6 +200,7 @@ class JournalRun:
         inherited: dict[str, WorkflowSnapshot],
         gate_replay: GateReplay | None = None,
         verb_replay: VerbReplay | None = None,
+        masked: dict[str, str] | None = None,
     ) -> None:
         self.run_id = run_id
         self.writer = writer
@@ -207,6 +214,8 @@ class JournalRun:
         self.options = options
         self._inherited = inherited
         self._recorded: dict[str, WorkflowSnapshot] = {}
+        # ref key -> sha256 of the real source, for child snapshots the old journal masked.
+        self._masked: dict[str, str] = masked if masked is not None else {}
 
     @classmethod
     def open(
@@ -230,18 +239,59 @@ class JournalRun:
         gate_replay: GateReplay | None = None
         verb_replay: VerbReplay | None = None
         inherited: dict[str, WorkflowSnapshot] = {}
+        masked: dict[str, WorkflowSnapshot] = {}
         effective = options
         if options.resume_from is not None:
             old = load_journal(options.state_dir, options.resume_from)
-            if has_args:
-                raise ValueError("args come from the journal on resume")
+            source_sha = old.header.source_sha or ""
+            # The library's way to hand a masked journal its real script and args: on the
+            # options, filling in only what the caller did not pass.
+            if source is None and not scriptless and options.resume_source is not None:
+                source = options.resume_source
+            if not has_args and options.resume_args is not NO_RESUME_ARGS:
+                if args_masked(old.header):
+                    has_args, args = True, options.resume_args
+                elif value_sha(options.resume_args) != (
+                    old.header.args_sha or value_sha(old.header.args)
+                ):
+                    raise JournalError(
+                        f"run {options.resume_from!r}: resume_args differ from the args "
+                        "the run started with; cannot resume it"
+                    )
             if source is None and not scriptless:
                 if old.header.source is None:
                     raise JournalError(
                         f"run {options.resume_from!r} has no script snapshot; cannot resume it"
                     )
+                if source_masked(old.header):
+                    raise JournalError(
+                        f"run {options.resume_from!r}: its journal holds a masked copy of the "
+                        f"script; resume it with the script itself (sha256 {source_sha[:12]}), "
+                        "or set keep_source for new runs"
+                    )
                 source, filename = old.header.source, old.header.filename
-            has_args, args = old.header.has_args, old.header.args
+            elif (
+                source is not None and source_masked(old.header) and text_sha(source) != source_sha
+            ):
+                raise JournalError(
+                    f"run {options.resume_from!r}: the script differs from the one its masked "
+                    f"journal was written from (sha256 {source_sha[:12]}); cannot resume it"
+                )
+            if args_masked(old.header):
+                if not has_args:
+                    raise JournalError(
+                        f"run {options.resume_from!r}: its journal holds masked args; "
+                        "pass the same args to resume it"
+                    )
+                if value_sha(args) != old.header.args_sha:
+                    raise JournalError(
+                        f"run {options.resume_from!r}: the args differ from the ones its "
+                        "masked journal was written with; cannot resume it"
+                    )
+            else:
+                if has_args:
+                    raise ValueError("args come from the journal on resume")
+                has_args, args = old.header.has_args, old.header.args
             # The old run's semantic options win, so caps and budget replay identically.
             effective = dataclasses.replace(
                 options,
@@ -299,7 +349,11 @@ class JournalRun:
                         f"resume: {gate.kind}() gate #{gate.ordinal} was still open; "
                         "it is asked again"
                     )
-            inherited = dict(old.workflows)
+            for ref_key, snap in old.workflows.items():
+                if snapshot_masked(snap):
+                    masked[ref_key] = snap
+                else:
+                    inherited[ref_key] = snap
         elif source is None and not scriptless:
             raise ValueError("a script source is needed unless resuming")
         run_id = options.run_id or new_run_id()
@@ -317,6 +371,7 @@ class JournalRun:
                 key_mode=effective.key_mode_name(),
             ),
             mask=effective.redact,
+            keep_source=effective.keep_source,
         )
         run = cls(
             run_id=run_id,
@@ -330,11 +385,15 @@ class JournalRun:
             inherited=inherited,
             gate_replay=gate_replay,
             verb_replay=verb_replay,
+            masked={k: s.source_sha or "" for k, s in masked.items()},
         )
         # Every child snapshot the old run had goes into the new journal now, not
         # when the child is next reached: a resumed run that stops before then
         # must still be resumable without re-reading a file that may have changed.
+        # A masked one goes in as it is, with its sha, and is checked when reached.
         try:
+            for snap in masked.values():
+                writer.append_workflow(snap)
             for snap in inherited.values():
                 run.record_workflow(snap.ref, ResolvedScript(snap.source, snap.filename))
         except BaseException:
@@ -351,6 +410,12 @@ class JournalRun:
         k = canonical_json(ref)
         if k in self._recorded:
             return
+        expected = self._masked.pop(k, None)
+        if expected is not None and text_sha(resolved.source) != expected:
+            raise JournalError(
+                f"workflow {k}: the journal holds a masked copy and the current script "
+                f"differs (sha256 {expected[:12]}); cannot resume it"
+            )
         snap = WorkflowSnapshot(ref, resolved.filename, resolved.source)
         self._recorded[k] = snap
         self.writer.append_workflow(snap)

@@ -207,8 +207,10 @@ def test_cli_run_needs_path_or_resume() -> None:
     assert info.value.code == 2
 
 
-def test_cli_resume_rejects_args(tmp_path: Path) -> None:
-    argv = ["run", "--resume", "r1", "--state-dir", str(tmp_path), "--args", "{}"]
+def test_cli_resume_rejects_budget(tmp_path: Path) -> None:
+    # --args may come with --resume now (a masked journal needs them, checked by sha256:
+    # tests/unit/test_cli_mask.py); the budget still comes from the journal.
+    argv = ["run", "--resume", "r1", "--state-dir", str(tmp_path), "--budget", "5"]
     with pytest.raises(SystemExit) as info:
         main(argv)
     assert info.value.code == 2

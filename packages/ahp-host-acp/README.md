@@ -206,8 +206,8 @@ ollama.com with `OLLAMA_API_KEY`.
 | `[[mcp_servers]]` | MCP servers for the agent to connect to: `name`, and `command` (a list, or one string split shell-style; its program is looked up on `PATH`) with an optional `[mcp_servers.env]` table; or `type = "http"` / `"sse"` with `url` and an optional `[mcp_servers.headers]` table, given only to an agent that says it takes that transport. |
 | `[roots]` / `--root NAME=PATH` (repeatable) | Named folders. Clients browse (read-only) a small tree of them; sessions may start in any. |
 | `root` / `--root PATH` | One unnamed folder, served as itself. |
-| `token_file` / `--token-file` | Require this connection token. Read from a file so it never appears in `ps` or logs. |
-| `port`, `bind` / `--port`, `--bind` | Default `127.0.0.1:4322` (4321 is the Claude host's). Loopback only. |
+| `token_file` / `--token-file` | Require this connection token. Read from a file so it never appears in `ps` or logs. A client sends it as `?tkn=` or as an `Authorization: Bearer` header (the header stays out of a proxy's access log). |
+| `port`, `bind` / `--port`, `--bind` | Default `127.0.0.1:4322` (4321 is the Claude host's). Any non-loopback `bind` (`0.0.0.0` inside a container, say) needs `token_file`, is refused without one before anything starts, and then accepts remote connections. |
 | `state_dir` / `--state-dir` | Persisted sessions, the sequence counter and `agent.json`. Default `~/.local/state/ahp-host-acp`. Give each host its own. |
 | `agent_name`, `description` / `--agent-name` | What clients call the agent. |
 | `provider_id` / `--provider-id` | The agent's id (default `acp`). Hosts behind one gateway with the same id are merged into one agent. |
@@ -321,8 +321,10 @@ when that policy says to. Commands it considers safe run without a prompt.
 
 So this host's approvals are exactly as strict as the agent's own. Configure
 the agent's policy before exposing it (opencode: `permission` in its config;
-OpenClaw: `openclaw approvals`, and `tools.exec` in its config). The agent runs as the host's OS user. Never bind
-this off loopback without a proxy that authenticates peers.
+OpenClaw: `openclaw approvals`, and `tools.exec` in its config). The agent runs as the host's OS user. Bind it
+off loopback only with a token file, and only where the network in between is yours (a
+container's published port bound to `127.0.0.1` on the outside, or a proxy that
+authenticates peers): the token is the only thing between a peer and the agent.
 
 **An approval can outlive its call, if the user says so.** The prompt offers
 the agent's own options, *always allow* among them when the agent has one,

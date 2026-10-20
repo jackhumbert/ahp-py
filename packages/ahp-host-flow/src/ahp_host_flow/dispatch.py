@@ -24,12 +24,18 @@ from ahp_host.provider.base import (
     AgentProvider,
     AgentSession,
     AgentSessionContext,
+    ClientToolCall,
+    FollowsActiveClients,
+    IdentifiesTurn,
     InputQuestion,
     InputRequest,
     ModelSelection,
     ProviderChat,
     ReconfiguresChats,
     ReconfiguresSessions,
+    ReopensToolChats,
+    ResumableAgentProvider,
+    ResumesTurns,
     ReturnsStructuredOutput,
     SessionPublisher,
     ToolConfirmation,
@@ -41,6 +47,7 @@ from ahp_protocol.ext.structured import OUTPUT_SCHEMA_META_KEY
 from ahp_host_flow import catalog
 from ahp_host_flow.approvals import Approver
 from ahp_host_flow.bridge import MaskingSink, ScopedPublisher, TurnTee, Watchdog
+from ahp_host_flow.clienttools import ClientTools
 from ahp_host_flow.config import (
     APPROVAL_KEY,
     APPROVAL_MODES,
@@ -70,6 +77,7 @@ from ahp_host_flow.engine import (
     classify,
     end_usage_attempt,
     preamble_text,
+    reattach_handle,
     report_dispatch,
     schema_error,
     stop_cause,
@@ -77,6 +85,7 @@ from ahp_host_flow.engine import (
     with_preamble,
 )
 from ahp_host_flow.engine.dispatcher import _STOP_CAUSE
+from ahp_host_flow.engine.remote import RemoteToolError
 from ahp_host_flow.limits import ProviderSlotsRegistry
 from ahp_host_flow.routing import fallback_chain, route, x_opts
 from ahp_host_flow.worktree import (
@@ -307,9 +316,10 @@ class _Worker:
 class _NamedChat:
     """A named worker chat (`opts.x.chat`) and the inner session its calls share.
 
-    Calls replay from the journal by key, never through this chat: on resume the first live
-    call recreates the chat and the session, so earlier turns exist only in the replay cache
-    and the inner agent forgets them unless its provider resumes sessions.
+    Calls replay from the journal by key, never through this chat. After a restart the first
+    live call rebuilds the chat's session from the resume state `DurableWorkers` kept when the
+    provider resumes sessions, so the inner agent still remembers the earlier turns; otherwise
+    it recreates the chat and the session, and earlier turns exist only in the replay cache.
     """
 
     provider: str
@@ -323,6 +333,32 @@ class _NamedChat:
     #: The session's running cost (ACP's `acpUsage.cost`) after the last call, so the next
     #: call counts only what it adds.
     session_cost: float = 0.0
+
+
+@dataclass
+class DurableWorkers:
+    """What a run keeps of its worker chats so a restarted host can pick them up again.
+
+    Part of the run's entry in the flow resume state; every key is optional there.
+    """
+
+    #: Named chats (`opts.x.chat`) by name: `{'provider', 'workerChat', 'title', 'config',
+    #: 'folder', 'innerState'}`, written at the end of each turn.
+    named: dict[str, dict[str, Any]] = field(default_factory=dict)
+    #: Worker turns in flight by worker chat (filled by the in-flight recording).
+    inflight: dict[str, dict[str, Any]] = field(default_factory=dict)
+    #: The named chats the cut-off run left, consumed as their names are rebuilt.
+    restored_named: dict[str, dict[str, Any]] = field(default_factory=dict)
+    #: The turns the cut-off run left in flight, consumed as they are picked up again.
+    restored_inflight: dict[str, dict[str, Any]] = field(default_factory=dict)
+
+    def to_json(self) -> dict[str, Any]:
+        out: dict[str, Any] = {}
+        if self.named:
+            out["namedChats"] = self.named
+        if self.inflight:
+            out["inflight"] = self.inflight
+        return out
 
 
 class _TeeSession:
@@ -613,6 +649,9 @@ class ProviderDispatcher(StepDispatcher):
         worker_providers: MutableMapping[str, str] | None = None,
         session_view: Callable[[], Mapping[str, Any]] | None = None,
         principal: str | None = None,
+        client_tools: ClientTools | None = None,
+        durable: DurableWorkers | None = None,
+        aborted: Callable[[], bool] = lambda: False,
     ) -> None:
         super().__init__(
             config=config,
@@ -625,6 +664,13 @@ class ProviderDispatcher(StepDispatcher):
             call_id_prefix=call_id_prefix,
             session_view=session_view,
         )
+        #: Where the named chats are recorded for a restart; None keeps nothing.
+        self.durable = durable
+        #: True once the run was aborted, so a cancelled worker turn is not taken for one a host
+        #: shutdown cut off (the run's `AbortSignal`, as `FleetDispatcher(aborted=...)`).
+        self.aborted = aborted
+        #: The session's client tools the workers may use; None offers none.
+        self.client_tools = client_tools
         #: Who the run is for; the `persons` of an approval rule match it.
         self.principal = principal
         #: Publishes a kept worktree as a changeset on its worker chat; None leaves it unpublished.
@@ -707,6 +753,8 @@ class ProviderDispatcher(StepDispatcher):
                 raise FlowAgentError(str(exc)) from exc
         #: The worker chat, once opened (empty when setup failed before it).
         opened: list[str] = []
+        # Read here: the dispatch task has the handle, the host's turn task does not.
+        reattach = reattach_handle()
         try:
             if chat_name is None:
                 return await self._run_worker(
@@ -720,6 +768,7 @@ class ProviderDispatcher(StepDispatcher):
                     chat_name=None,
                     attachments=attachments,
                     folder=folder,
+                    reattach=reattach,
                 )
             # Calls to one name are serialized: a session runs one turn at a time.
             async with self._named_locks.setdefault(chat_name, asyncio.Lock()):
@@ -798,6 +847,155 @@ class ProviderDispatcher(StepDispatcher):
         except (WorktreeError, OSError) as exc:
             self._note(f"agent() #{call.ordinal}: could not remove worktree {wt.path}: {exc}")
 
+    async def _record_named(
+        self, chat_name: str, named: _NamedChat, inner: AgentSession, provider: AgentProvider
+    ) -> None:
+        """Keep *named* in the durable state, with the inner session's resume state."""
+        if self.durable is None:
+            return
+        inner_state: Mapping[str, Any] | None = None
+        if isinstance(provider, ResumableAgentProvider):
+            try:
+                inner_state = await provider.resume_state_of(inner)
+            except Exception:
+                inner_state = None
+        self.durable.named[chat_name] = {
+            "provider": named.provider,
+            "workerChat": named.worker.resource,
+            "title": named.title,
+            "config": dict(named.config),
+            "folder": str(named.folder) if named.folder is not None else None,
+            "innerState": dict(inner_state) if inner_state is not None else None,
+        }
+
+    async def _rebuild_named(
+        self,
+        call: AgentCall,
+        name: str,
+        chat_name: str,
+        provider: AgentProvider,
+        spec: ProviderConfig,
+        opts: Mapping[str, Any],
+    ) -> _NamedChat | None:
+        """Named chat *chat_name* as the cut-off run left it, its session resumed; else None."""
+        if self.durable is None:
+            return None
+        record = self.durable.restored_named.pop(chat_name, None)
+        if record is None:
+            return None
+        label = f"agent() #{call.ordinal}: opts.x.chat {chat_name!r}"
+        worker: ProviderChat | None = None
+        # Why the chat is recreated rather than resumed, checked in this order.
+        if record["provider"] != name:
+            cause = f"it ran on provider {record['provider']!r} before the restart"
+        elif not isinstance(provider, ResumableAgentProvider):
+            cause = f"provider {name!r} cannot resume its session"
+        elif record["innerState"] is None:
+            cause = f"provider {name!r} recorded no session state for it"
+        else:
+            if isinstance(self.publisher, ReopensToolChats):
+                worker = self.publisher.worker_chat(record["workerChat"])
+            cause = f"its worker chat {record['workerChat']} is gone"
+        if worker is None or not isinstance(provider, ResumableAgentProvider):
+            self._note(
+                f"{label} was recreated after the restart; {cause}, so it starts without the "
+                "earlier turns"
+            )
+            return None
+        folder = Path(record["folder"]) if record["folder"] else None
+        try:
+            client_id, client_tools = (
+                self.client_tools.first() if self.client_tools is not None else (None, ())
+            )
+            inner = await provider.resume_session(
+                AgentSessionContext(
+                    session_uri=self.session_uri,
+                    chat_uri=worker.resource,
+                    provider_id=provider.agent.provider,
+                    working_directories=(
+                        (folder.as_uri(),) if folder is not None else self.working_directories
+                    ),
+                    model=model_for(spec, provider, opts, self.run_model),
+                    config=record["config"],
+                    active_client_id=client_id,
+                    client_tools=client_tools,
+                    publisher=ScopedPublisher(self.publisher, worker.resource),
+                    resume_state=record["innerState"],
+                )
+            )
+        except Exception as exc:
+            self._note(f"{label} could not resume its session ({exc}); recreating it")
+            return None
+        rebuilt = _NamedChat(name, worker, inner, record["title"], dict(record["config"]), folder)
+        self._named[chat_name] = rebuilt
+        self._note(f"{label} resumed its session on provider {name!r} after the restart")
+        return rebuilt
+
+    async def _resume_inflight(
+        self,
+        call: AgentCall,
+        name: str,
+        provider: AgentProvider,
+        spec: ProviderConfig,
+        opts: Mapping[str, Any],
+        folder: Path | None,
+        handle: DispatchHandle,
+    ) -> tuple[ProviderChat, AgentSession, str | None] | None:
+        """The worker chat and resumed session of the turn a restart cut off; else None.
+
+        The third item is the cut-off turn's id when the session can resume it in place.
+        """
+        # Only an in-process handle: a fleet or remote one names a session, never a worker chat.
+        chat = handle.worker_chat
+        if self.durable is None or chat is None or handle.provider != name:
+            return None
+        record = self.durable.restored_inflight.pop(chat, None)
+        self.durable.inflight.pop(chat, None)
+        if record is None or record["provider"] != name:
+            return None
+        if isinstance(opts.get("schema"), Mapping) or opts.get("isolation") == "worktree":
+            return None
+        if not (
+            isinstance(provider, ResumableAgentProvider)
+            and isinstance(self.publisher, ReopensToolChats)
+        ):
+            return None
+        old = self.publisher.worker_chat(chat)
+        if old is None:
+            return None
+        label = f"agent() #{call.ordinal}"
+        try:
+            client_id, client_tools = (
+                self.client_tools.first() if self.client_tools is not None else (None, ())
+            )
+            inner = await provider.resume_session(
+                AgentSessionContext(
+                    session_uri=self.session_uri,
+                    chat_uri=old.resource,
+                    provider_id=provider.agent.provider,
+                    working_directories=(
+                        (folder.as_uri(),) if folder is not None else self.working_directories
+                    ),
+                    model=model_for(spec, provider, opts, self.run_model),
+                    config=inner_config(spec, self.run_values(), opts),
+                    active_client_id=client_id,
+                    client_tools=client_tools,
+                    publisher=ScopedPublisher(self.publisher, old.resource),
+                    resume_state=record["innerState"],
+                )
+            )
+        except Exception as exc:
+            self._note(f"{label}: could not resume the cut-off turn ({exc}); dispatching it again")
+            return None
+        if isinstance(inner, ResumesTurns):
+            self._note(
+                f"{label}: resumed the turn the restart cut off on provider {name!r} in place "
+                f"({old.resource})"
+            )
+            return old, inner, str(record["turnId"])
+        self._note(f"{label}: provider {name!r} cannot resume a turn; dispatching it again")
+        return old, inner, None
+
     async def _run_worker(
         self,
         call: AgentCall,
@@ -810,10 +1008,23 @@ class ProviderDispatcher(StepDispatcher):
         chat_name: str | None = None,
         attachments: Sequence[dict[str, Any]] = (),
         folder: Path | None = None,
+        reattach: DispatchHandle | None = None,
     ) -> AgentResult:
         spec = self.config.providers[name]
         opts = call.opts
+        # Read here, in the dispatch task: set by the Scheduler's hard cap or the call's timeout
+        # before they cancel it.
+        cause = stop_cause()
+        #: The cut-off call's worker chat, resumed session and (when the session resumes turns)
+        #: the cut-off turn's id.
+        resumed: tuple[ProviderChat, AgentSession, str | None] | None = None
+        if chat_name is None and wt is None and reattach is not None:
+            resumed = await self._resume_inflight(
+                call, name, provider, spec, opts, folder, reattach
+            )
         existing = self._named.get(chat_name) if chat_name else None
+        if existing is None and chat_name is not None:
+            existing = await self._rebuild_named(call, name, chat_name, provider, spec, opts)
         if existing is not None and existing.provider != name:
             raise FlowAgentError(
                 f"opts.x.chat {chat_name!r} runs on provider {existing.provider!r}; "
@@ -838,6 +1049,8 @@ class ProviderDispatcher(StepDispatcher):
                     f"agent() #{call.ordinal}: opts.x.chat {chat_name!r} keeps its first call's "
                     f"folder {first}; {later} ignored"
                 )
+        elif resumed is not None:
+            worker = resumed[0]
         else:
             worker = await self.publisher.open_tool_chat(
                 title,
@@ -847,7 +1060,22 @@ class ProviderDispatcher(StepDispatcher):
             )
         opened.append(worker.resource)
         self.worker_providers[worker.resource] = name
-        report_dispatch(DispatchHandle(provider=name, chat=worker.resource))
+        # `worker_chat` only for a call whose inner state may get recorded: the engine hands a
+        # continued run the handle of a cut-off call only when it names a place to reattach to.
+        report_dispatch(
+            DispatchHandle(
+                provider=name,
+                chat=worker.resource,
+                worker_chat=(
+                    worker.resource
+                    if self.durable is not None
+                    and chat_name is None
+                    and wt is None
+                    and isinstance(provider, ResumableAgentProvider)
+                    else None
+                ),
+            )
+        )
 
         raw_schema = opts.get("schema")
         schema = raw_schema if isinstance(raw_schema, Mapping) else None
@@ -885,12 +1113,17 @@ class ProviderDispatcher(StepDispatcher):
         )
         if existing is not None:
             inner = existing.inner
+        elif resumed is not None:
+            inner = resumed[1]
         else:
             config = inner_config(spec, self.run_values(), opts)
             directories = (
                 (wt.cwd.as_uri(),)
                 if wt
                 else ((folder.as_uri(),) if folder is not None else self.working_directories)
+            )
+            client_id, client_tools = (
+                self.client_tools.first() if self.client_tools is not None else (None, ())
             )
             inner = await provider.create_session(
                 AgentSessionContext(
@@ -900,13 +1133,35 @@ class ProviderDispatcher(StepDispatcher):
                     working_directories=directories,
                     model=model,
                     config=config,
+                    active_client_id=client_id,
+                    client_tools=client_tools,
                     publisher=ScopedPublisher(self.publisher, worker.resource),
                 )
             )
             if chat_name is not None:
                 self._named[chat_name] = _NamedChat(name, worker, inner, title, config, folder)
         named = self._named.get(chat_name) if chat_name else None
+        # An unnamed, schema-less call keeps its session's state while the turn runs, so a
+        # restart can resume the turn in place (`ResumesTurns`) rather than send it again.
+        durable = self.durable
+        inner_state: Mapping[str, Any] | None = None
+        if (
+            durable is not None
+            and chat_name is None
+            and schema is None
+            and wt is None
+            and isinstance(provider, ResumableAgentProvider)
+        ):
+            try:
+                inner_state = await provider.resume_state_of(inner)
+            except Exception:
+                inner_state = None
+        resume_turn_id = resumed[2] if resumed is not None else None
         self.workers[worker.resource] = inner
+        if self.client_tools is not None and isinstance(inner, FollowsActiveClients):
+            # A new session gets the full list; a named chat's one is refreshed between calls.
+            with contextlib.suppress(Exception):
+                await inner.active_clients_changed(self.client_tools.clients())
         pending = (
             self.pending_overlays.pop(worker.resource, None)
             if self.pending_overlays is not None
@@ -955,6 +1210,12 @@ class ProviderDispatcher(StepDispatcher):
         async def run(sink: TurnSink) -> None:
             nonlocal value
             state.started = True
+            if durable is not None and inner_state is not None and isinstance(sink, IdentifiesTurn):
+                durable.inflight[worker.resource] = {
+                    "provider": name,
+                    "turnId": sink.turn_id,
+                    "innerState": dict(inner_state),
+                }
             state.task = asyncio.current_task()
             watchdog: Watchdog | None = None
             if spec.idle_timeout is not None:
@@ -971,7 +1232,12 @@ class ProviderDispatcher(StepDispatcher):
             )
             try:
                 if schema is None:
-                    await inner.send_user_message(message, cast(TurnSink, tee))
+                    if resume_turn_id is not None and isinstance(inner, ResumesTurns):
+                        await inner.resume_turn(
+                            worker.resource, resume_turn_id, cast(TurnSink, tee)
+                        )
+                    else:
+                        await inner.send_user_message(message, cast(TurnSink, tee))
                     value = self.redactor.mask_value(tee.reply)
                 else:
                     if not isinstance(sink, ActionTurnSink):
@@ -1022,6 +1288,8 @@ class ProviderDispatcher(StepDispatcher):
                 if tee.cost_usd is not None:
                     final["cost_usd"] = tee.cost_usd
                 reporter(final)
+                if named is not None and chat_name is not None and self.durable is not None:
+                    await self._record_named(chat_name, named, inner, provider)
                 state.done.set()
 
         def turn_ended() -> None:
@@ -1033,6 +1301,8 @@ class ProviderDispatcher(StepDispatcher):
             state.done.set()
             state.over.set()
 
+        #: Cancelled from outside while the turn ran (a shutdown): its record stays in the store.
+        cut_off = False
         try:
             # `on_end` is the only word of a turn cancelled before `run` starts.
             if not await worker.run_turn(call.prompt, run, on_end=turn_ended):
@@ -1045,8 +1315,18 @@ class ProviderDispatcher(StepDispatcher):
                 with contextlib.suppress(TimeoutError):
                     await asyncio.wait_for(state.over.wait(), ABORT_GRACE)
         except asyncio.CancelledError:
-            # The run was aborted (a worker skip cancels only the callback).
+            # The run was aborted (a worker skip cancels only the callback). A host shutdown
+            # lands here too, before the store's last write: only then does the turn stay
+            # recorded as in flight, so the restarted host can resume it. An abort, a skip, the
+            # idle watchdog and a stop the run made (budget, quota, wall time, call timeout) all
+            # end the call for good.
             state.aborting = True
+            cut_off = not (
+                state.skipped
+                or state.timed_out
+                or self.aborted()
+                or (cause is not None and cause.stopped())
+            )
             with contextlib.suppress(Exception):
                 await inner.cancel("run aborted")
             with contextlib.suppress(TimeoutError):
@@ -1056,6 +1336,8 @@ class ProviderDispatcher(StepDispatcher):
             raise
         finally:
             self.workers.pop(worker.resource, None)
+            if durable is not None and not cut_off:
+                durable.inflight.pop(worker.resource, None)
             self.worker_providers.pop(worker.resource, None)
             if self.pending_overlays is not None:
                 self.pending_overlays.pop(worker.resource, None)
@@ -1132,11 +1414,48 @@ class ProviderDispatcher(StepDispatcher):
 class _WorkerOut:
     """A remote call's output, written to its worker chat."""
 
-    def __init__(self, sink: TurnSink, provider: str, chat: str, redactor: Redactor) -> None:
+    def __init__(
+        self,
+        sink: TurnSink,
+        provider: str,
+        chat: str,
+        redactor: Redactor,
+        tools: ClientTools | None = None,
+    ) -> None:
         self.sink = sink
         self.provider = provider
         self.chat = chat
         self.redactor = redactor
+        self.client_tools = tools
+
+    def tools(self) -> list[dict[str, Any]]:
+        return self.client_tools.definitions() if self.client_tools is not None else []
+
+    async def run_tool(self, name: str, tool_input: Any, tool_call_id: str) -> Mapping[str, Any]:
+        owner = self.client_tools.owner(name) if self.client_tools is not None else None
+        if owner is None:
+            raise RemoteToolError(f"no client of the run offers {name!r}")
+        try:
+            result = await self.sink.run_client_tool(
+                ClientToolCall(
+                    call_id=f"remote-{tool_call_id}",
+                    name=name,
+                    client_id=owner,
+                    tool_input=tool_input,
+                    display_name=name,
+                )
+            )
+        except LookupError as exc:
+            raise RemoteToolError(str(exc)) from exc
+        if not result.accepted:
+            raise RemoteToolError(result.reason or f"the client answered {result.response}")
+        if isinstance(result.value, Mapping):
+            return result.value
+        return {
+            "success": True,
+            "pastTenseMessage": f"Ran {name}",
+            "content": [{"type": "text", "text": json.dumps(result.value)}],
+        }
 
     async def linked(self, session_uri: str) -> None:
         await self.sink.text_delta(f"Remote session: {session_uri}\n")
@@ -1210,8 +1529,9 @@ class _WorkerOut:
 class RemoteWorkerChats(StepDispatcher):
     """Shows each remote `agent()` call as a thin worker chat: the remote session and its text."""
 
-    def __init__(self, **options: Any) -> None:
+    def __init__(self, *, client_tools: ClientTools | None = None, **options: Any) -> None:
         super().__init__(**options)
+        self.client_tools = client_tools
         #: The body of each call in flight, by ordinal; `run` hands it to `_run_call`.
         self._bodies: dict[int, Callable[[RemoteOut, str], Awaitable[AgentResult]]] = {}
 
@@ -1248,7 +1568,9 @@ class RemoteWorkerChats(StepDispatcher):
             state.task = asyncio.current_task()
 
             try:
-                result = await body(_WorkerOut(sink, name, worker.resource, self.redactor), title)
+                result = await body(
+                    _WorkerOut(sink, name, worker.resource, self.redactor, self.client_tools), title
+                )
                 for key in usage:
                     count = result.usage.get(key)
                     usage[key] = count if isinstance(count, int) else 0

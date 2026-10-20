@@ -165,6 +165,17 @@ def fleet_folder(value: Any) -> str:
     )
 
 
+def reattach_session(before: DispatchHandle | None, name: str) -> str | None:
+    """The node session a cut-off call on provider *name* left, from its dispatch handle.
+
+    Only a fleet handle names one (`session`); an in-process handle (`worker_chat`) or one
+    for another provider is ignored, so the call starts a new node session.
+    """
+    if before is None or before.provider != name or not before.session:
+        return None
+    return before.session
+
+
 class FleetDispatcher(StepDispatcher):
     """Runs each `agent()` call on a gateway node through the gateway's fleet tools.
 
@@ -374,11 +385,7 @@ class FleetDispatcher(StepDispatcher):
         # Set by the Scheduler's hard cap or this call's timeout before they cancel it.
         cause = stop_cause()
         reporter = usage_reporter()
-        old = (
-            before.session
-            if before is not None and before.provider == name and before.session
-            else None
-        )
+        old = reattach_session(before, name)
         state = _FleetWorker()
         usage = {"input_tokens": 0, "output_tokens": 0, "cache_read_tokens": 0}
         value: Any = None

@@ -107,6 +107,11 @@ class ProviderConfig:
     # Text put before every prompt the inner agent is sent: True for the default, a string for
     # one of your own.
     preamble: bool | str = True
+    # Remote: 'module:function', an async factory that starts a host for the call (or the run)
+    # and returns its transport; replaces `url`.
+    launch: str | None = None
+    # Remote with launch: start a host for every call, and tear it down when the call ends.
+    per_call: bool = False
 
     @property
     def kind(self) -> Literal["inprocess", "fleet", "remote"]:
@@ -122,6 +127,8 @@ class WorkflowsConfig:
     python_sources: tuple[str, ...] = PYTHON_SOURCES_DEFAULT
     # Seconds between scans of the local source dirs; 0 turns watching off.
     watch_interval: float = 2.0
+    # Client tools offered to workers: all of the session's, none, or only these names.
+    client_tools: bool | tuple[str, ...] = True
 
 
 @dataclass(frozen=True)
@@ -129,6 +136,13 @@ class RedactConfig:
     # Extra regexes, applied after the builtin credential shapes.
     patterns: tuple[str, ...] = ()
     builtin: bool = True
+
+
+@dataclass(frozen=True)
+class JournalConfig:
+    # Keep the script, its args and child workflow sources in the journal as they are, rather
+    # than masked with their sha256 (the default).
+    keep_source: bool = False
 
 
 @dataclass(frozen=True)
@@ -206,6 +220,7 @@ class FlowConfig:
     limits: LimitsConfig = LimitsConfig()
     #: `[quotas]`: per-principal caps, kept in `<state_dir>/quotas.json`.
     quotas: QuotaLimits = field(default_factory=QuotaLimits)
+    journal: JournalConfig = JournalConfig()
 
 
 def _table(value: Any, where: str) -> Mapping[str, Any]:
@@ -252,11 +267,11 @@ def _parse_provider(name: str, raw: Any, base: Path) -> ProviderConfig:
     if not PROVIDER_NAME.fullmatch(name):
         raise ConfigError(f"provider name {name!r} must match {PROVIDER_NAME.pattern}")
     table = _table(raw, where)
-    present = [key for key in ("load", "via", "url") if key in table]
+    present = [key for key in ("load", "via", "url", "launch") if key in table]
     if not present:
-        raise ConfigError(f"{where} needs one of load, via, url")
+        raise ConfigError(f"{where} needs one of load, via, url, launch")
     if len(present) > 1:
-        raise ConfigError(f"{where}: load, via and url are exclusive")
+        raise ConfigError(f"{where}: load, via, url and launch are exclusive")
     if "load" in table:
         kind = "inprocess"
         allowed: tuple[str, ...] = (
@@ -294,6 +309,8 @@ def _parse_provider(name: str, raw: Any, base: Path) -> ProviderConfig:
         kind = "remote"
         allowed = (
             "url",
+            "launch",
+            "per_call",
             "token_file",
             "agent",
             "models",
@@ -306,7 +323,7 @@ def _parse_provider(name: str, raw: Any, base: Path) -> ProviderConfig:
             "fallback",
         )
     _check_keys(table, allowed, where)
-    load = via = node = agent = url = None
+    load = via = node = agent = url = launch = None
     token_file: Path | None = None
     config: Mapping[str, Any] | Path | None = None
     if kind == "inprocess":
@@ -328,12 +345,22 @@ def _parse_provider(name: str, raw: Any, base: Path) -> ProviderConfig:
         if not node:
             raise ConfigError(f"{where}.node is required")
     else:
-        url = _str(table, "url", where)
-        if url is None or not REMOTE_URL.fullmatch(url):
-            raise ConfigError(f"{where}.url must be a ws:// or wss:// URL")
-        raw_token = _str(table, "token_file", where)
-        if raw_token is not None:
-            token_file = _path(raw_token, base)
+        if "launch" in table:
+            launch = _str(table, "launch", where)
+            if launch is None or not LOAD_SPEC.fullmatch(launch):
+                raise ConfigError(f"{where}.launch must be 'module:function', got {launch!r}")
+            if "token_file" in table:
+                raise ConfigError(
+                    f"{where}.token_file needs url "
+                    "(a launched host's transport comes from the launcher)"
+                )
+        else:
+            url = _str(table, "url", where)
+            if url is None or not REMOTE_URL.fullmatch(url):
+                raise ConfigError(f"{where}.url must be a ws:// or wss:// URL")
+            raw_token = _str(table, "token_file", where)
+            if raw_token is not None:
+                token_file = _path(raw_token, base)
     if kind != "inprocess":
         agent = _str(table, "agent", where)
         if not agent:
@@ -356,6 +383,11 @@ def _parse_provider(name: str, raw: Any, base: Path) -> ProviderConfig:
     interactive = table.get("interactive", False)
     if not isinstance(interactive, bool):
         raise ConfigError(f"{where}.interactive must be true or false")
+    per_call = table.get("per_call", False)
+    if not isinstance(per_call, bool):
+        raise ConfigError(f"{where}.per_call must be true or false")
+    if per_call and launch is None:
+        raise ConfigError(f"{where}.per_call needs launch")
     preamble = table.get("preamble", True)
     if not isinstance(preamble, bool) and (not isinstance(preamble, str) or not preamble.strip()):
         raise ConfigError(f"{where}.preamble must be true, false or a non-empty string")
@@ -392,6 +424,8 @@ def _parse_provider(name: str, raw: Any, base: Path) -> ProviderConfig:
         fallback=fallback,
         interactive=interactive,
         preamble=preamble,
+        launch=launch,
+        per_call=per_call,
     )
 
 
@@ -466,7 +500,9 @@ def _check_fallbacks(providers: Mapping[str, ProviderConfig], routing: Routing) 
 
 def _parse_workflows(raw: Any, base: Path) -> WorkflowsConfig:
     table = _table(raw, "workflows")
-    _check_keys(table, ("dirs", "sources", "python_sources", "watch_interval"), "workflows")
+    _check_keys(
+        table, ("dirs", "sources", "python_sources", "watch_interval", "client_tools"), "workflows"
+    )
     dirs = tuple(_path(d, base) for d in _str_list(table.get("dirs", []), "workflows.dirs"))
     sources = tuple(_str_list(table.get("sources", list(SOURCES_DEFAULT)), "workflows.sources"))
     for source in sources:
@@ -501,7 +537,22 @@ def _parse_workflows(raw: Any, base: Path) -> WorkflowsConfig:
         raise ConfigError(
             "workflows.watch_interval must be a number of seconds >= 0 (0 turns watching off)"
         )
-    return WorkflowsConfig(dirs, sources, python_sources, float(interval))
+    client_tools: bool | tuple[str, ...] = True
+    if "client_tools" in table:
+        raw_tools = table["client_tools"]
+        if isinstance(raw_tools, bool):
+            client_tools = raw_tools
+        elif isinstance(raw_tools, list) and all(isinstance(t, str) for t in raw_tools):
+            client_tools = tuple(raw_tools)
+            if len(set(client_tools)) != len(client_tools):
+                raise ConfigError("workflows.client_tools has duplicates")
+        else:
+            raise ConfigError(
+                "workflows.client_tools must be true, false or an array of tool names"
+            )
+    return WorkflowsConfig(
+        dirs, sources, python_sources, float(interval), client_tools=client_tools
+    )
 
 
 def _parse_redact(raw: Any) -> RedactConfig:
@@ -519,6 +570,15 @@ def _parse_redact(raw: Any) -> RedactConfig:
     if not isinstance(builtin, bool):
         raise ConfigError("redact.builtin must be true or false")
     return RedactConfig(patterns, builtin)
+
+
+def _parse_journal(raw: Any) -> JournalConfig:
+    table = _table(raw, "journal")
+    _check_keys(table, ("keep_source",), "journal")
+    keep_source = table.get("keep_source", False)
+    if not isinstance(keep_source, bool):
+        raise ConfigError("journal.keep_source must be true or false")
+    return JournalConfig(keep_source)
 
 
 def _parse_verbs(raw: Any) -> dict[str, str]:
@@ -718,6 +778,7 @@ def parse_config(data: Mapping[str, Any], *, base: Path) -> FlowConfig:
             "changesets",
             "limits",
             "quotas",
+            "journal",
         ),
         "flow.toml",
     )
@@ -741,6 +802,7 @@ def parse_config(data: Mapping[str, Any], *, base: Path) -> FlowConfig:
     changesets = _parse_changesets(data.get("changesets", {}))
     limits = _parse_limits(data.get("limits", {}))
     quotas = _parse_quotas(data.get("quotas", {}))
+    journal = _parse_journal(data.get("journal", {}))
     return FlowConfig(
         providers,
         routing,
@@ -755,6 +817,7 @@ def parse_config(data: Mapping[str, Any], *, base: Path) -> FlowConfig:
         changesets,
         limits,
         quotas,
+        journal,
     )
 
 

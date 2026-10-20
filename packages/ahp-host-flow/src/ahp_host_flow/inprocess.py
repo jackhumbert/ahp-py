@@ -126,8 +126,12 @@ async def run_in_process(
     on_note: Callable[[str], None] | None = None,
     filename: str = "script.js",
     policy: Policy | None = None,
+    wire_log: Path | None = None,
 ) -> Any:
     """Run *source* as a script in a session rooted at *root*; return its value.
+
+    *wire_log* records the in-process host's frames, masked by the flow.toml's `[redact]`
+    rules (the provider's `Redactor`) beside ahp-host's credential redaction.
 
     JavaScript goes as a fenced message. A `.py` script is served from a temporary
     host directory and started as `/host:<name>`: whoever runs `flow run` is the
@@ -153,12 +157,17 @@ async def run_in_process(
             if args is not NO_ARGS:
                 text += " " + json.dumps(args)
             return await _run_message(
-                dataclasses.replace(config, workflows=workflows), text, root, on_note, policy
+                dataclasses.replace(config, workflows=workflows),
+                text,
+                root,
+                on_note,
+                policy,
+                wire_log,
             )
     text = "```js\n" + source + "\n```"
     if args is not NO_ARGS:
         text += "\n" + json.dumps(args)
-    return await _run_message(config, text, root, on_note, policy)
+    return await _run_message(config, text, root, on_note, policy, wire_log)
 
 
 async def _run_message(
@@ -167,9 +176,15 @@ async def _run_message(
     root: Path,
     on_note: Callable[[str], None] | None,
     policy: Policy | None = None,
+    wire_log: Path | None = None,
 ) -> Any:
     provider = FlowProvider(config, roots=Roots.single(root.resolve()))
-    host = Host(provider, policy if policy is not None else LoopbackSingleUserPolicy())
+    host = Host(
+        provider,
+        policy if policy is not None else LoopbackSingleUserPolicy(),
+        wire_log=wire_log,
+        wire_log_mask=provider.redactor,
+    )
     client_t, server_t = memory_pair()
     serving = asyncio.create_task(host.serve(server_t))
     try:

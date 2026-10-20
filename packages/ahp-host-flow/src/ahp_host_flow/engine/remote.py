@@ -16,8 +16,15 @@ Limits of a remote call, which only a gateway's fleet dispatch lifts (README, pl
   call is stopped and fails, rather than hanging the run.
 * `opts.x.cwd` must be an absolute path or a `file:` URI on the remote host; it is sent as
   the session's working directory and not checked here. `isolation` is not applied.
+* A remote call's worker chat runs the run's client tools for the remote agent: they are
+  advertised on the remote session (`OffersClientTools`), and its calls of them run on the
+  worker chat through the run's own clients.
 * A call a restart cut off is not reattached: the remote turn it left is
   stopped, and the call is dispatched again.
+* A provider with `launch` has its host started by the launcher: once, on first use, and torn
+  down by `aclose`; with `per_call`, a host for every call, given the call's folder and the
+  client tools and torn down after it on every path (done, failed, skipped, aborted). The
+  host a restart cut off is gone, so a reattach is run again.
 """
 
 from __future__ import annotations
@@ -25,10 +32,10 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import PurePosixPath, PureWindowsPath
-from typing import Any, Final, Protocol, TypeVar
+from typing import Any, Final, Protocol, TypeVar, runtime_checkable
 
 from ahp_client import (
     Client,
@@ -41,6 +48,7 @@ from ahp_client import (
     UnansweredToolCallError,
     connect,
 )
+from ahp_client.serve import ClientToolHost
 from ahp_protocol.transport import Transport
 
 from ahp_host_flow.engine.dispatcher import (
@@ -76,6 +84,24 @@ class RemoteAgentError(DispatchError):
 
 
 @dataclass(frozen=True)
+class LaunchRequest:
+    """What a launcher is asked to start a host for."""
+
+    #: The provider's name in flow.toml.
+    provider: str
+    agent: str
+    #: The call's `opts.x.cwd` as `folder_uri` gives it; None for a host shared by the run, or a
+    #: call without cwd.
+    folder: str | None
+    #: The definitions the remote session will be offered.
+    client_tools: tuple[Mapping[str, Any], ...] = ()
+
+
+# Returns the transport to the launched host and the coroutine function that tears it down.
+Launcher = Callable[[LaunchRequest], Awaitable[tuple[Transport, Callable[[], Awaitable[None]]]]]
+
+
+@dataclass(frozen=True)
 class RemoteSpec:
     """Where a remote provider lives: the host to dial and the agent to start there."""
 
@@ -95,6 +121,10 @@ class RemoteSpec:
     approval_timeout: float | None = None
     #: Text put before the prompt the remote agent is sent (flow.toml `preamble`).
     preamble: str | None = None
+    #: Starts the host (flow.toml `launch`); wins over *url* and *transport_factory*.
+    launch: Launcher | None = None
+    #: Start a host for every call and tear it down after it (flow.toml `per_call`).
+    per_call: bool = False
 
 
 @dataclass(frozen=True)
@@ -152,6 +182,23 @@ class RemoteOut(Protocol):
         ...
 
 
+class RemoteToolError(Exception):
+    """A client tool the run could not run; its message becomes the tool's failure result."""
+
+
+@runtime_checkable
+class OffersClientTools(Protocol):
+    """A `RemoteOut` that also runs the run's client tools for the remote agent."""
+
+    def tools(self) -> Sequence[Mapping[str, Any]]:
+        """The tool definitions to advertise on the remote session."""
+        ...
+
+    async def run_tool(self, name: str, tool_input: Any, tool_call_id: str) -> Mapping[str, Any]:
+        """Run it on the worker chat and return a `ToolCallResult`; `RemoteToolError` fails it."""
+        ...
+
+
 class RemoteWorkers(Protocol):
     """Gives a remote call a place to show itself (a worker chat) and runs *body* in it."""
 
@@ -181,6 +228,27 @@ def folder_uri(opts: Mapping[str, Any]) -> str | None:
     raise RemoteAgentError(
         f"opts.x.cwd: {value} must be an absolute path or a file: URI for a remote provider"
     )
+
+
+async def _finish(aw: Awaitable[Any]) -> None:
+    """Run *aw* to the end even if this task is cancelled meanwhile; log, not raise, a failure."""
+    running = asyncio.ensure_future(aw)
+    cancelled = False
+    while not running.done():
+        try:
+            await asyncio.shield(running)
+        except asyncio.CancelledError:
+            if running.cancelled():
+                break
+            cancelled = True
+        except Exception:
+            break
+    if not running.cancelled():
+        failure = running.exception()
+        if failure is not None:
+            _log.warning("cleaning up a launched host failed", exc_info=failure)
+    if cancelled:
+        raise asyncio.CancelledError
 
 
 def _title(call: AgentCall) -> str:
@@ -217,6 +285,15 @@ def _question(event: InputRequested) -> RemoteQuestion:
         url=url if isinstance(url, str) else None,
         questions=tuple(q for q in event.questions if isinstance(q, Mapping)),
     )
+
+
+def _tool_executor(
+    out: OffersClientTools, name: str
+) -> Callable[..., Awaitable[Mapping[str, Any]]]:
+    async def execute(action: Mapping[str, Any]) -> Mapping[str, Any]:
+        return await out.run_tool(name, action.get("toolInput"), str(action.get("toolCallId", "")))
+
+    return execute
 
 
 class _BareOut:
@@ -256,6 +333,7 @@ class ClientDispatcher:
         self.client_id = client_id
         self.on_log = on_log
         self._client: Client | None = None
+        self._launched_close: Callable[[], Awaitable[None]] | None = None
         self._lock = asyncio.Lock()
 
     def _note(self, line: str) -> None:
@@ -268,7 +346,17 @@ class ClientDispatcher:
         async with self._lock:
             if self._client is None:
                 spec = self.spec
-                if spec.transport_factory is not None:
+                if spec.launch is not None:
+                    transport, close = await spec.launch(
+                        LaunchRequest(spec.name, spec.agent, None, ())
+                    )
+                    try:
+                        self._client = await connect(transport=transport, client_id=self.client_id)
+                    except BaseException:
+                        await _finish(close())
+                        raise
+                    self._launched_close = close
+                elif spec.transport_factory is not None:
                     self._client = await connect(
                         transport_factory=spec.transport_factory, client_id=self.client_id
                     )
@@ -278,12 +366,56 @@ class ClientDispatcher:
                     )
             return self._client
 
+    @contextlib.asynccontextmanager
+    async def _launched(self, request: LaunchRequest) -> AsyncIterator[Client]:
+        """A host started for one call and torn down after it, whatever way the call ends."""
+        spec = self.spec
+        assert spec.launch is not None
+        try:
+            transport, close = await spec.launch(request)
+        except Exception as exc:
+            raise RemoteAgentError(
+                f"provider {spec.name!r}: cannot launch a host: {exc}",
+                kind="unavailable",
+                transient=True,
+            ) from exc
+        try:
+            client = await connect(transport=transport, client_id=self.client_id)
+        except BaseException as exc:
+            # A skip or abort can land while the client connects: the host is torn down then too.
+            await _finish(close())
+            if not isinstance(exc, Exception):
+                raise
+            raise RemoteAgentError(
+                f"provider {spec.name!r}: cannot reach the launched host: {exc}",
+                kind="unavailable",
+                transient=True,
+            ) from exc
+
+        async def teardown() -> None:
+            try:
+                await client.aclose()
+            except Exception:
+                _log.warning("closing the client of a launched host failed", exc_info=True)
+            finally:
+                await close()
+
+        try:
+            yield client
+        finally:
+            # One shielded teardown: a cancellation arriving while the client closes (an abort
+            # or skip lands twice) must not skip stopping the host.
+            await _finish(teardown())
+
     async def aclose(self) -> None:
         async with self._lock:
             client, self._client = self._client, None
+            close, self._launched_close = self._launched_close, None
         if client is not None:
             with contextlib.suppress(Exception):
                 await client.aclose()
+        if close is not None:
+            await _finish(close())
 
     async def run_agent(self, call: AgentCall) -> AgentResult:
         iso = call.opts.get("isolation")
@@ -297,7 +429,13 @@ class ClientDispatcher:
         # Read here, in the dispatch task: the worker callback runs in a task of its own.
         before = reattach_handle()
         if before is not None and before.session and before.provider == self.spec.name:
-            await self._stop_cut_off(call, before.session)
+            if self.spec.per_call:
+                self._note(
+                    f"agent() #{call.ordinal}: provider {self.spec.name!r} launches a host per "
+                    "call; the one the restart cut off is gone, so the call runs again"
+                )
+            else:
+                await self._stop_cut_off(call, before.session)
         if self.workers is not None:
             return await self.workers.run(
                 call, self.spec.name, lambda out, title: self._body(call, out, title)
@@ -373,10 +511,42 @@ class ClientDispatcher:
     async def _body(self, call: AgentCall, out: RemoteOut, title: str) -> AgentResult:
         spec = self.spec
         folder = folder_uri(call.opts)
+        tools = tuple(out.tools()) if isinstance(out, OffersClientTools) else ()
+        if spec.per_call:
+            request = LaunchRequest(spec.name, spec.agent, folder, tools)
+            async with self._launched(request) as client:
+                return await self._run_on(client, call, out, title, folder, tools)
         try:
-            client = await self._connected()
+            shared = await self._connected()
+        except Exception as exc:
+            raise RemoteAgentError(
+                f"provider {spec.name!r}: cannot reach the remote host: {exc}",
+                kind="unavailable",
+                transient=True,
+            ) from exc
+        return await self._run_on(shared, call, out, title, folder, tools)
+
+    async def _run_on(
+        self,
+        client: Client,
+        call: AgentCall,
+        out: RemoteOut,
+        title: str,
+        folder: str | None,
+        tools: tuple[Mapping[str, Any], ...],
+    ) -> AgentResult:
+        spec = self.spec
+        try:
+            host: ClientToolHost | None = None
+            if isinstance(out, OffersClientTools) and tools:
+                offers: OffersClientTools = out
+                host = ClientToolHost(client.protocol, client_id=self.client_id)
+                for definition in tools:
+                    host.register(dict(definition), _tool_executor(offers, str(definition["name"])))
             session = await client.create_session(
-                provider=spec.agent, working_directories=[folder] if folder is not None else None
+                provider=spec.agent,
+                working_directories=[folder] if folder is not None else None,
+                tools=host,
             )
         except Exception as exc:
             raise RemoteAgentError(

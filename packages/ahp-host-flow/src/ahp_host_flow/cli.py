@@ -14,10 +14,12 @@ from typing import Any
 from ahp_host.core.automations import iso
 
 from ahp_host_flow import redaction, shim
-from ahp_host_flow.config import ConfigError, load_config
+from ahp_host_flow.config import ConfigError, load_config, make_redactor
 from ahp_host_flow.engine import (
+    NO_RESUME_ARGS,
     EchoDispatcher,
     JournalError,
+    Redactor,
     RunOptions,
     load_journal,
     redact_agent_record,
@@ -53,7 +55,13 @@ def _build_parser() -> argparse.ArgumentParser:
             "where it replaces the journal's snapshot"
         ),
     )
-    run.add_argument("--args", help="JSON passed to the script as `args`")
+    run.add_argument(
+        "--args",
+        help=(
+            "JSON passed to the script as `args`; with --resume, the args the run started "
+            "with, needed when its journal holds them masked (checked against their sha256)"
+        ),
+    )
     run.add_argument("--node", help="Node binary (overrides AHP_FLOW_NODE and PATH)")
     run.add_argument("--concurrency", type=int, help="most agent() calls in flight at once")
     run.add_argument("--budget", type=int, help="output-token ceiling for the run")
@@ -73,6 +81,20 @@ def _build_parser() -> argparse.ArgumentParser:
         "--resume",
         metavar="RUN_ID",
         help="resume an earlier run from its journal: unchanged agent() calls are served from it",
+    )
+    run.add_argument(
+        "--keep-source",
+        action="store_true",
+        help=(
+            "keep the script and its args in the journal as they are; by default they are "
+            "masked (builtin credential shapes, or the flow.toml's [redact] with --config) "
+            "and kept as their sha256, so a resume needs the script path and --args again"
+        ),
+    )
+    run.add_argument(
+        "--wire-log",
+        metavar="PATH",
+        help="with --config: write the in-process host's frames as JSONL, masked like the journal",
     )
     run.add_argument(
         "--config",
@@ -151,6 +173,11 @@ def _run_with_config(parser: argparse.ArgumentParser, args: argparse.Namespace) 
         return 1
     if args.node is not None:
         config = dataclasses.replace(config, node=args.node)
+    if args.keep_source:
+        config = dataclasses.replace(
+            config, journal=dataclasses.replace(config.journal, keep_source=True)
+        )
+    redactor = make_redactor(config.redact)
     try:
         value = asyncio.run(
             run_in_process(
@@ -160,10 +187,11 @@ def _run_with_config(parser: argparse.ArgumentParser, args: argparse.Namespace) 
                 root=Path(args.root),
                 filename=path.name,
                 on_note=lambda note: _stderr(f"[flow] {note}"),
+                wire_log=Path(args.wire_log) if args.wire_log else None,
             )
         )
     except FlowRunFailed as exc:
-        _stderr(f"flow: {exc}")
+        _stderr(f"flow: {redactor.mask(str(exc))}")
         return 1
     print(json.dumps(value, indent=2))
     return 0
@@ -252,10 +280,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.config is not None:
         return _run_with_config(parser, args)
 
+    if args.wire_log is not None:
+        parser.error("--wire-log needs --config (only the in-process host has a wire)")
     if args.path is None and args.resume is None:
         parser.error("a script path is needed unless --resume is given")
-    if args.resume is not None and (args.args is not None or args.budget is not None):
-        parser.error("--args and --budget come from the journal with --resume")
+    if args.resume is not None and args.budget is not None:
+        parser.error("--budget comes from the journal with --resume")
 
     script_args: Any = NO_ARGS
     if args.args is not None:
@@ -264,6 +294,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         except json.JSONDecodeError as exc:
             parser.error(f"--args is not valid JSON: {exc}")
 
+    # Logs, errors and the journal are masked by the builtin credential shapes (plan §8 M17
+    # item 4); the journal keeps the script and args masked with their sha256 unless
+    # --keep-source, so resuming such a run takes the script path and --args again.
+    redactor = Redactor()
+    resume_args: Any = NO_RESUME_ARGS
+    if args.resume is not None and script_args is not NO_ARGS:
+        # Checked against the journal's sha256; never the run's args without that check.
+        resume_args, script_args = script_args, NO_ARGS
     try:
         options = RunOptions(
             concurrency=args.concurrency,
@@ -274,6 +312,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             state_dir=Path(args.state_dir).resolve() if args.state_dir else None,
             run_id=args.run_id,
             resume_from=args.resume,
+            redact=redactor.mask_value,
+            keep_source=args.keep_source,
+            resume_args=resume_args,
         )
     except ValueError as exc:
         parser.error(str(exc))
@@ -315,7 +356,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
         )
     except (SandboxError, JournalError, ValueError) as exc:
-        _stderr(f"flow: {exc}")
+        _stderr(f"flow: {redactor.mask(str(exc))}")
         return 1
     print(json.dumps(value, indent=2))
     return 0

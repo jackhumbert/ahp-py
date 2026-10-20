@@ -12,6 +12,7 @@ from ahp_host.provider import (
     AgentSessionContext,
     EchoProvider,
     EchoSession,
+    ObservesChatState,
     ObservesSessionState,
     ReopensToolChats,
 )
@@ -68,6 +69,42 @@ async def test_sessionview_publisher_is_observable() -> None:
         assert publisher.session_state() == state(host, uri)
     finally:
         await shut(host, wire, serving)
+
+
+async def test_sessionview_chat_state_shows_the_turns_message(tmp_path: Path) -> None:
+    """`chat_state` reads a turn's message back, also after a restart from the store."""
+    provider = Recording()
+    store = FileSessionStore(tmp_path / "sessions", debounce=0.0)
+    host = Host(provider, LoopbackSingleUserPolicy(), store=store)
+    wire, serving = await connect(host)
+    try:
+        chat = await open_session(wire, "echo:/sv-cs")
+        publisher = provider.contexts[0].publisher
+        assert isinstance(publisher, ObservesChatState)
+        await run_turn(wire, chat, "t1", "remember this")
+        (turn,) = publisher.chat_state()["turns"]
+        assert (turn["id"], turn["message"]["text"]) == ("t1", "remember this")
+        assert publisher.chat_state(chat) == state(host, chat)
+        # A chat the session does not own reads as nothing.
+        assert publisher.chat_state("chat:/someone-else") == {}
+    finally:
+        await shut(host, wire, serving)
+
+    provider2 = Recording()
+    host2 = Host(
+        provider2, LoopbackSingleUserPolicy(), store=FileSessionStore(tmp_path / "sessions")
+    )
+    await host2.restore()
+    wire2, serving2 = await connect(host2)
+    try:
+        await wire2.request("subscribe", {"channel": "echo:/sv-cs"})
+        await run_turn(wire2, chat, "t2", "and this")
+        publisher2 = provider2.contexts[0].publisher
+        assert isinstance(publisher2, ObservesChatState)
+        texts = [t["message"]["text"] for t in publisher2.chat_state(chat)["turns"]]
+        assert texts == ["remember this", "and this"]
+    finally:
+        await shut(host2, wire2, serving2)
 
 
 async def test_sessionview_worker_chat_reopens_only_tool_chats() -> None:

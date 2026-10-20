@@ -1180,6 +1180,21 @@ class ObservesSessionState(Protocol):
 
 
 @runtime_checkable
+class ObservesChatState(Protocol):
+    """A publisher that can show one of the session's chats as it currently is."""
+
+    def chat_state(self, chat: str | None = None) -> Mapping[str, Any]:
+        """The chat's current reduced state, read-only; ``{}`` for a chat the session does not own.
+
+        *chat* defaults to the session's default chat. The state is what the session store
+        persists, so after a restart it holds the turns the last process recorded -- including
+        each turn's ``message`` as the client sent it, which is how a provider that is handed
+        only a turn id (`ResumesTurns.resume_turn`) can read what the turn asked for.
+        """
+        ...
+
+
+@runtime_checkable
 class PublishesChatActivity(Protocol):
     """A publisher that can set a chat's activity, with a ``_meta`` riding on the action."""
 

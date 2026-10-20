@@ -153,7 +153,7 @@ from ahp_host.core.watches import (
     WatchRequest,
     new_watch_channel,
 )
-from ahp_host.core.wirelog import WireLog
+from ahp_host.core.wirelog import ContentMasker, WireLog
 from ahp_host.provider.base import (
     AgentProvider,
     AgentSession,
@@ -1166,6 +1166,14 @@ class _Publisher:
         state = self._host.sequencer.state_of(self._session.uri)
         return state if isinstance(state, Mapping) else {}
 
+    def chat_state(self, chat: str | None = None) -> Mapping[str, Any]:
+        """`ObservesChatState`: a chat of this session as reduced; ``{}`` for any other."""
+        channel = self._chat_of(chat)
+        if channel is None:
+            return {}
+        state = self._host.sequencer.state_of(channel)
+        return state if isinstance(state, Mapping) else {}
+
     def worker_chat(self, resource: str) -> ProviderChat | None:
         if resource in self._session.provider_chats:
             return _ProviderChat(self._host, self._session, resource)
@@ -1848,6 +1856,7 @@ class Host:
         info: HostInfo | None = None,
         supported_versions: Sequence[str] = DEFAULT_SUPPORTED_VERSIONS,
         wire_log: Path | None = None,
+        wire_log_mask: ContentMasker | None = None,
         sequence_file: Path | None = None,
         root_config: RootConfig | None = None,
         resources: ResourceProvider | None = None,
@@ -2068,7 +2077,9 @@ class Host:
         self.max_content_bytes = max_content_bytes
         self.sequencer.observer = self
         self._root_ready = False
-        self.wire_log = WireLog(wire_log) if wire_log is not None else None
+        # `wire_log_mask` masks every string the wire log writes, after its credential
+        # redaction (`core/wirelog.py`, "Content masking"); the wire itself is untouched.
+        self.wire_log = WireLog(wire_log, mask=wire_log_mask) if wire_log is not None else None
 
     # ─── lifecycle ───────────────────────────────────────────────────────
 

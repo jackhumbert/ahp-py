@@ -10,6 +10,20 @@ versions each release speaks.
 
 ## [Unreleased]
 
+### Added — chat view and a wire-log content masker (M17)
+
+- **`ObservesChatState`** (`ahp_host.provider`): the publisher's `chat_state(chat=None)` returns one
+  of the session's chats as currently reduced (`{}` for a chat it does not own), read-only. It is
+  what the store persists, so after a restart it holds each turn's `message` as the client sent it:
+  a provider handed only a turn id (`ResumesTurns.resume_turn`) can read what the turn asked for.
+  ahp-host-flow re-reads a run's start this way. `tests/unit/test_sessionview.py`.
+- **`WireLog(mask=)`** and **`Host(wire_log_mask=)`**: an optional content masker, a
+  `Callable[[str], str]` or an object with `mask(str) -> str` (`core.wirelog.ContentMasker`,
+  `MasksText`), applied to every string value of every frame the wire log writes, at any depth,
+  after the credential-key redaction; keys and the sidecar are untouched, the outbound frame is
+  never mutated, and a frame whose masker raises is not written. `core.wirelog.mask_strings`.
+  `tests/unit/test_wirelog.py`.
+
 ### Added — chat activity with `_meta` (M16)
 
 - **`PublishesChatActivity`** (`ahp_host.provider`): the publisher's `chat_activity_changed(chat,

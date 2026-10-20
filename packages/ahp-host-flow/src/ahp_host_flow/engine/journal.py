@@ -112,6 +112,15 @@ def call_key(call: AgentCall, *, extra: object = _NO_EXTRA) -> str:
     return hashlib.sha256(canonical_json(payload).encode("utf-8")).hexdigest()
 
 
+def text_sha(text: str) -> str:
+    """sha256 of *text*: how a masked journal vouches for the script it was written from."""
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def value_sha(value: Any) -> str:
+    return text_sha(canonical_json(value))
+
+
 def verb_key(name: str, args: Sequence[Any]) -> str:
     """The replay key of a custom verb call: sha256 of the canonical JSON of name and args."""
     payload = {"args": list(args), "name": name}
@@ -147,6 +156,10 @@ class RunHeader:
     resumed_from: str | None = None
     # How the run keyed its agent() calls: "default", or the resume-key hook's mode name.
     key_mode: str = "default"
+    # sha256 of the real script and of the canonical JSON of the real args; None in a
+    # journal written before M17. When the stored text no longer hashes to it, it is masked.
+    source_sha: str | None = None
+    args_sha: str | None = None
 
 
 @dataclass(frozen=True)
@@ -155,6 +168,8 @@ class WorkflowSnapshot:
     ref: Any
     filename: str
     source: str
+    # sha256 of the real source, set when `source` may be masked (read side).
+    source_sha: str | None = None
 
     @property
     def ref_key(self) -> str:
@@ -184,6 +199,8 @@ class StartRecord:
     chat: str | None = None
     # The node session (fleet) or remote session the call ran on, None when unknown.
     session: str | None = None
+    # The in-process worker chat a restart can resume the call in (`DispatchHandle.worker_chat`).
+    worker_chat: str | None = None
 
 
 @dataclass(frozen=True)
@@ -240,6 +257,29 @@ class LoadedJournal:
         return tuple(v for v in self.verbs if v.status == "open")
 
 
+def source_masked(header: RunHeader) -> bool:
+    """True when the header holds a masked copy of the script, not the script itself."""
+    return (
+        header.source_sha is not None
+        and header.source is not None
+        and text_sha(header.source) != header.source_sha
+    )
+
+
+def args_masked(header: RunHeader) -> bool:
+    """True when the header holds masked args, not the args the run was given."""
+    return (
+        header.has_args
+        and header.args_sha is not None
+        and value_sha(header.args) != header.args_sha
+    )
+
+
+def snapshot_masked(snap: WorkflowSnapshot) -> bool:
+    """True when a child workflow snapshot holds a masked copy of the source."""
+    return snap.source_sha is not None and text_sha(snap.source) != snap.source_sha
+
+
 def _line(record: dict[str, Any]) -> str:
     return json.dumps(record, separators=(",", ":"), ensure_ascii=True, allow_nan=False) + "\n"
 
@@ -252,7 +292,9 @@ class JournalWriter:
         file: IO[str],
         mask: Callable[[Any], Any] | None = None,
         lock: IO[bytes] | None = None,
+        keep_source: bool = False,
     ) -> None:
+        self._keep_source = keep_source
         self._path = path
         self._run_id = run_id
         self._file: IO[str] | None = file
@@ -266,6 +308,7 @@ class JournalWriter:
         header: RunHeader,
         *,
         mask: Callable[[Any], Any] | None = None,
+        keep_source: bool = False,
     ) -> JournalWriter:
         d = run_dir(state_dir, header.run_id)
         try:
@@ -283,25 +326,36 @@ class JournalWriter:
             file.close()
             path.unlink(missing_ok=True)
             raise JournalError(f"run {header.run_id!r} is already being written")
-        writer = cls(path, header.run_id, file, mask, lock)
+        writer = cls(path, header.run_id, file, mask, lock, keep_source)
         try:
-            writer._write(
-                {
-                    "type": "run",
-                    "version": JOURNAL_VERSION,
-                    "runId": header.run_id,
-                    "resumedFrom": header.resumed_from,
-                    "filename": header.filename,
-                    "source": header.source,
-                    "hasArgs": header.has_args,
-                    "args": header.args if header.has_args else None,
-                    "options": {
-                        "maxAgents": header.max_agents,
-                        "budgetTotal": header.budget_total,
-                        "keyMode": header.key_mode,
-                    },
-                }
-            )
+            source: str | None = header.source
+            args = header.args if header.has_args else None
+            if mask is not None and not keep_source:
+                if source is not None:
+                    source = str(mask(source))
+                if header.has_args:
+                    args = mask(args)
+            record: dict[str, Any] = {
+                "type": "run",
+                "version": JOURNAL_VERSION,
+                "runId": header.run_id,
+                "resumedFrom": header.resumed_from,
+                "filename": header.filename,
+                "source": source,
+                "hasArgs": header.has_args,
+                "args": args,
+                "options": {
+                    "maxAgents": header.max_agents,
+                    "budgetTotal": header.budget_total,
+                    "keyMode": header.key_mode,
+                },
+            }
+            # Always the hash of the real text, so a resume can check what it is given.
+            if header.source is not None:
+                record["sourceSha"] = text_sha(header.source)
+            if header.has_args:
+                record["argsSha"] = value_sha(header.args)
+            writer._write(record)
         except BaseException:
             # A header that cannot be written (args with NaN, say) leaves no run
             # behind, so the same run id can be used again.
@@ -341,10 +395,17 @@ class JournalWriter:
 
     def append_started(self, record: StartRecord) -> None:
         handle: dict[str, Any] | None = None
-        if record.provider is not None or record.chat is not None or record.session is not None:
+        if (
+            record.provider is not None
+            or record.chat is not None
+            or record.session is not None
+            or record.worker_chat is not None
+        ):
             handle = {"provider": record.provider, "chat": record.chat}
             if record.session is not None:
                 handle["session"] = record.session
+            if record.worker_chat is not None:
+                handle["workerChat"] = record.worker_chat
         self._write(
             {"type": "started", "ordinal": record.ordinal, "key": record.key, "handle": handle}
         )
@@ -389,12 +450,18 @@ class JournalWriter:
         )
 
     def append_workflow(self, snapshot: WorkflowSnapshot) -> None:
+        mask = self._mask
+        source = snapshot.source
+        if mask is not None and not self._keep_source:
+            source = str(mask(source))
+        sha = snapshot.source_sha if snapshot.source_sha is not None else text_sha(snapshot.source)
         self._write(
             {
                 "type": "workflow",
                 "ref": snapshot.ref,
                 "filename": snapshot.filename,
-                "source": snapshot.source,
+                "source": source,
+                "sourceSha": sha,
             }
         )
 
@@ -466,6 +533,7 @@ def load_journal(state_dir: Path, run_id: str) -> LoadedJournal:
             options = options if isinstance(options, dict) else {}
             source = rec.get("source")
             key_mode = options.get("keyMode")
+            source_sha, args_sha = rec.get("sourceSha"), rec.get("argsSha")
             header = RunHeader(
                 run_id=str(rec.get("runId", run_id)),
                 filename=str(rec.get("filename", "")),
@@ -476,12 +544,20 @@ def load_journal(state_dir: Path, run_id: str) -> LoadedJournal:
                 budget_total=options.get("budgetTotal"),
                 resumed_from=rec.get("resumedFrom"),
                 key_mode=key_mode if isinstance(key_mode, str) else "default",
+                source_sha=source_sha if isinstance(source_sha, str) else None,
+                args_sha=args_sha if isinstance(args_sha, str) else None,
             )
         elif kind == "workflow":
             filename, source = rec.get("filename"), rec.get("source")
             if not isinstance(filename, str) or not isinstance(source, str):
                 raise JournalError(f"journal line {n}: bad workflow record")
-            snap = WorkflowSnapshot(ref=rec.get("ref"), filename=filename, source=source)
+            sha = rec.get("sourceSha")
+            snap = WorkflowSnapshot(
+                ref=rec.get("ref"),
+                filename=filename,
+                source=source,
+                source_sha=sha if isinstance(sha, str) else None,
+            )
             workflows.setdefault(snap.ref_key, snap)
         elif kind == "agent":
             ordinal, key, status = rec.get("ordinal"), rec.get("key"), rec.get("status")
@@ -516,10 +592,10 @@ def load_journal(state_dir: Path, run_id: str) -> LoadedJournal:
             )
         elif kind == "started":
             ordinal, key, handle = rec.get("ordinal"), rec.get("key"), rec.get("handle")
-            provider = chat = session = None
+            provider = chat = session = worker_chat = None
             if isinstance(handle, dict):
                 provider, chat = handle.get("provider"), handle.get("chat")
-                session = handle.get("session")
+                session, worker_chat = handle.get("session"), handle.get("workerChat")
             if (
                 not _is_count(ordinal)
                 or not isinstance(key, str)
@@ -527,10 +603,11 @@ def load_journal(state_dir: Path, run_id: str) -> LoadedJournal:
                 or (provider is not None and not isinstance(provider, str))
                 or (chat is not None and not isinstance(chat, str))
                 or (session is not None and not isinstance(session, str))
+                or (worker_chat is not None and not isinstance(worker_chat, str))
             ):
                 raise JournalError(f"journal line {n}: bad started record")
             # A fallback repeats the record under the provider it moved to; the last wins.
-            started[ordinal] = StartRecord(ordinal, key, provider, chat, session)
+            started[ordinal] = StartRecord(ordinal, key, provider, chat, session, worker_chat)
         elif kind == "gate":
             ordinal, key = rec.get("ordinal"), rec.get("key")
             gate_kind, status = rec.get("kind"), rec.get("status")
