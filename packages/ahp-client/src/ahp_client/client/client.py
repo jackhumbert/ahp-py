@@ -524,7 +524,8 @@ class AhpClient(CommandsMixin):
         try:
             if deadline is not None and deadline > 0:
                 try:
-                    return await asyncio.wait_for(asyncio.shield(future), deadline)
+                    async with asyncio.timeout(deadline):
+                        return await asyncio.shield(future)
                 except asyncio.CancelledError:
                     # A caller's cancellation stops at the shield: the inner
                     # future stays pending, the finally's guard sees neither

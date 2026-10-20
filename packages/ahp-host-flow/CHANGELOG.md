@@ -4,6 +4,12 @@
 
 ## [0.1.0] - unreleased
 
+### Fixed — cancellation on Python 3.11
+
+- A remote worker's relayed request waits for `approval_timeout` under `asyncio.timeout`,
+  not `wait_for`, so a skip landing as the answer arrives is not lost on Python 3.11
+  (with ahp-client's matching fix, a skipped per-call step now always stops).
+
 ### Added — release preparation (M18)
 
 - `scripts/smoke_wheel.py` checks an installed wheel from outside the checkout (CI's wheels job and release.yml run it).

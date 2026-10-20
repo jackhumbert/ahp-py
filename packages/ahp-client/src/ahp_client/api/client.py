@@ -983,7 +983,8 @@ class Session:
             if remaining <= 0:
                 return True
             try:
-                tagged = await asyncio.wait_for(_next_or_none(reader), remaining)
+                async with asyncio.timeout(remaining):
+                    tagged = await _next_or_none(reader)
             except TimeoutError:
                 return True
             if tagged is None:
@@ -1761,7 +1762,10 @@ class TurnStream:
         while True:
             timeout = None if deadline is None else max(0.0, deadline - loop.time())
             try:
-                tagged = await asyncio.wait_for(self._next_tagged(), timeout)
+                # asyncio.timeout, not wait_for: on Python 3.11 wait_for drops a cancellation
+                # that lands as the event arrives, and a skipped turn would run on.
+                async with asyncio.timeout(timeout):
+                    tagged = await self._next_tagged()
             except TimeoutError as exc:
                 await self._finish()
                 raise TimeoutError(

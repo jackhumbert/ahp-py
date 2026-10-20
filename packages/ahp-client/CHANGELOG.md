@@ -8,6 +8,13 @@ Every release states the protocol versions it speaks.
 
 ## [0.1.0] - unreleased
 
+### Fixed — cancellation on Python 3.11
+
+- Request replies, turn events and the post-turn drain wait under `asyncio.timeout`
+  instead of `asyncio.wait_for`. On Python 3.11, `wait_for` drops a cancellation that
+  lands as the awaited value arrives, so a cancelled caller (a skipped flow step) could
+  keep running a turn.
+
 ### Changed — release preparation (M18)
 
 - The version is 0.1.0 (was 0.1.0.dev0).

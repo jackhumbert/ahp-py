@@ -500,7 +500,8 @@ class ClientDispatcher:
         if limit is None:
             return await awaitable
         try:
-            return await asyncio.wait_for(awaitable, limit)
+            async with asyncio.timeout(limit):
+                return await awaitable
         except TimeoutError:
             raise RemoteAgentError(
                 f"provider {self.spec.name!r}: nobody answered the remote agent's request on "
