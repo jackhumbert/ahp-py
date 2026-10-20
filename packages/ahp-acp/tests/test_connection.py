@@ -222,8 +222,16 @@ async def test_env_is_exact_without_inheritance(monkeypatch: pytest.MonkeyPatch)
     assert env["EXTRA"] == "1"
     assert "AHP_ACP_TEST_PARENT_VAR" not in env
     assert "HOME" not in env
-    # The interpreter itself may add a locale or a few platform variables.
-    assert set(env) - {"EXTRA"} <= {"LC_CTYPE", "SYSTEMROOT", "PYTHONUTF8", "PYTHONCOERCECLOCALE"}
+    # The interpreter or the OS may add a locale or a few platform variables
+    # (macOS gives every process __CF_USER_TEXT_ENCODING).
+    platform = {
+        "LC_CTYPE",
+        "SYSTEMROOT",
+        "PYTHONUTF8",
+        "PYTHONCOERCECLOCALE",
+        "__CF_USER_TEXT_ENCODING",
+    }
+    assert set(env) - {"EXTRA"} <= platform
 
 
 def _gone(pid: int) -> bool:
