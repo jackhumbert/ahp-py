@@ -44,7 +44,8 @@ import random
 import uuid
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Any, Final
+from typing import Any, Final, Literal
+from urllib.parse import unquote
 
 from ahp_host import ConnectionInfo
 from ahp_protocol import (
@@ -133,6 +134,8 @@ _CHANNEL_KEYS: Final = ("channel", "resource", "session", "sessionResource", "ch
 _MERGED: Final = frozenset({ROOT_URI, AUTOMATIONS_URI})
 #: Params whose value may be a file URI naming its node.
 _FILE_KEYS: Final = ("uri", "root", "cwd", "workingDirectory", "channel", "resource")
+#: The subset of those that is a folder for a new session (`client_files="refuse"`).
+_FOLDER_KEYS: Final = ("uri", "root", "cwd", "workingDirectory")
 #: Asked before a session exists, often before its folder is chosen.
 _SESSION_CONFIG_METHODS: Final = frozenset({"resolveSessionConfig", "sessionConfigCompletions"})
 #: Read-only, so a content ref whose node is unknown can be asked of each.
@@ -170,7 +173,12 @@ class Gateway:
         redial_backoff: tuple[float, float] = (0.5, 30.0),
         redial_jitter: float = 0.25,
         orchestrator: OrchestratorConfig | None = None,
+        client_files: Literal["passthrough", "refuse"] = "passthrough",
     ) -> None:
+        if client_files not in ("passthrough", "refuse"):
+            raise ValueError(
+                f"client_files must be 'passthrough' or 'refuse', got {client_files!r}"
+            )
         if not 0.0 <= redial_jitter < 1.0:
             raise ValueError(f"redial_jitter must be in [0, 1), got {redial_jitter}")
         self.directory = directory
@@ -192,6 +200,12 @@ class Gateway:
         self.redial_jitter = redial_jitter
         #: Fleet tools for sessions of the orchestrator agent; None: not offered.
         self.orchestrator = Orchestrator(self, orchestrator) if orchestrator is not None else None
+        #: What a new session's `file:` folder that names no connected node
+        #: (`file:///typo/x`, bare `file:///`) becomes: "passthrough" leaves it
+        #: a client-local path, so provider routing picks the node and the
+        #: session opens at that node's default root; "refuse" answers
+        #: InvalidParams, as for an `ahp-file` URI naming an unknown node.
+        self.client_files = client_files
 
     async def start(self) -> None:
         """Take up what outlives a connection: the orchestrators, if any."""
@@ -427,6 +441,7 @@ class _SurfaceConnection:
         if node_id is None and method in _SESSION_CONFIG_METHODS:
             # Asked before a folder is chosen: the default node answers, and
             # the client asks again once the folder names one.
+            self._refuse_client_files(params)
             node_id = self._default_node(params.get("provider"))
         if node_id is None and method == "listAutomationTriggerDefinitions":
             # The same question for an automation's template.
@@ -1056,6 +1071,7 @@ class _SurfaceConnection:
         channel = params.get("channel")
         if not isinstance(channel, str):
             raise invalid_params("channel is required")
+        self._refuse_client_files(params)
         orchestrator = self.gateway.orchestrator
         if orchestrator is not None and orchestrator.is_orchestrator(params.get("provider")):
             return await self._create_orchestrator(orchestrator, channel, params)
@@ -1170,6 +1186,26 @@ class _SurfaceConnection:
                 for agent in node.root.get("agents") or []
             )
         ]
+
+    def _refuse_client_files(self, params: Mapping[str, Any]) -> None:
+        """With `client_files="refuse"`, refuse a folder left as a `file:` URI.
+
+        By now every `file:///<node>/...` naming a node in the inventory has
+        been read as `ahp-file`, so a `file:` folder still here names no node
+        of this connection - a mistyped id, or bare `file:///`. Passed through
+        it would route by provider to a node that opens it at its own root.
+        """
+        if self.gateway.client_files != "refuse":
+            return
+        candidates: list[Any] = [params.get(key) for key in _FOLDER_KEYS]
+        directories = params.get("workingDirectories")
+        if isinstance(directories, list):
+            candidates.extend(directories)
+        for value in candidates:
+            if isinstance(value, str) and value.startswith("file:"):
+                rest = value[len("file:") :].lstrip("/")
+                name = unquote(rest.partition("/")[0])
+                raise invalid_params(f"no node {name!r} is available to this connection")
 
     def _node_named_by_files(self, params: Mapping[str, Any]) -> str | None:
         """The node every file URI in the request names, if any names one.
@@ -1357,6 +1393,7 @@ class _SurfaceConnection:
             session = definition.get("session") if isinstance(definition, Mapping) else None
             template = session if isinstance(session, Mapping) else {}
             try:
+                self._refuse_client_files(template)
                 node_id = self._node_named_by_files(template)
             except AhpError as exc:
                 self._reject(dispatch, exc.message)

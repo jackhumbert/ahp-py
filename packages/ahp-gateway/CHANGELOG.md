@@ -6,6 +6,17 @@ Every release states the protocol versions it speaks.
 
 ## [Unreleased]
 
+### Added
+
+- **`Gateway(client_files="refuse")`.** Opt-in (default `"passthrough"`, unchanged). A new
+  session's folder (`workingDirectories`, `workingDirectory`, `uri`, `root`, `cwd`) that is
+  still a `file:` URI after the `file:///<node>/...` alias - a mistyped or unconnected node
+  id, or a bare `file:///` - is refused with InvalidParams "no node 'X' is available to this
+  connection", instead of falling through to provider routing and opening the session at
+  another node's default root. Applies to `createSession`, the `resolveSessionConfig` /
+  `sessionConfigCompletions` default-node fallback, and a new automation's session template.
+  `tests/test_gateway.py`.
+
 ## [0.1.0] - unreleased
 
 ### Added — release preparation (M18)

@@ -31,6 +31,16 @@ diff content route back to the machine they live on.
 [`docs/plan.md`](docs/plan.md) is the design; §9 records what is built and
 what is not.
 
+## Refusing client-local folders
+
+By default a new session whose folder is a `file:` URI naming no connected node
+(`file:///typo/srv/repo`, bare `file:///`) is passed through as a client-local
+path and routed by provider, so it opens at the default root of the first node
+offering the agent. `Gateway(client_files="refuse")` answers InvalidParams
+"no node 'typo' is available to this connection" instead, the same refusal as
+for an `ahp-file` URI naming an unknown node. A folder naming a connected node
+(`file:///<node>/...` or `ahp-file:///<node>/...`) routes as before.
+
 ## Fleet tools: the orchestrator and flow sessions
 
 With an `OrchestratorConfig` (`Gateway(orchestrator=...)`), the gateway joins

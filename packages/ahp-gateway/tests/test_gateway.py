@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import uuid
 from typing import Any
 
 import pytest
@@ -305,3 +306,88 @@ async def test_a_machines_own_config_and_server_info_ride_in_its_entry_not_the_r
         assert "meta" not in node  # the sibling host sets no root _meta
     finally:
         await fleet.aclose()
+
+
+def _two_echo_nodes(**options: Any) -> Fleet:
+    return Fleet(
+        {"node-a": echo_host("echo"), "node-b": echo_host("echo")},
+        [NodeRecord("node-a", "mem://a", DEV), NodeRecord("node-b", "mem://b", DEV)],
+        everyone_is_a_dev,
+        **options,
+    )
+
+
+async def _create(fleet: Fleet, directories: list[str]) -> int:
+    """createSession with these folders; the refusal's code, or 0 when it opened."""
+    raw = AhpClient(fleet.surface_transport())
+    await raw.connect()
+    await raw.initialize(client_id="c1")
+    try:
+        await raw.request(
+            "createSession",
+            {
+                "channel": f"echo:/{uuid.uuid4().hex}",
+                "provider": "echo",
+                "workingDirectories": directories,
+            },
+        )
+        return 0
+    except RpcError as exc:
+        return exc.code if "is available to this connection" in exc.message else -1
+    finally:
+        await raw.shutdown()
+
+
+async def test_client_files_passthrough_leaves_an_unknown_node_to_provider_routing() -> None:
+    fleet = _two_echo_nodes()
+    try:
+        assert await _create(fleet, ["file:///typo/srv/repo"]) == 0
+        assert await _create(fleet, ["file:///"]) == 0
+        async with fleet.direct("node-a") as node_a:
+            assert len((await node_a.sessions())["items"]) == 2
+    finally:
+        await fleet.aclose()
+
+
+@pytest.mark.parametrize("folder", ["file:///typo/srv/repo", "file:///", "file:///typo"])
+async def test_client_files_refuse_refuses_a_folder_naming_no_node(folder: str) -> None:
+    fleet = _two_echo_nodes(client_files="refuse")
+    try:
+        assert await _create(fleet, [folder]) == -32602
+        async with fleet.direct("node-a") as node_a:
+            assert (await node_a.sessions())["items"] == []
+    finally:
+        await fleet.aclose()
+
+
+async def test_client_files_refuse_refuses_a_node_that_is_not_connected() -> None:
+    fleet = Fleet(
+        {"node-a": echo_host("echo")},
+        [NodeRecord("node-a", "mem://a", DEV), NodeRecord("node-b", "mem://b", DEV)],
+        everyone_is_a_dev,
+        client_files="refuse",
+    )
+    try:
+        assert await _create(fleet, ["file:///node-b/srv/repo"]) == -32602
+        assert await _create(fleet, ["ahp-file:///node-b/srv/repo"]) == -32602
+    finally:
+        await fleet.aclose()
+
+
+async def test_client_files_refuse_still_routes_a_connected_node() -> None:
+    fleet = _two_echo_nodes(client_files="refuse")
+    try:
+        assert await _create(fleet, ["file:///node-b/srv/repo"]) == 0
+        assert await _create(fleet, ["ahp-file:///node-b/srv/other"]) == 0
+        async with fleet.direct("node-b") as node_b:
+            folders = sorted(
+                item["workingDirectories"][0] for item in (await node_b.sessions())["items"]
+            )
+        assert folders == ["file:///srv/other", "file:///srv/repo"]
+    finally:
+        await fleet.aclose()
+
+
+def test_client_files_rejects_an_unknown_mode() -> None:
+    with pytest.raises(ValueError, match="client_files"):
+        _two_echo_nodes(client_files="nope")

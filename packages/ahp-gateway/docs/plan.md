@@ -173,6 +173,16 @@ A request routes by, in order:
 3. the one node offering the named provider;
 4. the only node, if there is one.
 
+`Gateway(client_files="refuse")` (default `"passthrough"`) tightens step 2 for a
+new session: a folder still a `file:` URI after the alias above names no
+connected node (a mistyped or unconnected node id, or bare `file:///`), and
+passthrough would let step 3 pick a node that opens the session at its own
+default root. With `"refuse"` the request is answered InvalidParams "no node
+'X' is available to this connection", as for an `ahp-file` URI naming an
+unknown node. It covers `createSession`, the session-config fallback to the
+default node, and an automation's session template; resource reads already
+refuse when several nodes could answer.
+
 A changeset's channel is learned from the variable-free `uriTemplate` a
 session or chat advertises it by; one with a variable is expanded by the client
 and found by asking each node, as on `reconnect` (below).
