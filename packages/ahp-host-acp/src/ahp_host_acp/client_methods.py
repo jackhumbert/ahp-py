@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
 import os
 import shlex
 import shutil
@@ -29,7 +30,7 @@ import signal
 import subprocess
 import sys
 import uuid
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Final, TypeGuard
@@ -61,6 +62,34 @@ INVALID: Final = -32602
 #: it may ask for: a host-side bound.
 OUTPUT_LIMIT: Final = 1024 * 1024
 _KINDS: Final = {"fs/read_text_file": "read", "fs/write_text_file": "write"}
+
+
+@dataclass(frozen=True)
+class ExtRequestContext:
+    """What a handler of an agent's extension request (`AgentSpec.ext_handlers`) is given.
+
+    `cwd` and `roots` are the folders the host granted this session; `resolve_path`
+    is the same jail `fs/*` is served under (it raises `AcpError` for a relative
+    path or one outside `roots`, and returns the resolved path otherwise), so a
+    handler never needs its own. `policy` is the host's `ToolPolicy`, if any,
+    for a handler that wants to judge what it is about to do.
+    """
+
+    method: str
+    session_id: str | None
+    cwd: Path
+    roots: Roots
+    policy: ToolPolicy | None
+    resolve_path: Callable[[Any], Path]
+    log: logging.Logger
+
+
+#: Answers one extension request (a method starting with `_`) from the agent.
+ExtHandler = Callable[[ExtRequestContext, dict[str, Any]], Awaitable[dict[str, Any]]]
+#: The message of the JSON-RPC error a failing handler is answered with.
+EXT_FAILED: Final = "extension request failed"
+INTERNAL: Final = -32603
+_log = logging.getLogger("ahp_host_acp.ext")
 
 
 @dataclass
@@ -174,6 +203,28 @@ class ClientMethods:
             await self._reap(terminal)
             return {}
         raise AcpError(f"unknown client method {method}", INVALID)
+
+    async def handle_ext(
+        self, handler: ExtHandler, method: str, params: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        """Run an embedder's extension handler; any failure is a generic JSON-RPC error."""
+        session_id = params.get("sessionId")
+        context = ExtRequestContext(
+            method=method,
+            session_id=session_id if isinstance(session_id, str) else None,
+            cwd=self._cwd(),
+            roots=self._roots,
+            policy=self._policy,
+            resolve_path=self._jailed,
+            log=_log,
+        )
+        try:
+            return await handler(context, dict(params))
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            _log.exception("extension request %s failed", method)
+            raise AcpError(EXT_FAILED, INTERNAL) from None
 
     async def aclose(self) -> None:
         """Kill and forget every terminal."""

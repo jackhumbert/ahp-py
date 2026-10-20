@@ -114,6 +114,7 @@ from ahp_host_acp import commands as slash
 from ahp_host_acp import plan as plans
 from ahp_host_acp.catalogue import Catalogue
 from ahp_host_acp.changes import Diff, SessionEdits, diffs_of
+from ahp_host_acp.client_methods import ExtHandler
 from ahp_host_acp.client_tools import RelayTool
 from ahp_host_acp.mcp import McpServer
 from ahp_host_acp.options import AgentOptions, coerce, same
@@ -193,6 +194,11 @@ class AgentSpec:
     #: Tell the agent why a call was declined, as a text block on the chat's
     #: next prompt (ACP's outcome has no field for it).
     decline_feedback: bool = True
+    #: Answers to the agent's extension requests (methods starting with `_`, such
+    #: as `_vendor/workspace`), keyed by method name: see
+    #: :class:`ahp_host_acp.client_methods.ExtRequestContext`. A `_` method with no
+    #: handler is refused as not found. Python only, not a config-file key.
+    ext_handlers: Mapping[str, ExtHandler] = field(default_factory=dict)
 
 
 def launch_argv(spec: AgentSpec, cwd: Path) -> tuple[str, ...]:
@@ -1199,6 +1205,8 @@ class AcpSession:
             return await self._methods.handle(
                 method, _mapping(params), chat.sink if chat is not None else None
             )
+        if method.startswith("_") and (handler := self._spec.ext_handlers.get(method)) is not None:
+            return await self._methods.handle_ext(handler, method, _mapping(params))
         # fs/*, terminal/* were not offered in clientCapabilities.
         raise MethodNotFoundError(method)
 

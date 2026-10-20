@@ -309,6 +309,24 @@ the current state and sends `notifications/tools/list_changed` when it
 changes. An agent that caches its tools and ignores `list_changed` keeps the
 set it first listed.
 
+## Extension requests from the agent
+
+An ACP agent may send requests in the `_`-prefixed extension namespace (for example
+`_vendor/workspace`) to its client. An embedder answers them with `ext_handlers`, a
+mapping of method name to an async handler, set on `AgentSpec` or passed to `from_config`
+(Python only, not a config-file key):
+
+    async def workspace(ctx: ExtRequestContext, params: dict) -> dict:
+        path = ctx.resolve_path(params["path"])   # AcpError if outside the granted folders
+        return {"name": path.name, "cwd": str(ctx.cwd)}
+
+    provider = from_config(roots=["~/projects"], ext_handlers={"_vendor/workspace": workspace})
+
+The context has `method`, `session_id`, `cwd`, `roots`, `policy`, `resolve_path` (the
+jail `fs/*` is served under; use it rather than your own) and `log`. A handler that raises
+is answered with a generic error (`extension request failed`) and the exception is only
+logged. A `_` method with no handler is refused as not found, as before.
+
 ## The reference agent
 
 The package ships a small ACP *agent*, written with the standard library only,

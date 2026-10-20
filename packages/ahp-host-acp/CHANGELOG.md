@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+### Added — answering an agent's extension requests
+
+- `AgentSpec.ext_handlers` (and the `ext_handlers` keyword of `from_config`): a mapping of
+  extension method name (starting with `_`, e.g. `_vendor/workspace`) to an async
+  `handler(ctx: ExtRequestContext, params: dict) -> dict`. `ExtRequestContext` carries
+  `method`, `session_id`, `cwd`, `roots`, `policy`, `resolve_path` (the same roots jail
+  `fs/*` uses) and `log`. A handler that raises is answered with a generic JSON-RPC error
+  (`extension request failed`, no exception text). A `_` method with no handler is still
+  refused as not found.
+
 ## [0.1.0] - unreleased
 
 ### Fixed — the client-tool bridge's close

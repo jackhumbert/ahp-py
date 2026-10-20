@@ -113,6 +113,7 @@ AGENT_OPTIONS = frozenset(
         "model_command",
         "config_options",
         "mcp_servers",
+        "ext_handlers",
     }
 )
 
@@ -134,6 +135,15 @@ def provider_from_options(options: Mapping[str, Any], roots: Roots, state_dir: P
     ):
         raise ConfigError("model_command must be a string containing {model}")
     description = options.get("description")
+    ext_handlers = options.get("ext_handlers", {})
+    if not isinstance(ext_handlers, Mapping) or not all(
+        isinstance(name, str) and name.startswith("_") and callable(handler)
+        for name, handler in ext_handlers.items()
+    ):
+        raise ConfigError(
+            "ext_handlers must map method names starting with '_' to async callables"
+            " (set it from Python, not in a config file)"
+        )
     policy, client_methods = _policy(options)
     return AcpProvider(
         roots,
@@ -150,6 +160,7 @@ def provider_from_options(options: Mapping[str, Any], roots: Roots, state_dir: P
             model_command=model_command,
             config_options=_option_values(options),
             mcp_servers=_mcp_servers(options),
+            ext_handlers=dict(ext_handlers),
         ),
         display_name=str(options.get("agent_name", DEFAULT_AGENT_NAME)),
         models=_models(None, options),
