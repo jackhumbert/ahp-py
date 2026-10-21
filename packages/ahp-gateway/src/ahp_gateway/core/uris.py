@@ -29,6 +29,15 @@ nodes). Inbound, a `file:` URI whose first path segment is a node id is read
 as that node's ``ahp-file`` URI (:func:`from_client_alias`). The cost: a
 client's genuine local path that starts with ``/<node id>/`` would be misread.
 
+**Flat places** (opt-in, ``flat_places``). An editor labels a folder by the
+last segment of its URI, so under the nested layout a person who picks node
+``node-a`` then root ``proj`` sees only ``proj``. Flat places fold the node into
+that segment: ``file:///<root>/<rest>`` on node N is
+``ahp-file:///<N>: <root>/<rest>`` (the top of a node, ``file:///``, stays the
+bare ``ahp-file:///<N>``), and ``ahp-file:///`` lists one ``<N>: <root>`` entry per
+root each node serves. A first segment without ``": "`` keeps the nested
+meaning, so older URIs still route. Node ids never contain ``": "``.
+
 The nodes keep speaking plain `file:`; the gateway translates at the edge. Only
 whole string values are rewritten; a path quoted inside prose is left alone,
 because rewriting free text would corrupt what the agent said.
@@ -53,6 +62,7 @@ from ahp_protocol import ROOT_URI
 from ahp_protocol.channels import AUTOMATIONS_URI
 
 __all__ = [
+    "PLACE_SEPARATOR",
     "SCHEME",
     "VIRTUAL_ROOT",
     "ChannelOwners",
@@ -76,6 +86,8 @@ _LOCAL_PREFIX: Final = "file:///"
 _FILE_PREFIX: Final = "file://"
 #: Characters kept literal when a decoded path is written back into a URI.
 _PATH_SAFE: Final = "/:@!$&'()*+,;=-._~"
+#: Between node id and root name in a flat place's path segment.
+PLACE_SEPARATOR: Final = ": "
 
 #: Keys whose string value names a channel the sender owns. Read off the
 #: shapes the host emits: summaries and snapshots carry `resource`, action
@@ -119,7 +131,19 @@ def is_virtual_root(value: Any) -> bool:
     return isinstance(value, str) and value.rstrip("/") == f"{SCHEME}:"
 
 
-def node_of(value: Any) -> str | None:
+def split_place(segment: str) -> tuple[str, str | None]:
+    """A decoded first path segment as (node, root): `node-a: proj` is
+    ("node-a", "proj"); a bare node id is (id, None)."""
+    node, separator, root = segment.partition(PLACE_SEPARATOR)
+    return (node, root) if separator else (segment, None)
+
+
+def place_segment(node_id: str, root: str) -> str:
+    """The path segment (percent-encoded) of the flat place `<node>: <root>`."""
+    return quote(f"{node_id}{PLACE_SEPARATOR}{root}", safe=_PATH_SAFE)
+
+
+def node_of(value: Any, *, flat: bool = False) -> str | None:
     """The node an `ahp-file` URI names, or None for anything else (and for the
     virtual root, which names every node)."""
     value = canonical_uri(value)
@@ -130,10 +154,14 @@ def node_of(value: Any) -> str | None:
         node, _, _ = rest[1:].partition("/")
     else:
         node, _, _ = rest.partition("/")
+    if flat and PLACE_SEPARATOR in unquote(node):
+        node = split_place(unquote(node))[0]
     return node or None
 
 
-def from_client_alias(value: Any, node_ids: Collection[str], *, root_uri: bool = False) -> Any:
+def from_client_alias(
+    value: Any, node_ids: Collection[str], *, root_uri: bool = False, flat: bool = False
+) -> Any:
     """Read VS Code's `file:///<node>/...` spelling as `ahp-file:///<node>/...`, everywhere.
 
     With `root_uri`, a bare `file:///` is the list of nodes too; that is only
@@ -148,11 +176,14 @@ def from_client_alias(value: Any, node_ids: Collection[str], *, root_uri: bool =
         if not rest.strip("/"):
             return VIRTUAL_ROOT if root_uri else value
         first, _, _ = rest.partition("/")
-        return f"{_PREFIX}/{rest}" if unquote(first) in node_ids else value
+        name = unquote(first)
+        if flat:
+            name = split_place(name)[0]
+        return f"{_PREFIX}/{rest}" if name in node_ids else value
     if isinstance(value, Mapping):
-        return {key: from_client_alias(item, node_ids) for key, item in value.items()}
+        return {key: from_client_alias(item, node_ids, flat=flat) for key, item in value.items()}
     if isinstance(value, list):
-        return [from_client_alias(item, node_ids) for item in value]
+        return [from_client_alias(item, node_ids, flat=flat) for item in value]
     return value
 
 
@@ -161,8 +192,16 @@ def _drive_folded(path: str) -> str:
     return path[0].lower() + path[1:] if len(path) > 1 and path[1] == ":" else path
 
 
-def _qualify_one(value: str, node_id: str, root: str | None) -> str:
+def _qualify_one(value: str, node_id: str, root: str | None, flat: bool = False) -> str:
     absolute = unquote(value[len(_LOCAL_PREFIX) :])
+    if flat:
+        place, _, rel = absolute.lstrip("/").partition("/")
+        if not place:
+            return f"{_PREFIX}/{node_id}"
+        rel = rel.strip("/")
+        return f"{_PREFIX}/{place_segment(node_id, place)}" + (
+            f"/{quote(rel, safe=_PATH_SAFE)}" if rel else ""
+        )
     folded, folded_root = _drive_folded(absolute), _drive_folded(root) if root else None
     if (
         root is not None
@@ -177,10 +216,13 @@ def _qualify_one(value: str, node_id: str, root: str | None) -> str:
     return f"{_PREFIX}{node_id}/{quote(absolute.lstrip('/'), safe=_PATH_SAFE)}"
 
 
-def _unqualify_one(value: str, node_id: str, root: str | None) -> str:
+def _unqualify_one(value: str, node_id: str, root: str | None, flat: bool = False) -> str:
     rest = value[len(_PREFIX) :]
     if rest.startswith("/"):
         node, _, rel = rest[1:].partition("/")
+        place: str | None = None
+        if flat and PLACE_SEPARATOR in unquote(node):
+            node, place = split_place(unquote(node))
         if not node:
             raise ForeignUriError(f"{value} is the list of nodes, not a file on one")
         if node != node_id:
@@ -190,6 +232,11 @@ def _unqualify_one(value: str, node_id: str, root: str | None) -> str:
             # Relative to a root, `..` would climb out of it; a legitimate
             # client never sends one (the host refuses them too).
             raise ForeignUriError(f"{value} climbs out of {node_id}'s root")
+        if place is not None:
+            if not place or place == ".." or "/" in place:
+                raise ForeignUriError(f"{value} names no root on {node_id}")
+            joined = "/".join(part for part in (quote(place, safe=_PATH_SAFE), rel) if part)
+            return f"{_LOCAL_PREFIX}{joined}"
         base = quote(root, safe=_PATH_SAFE) if root is not None else ""
         joined = "/".join(part for part in (base, rel) if part)
         return f"{_LOCAL_PREFIX}{joined}"
@@ -199,18 +246,30 @@ def _unqualify_one(value: str, node_id: str, root: str | None) -> str:
     return f"{_LOCAL_PREFIX}{absolute}"
 
 
-def qualify_file_uris(value: Any, node_id: str, root: str | None = None) -> Any:
-    """Node -> surface: `file:///p` becomes an `ahp-file` URI, everywhere."""
+def qualify_file_uris(
+    value: Any, node_id: str, root: str | None = None, *, flat: bool = False
+) -> Any:
+    """Node -> surface: `file:///p` becomes an `ahp-file` URI, everywhere.
+
+    With `flat`, the first path segment is a root and joins the node id into one
+    segment (`ahp-file:///<node>: <root>/...`); `root` is not used.
+    """
     if isinstance(value, str):
-        return _qualify_one(value, node_id, root) if value.startswith(_LOCAL_PREFIX) else value
+        if value.startswith(_LOCAL_PREFIX):
+            return _qualify_one(value, node_id, root, flat)
+        return value
     if isinstance(value, Mapping):
-        return {key: qualify_file_uris(item, node_id, root) for key, item in value.items()}
+        return {
+            key: qualify_file_uris(item, node_id, root, flat=flat) for key, item in value.items()
+        }
     if isinstance(value, list):
-        return [qualify_file_uris(item, node_id, root) for item in value]
+        return [qualify_file_uris(item, node_id, root, flat=flat) for item in value]
     return value
 
 
-def unqualify_file_uris(value: Any, node_id: str, root: str | None = None) -> Any:
+def unqualify_file_uris(
+    value: Any, node_id: str, root: str | None = None, *, flat: bool = False
+) -> Any:
     """Surface -> node: an `ahp-file` URI on this node becomes its `file:///p`.
 
     One naming a *different* node raises :class:`ForeignUriError`: forwarding it
@@ -220,11 +279,13 @@ def unqualify_file_uris(value: Any, node_id: str, root: str | None = None) -> An
     """
     if isinstance(value, str):
         value = canonical_uri(value)
-        return _unqualify_one(value, node_id, root) if value.startswith(_PREFIX) else value
+        return _unqualify_one(value, node_id, root, flat) if value.startswith(_PREFIX) else value
     if isinstance(value, Mapping):
-        return {key: unqualify_file_uris(item, node_id, root) for key, item in value.items()}
+        return {
+            key: unqualify_file_uris(item, node_id, root, flat=flat) for key, item in value.items()
+        }
     if isinstance(value, list):
-        return [unqualify_file_uris(item, node_id, root) for item in value]
+        return [unqualify_file_uris(item, node_id, root, flat=flat) for item in value]
     return value
 
 

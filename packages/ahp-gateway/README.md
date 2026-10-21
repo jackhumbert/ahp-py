@@ -41,6 +41,19 @@ offering the agent. `Gateway(client_files="refuse")` answers InvalidParams
 for an `ahp-file` URI naming an unknown node. A folder naming a connected node
 (`file:///<node>/...` or `ahp-file:///<node>/...`) routes as before.
 
+## Flat places
+
+An editor labels a folder, in a working-directory chip or a folder picker, by the
+last segment of its URI and ignores host-provided display names. With the default
+nested layout (`ahp-file:///<node>/<root>/...`) picking node `node-a` then root
+`proj` shows just `proj`. Pass `Gateway(..., flat_places=True)` (default off) to
+fold the node into that segment: `file:///<root>/<rest>` on node `node-a` is
+`ahp-file:///node-a: proj/<rest>`, and the top of the tree lists one
+`node-a: proj` entry per root each node serves (read from the node's own
+top-level listing). A node with no named roots stays a bare `ahp-file:///<node>`.
+Inbound, a first segment without `": "` keeps its nested meaning, so older URIs
+still route. Node ids may not contain `": "`; the gateway refuses to admit one.
+
 ## Fleet tools: the orchestrator and flow sessions
 
 With an `OrchestratorConfig` (`Gateway(orchestrator=...)`), the gateway joins
