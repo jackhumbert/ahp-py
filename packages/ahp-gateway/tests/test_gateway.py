@@ -93,6 +93,28 @@ async def test_a_working_directory_picks_the_node_and_names_it() -> None:
         await fleet.aclose()
 
 
+async def test_a_single_slash_working_directory_picks_the_node_like_the_triple_slash_one() -> None:
+    # A client's URI `toString()` drops the empty authority of a non-`file`
+    # scheme, so `ahp-file:///node-b/x` comes back as `ahp-file:/node-b/x`.
+    fleet = Fleet(
+        {"node-a": echo_host("echo"), "node-b": echo_host("echo")},
+        [NodeRecord("node-a", "mem://a", DEV), NodeRecord("node-b", "mem://b", DEV)],
+        everyone_is_a_dev,
+    )
+    try:
+        async with fleet.surface() as client:
+            await client.create_session(
+                provider="echo", working_directories=["ahp-file:/node-b/srv/repo"]
+            )
+        async with fleet.direct("node-b") as node_b:
+            (on_b,) = (await node_b.sessions())["items"]
+        assert on_b["workingDirectories"] == ["file:///srv/repo"]
+        async with fleet.direct("node-a") as node_a:
+            assert not (await node_a.sessions())["items"]
+    finally:
+        await fleet.aclose()
+
+
 async def test_a_folderless_session_goes_to_the_first_node_offering_the_agent() -> None:
     # Two nodes, one agent, no folder: a plain chat. The inventory's first
     # connected node takes it rather than the request being refused.

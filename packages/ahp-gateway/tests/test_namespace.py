@@ -95,6 +95,18 @@ async def test_each_machines_folder_is_its_root(two_machines: Fleet) -> None:
         await two_machines.aclose()
 
 
+async def test_a_single_slash_uri_reads_like_the_triple_slash_one(two_machines: Fleet) -> None:
+    try:
+        raw, _ = await _connect(two_machines)
+        assert await _names(raw, "ahp-file:/box/game") == ["main.py"]
+        assert await _names(raw, "ahp-file:/") == ["box", "mac"]
+        read = await raw.request("resourceRead", {"uri": "ahp-file:/mac/notes.txt"})
+        assert "notes.txt" in str(read)
+        await raw.shutdown()
+    finally:
+        await two_machines.aclose()
+
+
 async def test_the_list_of_machines_is_read_only(two_machines: Fleet) -> None:
     try:
         raw, _ = await _connect(two_machines)

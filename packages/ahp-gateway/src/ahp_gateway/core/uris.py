@@ -57,6 +57,7 @@ __all__ = [
     "VIRTUAL_ROOT",
     "ChannelOwners",
     "ForeignUriError",
+    "canonical_uri",
     "from_client_alias",
     "is_virtual_root",
     "learn_owned",
@@ -93,6 +94,18 @@ class ForeignUriError(ValueError):
     """A request routed to one node named a file on another, or no node at all."""
 
 
+def canonical_uri(value: Any) -> Any:
+    """`ahp-file:/<node>/p` as `ahp-file:///<node>/p`.
+
+    A URI's `toString()` drops an empty authority for a non-`file` scheme, so a
+    client sends back the single-slash spelling of what the gateway advertised.
+    One with a real authority (`ahp-file://x/...`) is left as it is.
+    """
+    if isinstance(value, str) and value.startswith(f"{SCHEME}:/") and not value.startswith(_PREFIX):
+        return f"{_PREFIX}/{value[len(SCHEME) + 2 :]}"
+    return value
+
+
 def root_of(default_directory: Any) -> str | None:
     """A node's root as a decoded path ("home/dev/src", "C:/work"), from the
     `defaultDirectory` it advertised; None when it advertised none."""
@@ -109,6 +122,7 @@ def is_virtual_root(value: Any) -> bool:
 def node_of(value: Any) -> str | None:
     """The node an `ahp-file` URI names, or None for anything else (and for the
     virtual root, which names every node)."""
+    value = canonical_uri(value)
     if not isinstance(value, str) or not value.startswith(_PREFIX):
         return None
     rest = value[len(_PREFIX) :]
@@ -127,6 +141,7 @@ def from_client_alias(value: Any, node_ids: Collection[str], *, root_uri: bool =
     tree from its top would send it.
     """
     if isinstance(value, str):
+        value = canonical_uri(value)
         if not value.startswith(_LOCAL_PREFIX):
             return value
         rest = value[len(_LOCAL_PREFIX) :]
@@ -204,6 +219,7 @@ def unqualify_file_uris(value: Any, node_id: str, root: str | None = None) -> An
     client's own and passes through untouched.
     """
     if isinstance(value, str):
+        value = canonical_uri(value)
         return _unqualify_one(value, node_id, root) if value.startswith(_PREFIX) else value
     if isinstance(value, Mapping):
         return {key: unqualify_file_uris(item, node_id, root) for key, item in value.items()}

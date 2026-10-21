@@ -6,6 +6,8 @@ from ahp_gateway.core.uris import (
     VIRTUAL_ROOT,
     ChannelOwners,
     ForeignUriError,
+    canonical_uri,
+    from_client_alias,
     is_virtual_root,
     learn_owned_channels,
     node_of,
@@ -146,3 +148,21 @@ def test_the_first_owner_keeps_a_channel() -> None:
     owners.claim("b", {"x", "y"})
     assert owners.owner_of("x") == "a"
     assert owners.owner_of("y") == "b"
+
+
+def test_a_single_slash_spelling_is_the_triple_slash_one() -> None:
+    assert canonical_uri("ahp-file:/node-a/app/x.py") == "ahp-file:///node-a/app/x.py"
+    assert canonical_uri("ahp-file:/") == VIRTUAL_ROOT
+    # Already canonical, or carrying a real authority, or not ours: untouched.
+    assert canonical_uri("ahp-file:///node-a/x") == "ahp-file:///node-a/x"
+    assert canonical_uri("ahp-file://node-a/x") == "ahp-file://node-a/x"
+    assert canonical_uri("file:///x") == "file:///x"
+    assert node_of("ahp-file:/node-a/app") == "node-a"
+    assert unqualify_file_uris("ahp-file:/node-a/app/x.py", "node-a", ROOT) == (
+        "file:///home/dev/src/app/x.py"
+    )
+    assert from_client_alias({"uri": ["ahp-file:/node-a/x"]}, {"node-a"}) == {
+        "uri": ["ahp-file:///node-a/x"]
+    }
+    with pytest.raises(ForeignUriError):
+        unqualify_file_uris("ahp-file:/node-b/x", "node-a", ROOT)
