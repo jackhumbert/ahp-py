@@ -10,6 +10,15 @@ versions each release speaks.
 
 ## [Unreleased]
 
+### Added
+
+- A session with no working directory now carries `_meta.workspaceless: true` on its
+  `SessionSummary` (`listSessions`, `root/sessionAdded`, `root/sessionSummaryChanged`), which a
+  client that groups sessions by folder reads as "files with the plain chats, not under a folder".
+  Derived from `workingDirectories`, so adding a directory retracts it (`_meta` is re-sent without
+  the key), it follows a restart and a fork, and other `_meta` keys are kept. The key is exported
+  as `ahp_host.core.WORKSPACELESS_META_KEY`.
+
 ## [0.1.0] - unreleased
 
 The first release. It offers protocol versions **1.0.0, 0.9.0, 0.8.0, 0.7.0 and 0.6.0**

@@ -264,6 +264,14 @@ _SUMMARY_FIELDS: Final = (
     "_meta",
 )
 
+#: Key in `SessionSummary._meta` marking a session with no working directories.
+#: A client that groups its session list by folder reads `_meta.workspaceless
+#: === true` as "this chat belongs to no folder" and files it with the plain
+#: chats, instead of under a folder group it cannot name. The host derives it
+#: in `_project_summary`: set while the session has no working directory,
+#: absent once it has one (the other `_meta` keys are kept either way).
+WORKSPACELESS_META_KEY: Final = "workspaceless"
+
 #: Upper bound on one `listSessions` page. The spec lets a server "impose its
 #: own upper cap"; without one, a host with a large catalogue serialises the
 #: whole thing into a single response.
@@ -3047,6 +3055,18 @@ class Host:
         summary: dict[str, Any] = {}
         if isinstance(state, Mapping):
             summary = {key: state[key] for key in _SUMMARY_FIELDS if key in state}
+            # Derived from the directories rather than stored, so it cannot
+            # disagree with them: it follows a directory added later, a
+            # restart, and a fork (which inherits its source's directories).
+            meta = dict(summary["_meta"]) if isinstance(summary.get("_meta"), Mapping) else {}
+            meta.pop(WORKSPACELESS_META_KEY, None)
+            directories = state.get("workingDirectories")
+            if not (isinstance(directories, list) and directories):
+                meta[WORKSPACELESS_META_KEY] = True
+            if meta or "_meta" in session.published_summary:
+                # An empty `_meta` is still sent when one was announced before:
+                # `changes` replaces the value, and is the only way to retract.
+                summary["_meta"] = meta
         if session.changes is not None:
             # Summary-only, and so read from the session rather than from the
             # channel: `SessionSummary` declares `changes`, `SessionState` does

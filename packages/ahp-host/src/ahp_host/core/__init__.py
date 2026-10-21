@@ -11,7 +11,7 @@ from ahp_host.core.automations import (
     FileAutomationStore,
     InMemoryAutomationStore,
 )
-from ahp_host.core.host import Host, HostInfo
+from ahp_host.core.host import WORKSPACELESS_META_KEY, Host, HostInfo
 from ahp_host.core.policy import (
     PRINCIPAL_METADATA_KEY,
     ConnectionInfo,
@@ -26,6 +26,7 @@ __all__ = [
     "DEFAULT_SUPPORTED_VERSIONS",
     "PRINCIPAL_METADATA_KEY",
     "ROOT_URI",
+    "WORKSPACELESS_META_KEY",
     "AhpError",
     "AutomationStore",
     "ChannelKind",
