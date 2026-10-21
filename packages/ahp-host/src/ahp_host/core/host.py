@@ -7580,6 +7580,8 @@ class Host:
         await self._react(channel, action, connection)
         session = self._session_for(channel)
         if session is not None:
+            if action.get("type") == "chat/isReadChanged" and action.get("isRead") is True:
+                await self._roll_up_read(session)
             await self._mirror_summary(session)
 
     async def _queue_instead_of_starting(
@@ -8645,6 +8647,28 @@ class Host:
             return
         await self.sequencer.publish(session.uri, {"type": "session/titleChanged", "title": title})
         await self._mirror_summary(session)
+
+    async def _roll_up_read(self, session: _Session) -> None:
+        """Mark the session read once every one of its chats is read.
+
+        Some clients mark a chat read (`chat/isReadChanged`) and never dispatch
+        `session/isReadChanged`, which would leave the session's unread dot up
+        forever. The session is read exactly when no chat is unread, so the
+        host publishes the session-level action itself, the same one a client
+        would have sent. `_mark_unread` is the other direction.
+        """
+        state = self.sequencer.state_of(session.uri)
+        if not isinstance(state, Mapping):
+            return
+        status = state.get("status")
+        if not isinstance(status, int) or status & SessionStatus.IS_READ:
+            return
+        for chat_uri in {session.chat_uri, *session.chat_uris}:
+            chat = self.sequencer.state_of(chat_uri)
+            chat_status = chat.get("status") if isinstance(chat, Mapping) else None
+            if not isinstance(chat_status, int) or not chat_status & SessionStatus.IS_READ:
+                return
+        await self.sequencer.publish(session.uri, {"type": "session/isReadChanged", "isRead": True})
 
     async def _mark_unread(self, session: _Session) -> None:
         """Return the unread dot after the agent has answered.
