@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+### Added — opt-in side chats
+
+- `AgentSpec.side_chat: SideChatMode | None` (default `None`: no `sideChat` capability, a
+  side-chat `createChat` is refused, as before). When set, `multipleChats.sideChat` is
+  advertised and a side chat opens as its own ACP session, seeded once on its first prompt:
+  by default a bounded text preamble of the source conversation through the turn plus the
+  selection (`SideChatMode(max_chars=12000, preamble=True)`), or by an overridden
+  `AcpSession.side_chat_seed(origin: SideChatOrigin) -> SideChatSeed | None` (`_meta` on
+  `session/new` and the first prompt, and/or a preamble). `AcpProvider.session_class` names
+  the `AcpSession` subclass to use. A pending seed is saved with the chat's resume state.
+
 ### Added — answering an agent's extension requests
 
 - `AgentSpec.ext_handlers` (and the `ext_handlers` keyword of `from_config`): a mapping of

@@ -93,12 +93,37 @@ when the session is created, and AHP has no way to add to it later; the agent
 starts on a session's first turn, so the very first session an agent ever has
 offers no config. Every session after it does.
 
-Not yet: side chats (ACP has no way to give a session context outside its
-own conversation); annotation attachments (they live on a host channel this
+Side chats are opt-in (see below). Not yet: annotation attachments (they live on a host channel this
 adapter does not read); telling the agent *why* a call was declined -- ACP's
 permission answer has no field for a reason or a suggestion, so they stay in
 the transcript. The client filesystem and terminal methods are offered only
 with `[policy] host_tools = true` (see Security).
+
+### Side chats
+
+A client (VS Code, for one) offers "side chat" only when the agent advertises
+`capabilities.multipleChats.sideChat`, and then sends `createChat` with a
+`sideChat` source: the chat, the turn, and optionally the selected text. ACP
+cannot give one session another's conversation, so this is off by default (no
+capability, and the request is refused). Turn it on with
+`AgentSpec(..., side_chat=SideChatMode())`. A side chat is then an ordinary ACP
+session of its own, with its own turns; it never writes into the source chat.
+
+It is seeded once, on its first prompt. The built-in seed puts a text block
+ahead of that prompt: the source conversation through the named turn (whole
+turns, newest kept, at most `SideChatMode.max_chars` characters, saying how
+many were left out) and the selection, framed as reference material and not
+as instructions. `SideChatMode(preamble=False)` turns that off.
+
+To seed it another way (say, an agent that can fork its own session), subclass
+`AcpSession`, override `async def side_chat_seed(self, origin: SideChatOrigin)
+-> SideChatSeed | None`, and set `AcpProvider.session_class` to it. `origin`
+has the source chat URI, its ACP session id (if open here), the turn id, the
+selection as sent, and the source's turns through that turn. The returned
+`SideChatSeed(meta=..., preamble=...)` adds `meta` as `_meta` to the side
+chat's `session/new` and first `session/prompt`, and/or `preamble` as the text
+block before the first prompt. The seed is saved with the chat until that
+prompt is delivered, so a restart in between keeps it; it is applied once.
 
 ## Run it
 

@@ -120,6 +120,7 @@ from ahp_host_acp.mcp import McpServer
 from ahp_host_acp.options import AgentOptions, coerce, same
 from ahp_host_acp.paths import directory_of
 from ahp_host_acp.roots import Roots, as_roots
+from ahp_host_acp.side_chat import SideChatMode, SideChatOrigin, SideChatSeed, render_preamble
 from ahp_host_acp.tools import ToolCall, text_of
 
 log = logging.getLogger(__name__)
@@ -199,6 +200,9 @@ class AgentSpec:
     #: :class:`ahp_host_acp.client_methods.ExtRequestContext`. A `_` method with no
     #: handler is refused as not found. Python only, not a config-file key.
     ext_handlers: Mapping[str, ExtHandler] = field(default_factory=dict)
+    #: Offer side chats (`multipleChats.sideChat`): see :mod:`ahp_host_acp.side_chat`.
+    #: `None` (the default) advertises nothing and refuses a side chat.
+    side_chat: SideChatMode | None = None
 
 
 def launch_argv(spec: AgentSpec, cwd: Path) -> tuple[str, ...]:
@@ -230,8 +234,11 @@ class _Chat:
         acp_session_id: str | None = None,
         model: str | None = None,
         turns: int | None = 0,
+        seed: SideChatSeed | None = None,
     ) -> None:
         self.uri = uri
+        #: A side chat's seed, until the prompt carrying it was delivered.
+        self.seed = seed
         self.acp_session_id = acp_session_id
         #: The agent process this chat's session is open in; see
         #: `AcpSession._generation`. 0: none yet.
@@ -298,6 +305,7 @@ class _Chat:
             acp_session_id=session_id if isinstance(session_id, str) else None,
             model=saved_model if isinstance(saved_model, str) else model,
             turns=turns if isinstance(turns, int) and not isinstance(turns, bool) else None,
+            seed=SideChatSeed.restored(state.get("sideSeed")),
         )
 
     def state(self) -> dict[str, Any]:
@@ -308,6 +316,8 @@ class _Chat:
             state["model"] = self.model
         if self.turns is not None:
             state["turns"] = self.turns
+        if self.seed is not None:
+            state["sideSeed"] = self.seed.state()
         return state
 
     @property
@@ -568,6 +578,8 @@ class AcpSession:
                 )
                 # The chat shows turns the new session never saw.
                 chat.turns = None
+            if chat.seed is not None and chat.seed.meta:
+                base["_meta"] = dict(chat.seed.meta)
             result = _mapping(await conn.request("session/new", base))
             session_id = result.get("sessionId")
             if not isinstance(session_id, str) or not session_id:
@@ -727,18 +739,52 @@ class AcpSession:
         uri = context.chat_uri
         if uri in self._chats:
             return
-        if context.origin_kind == "sideChat":
-            # Not advertised: ACP has no way to give a session context that is
-            # not part of its own conversation.
-            raise AhpError(PERMISSION_DENIED, "this agent cannot open side chats")
         saved = self._saved_chats.pop(uri, None)
+        side = context.origin_kind == "sideChat"
+        if side and saved is None and self._spec.side_chat is None:
+            # Not advertised unless opted in: ACP has no way to give a session
+            # context that is not part of its own conversation.
+            raise AhpError(PERMISSION_DENIED, "this agent cannot open side chats")
         if saved is not None:
             self._chats[uri] = _Chat.restored(uri, saved, self._default.model)
             return
         chat = _Chat(uri, model=self._default.model)
-        if context.fork is not None:
+        if side:
+            chat.seed = await self._side_chat_seed(context)
+        elif context.fork is not None:
             await self._fork(chat, context.fork)
         self._chats[uri] = chat
+
+    async def _side_chat_seed(self, context: ChatContext) -> SideChatSeed | None:
+        origin = context.origin or {}
+        source = context.side_chat
+        source_uri = source.chat_uri if source is not None else origin.get("chat")
+        source_uri = source_uri if isinstance(source_uri, str) else None
+        selection = origin.get("selection")
+        known = self._chats.get(source_uri) if source_uri is not None else None
+        turn_id = source.turn_id if source is not None else origin.get("turnId")
+        seed = await self.side_chat_seed(
+            SideChatOrigin(
+                chat_uri=source_uri,
+                acp_session_id=known.acp_session_id if known is not None else None,
+                turn_id=turn_id if isinstance(turn_id, str) else None,
+                selection=selection if isinstance(selection, Mapping) else None,
+                turns=tuple(source.turns) if source is not None else (),
+            )
+        )
+        return seed if seed is not None and (seed.meta or seed.preamble) else None
+
+    async def side_chat_seed(self, origin: SideChatOrigin) -> SideChatSeed | None:
+        """How to seed a side chat's ACP session; override to do it your way.
+
+        Called once, as the side chat opens (`AgentSpec.side_chat` is set). The
+        default is the built-in preamble (:func:`~ahp_host_acp.side_chat.render_preamble`)
+        when the mode asks for it. Return ``None`` to seed nothing.
+        """
+        mode = self._spec.side_chat
+        if mode is None or not mode.preamble:
+            return None
+        return SideChatSeed(preamble=render_preamble(origin, mode.max_chars))
 
     async def _fork(self, chat: _Chat, fork: ForkedFrom) -> None:
         """Give *chat* a fork of its source chat's ACP session."""
@@ -873,7 +919,7 @@ class AcpSession:
             state["acpSessionId"] = self._default.acp_session_id
         chats: dict[str, Any] = dict(self._saved_chats)
         for uri, chat in self._chats.items():
-            if chat is not self._default and chat.acp_session_id:
+            if chat is not self._default and (chat.acp_session_id or chat.seed is not None):
                 chats[uri] = chat.state()
         if not state and not chats:
             return None
@@ -1359,14 +1405,18 @@ class AcpSession:
             await asyncio.wait({inflight}, timeout=SETTLE_TIMEOUT)
 
     async def _prompt(
-        self, conn: AcpConnection, chat: _Chat, blocks: Sequence[Mapping[str, Any]]
+        self,
+        conn: AcpConnection,
+        chat: _Chat,
+        blocks: Sequence[Mapping[str, Any]],
+        *,
+        meta: Mapping[str, Any] | None = None,
     ) -> Mapping[str, Any]:
         """One `session/prompt`, shielded: a stopped turn lets it finish in the background."""
-        task = asyncio.create_task(
-            conn.request(
-                "session/prompt", {"sessionId": chat.acp_session_id, "prompt": list(blocks)}
-            )
-        )
+        params: dict[str, Any] = {"sessionId": chat.acp_session_id, "prompt": list(blocks)}
+        if meta:
+            params["_meta"] = dict(meta)
+        task = asyncio.create_task(conn.request("session/prompt", params))
         chat.inflight = task
         task.add_done_callback(_consume)
         return _mapping(await asyncio.shield(task))
@@ -1431,18 +1481,22 @@ class AcpSession:
         # The reasons go out with this prompt and are dropped only once it was delivered:
         # an agent that dies on the prompt never read them, so the retry carries them again.
         # Declines made during this turn are appended after them, for the next prompt.
+        side, chat.seed = chat.seed, None
+        if side is not None and side.preamble:
+            blocks.insert(0, prompts.text(side.preamble))
         sent_declines = len(chat.declines)
         if sent_declines:
             # Last, so the agent's first text block stays the user's message.
             blocks.append({"type": "text", "text": "\n".join(chat.declines)})
         try:
-            result = await self._prompt(conn, chat, blocks)
+            result = await self._prompt(conn, chat, blocks, meta=side.meta if side else None)
         except asyncio.CancelledError:
             # The prompt was in flight (the agent has it); a cancel does not resend it.
             del chat.declines[:sent_declines]
             await self._cancel(chat)
             raise
         except AgentExitedError as error:
+            chat.seed = side or chat.seed  # the agent may never have read it
             await self._close_open_calls(chat, sink)
             await self._drop_connection()
             chat.turns = None  # whether the agent kept this turn is anyone's guess
@@ -1528,6 +1582,9 @@ class AcpProvider:
 
     #: `DeclaresCompletionTriggers`: the agent's slash commands open on `/`.
     completion_trigger_characters: Final = (slash.TRIGGER,)
+    #: The session type to create; a subclass of `AcpSession` here can override
+    #: hooks such as `AcpSession.side_chat_seed`.
+    session_class: type[AcpSession] = AcpSession
 
     def __init__(
         self,
@@ -1567,12 +1624,15 @@ class AcpProvider:
 
         `multipleChats`: every ACP agent can hold several sessions, which is
         what a chat is here. `fork` only when the agent's last `initialize`
-        said it can (`sessionCapabilities.fork`); `sideChat` never, since ACP
-        has no way to give a session context outside its own conversation.
+        said it can (`sessionCapabilities.fork`); `sideChat` only when
+        `AgentSpec.side_chat` opts in, since ACP has no way to give a session
+        context outside its own conversation (see :mod:`ahp_host_acp.side_chat`).
         """
         multiple: dict[str, Any] = {}
         if self.catalogue.session_capability("fork"):
             multiple["fork"] = True
+        if self.spec.side_chat is not None:
+            multiple["sideChat"] = True
         return AgentInfo(
             provider=self.provider_id,
             display_name=self._display_name,
@@ -1643,7 +1703,7 @@ class AcpProvider:
         )
 
     def _session(self, context: AgentSessionContext, **kwargs: Any) -> AcpSession:
-        session = AcpSession(
+        session = self.session_class(
             context,
             roots=self.roots,
             spec=self.spec,
