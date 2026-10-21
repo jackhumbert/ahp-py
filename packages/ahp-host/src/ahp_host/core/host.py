@@ -6667,7 +6667,7 @@ class Host:
             # client that names none is asking for a session with no folder (a
             # plain chat); the agent decides what that may touch, and filling in
             # the root would hand it the whole served tree instead.
-            requested = [self.default_directory]
+            requested = [self._fallback_directory()]
         if self._multiroot(self._provider_named(params.get("provider"))) is None:
             # "Servers without that capability treat only the first entry as the
             # session's working directory and ignore the rest." Truncate rather
@@ -6680,6 +6680,24 @@ class Host:
             if connection is None
             or self.policy.may_grant_working_directory(connection.info, session, directory)
         ]
+
+    def _fallback_directory(self) -> str:
+        """The advertised default directory, or the primary root for a named-roots host.
+
+        A named-roots host advertises the virtual top (`file:///`) for a picker
+        to open at. Served as "the primary root" by its resource provider, but
+        as a session's working directory it names the filesystem's own top to
+        anything that reads it literally (an agent's cwd). Its primary root is
+        the folder that is meant. A single-root host is unchanged.
+        """
+        assert self.default_directory is not None
+        roots = getattr(self.resources, "roots", None)
+        primary = getattr(roots, "primary", None)
+        if getattr(roots, "is_named", False) and isinstance(primary, Path):
+            candidate = primary.as_uri()
+            if self._inside_the_jail(candidate):
+                return candidate
+        return self.default_directory
 
     def _inside_the_jail(self, uri: str) -> bool:
         """Whether the installed resource provider would actually serve this.
