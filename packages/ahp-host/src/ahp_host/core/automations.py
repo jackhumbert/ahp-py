@@ -42,6 +42,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from ahp_host.core.plugin_copies import PluginCopy
 from ahp_host.core.private_files import make_owner_only
 from ahp_host.core.store import _write_atomically
+from ahp_host.provider.base import RunCredential
 
 __all__ = [
     "AUTOMATION_SCHEME",
@@ -51,6 +52,8 @@ __all__ = [
     "FileAutomationStore",
     "InMemoryAutomationStore",
     "Occurrence",
+    "RunCredential",
+    "RunCredentials",
     "after_date",
     "after_runs",
     "apply_patch",
@@ -589,6 +592,20 @@ class AutomationStore(Protocol):
     async def save(self, record: AutomationRecord) -> None: ...
 
     async def delete(self, resource: str) -> None: ...
+
+
+class RunCredentials(Protocol):
+    """Where an unattended run gets the credentials a connection would carry.
+
+    An automation run has no peer, so no caller token or headers reach the
+    provider. The host asks this hook once per run, before any session exists.
+    Returning ``None`` means the owner has no credentials: the run ends
+    ``failed`` ("no credentials for owner") and no session is created.
+    """
+
+    async def for_run(
+        self, principal: str | None, automation: AutomationRecord
+    ) -> RunCredential | None: ...
 
 
 class InMemoryAutomationStore:

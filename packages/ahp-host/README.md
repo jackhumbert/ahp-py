@@ -389,6 +389,13 @@ the copy under its own `ahp-plugin-copy:` URI, and gives it to every run
 session — so a run at 3 a.m. has the skills and prompts the user saved,
 with no client connected. The copy is bounded (500 files, 8 MiB); a capture
 that fails rejects the whole action.
+**Unattended runs can be given credentials.** A run has no connection, so no
+caller token or headers reach the provider. Pass `run_credentials=` to `Host`, an
+object with `async for_run(principal, automation)` (`RunCredentials`), and it is
+asked once per run for a `RunCredential` (`token`, `headers`), which the provider
+receives as `AgentSessionContext.credentials`. If it returns `None` the run ends
+`failed` with "no credentials for owner" and no session is created; with no hook
+a run behaves as before.
 **Disable conditions** (`afterRuns`, `afterDate`) stop scheduling on their own:
 `AutomationEntry.runCount` counts each scheduled run when it is admitted, a met
 condition sets `enabled` to false and leaves the conditions in place, and

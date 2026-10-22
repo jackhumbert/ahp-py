@@ -12,6 +12,11 @@ versions each release speaks.
 
 ### Added
 
+- `Host(run_credentials=...)` takes a `RunCredentials` hook (`for_run(principal, automation)`),
+  asked once per automation run, before any session exists. It returns a `RunCredential` (`token`,
+  `headers`), which the provider sees as `AgentSessionContext.credentials`; an unattended run has
+  no connection to carry them. Returning `None` fails the run with "no credentials for owner" and
+  creates no session. With no hook, nothing changes. Host-side only; no wire change.
 - Automations are owned by the principal that created them. The creator's `principal_of` is stamped
   on the `AutomationRecord` (`principal`, persisted by `FileAutomationStore`; older records load as
   `None`; never on the wire). Under a policy with a principal, the catalogue and the run channels

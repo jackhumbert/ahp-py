@@ -71,6 +71,7 @@ from ahp_host.core.automations import (
     TERMINAL_STATUSES,
     AutomationRecord,
     AutomationStore,
+    RunCredentials,
     after_date,
     after_runs,
     apply_patch,
@@ -189,6 +190,7 @@ from ahp_host.provider.base import (
     ResumableAgentProvider,
     ResumesOnRestore,
     ResumesTurns,
+    RunCredential,
     SessionPublisher,
     SteersTurns,
     TransfersChats,
@@ -1942,6 +1944,7 @@ class Host:
         automations: AutomationStore | None = None,
         automation_history: int = DEFAULT_AUTOMATION_HISTORY,
         max_content_bytes: int | None = DEFAULT_MAX_STORE_BYTES,
+        run_credentials: RunCredentials | None = None,
     ) -> None:
         if policy is None:  # pragma: no cover - defensive; typing already forbids it
             raise ValueError("a Policy is required; there is no default")
@@ -2121,6 +2124,8 @@ class Host:
         # means. An automation outlives the process by definition, so there is
         # no in-memory default to fall back on -- see `core/automations.py`.
         self.automations = automations
+        #: Supplies an unattended run its credentials; see `RunCredentials`.
+        self.run_credentials = run_credentials
         #: `AutomationCapabilities.runHistoryLimit`: terminal runs shown per
         #: automation before `fetchAutomationRuns` pages in more.
         self.automation_history = max(1, automation_history)
@@ -7181,6 +7186,7 @@ class Host:
         title: str | None = None,
         adopt_chat: str | None = None,
         principal: str | None = None,
+        credentials: RunCredential | None = None,
     ) -> asyncio.Task[None]:
         """`createSession`, and the host creating one of its own.
 
@@ -7196,7 +7202,9 @@ class Host:
 
         *principal* is for that no-connection case only: an automation run's
         session belongs to the automation's owner, so a policy that partitions
-        by owner lets them reach it.
+        by owner lets them reach it. *credentials* is likewise for that case:
+        what a `RunCredentials` hook supplied, handed to the provider's session
+        context.
 
         Returns the bring-up task, which a caller that must wait for the
         session to be `ready` awaits.
@@ -7371,7 +7379,9 @@ class Host:
         # Bring-up runs after the response so the client can subscribe first.
         # Hold a reference: a bare create_task can be garbage-collected mid-flight.
         self._audit("session.created", connection, channel=channel)
-        task = asyncio.create_task(self._bring_up(session, params, working_directories, forked))
+        task = asyncio.create_task(
+            self._bring_up(session, params, working_directories, forked, credentials)
+        )
         self._background.add(task)
         task.add_done_callback(self._background.discard)
         return task
@@ -7410,11 +7420,13 @@ class Host:
         params: Mapping[str, Any],
         working_directories: Sequence[str],
         forked: tuple[_Session, list[Any]] | None = None,
+        credentials: RunCredential | None = None,
     ) -> None:
         try:
             active_client = _active_clients(params.get("activeClient"))
             context = AgentSessionContext(
                 principal=session.principal,
+                credentials=credentials,
                 publisher=session.publisher,
                 session_uri=session.uri,
                 chat_uri=session.chat_uri,
@@ -9591,6 +9603,20 @@ class Host:
                     record, run_uri, "failed", f"no agent for provider {provider_id!r}"
                 )
                 return
+            credentials: RunCredential | None = None
+            if self.run_credentials is not None:
+                lookup_failed = False
+                try:
+                    credentials = await self.run_credentials.for_run(record.principal, record)
+                except Exception:
+                    lookup_failed = True
+                    _log.warning("run_credentials.for_run failed; treating as none", exc_info=True)
+                if credentials is None:
+                    reason = (
+                        "credentials lookup failed" if lookup_failed else "no credentials for owner"
+                    )
+                    await self._finish_run(record, run_uri, "failed", reason)
+                    return
             params: dict[str, Any] = {
                 # Minted in the shape VS Code mints its own, `<provider>:/<uuid>`.
                 "channel": f"{provider_id}:/{uuid.uuid4()}",
@@ -9606,6 +9632,7 @@ class Host:
                 origin={"kind": "automation", "automation": record.resource, "run": run_uri},
                 principal=record.principal,
                 title=title if isinstance(title, str) and title else None,
+                credentials=credentials,
             )
             session_uri = params["channel"]
             await self._run_changed(

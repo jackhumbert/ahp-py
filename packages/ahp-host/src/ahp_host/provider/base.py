@@ -74,6 +74,7 @@ __all__ = [
     "ResumesOnRestore",
     "ResumesTurns",
     "ReturnsStructuredOutput",
+    "RunCredential",
     "SessionDescription",
     "SessionDirectory",
     "SessionPublisher",
@@ -590,6 +591,19 @@ class ForkedFrom:
 
 
 @dataclass(frozen=True)
+class RunCredential:
+    """What an unattended session would otherwise take from a connection.
+
+    An automation run has no peer, so no caller token or headers reach the
+    provider; a host's `RunCredentials` hook supplies them here instead.
+    Host-side only, never published.
+    """
+
+    token: str | None = field(default=None, repr=False)
+    headers: Mapping[str, str] = field(default_factory=dict, repr=False)
+
+
+@dataclass(frozen=True)
 class AgentSessionContext:
     session_uri: str
     chat_uri: str
@@ -618,6 +632,9 @@ class AgentSessionContext:
     #: The principal of the connection that created the session (the policy's
     #: optional `principal_of`); restored from the store. ``None`` without the hook.
     principal: str | None = None
+    #: Credentials a `RunCredentials` hook supplied for an unattended automation
+    #: run, which has no connection to carry them. ``None`` for any other session.
+    credentials: RunCredential | None = None
 
 
 @dataclass(frozen=True)

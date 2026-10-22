@@ -24,11 +24,13 @@ from ahp_protocol.transport import memory_pair
 
 from ahp_host.core import Host, LoopbackSingleUserPolicy
 from ahp_host.core.automations import (
+    AutomationRecord,
     FileAutomationStore,
     InMemoryAutomationStore,
     iso,
 )
-from ahp_host.provider import EchoProvider
+from ahp_host.provider import AgentSessionContext, EchoProvider, RunCredential
+from ahp_host.provider.echo import EchoSession
 
 from .test_host_end_to_end import FakeClient
 
@@ -369,6 +371,96 @@ class TestARun:
             )["result"]["resource"]
             await _until(lambda: _status(host, run) == "failed")
             assert "gone" in host.sequencer.state_of(run)["lifecycle"]["error"]["message"]
+        finally:
+            await host.aclose()
+
+    async def test_run_credentials_reach_the_provider_session(self) -> None:
+        seen: list[AgentSessionContext] = []
+
+        class Recording(EchoProvider):
+            async def create_session(self, context: AgentSessionContext) -> EchoSession:
+                seen.append(context)
+                return await super().create_session(context)
+
+        class Hook:
+            def __init__(self) -> None:
+                self.asked: list[tuple[str | None, str]] = []
+
+            async def for_run(
+                self, principal: str | None, automation: AutomationRecord
+            ) -> RunCredential | None:
+                self.asked.append((principal, automation.resource))
+                return RunCredential(token="tok-1", headers={"x-note": "a"})
+
+        hook = Hook()
+        host = Host(
+            Recording(),
+            LoopbackSingleUserPolicy(),
+            automations=InMemoryAutomationStore(),
+            run_credentials=hook,
+        )
+        try:
+            client, _ = await _client(host)
+            await _create(client, host, _definition())
+            reply = await client.request(
+                "runAutomation",
+                {"channel": AUTOMATIONS_URI, "automation": AUTOMATION, "requestId": "r"},
+            )
+            await _until(lambda: _status(host, reply["result"]["resource"]) == "completed")
+            (context,) = seen
+            assert context.credentials == RunCredential(token="tok-1", headers={"x-note": "a"})
+            assert [resource for _, resource in hook.asked] == [AUTOMATION]
+        finally:
+            await host.aclose()
+
+    async def test_no_run_credentials_fails_the_run_without_a_session(self) -> None:
+        class Hook:
+            async def for_run(
+                self, principal: str | None, automation: AutomationRecord
+            ) -> RunCredential | None:
+                return None
+
+        host = Host(
+            EchoProvider(),
+            LoopbackSingleUserPolicy(),
+            automations=InMemoryAutomationStore(),
+            run_credentials=Hook(),
+        )
+        try:
+            client, _ = await _client(host)
+            await _create(client, host, _definition())
+            run = (
+                await client.request(
+                    "runAutomation",
+                    {"channel": AUTOMATIONS_URI, "automation": AUTOMATION, "requestId": "r"},
+                )
+            )["result"]["resource"]
+            await _until(lambda: _status(host, run) == "failed")
+            state = host.sequencer.state_of(run)
+            assert state["lifecycle"]["error"]["message"] == "no credentials for owner"
+            assert not state["sessions"]
+            assert not host._sessions
+        finally:
+            await host.aclose()
+
+    async def test_no_run_credentials_hook_leaves_the_session_without_any(self) -> None:
+        seen: list[AgentSessionContext] = []
+
+        class Recording(EchoProvider):
+            async def create_session(self, context: AgentSessionContext) -> EchoSession:
+                seen.append(context)
+                return await super().create_session(context)
+
+        host = Host(Recording(), LoopbackSingleUserPolicy(), automations=InMemoryAutomationStore())
+        try:
+            client, _ = await _client(host)
+            await _create(client, host, _definition())
+            reply = await client.request(
+                "runAutomation",
+                {"channel": AUTOMATIONS_URI, "automation": AUTOMATION, "requestId": "r"},
+            )
+            await _until(lambda: _status(host, reply["result"]["resource"]) == "completed")
+            assert seen[0].credentials is None
         finally:
             await host.aclose()
 

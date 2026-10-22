@@ -10,6 +10,7 @@ from ahp_host.core.automations import (
     AutomationStore,
     FileAutomationStore,
     InMemoryAutomationStore,
+    RunCredentials,
 )
 from ahp_host.core.host import WORKSPACELESS_META_KEY, Host, HostInfo
 from ahp_host.core.policy import (
@@ -39,6 +40,7 @@ __all__ = [
     "LoopbackSingleUserPolicy",
     "Policy",
     "RedactionError",
+    "RunCredentials",
     "Sequencer",
     "classify",
     "negotiate",

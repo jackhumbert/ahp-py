@@ -21,6 +21,7 @@ from ahp_host.provider.base import (
     ResumableAgentProvider,
     ResumesOnRestore,
     ReturnsStructuredOutput,
+    RunCredential,
     TurnSink,
     UserMessage,
 )
@@ -49,6 +50,7 @@ __all__ = [
     "ResumableAgentProvider",
     "ResumesOnRestore",
     "ReturnsStructuredOutput",
+    "RunCredential",
     "TurnSink",
     "UserMessage",
 ]
