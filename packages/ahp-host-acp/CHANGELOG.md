@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Fixed — usage meter
+
+- `UsageInfo.inputTokens` is now the most recent model call (the turn's last `usage_update.used`),
+  which is what clients read for the context-window meter. ACP's prompt-response usage sums every
+  round, so that sum moved to `_meta.turnTokenTotals` (`[{model, inputTokens, cachedTokens,
+  outputTokens}]`). An agent that sends no `usage_update` keeps the turn's input count as
+  `inputTokens`, as before.
+
 ### Added — opt-in side chats
 
 - `AgentSpec.side_chat: SideChatMode | None` (default `None`: no `sideChat` capability, a

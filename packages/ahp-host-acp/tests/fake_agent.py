@@ -14,6 +14,8 @@ The prompt text picks the behaviour:
 - ``selfmode``     the agent switches its own mode to `code`
 - ``plan``         a plan, the same plan again, then the plan moved on
 - ``usage``        a `usage_update` with a context size and a cost
+- ``rounds``       three `usage_update`s (used 100, 200, 300), then a turn usage summing them
+- ``sumonly``      a turn usage (input 600) and no `usage_update`
 - ``edit``         edit `notes.txt` (whole-file diff, shown only before it is written)
 - ``fragment``     edit `code.py` with a fragment diff, reported only once written
 - ``create``       create `new.txt`
@@ -586,6 +588,31 @@ def prompt(session_id: str, words: str) -> dict[str, Any]:
             },
         )
         return {"stopReason": "end_turn"}
+    if words == "rounds":
+        for used in (100, 200, 300):
+            update(
+                session_id,
+                {
+                    "sessionUpdate": "usage_update",
+                    "used": used,
+                    "size": 200000,
+                    "cost": {"amount": 0.5, "currency": "USD"},
+                },
+            )
+        return {
+            "stopReason": "end_turn",
+            "usage": {
+                "inputTokens": 600,
+                "outputTokens": 40,
+                "cachedReadTokens": 7,
+                "totalTokens": 640,
+            },
+        }
+    if words == "sumonly":
+        return {
+            "stopReason": "end_turn",
+            "usage": {"inputTokens": 600, "outputTokens": 40, "totalTokens": 640},
+        }
     if words == "edit":
         path = cwd / "notes.txt"
         old = read_exact(path)

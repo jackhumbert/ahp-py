@@ -362,6 +362,39 @@ async def test_usage_carries_the_context_window_and_cost(
     assert (model["id"], model["maxPromptTokens"]) == ("a", 200000)
 
 
+async def test_usage_reports_the_latest_call_and_the_turn_sum_apart(
+    tmp_path: Path, log: Path, catalogue: Path
+) -> None:
+    provider = _provider(tmp_path, log, "CONFIG_OPTIONS", catalogue=catalogue)
+    session = await provider.create_session(context(tmp_path))
+    try:
+        rounds = await _say(session, "rounds")
+        sum_only = await _say(session, "sumonly")
+    finally:
+        await session.aclose()
+    # (a) inputTokens is the last call's prompt; the turn sum rides in turnTokenTotals.
+    assert [e for e in rounds.events if e[0] == "usage"] == [("usage", 300, 40, 7, None)]
+    (meta,) = rounds.usage_meta
+    assert meta is not None
+    totals = meta["turnTokenTotals"]
+    assert [(t["inputTokens"], t["cachedTokens"], t["outputTokens"]) for t in totals] == [
+        (600, 7, 40)
+    ]
+    assert isinstance(totals[0]["model"], str)
+    # (d) the keys the bridge already published survive beside it.
+    assert meta["acpUsage"] == {
+        "used": 300,
+        "size": 200000,
+        "cost": {"amount": 0.5, "currency": "USD"},
+    }
+    # (c) the next turn does not inherit the last `used`; (b) with no usage_update
+    # the turn's own input count is what inputTokens falls back to.
+    assert [e for e in sum_only.events if e[0] == "usage"] == [("usage", 600, 40, None, None)]
+    (meta2,) = sum_only.usage_meta
+    assert meta2 is not None
+    assert meta2["turnTokenTotals"][0]["inputTokens"] == 600
+
+
 # -- edits -> changeset -------------------------------------------------------------------
 
 

@@ -1098,10 +1098,11 @@ class AcpSession:
     async def _on_usage(self, chat: _Chat, update: UsageUpdate) -> None:
         """`usage_update`: tokens in context, the window's size, and the cost.
 
-        `used` stands in for a turn's input tokens when the prompt's answer
-        has none; `size` and `cost` ride on the turn's usage `_meta` (see
-        :meth:`_report_usage`), and `size` is remembered as the model's
-        context window for the picker.
+        `used` is the latest model call's prompt size; the last one seen in a
+        turn is published as the turn's `inputTokens` (clients read that as the
+        most recent model call), see :meth:`_report_usage`. `size` and `cost`
+        ride on the turn's usage `_meta`, and `size` is remembered as the
+        model's context window for the picker.
         """
         chat.context_used = update.used
         if update.size > 0:
@@ -1539,14 +1540,21 @@ class AcpSession:
         `inputTokens` and the context size stands in for it, `acpUsage` says so
         (`inputGauge: true`): the figure is how full the context is, not what the
         turn consumed, and a reader that sums usage (a budget) must not count it.
+
+        `inputTokens` is the most recent model call, which clients read as the
+        context-window meter: the last `usage_update.used` of the turn when one
+        arrived. ACP's turn usage sums every round, so that sum goes to
+        `_meta.turnTokenTotals` (`[{model, inputTokens, cachedTokens,
+        outputTokens}]`) and is `inputTokens` only for an agent that sends no
+        `usage_update`.
         """
         usage = _mapping(result.get("usage"))
-        input_tokens = usage.get("inputTokens")
-        gauge = False
-        if not isinstance(input_tokens, int):
-            # No per-turn usage: the agent's context size is the best gauge.
+        turn_input = usage.get("inputTokens")
+        input_tokens = turn_input
+        # With no per-turn usage the agent's context size is a gauge, not a count.
+        gauge = chat.context_used is not None and not isinstance(turn_input, int)
+        if chat.context_used is not None:
             input_tokens = chat.context_used
-            gauge = input_tokens is not None
         output_tokens = usage.get("outputTokens")
         cached = usage.get("cachedReadTokens")
         acp_usage: dict[str, Any] = {}
@@ -1561,12 +1569,24 @@ class AcpSession:
             acp_usage["inputGauge"] = True
         if input_tokens is None and not isinstance(output_tokens, int) and not acp_usage:
             return
+        meta: dict[str, Any] = {}
+        if acp_usage:
+            meta["acpUsage"] = acp_usage
+        if isinstance(turn_input, int) or isinstance(output_tokens, int):
+            meta["turnTokenTotals"] = [
+                {
+                    "model": _current_model(chat) or "",
+                    "inputTokens": turn_input if isinstance(turn_input, int) else 0,
+                    "cachedTokens": cached if isinstance(cached, int) else 0,
+                    "outputTokens": output_tokens if isinstance(output_tokens, int) else 0,
+                }
+            ]
         await sink.usage(
             input_tokens=input_tokens,
             output_tokens=output_tokens if isinstance(output_tokens, int) else None,
             cache_read_tokens=cached if isinstance(cached, int) else None,
             model=chat.applied_model,
-            meta={"acpUsage": acp_usage} if acp_usage else None,
+            meta=meta or None,
         )
 
 
