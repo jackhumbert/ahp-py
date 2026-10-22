@@ -75,7 +75,7 @@ def provider_roots(host_roots: Roots | None, state_dir: Path) -> Roots:
         n += 1
         name = f"{RUNS_ROOT_NAME}-{n}"
     named = dict(zip(host_roots.names, host_roots.paths, strict=True))
-    return Roots.named({**named, name: runs})
+    return Roots.named({**named, name: runs}, host_roots.layout)
 
 
 def _accepts(factory: Any, name: str) -> bool:

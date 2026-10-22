@@ -282,6 +282,12 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="a folder sessions may work in (overrides the config's); repeat as NAME=PATH",
     )
     parser.add_argument(
+        "--roots-layout",
+        choices=("tree", "real"),
+        help="named roots: 'tree' (default) serves file:///<name>/..., 'real' serves each "
+        "root at its real path, browsable from / (overrides the config's roots_layout)",
+    )
+    parser.add_argument(
         "--timeout",
         type=float,
         metavar="SECONDS",

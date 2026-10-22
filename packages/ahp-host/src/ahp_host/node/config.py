@@ -9,6 +9,8 @@
     # how long a stop or restart waits for running turns to finish, in seconds (default 300)
     drain_timeout = 300
 
+    roots_layout = "tree"         # top-level, before [roots]; or "real" for real paths
+
     [roots]                       # named folders: file:///llm/..., file:///projects/...
     llm = 'G:\\llm'
     projects = 'C:\\Users\\me\\projects'
@@ -40,7 +42,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from ahp_host.node.roots import Roots, parse_root_arg
+from ahp_host.node.roots import LAYOUTS, Roots, parse_root_arg
 
 DEFAULT_STATE = Path.home() / ".local/state/ahp-node"
 DEFAULT_PORT = 4321
@@ -52,6 +54,7 @@ _KEYS = frozenset(
     {
         "root",
         "roots",
+        "roots_layout",
         "port",
         "bind",
         "token_file",
@@ -103,14 +106,14 @@ def _path(value: Any, key: str) -> Path:
     return Path(value).expanduser()
 
 
-def _named(roots: Mapping[str, Path]) -> Roots:
+def _named(roots: Mapping[str, Path], layout: str = "tree") -> Roots:
     try:
-        return Roots.named({name: path.expanduser() for name, path in roots.items()})
+        return Roots.named({name: path.expanduser() for name, path in roots.items()}, layout)
     except ValueError as exc:
         raise ConfigError(str(exc)) from exc
 
 
-def roots_from_flags(values: list[str]) -> Roots:
+def roots_from_flags(values: list[str], layout: str = "tree") -> Roots:
     parsed = [parse_root_arg(value) for value in values]
     named = [(name, path) for name, path in parsed if name is not None]
     if not named:
@@ -119,10 +122,10 @@ def roots_from_flags(values: list[str]) -> Roots:
         return Roots.single(parsed[0][1].expanduser())
     if len(named) != len(parsed):
         raise ConfigError("mix of named and unnamed --root flags: name them all")
-    return _named(dict(named))
+    return _named(dict(named), layout)
 
 
-def roots_from_file(data: Mapping[str, Any]) -> Roots | None:
+def roots_from_file(data: Mapping[str, Any], layout: str = "tree") -> Roots | None:
     if "root" in data and "roots" in data:
         raise ConfigError("use either root or [roots], not both")
     if "root" in data:
@@ -131,7 +134,7 @@ def roots_from_file(data: Mapping[str, Any]) -> Roots | None:
         table = data["roots"]
         if not isinstance(table, Mapping) or not table:
             raise ConfigError("[roots] must be a table of name = path")
-        return _named({name: _path(path, f"roots.{name}") for name, path in table.items()})
+        return _named({name: _path(path, f"roots.{name}") for name, path in table.items()}, layout)
     return None
 
 
@@ -174,7 +177,13 @@ def load(args: argparse.Namespace) -> NodeSettings:
     if unknown:
         raise ConfigError(f"{args.config}: unknown setting(s): {', '.join(unknown)}")
 
-    roots = roots_from_flags(args.root) if args.root else roots_from_file(data)
+    file_layout = data.get("roots_layout", "tree")
+    if not isinstance(file_layout, str):
+        raise ConfigError(f"{args.config}: roots_layout must be a string")
+    layout = getattr(args, "roots_layout", None) or file_layout
+    if layout not in LAYOUTS:
+        raise ConfigError(f"{args.config}: roots_layout must be one of: {', '.join(LAYOUTS)}")
+    roots = roots_from_flags(args.root, layout) if args.root else roots_from_file(data, layout)
     if roots is None:
         raise ConfigError("no folder to serve: give --root, or root / [roots] in the config")
     for path in roots.paths:

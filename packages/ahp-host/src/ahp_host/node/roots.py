@@ -11,13 +11,26 @@ is reachable, and each root is still served through ahp-host's jail
 only ever *chooses* a jail - it never opens a path itself.
 
 Behind a gateway the tree shows up as `<machine>/<name>/...`.
+
+Named roots can instead be served at their real paths (`layout="real"`,
+`--roots-layout real`): each root is its real absolute `file:` URI, and a
+picker can walk down from `file:///` through the *spine* - the directories on
+the way to a root (`/`, `/home`, `/home/dev` for a root `/home/dev/proj`). A
+spine directory lists only the children that are roots or lead to one, and the
+listing is synthesized from the roots, never read from the disk. It is a
+listing and nothing more: reading, writing or watching a spine path is refused
+like any path outside the roots. Tree spellings (`file:///<name>/<rel>`) still
+resolve to the named root, unless the URI is itself inside a real root or on
+the spine: the real path wins.
 """
 
 from __future__ import annotations
 
+import os
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from itertools import pairwise
 from pathlib import Path
 from urllib.parse import quote, unquote, urlparse
 
@@ -34,6 +47,7 @@ from ahp_host.node.paths import directory_of
 #: A root's name becomes a path segment every client shows; keep it plain.
 _NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
 _TOP = "file:///"
+LAYOUTS = ("tree", "real")
 
 
 def is_valid_root_name(name: str) -> bool:
@@ -50,24 +64,33 @@ class Roots:
 
     paths: tuple[Path, ...]
     names: tuple[str, ...] = ()
+    #: "tree": named roots under a virtual tree. "real": at their real URIs.
+    layout: str = "tree"
 
     @classmethod
     def single(cls, root: Path) -> Roots:
         return cls((Path(root).resolve(),))
 
     @classmethod
-    def named(cls, roots: Mapping[str, Path]) -> Roots:
+    def named(cls, roots: Mapping[str, Path], layout: str = "tree") -> Roots:
+        if layout not in LAYOUTS:
+            raise ValueError(f"roots layout {layout!r}: use one of {', '.join(LAYOUTS)}")
         if not roots:
             raise ValueError("at least one root is required")
         for name in roots:
             if not is_valid_root_name(name):
                 raise ValueError(f"root name {name!r}: use letters, digits, '.', '-', '_'")
         paths = tuple(Path(path).expanduser().resolve() for path in roots.values())
-        return cls(paths, tuple(roots))
+        return cls(paths, tuple(roots), layout)
 
     @property
     def is_named(self) -> bool:
         return bool(self.names)
+
+    @property
+    def is_real(self) -> bool:
+        """Named roots served at their real paths (the sparse real tree)."""
+        return self.is_named and self.layout == "real"
 
     @property
     def primary(self) -> Path:
@@ -80,15 +103,85 @@ class Roots:
 
     def default_directory(self) -> str:
         """What the host advertises for a folder picker to open at."""
-        return _TOP if self.is_named else self.primary.as_uri()
+        return _TOP if self.is_named and not self.is_real else self.primary.as_uri()
+
+    # -- the spine (real layout) --------------------------------------------------
+
+    def _chains(self) -> list[tuple[Path, ...]]:
+        """Each root's path from its anchor down to the root itself."""
+        return [(*reversed(root.parents), root) for root in self.paths]
+
+    def _spine_node(self, uri: str) -> tuple[Path | None] | None:
+        """The spine directory a URI names, as a one-tuple; None if it is not on
+        the spine. The tuple holds None for the top of a Windows machine (above
+        its drives)."""
+        parsed = urlparse(uri)
+        if parsed.scheme not in ("file", "vscode-agent-host"):
+            return None
+        if not parsed.path.strip("/") and os.name == "nt":
+            return (None,)
+        path = directory_of(uri)
+        if path is None or ".." in path.parts:
+            return None
+        if any(_inside(path, root) for root in self.paths):
+            return None
+        for chain in self._chains():
+            if path in chain[:-1]:
+                return (path,)
+        return None
+
+    def spine_children(self, uri: str) -> list[str] | None:
+        """Real layout: the names to list under a spine directory, or None.
+
+        Only the children that are roots or lead toward one; never the disk.
+        """
+        if not self.is_real:
+            return None
+        spine = self._spine_node(uri)
+        if spine is None:
+            return None
+        node = spine[0]
+        names: set[str] = set()
+        for chain in self._chains():
+            if node is None:
+                child: Path | None = chain[0]
+            else:
+                child = next((b for a, b in pairwise(chain) if a == node), None)
+            if child is not None:
+                names.add(child.name or child.drive or str(child))
+        return sorted(names)
+
+    def spine_uri(self, uri: str) -> str | None:
+        """The canonical URI of a spine directory, or None if not on the spine."""
+        if not self.is_real:
+            return None
+        spine = self._spine_node(uri)
+        if spine is None:
+            return None
+        node = spine[0]
+        return _TOP if node is None else node.as_uri()
 
     # -- URI <-> real path ------------------------------------------------------
 
     def _split(self, uri: str) -> tuple[int, str] | None:
-        """For a named tree URI: (root index, relative path); None if not one."""
+        """For a root's URI: (root index, relative path); None if not one.
+
+        Tree layout: `file:///<name>/<rel>`. Real layout: the real path inside
+        a root first, then (a real path wins) the tree spelling, unless the URI
+        is on the spine.
+        """
         parsed = urlparse(uri)
         if parsed.scheme not in ("file", "vscode-agent-host"):
             return None
+        if self.is_real:
+            path = directory_of(uri)
+            if path is not None and ".." not in path.parts:
+                for index, root in enumerate(self.paths):
+                    if _inside(path, root):
+                        rel = "" if path == root else path.relative_to(root).as_posix()
+                        return index, rel
+            if self._spine_node(uri) is not None:
+                return None
         segments = [unquote(s) for s in parsed.path.split("/") if s]
         if not segments or segments[0] not in self.names:
             return None
@@ -109,7 +202,13 @@ class Roots:
         """
         if self.is_named:
             parsed = urlparse(uri)
-            if parsed.scheme in ("file", "vscode-agent-host") and not parsed.path.strip("/"):
+            if self.is_real and self._spine_node(uri) is not None:
+                return None
+            if (
+                not self.is_real
+                and parsed.scheme in ("file", "vscode-agent-host")
+                and not parsed.path.strip("/")
+            ):
                 return self.primary
             split = self._split(uri)
             if split is not None:
@@ -127,6 +226,8 @@ class Roots:
         if not self.is_named:
             return real.as_uri() if self.contains(real) else None
         resolved = real.resolve()
+        if self.is_real:
+            return resolved.as_uri() if self.contains(resolved) else None
         for name, root in zip(self.names, self.paths, strict=True):
             if _inside(resolved, root):
                 rel = resolved.relative_to(root).as_posix()
@@ -137,6 +238,11 @@ class Roots:
 
 class NamedRootsResourceProvider:
     """A read-only view of several jailed roots under one small tree.
+
+    In the real layout the roots sit at their real URIs and the only thing
+    added is the spine: a listing-only chain of directories down from the top
+    (`Roots.spine_children`). `serves` stays False for it, so the host grants
+    no working directory, watch or read there.
 
     Deliberately has no `root` attribute: the host would compare working
     directories against it. It answers `serves` instead, which the host asks.
@@ -186,19 +292,25 @@ class NamedRootsResourceProvider:
         return parsed.scheme in ("file", "vscode-agent-host") and not parsed.path.strip("/")
 
     async def resolve(self, uri: str, *, follow_symlinks: bool = True) -> ResourceInfo:
-        if self._is_top(uri):
+        spine = self.roots.spine_uri(uri)
+        if spine is not None:
+            return ResourceInfo(uri=spine, type="directory")
+        if self._is_top(uri) and not self.roots.is_real:
             return ResourceInfo(uri=_TOP, type="directory")
         jail, real = self._jail_uri(uri)
         return self._to_tree(await jail.resolve(real, follow_symlinks=follow_symlinks))
 
     async def read(self, uri: str) -> ResourceContent:
-        if self._is_top(uri):
+        if self._is_top(uri) and not self.roots.is_real:
             raise errors.AhpError(-32009, "The list of folders is not a file")
         jail, real = self._jail_uri(uri)
         return await jail.read(real)
 
     async def list_dir(self, uri: str) -> Sequence[DirectoryEntry]:
-        if self._is_top(uri):
+        spine = self.roots.spine_children(uri)
+        if spine is not None:
+            return [DirectoryEntry(name=name, type="directory") for name in spine]
+        if self._is_top(uri) and not self.roots.is_real:
             return [DirectoryEntry(name=name, type="directory") for name in self.roots.names]
         jail, real = self._jail_uri(uri)
         return await jail.list_dir(real)

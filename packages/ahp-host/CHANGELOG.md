@@ -12,6 +12,13 @@ versions each release speaks.
 
 ### Added
 
+- Named roots can be served at their real paths: `roots_layout = "real"` in the node config, or
+  `ahp-node --roots-layout real` (`Roots.named(roots, layout="real")`). Each root is its real
+  absolute `file:` URI, the default directory is the primary root's, and a picker can browse down
+  from `file:///` through a listing-only spine of the directories leading to a root (children that
+  are roots or lead to one, synthesized, never read from disk; no read, write or watch). The jail
+  is unchanged and `file:///<name>/...` still resolves unless the URI is inside a real root or on
+  the spine. The default stays `tree`.
 - A session with no working directory now carries `_meta.workspaceless: true` on its
   `SessionSummary` (`listSessions`, `root/sessionAdded`, `root/sessionSummaryChanged`), which a
   client that groups sessions by folder reads as "files with the plain chats, not under a folder".

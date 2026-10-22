@@ -494,6 +494,16 @@ here will find it. The host reads it back and publishes the children, which is
 what makes a plugin's skills, prompts and instructions render rather than
 appearing as an empty container.
 
+**Named roots can be served at their real paths.** By default `[roots]` (or
+`--root NAME=PATH`) is shown as a small virtual tree: `file:///` lists the names and
+`file:///<name>/<rel>` is `<rel>` under that root. Set `roots_layout = "real"` (a top-level key, placed before `[roots]`; or
+`--roots-layout real`) and each root is served at its real absolute `file:` URI instead.
+A folder picker can walk down from `/` through the directories on the way to a root;
+those list only the children that are roots or lead to one, and they are a listing and
+nothing else (no read, write or watch). Anything else is refused as before, and the
+old `file:///<name>/...` spelling still works unless the URI is itself a real path
+inside a root or on the way to one.
+
 **`ahp-node` keeps itself running.** `ahp-node supervise` restarts the node,
 and the config's `tunnel` command, whenever they exit; `ahp-node install`
 registers that supervisor as the current user — a Scheduled Task at logon on
