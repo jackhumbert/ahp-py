@@ -11,6 +11,10 @@
     # or, instead of [roots], one unnamed folder served as itself:
     # root = "~/Github"
 
+    # named roots: "tree" (default) serves file:///<name>/..., "real" serves each
+    # root at its real path
+    # roots_layout = "real"
+
 Use single-quoted (literal) TOML strings for Windows paths so backslashes are
 kept as written. `~` is expanded everywhere a path is expected.
 """
@@ -28,7 +32,7 @@ from typing import Any
 from ahp_host.provider.policy import PolicyError, ToolPolicy, policy_from_table
 
 from ahp_host_claude.claude_ai import scope_of
-from ahp_host_claude.roots import Roots, parse_root_arg
+from ahp_host_claude.roots import LAYOUTS, Roots, parse_root_arg
 
 DEFAULT_STATE = Path.home() / ".local/state/ahp-host-claude"
 DEFAULT_PORT = 4321
@@ -40,6 +44,7 @@ _KEYS = frozenset(
     {
         "root",
         "roots",
+        "roots_layout",
         "port",
         "bind",
         "token_file",
@@ -95,7 +100,7 @@ def _path(value: Any, key: str) -> Path:
     return Path(value).expanduser()
 
 
-def _roots_from_flags(values: list[str]) -> Roots:
+def _roots_from_flags(values: list[str], layout: str = "tree") -> Roots:
     parsed = [parse_root_arg(value) for value in values]
     named = [(name, path) for name, path in parsed if name is not None]
     if not named:
@@ -104,17 +109,26 @@ def _roots_from_flags(values: list[str]) -> Roots:
         return Roots.single(parsed[0][1].expanduser())
     if len(named) != len(parsed):
         raise ConfigError("mix of named and unnamed --root flags: name them all")
-    return _named(dict(named))
+    return _named(dict(named), layout)
 
 
-def _named(roots: Mapping[str, Path]) -> Roots:
+def _named(roots: Mapping[str, Path], layout: str = "tree") -> Roots:
     try:
-        return Roots.named({name: path.expanduser() for name, path in roots.items()})
+        return Roots.named({name: path.expanduser() for name, path in roots.items()}, layout)
     except ValueError as exc:
         raise ConfigError(str(exc)) from exc
 
 
-def _roots_from_file(data: Mapping[str, Any]) -> Roots | None:
+def layout_of(flag: str | None, data: Mapping[str, Any]) -> str:
+    """The roots layout: the flag, else the file's `roots_layout`, else "tree"."""
+    layout = flag or data.get("roots_layout", "tree")
+    if not isinstance(layout, str) or layout not in LAYOUTS:
+        raise ConfigError(f"roots_layout must be one of: {', '.join(LAYOUTS)}")
+    return layout
+
+
+def _roots_from_file(data: Mapping[str, Any], layout: str | None = None) -> Roots | None:
+    layout = layout_of(layout, data)
     if "root" in data and "roots" in data:
         raise ConfigError("use either root or [roots], not both")
     if "root" in data:
@@ -123,7 +137,7 @@ def _roots_from_file(data: Mapping[str, Any]) -> Roots | None:
         table = data["roots"]
         if not isinstance(table, Mapping) or not table:
             raise ConfigError("[roots] must be a table of name = path")
-        return _named({name: _path(path, f"roots.{name}") for name, path in table.items()})
+        return _named({name: _path(path, f"roots.{name}") for name, path in table.items()}, layout)
     return None
 
 
@@ -206,7 +220,8 @@ def load(args: argparse.Namespace) -> Settings:
     if args.config is not None:
         data = read_config_file(Path(args.config).expanduser())
 
-    roots = _roots_from_flags(args.root) if args.root else _roots_from_file(data)
+    layout = layout_of(getattr(args, "roots_layout", None), data)
+    roots = _roots_from_flags(args.root, layout) if args.root else _roots_from_file(data, layout)
     if roots is None:
         raise ConfigError("no folder to serve: give --root, or root / [roots] in a config file")
     for path in roots.paths:

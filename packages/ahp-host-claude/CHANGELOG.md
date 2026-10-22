@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Added
+
+- `--roots-layout {tree,real}` and the `roots_layout` config key: serve named roots at
+  their real paths (`real`) instead of under `file:///<name>/` (`tree`, the default).
+
 ## [0.1.0] - unreleased
 
 ### Added — release preparation (M18)

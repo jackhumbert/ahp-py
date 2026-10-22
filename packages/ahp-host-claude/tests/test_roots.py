@@ -264,3 +264,73 @@ def test_chat_tools_from_a_flag_or_the_config_file(tmp_path: Path) -> None:
     assert load(_parse_args(["--root", str(tmp_path)])).chat_tools is None
     with pytest.raises(ConfigError, match="chat_tools"):
         load(_parse_args(["--root", str(tmp_path), "--chat-tools", "WebSearch,Bash"]))
+
+
+@pytest.fixture
+def real_roots(two_roots: Roots) -> Roots:
+    llm, work = two_roots.paths
+    return Roots.named({"llm": llm, "work": work}, "real")
+
+
+def test_roots_layout_flag() -> None:
+    assert _parse_args(["--roots-layout", "real"]).roots_layout == "real"
+    assert _parse_args([]).roots_layout is None
+    with pytest.raises(SystemExit):
+        _parse_args(["--roots-layout", "flat"])
+
+
+def test_roots_layout_from_flag_and_file(two_roots: Roots, tmp_path: Path) -> None:
+    llm, work = two_roots.paths
+    config = _write(
+        tmp_path / "node.toml",
+        f"roots_layout = 'real'\n[roots]\nllm = '{llm}'\nwork = '{work}'\n",
+    )
+    assert load(_parse_args(["--config", str(config)])).roots.is_real
+    flagged = load(_parse_args(["--config", str(config), "--roots-layout", "tree"]))
+    assert not flagged.roots.is_real
+    from_flags = load(
+        _parse_args(["--root", f"llm={llm}", "--root", f"work={work}", "--roots-layout", "real"])
+    )
+    assert from_flags.roots.is_real
+    assert not load(_parse_args(["--root", f"llm={llm}"])).roots.is_real
+    bad = _write(tmp_path / "bad.toml", f"roots_layout = 'flat'\nroot = '{llm}'\n")
+    with pytest.raises(ConfigError):
+        load(_parse_args(["--config", str(bad)]))
+
+
+def test_real_layout_default_directory(real_roots: Roots) -> None:
+    assert real_roots.default_directory() == real_roots.paths[0].as_uri()
+
+
+async def test_real_layout_session_cwd_and_spine(real_roots: Roots) -> None:
+    from claude_agent_sdk import ClaudeAgentOptions, ResultMessage
+
+    result = ResultMessage(
+        subtype="success",
+        duration_ms=1,
+        duration_api_ms=1,
+        is_error=False,
+        num_turns=1,
+        session_id="s",
+    )
+    clients: list[FakeClient] = []
+
+    def factory(options: ClaudeAgentOptions) -> FakeClient:
+        clients.append(FakeClient(options, [[result]]))
+        return clients[-1]
+
+    work = real_roots.paths[1]
+    provider = ClaudeProvider(real_roots, client_factory=factory)
+    session = await provider.create_session(
+        AgentSessionContext(
+            session_uri="s",
+            chat_uri="c",
+            provider_id="claude",
+            working_directories=((work / "app").as_uri(),),
+        )
+    )
+    await session.send_user_message(UserMessage(text="x"), RecordingSink())
+    assert clients[0].options.cwd == str(work / "app")
+
+    listing = await NamedRootsResourceProvider(real_roots).list_dir("file:///")
+    assert {e.name for e in listing} == {p.parts[1] for p in real_roots.paths}

@@ -287,6 +287,7 @@ error, so a typo cannot silently fall back to a default.
 | Setting / flag | Meaning |
 |---|---|
 | `[roots]` / `--root NAME=PATH` (repeatable) | Named folders. Clients browse (read-only) a small tree of them; sessions may work in any. Nothing else on the machine is reachable. A session with no folder is a chat, with no file or shell tools. |
+| `roots_layout` / `--roots-layout {tree,real}` | Named folders only. `tree` (default) serves `file:///<name>/...`; `real` serves each folder at its real path, with only the directories leading to them browsable from `/`. The flag overrides the file. |
 | `root` / `--root PATH` | One unnamed folder, served as itself. |
 | `token_file` / `--token-file` | Require this connection token. Read from a file so it never appears in `ps` or logs. |
 | `port`, `bind` / `--port`, `--bind` | Default `127.0.0.1:4321`. Loopback only. |

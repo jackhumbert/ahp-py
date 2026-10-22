@@ -5,6 +5,7 @@ ahp-host when a node learned to serve several agents.
 """
 
 from ahp_host.node.roots import (
+    LAYOUTS,
     NamedRootsResourceProvider,
     Roots,
     as_roots,
@@ -13,6 +14,7 @@ from ahp_host.node.roots import (
 )
 
 __all__ = [
+    "LAYOUTS",
     "NamedRootsResourceProvider",
     "Roots",
     "as_roots",
