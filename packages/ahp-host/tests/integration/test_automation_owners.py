@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -291,6 +292,87 @@ class TestScheduledRunsBelongToTheOwner:
         await _until(lambda: "primarySession" in host.sequencer.state_of(run))
         session = host.sequencer.state_of(run)["primarySession"]
         assert policy.owner_of(session) == "alice"
+
+    async def test_a_scheduled_run_session_is_alices_and_hidden_from_bob(self) -> None:
+        policy = OwnedSessionPolicy(principal_from_header(_HEADER))
+        host = Host(EchoProvider(), policy, automations=InMemoryAutomationStore())
+        try:
+            alice, _ = await _user(host, "alice", "a1")
+            bob, _ = await _user(host, "bob", "b1")
+            await _dispatch(
+                alice,
+                AUTOMATIONS_URI,
+                {
+                    "type": "automation/createRequested",
+                    "resource": AUTOMATION,
+                    "definition": _definition(
+                        triggers=[
+                            {
+                                "id": "t1",
+                                "kind": "schedule",
+                                "schedule": {"expression": "*/5 * * * *", "timeZone": "UTC"},
+                            }
+                        ]
+                    ),
+                },
+            )
+            await _until(lambda: any(e["resource"] == AUTOMATION for e in _entries(host)))
+            now = datetime.now(UTC) + timedelta(minutes=10)
+            assert await host.run_due_automations(now) == 1
+            (summary,) = _entries(host)[0]["runs"]
+            run = summary["resource"]
+            await _until(lambda: "primarySession" in host.sequencer.state_of(run))
+            session = host.sequencer.state_of(run)["primarySession"]
+            assert policy.owner_of(run) == "alice"
+            assert policy.owner_of(session) == "alice"
+            for channel in (run, session):
+                assert "error" not in await alice.request("subscribe", {"channel": channel})
+                refused = await bob.request("subscribe", {"channel": channel})
+                assert refused["error"]["code"] == -32009
+        finally:
+            await host.aclose()
+
+    async def test_a_manual_run_session_is_alices_and_hidden_from_bob(
+        self, shared: tuple[Host, OwnedSessionPolicy]
+    ) -> None:
+        host, policy = shared
+        alice, bob = await _alice_creates(host)
+        reply = await alice.request(
+            "runAutomation",
+            {"channel": AUTOMATIONS_URI, "automation": AUTOMATION, "requestId": "r1"},
+        )
+        run = reply["result"]["resource"]
+        await _until(lambda: "primarySession" in host.sequencer.state_of(run))
+        session = host.sequencer.state_of(run)["primarySession"]
+        assert policy.owner_of(run) == "alice"
+        assert policy.owner_of(session) == "alice"
+        for channel in (run, session):
+            refused = await bob.request("subscribe", {"channel": channel})
+            assert refused["error"]["code"] == -32009
+
+    async def test_an_ownerless_automation_makes_an_ownerless_run_session(self) -> None:
+        policy = OwnedSessionPolicy(principal_from_header(_HEADER))
+        store = InMemoryAutomationStore()
+        await store.save(
+            AutomationRecord(
+                resource=AUTOMATION,
+                definition=_definition(),
+                created_at="2026-01-01T00:00:00.000Z",
+                modified_at="2026-01-01T00:00:00.000Z",
+            )
+        )
+        host = Host(EchoProvider(), policy, automations=store)
+        try:
+            await _user(host, "alice", "a1")
+            (record,) = host._automations.values()
+            assert record.principal is None
+            run = await host._start_run(record, {"kind": "trigger", "triggerId": "t"})
+            await _until(lambda: "primarySession" in host.sequencer.state_of(run))
+            session = host.sequencer.state_of(run)["primarySession"]
+            assert policy.owner_of(run) is None
+            assert policy.owner_of(session) is None
+        finally:
+            await host.aclose()
 
 
 class TestPersistence:

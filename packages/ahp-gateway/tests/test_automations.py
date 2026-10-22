@@ -16,14 +16,16 @@ from typing import Any
 
 from ahp_client import AhpClient
 from ahp_client.client import ActionEvent, Subscription
-from ahp_host import Host, LoopbackSingleUserPolicy
+from ahp_host import ConnectionInfo, Host, LoopbackSingleUserPolicy
 from ahp_host.core import InMemoryAutomationStore
+from ahp_host.core.policies import OwnedSessionPolicy, principal_from_header
 from ahp_host.core.resources import RootedFilesystemResourceProvider
 from ahp_host.provider.echo import EchoProvider
+from ahp_protocol import Transport, memory_pair
 from ahp_protocol.channels import AUTOMATIONS_URI
 
-from ahp_gateway.registry import NodeRecord
-from tests.fleet import DEV, Fleet, everyone_is_a_dev
+from ahp_gateway.registry import NodeRecord, Principal
+from tests.fleet import DEV, Fleet, HostConnector, everyone_is_a_dev
 
 
 def _machine(base: Path, name: str, *, automations: bool = True) -> Host:
@@ -257,5 +259,86 @@ async def test_the_catalogue_is_every_machines_entries(tmp_path: Path) -> None:
         resources = {e["resource"] for e in result["snapshot"]["state"]["entries"]}
         assert resources == {"ahp-automation:/mac", "ahp-automation:/box"}
         await second.shutdown()
+    finally:
+        await fleet.aclose()
+
+
+_HEADER = "x-forwarded-user"
+
+
+class _AsThePrincipal(HostConnector):
+    """Dials each node as the surface's principal, the way a proxy would."""
+
+    async def connect(self, record: NodeRecord, principal: Principal) -> Transport:
+        self.dialed.append((record.node_id, principal.subject))
+        client_end, server_end = memory_pair()
+        self.tasks.append(
+            asyncio.create_task(
+                self.hosts[record.node_id].serve(
+                    server_end, peer="gateway", headers={_HEADER: principal.subject}
+                )
+            )
+        )
+        return client_end
+
+
+def _client_id_is_the_user(info: ConnectionInfo) -> Principal:
+    return Principal(info.client_id, DEV)
+
+
+async def test_another_user_cannot_see_or_run_an_automation_through_the_gateway(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "box" / "Github"
+    (root / "project").mkdir(parents=True)
+    host = Host(
+        EchoProvider(provider_id="claude"),
+        OwnedSessionPolicy(principal_from_header(_HEADER)),
+        resources=RootedFilesystemResourceProvider(root),
+        default_directory=root.resolve().as_uri(),
+        automations=InMemoryAutomationStore(),
+    )
+    fleet = Fleet({"box": host}, [NodeRecord("box", "mem://box", DEV)], _client_id_is_the_user)
+    fleet.connector = _AsThePrincipal(fleet.hosts)
+    fleet.gateway.connector = fleet.connector
+    try:
+        alice = AhpClient(fleet.surface_transport())
+        await alice.connect()
+        await alice.initialize(client_id="alice")
+        _, subscription = await alice.subscribe(AUTOMATIONS_URI)
+        watch = _Watch(subscription)
+        resource = "ahp-automation:/alices"
+        alice.dispatch(
+            AUTOMATIONS_URI,
+            {
+                "type": "automation/createRequested",
+                "resource": resource,
+                "definition": _definition(),
+            },
+        )
+        await watch.until(lambda: bool(watch.of("automation/set")))
+
+        bob = AhpClient(fleet.surface_transport())
+        await bob.connect()
+        await bob.initialize(client_id="bob")
+        result, _ = await bob.subscribe(AUTOMATIONS_URI)
+        assert result["snapshot"]["state"] == {"entries": []}
+        refused = None
+        try:
+            await bob.request(
+                "runAutomation",
+                {"channel": AUTOMATIONS_URI, "automation": resource, "requestId": "r1"},
+            )
+        except Exception as error:
+            refused = error
+        assert refused is not None
+        assert "-32009" in str(refused)
+        assert host._automations[resource].runs == []
+
+        again, _ = await alice.subscribe(AUTOMATIONS_URI)
+        assert [e["resource"] for e in again["snapshot"]["state"]["entries"]] == [resource]
+        watch.close()
+        await alice.shutdown()
+        await bob.shutdown()
     finally:
         await fleet.aclose()
