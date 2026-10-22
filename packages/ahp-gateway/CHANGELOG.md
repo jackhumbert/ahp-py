@@ -8,6 +8,9 @@ Every release states the protocol versions it speaks.
 
 ### Added
 
+- **`Gateway(flat_places=<callable>)`.** `flat_places` also accepts a callable taking the
+  authenticated `Principal` and returning a bool, resolved once per connection after
+  authentication. A bool behaves exactly as before.
 - **`Gateway(client_files="refuse")`.** Opt-in (default `"passthrough"`, unchanged). A new
   session's folder (`workingDirectories`, `workingDirectory`, `uri`, `root`, `cwd`) that is
   still a `file:` URI after the `file:///<node>/...` alias - a mistyped or unconnected node

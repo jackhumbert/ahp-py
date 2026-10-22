@@ -54,6 +54,11 @@ top-level listing). A node with no named roots stays a bare `ahp-file:///<node>`
 Inbound, a first segment without `": "` keeps its nested meaning, so older URIs
 still route. Node ids may not contain `": "`; the gateway refuses to admit one.
 
+`flat_places` may also be a callable taking the authenticated `Principal` and
+returning a bool. It is resolved once per connection, right after authentication,
+so an embedder can choose per person: a connection narrowed to a single node has
+no need to fold the node into the folder name, and can get plain root names.
+
 ## Fleet tools: the orchestrator and flow sessions
 
 With an `OrchestratorConfig` (`Gateway(orchestrator=...)`), the gateway joins

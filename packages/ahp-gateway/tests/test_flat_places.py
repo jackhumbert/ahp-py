@@ -95,10 +95,10 @@ def _fleet(**options: Any) -> Fleet:
     )
 
 
-async def _connect(fleet: Fleet) -> AhpClient:
+async def _connect(fleet: Fleet, client_id: str = "picker") -> AhpClient:
     raw = AhpClient(fleet.surface_transport())
     await raw.connect()
-    await raw.initialize(client_id="picker")
+    await raw.initialize(client_id=client_id)
     return raw
 
 
@@ -114,6 +114,29 @@ async def test_the_top_lists_one_entry_per_root_and_a_bare_id_without_roots() ->
         ]
         assert {e["type"] for e in listed["entries"]} == {"directory"}
         await raw.shutdown()
+    finally:
+        await fleet.aclose()
+
+
+async def test_a_callable_decides_per_connection_from_the_principal() -> None:
+    fleet = _fleet(flat_places=lambda principal: principal.subject == "person-a")
+    try:
+        flat = await _connect(fleet, "person-a")
+        nested = await _connect(fleet, "person-b")
+        flat_top = await flat.request("resourceList", {"uri": "ahp-file:///"})
+        nested_top = await nested.request("resourceList", {"uri": "ahp-file:///"})
+        assert sorted(e["name"] for e in flat_top["entries"]) == [
+            "node-a: docs",
+            "node-a: proj",
+            "node-b",
+        ]
+        assert sorted(e["name"] for e in nested_top["entries"]) == ["node-a", "node-b"]
+        flat_dir = await flat.request("resourceList", {"uri": "ahp-file:///node-a: proj"})
+        assert [e["name"] for e in flat_dir["entries"]] == ["a.txt"]
+        nested_dir = await nested.request("resourceList", {"uri": "ahp-file:///node-a/proj"})
+        assert [e["name"] for e in nested_dir["entries"]] == ["a.txt"]
+        await flat.shutdown()
+        await nested.shutdown()
     finally:
         await fleet.aclose()
 
