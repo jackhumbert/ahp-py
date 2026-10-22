@@ -12,6 +12,10 @@ versions each release speaks.
 
 ### Added
 
+- **`InitializeResult._meta["vscode.autonomousAutomations"]: true`** whenever automations are
+  enabled. The VS Code client uses an `automations` catalogue only with this key; without it, it
+  reports the host as needing an update. The host runs its own schedule, so the claim holds.
+
 - `Host(run_credentials=...)` takes a `RunCredentials` hook (`for_run(principal, automation)`),
   asked once per automation run, before any session exists. It returns a `RunCredential` (`token`,
   `headers`), which the provider sees as `AgentSessionContext.credentials`; an unattended run has

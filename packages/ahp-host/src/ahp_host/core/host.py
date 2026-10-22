@@ -28,6 +28,7 @@ from typing import Any, Final
 
 from ahp_protocol import errors
 from ahp_protocol.channels import AUTOMATIONS_URI, ROOT_URI
+from ahp_protocol.ext.client_meta import AUTONOMOUS_AUTOMATIONS_META_KEY
 from ahp_protocol.ext.delegation import ORIGIN_META_KEY, parse_delegation
 from ahp_protocol.ext.operation import operation_params
 from ahp_protocol.ext.redaction import (
@@ -3093,6 +3094,10 @@ class Host:
                 # a definition is saved (`plugin_copies.py`).
                 "customizations": {},
             }
+            # This host schedules and runs automations itself (`_schedule_loop`),
+            # so it says so to clients that ask for that before they will use
+            # the catalogue (`ahp_protocol.ext.client_meta`).
+            result["_meta"][AUTONOMOUS_AUTOMATIONS_META_KEY] = True
         return result
 
     async def _subscribe(self, connection: Connection, params: Mapping[str, Any]) -> dict[str, Any]:

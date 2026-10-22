@@ -65,6 +65,7 @@ from ahp_protocol.errors import (
     provider_not_found,
     unsupported_protocol_version,
 )
+from ahp_protocol.ext.client_meta import AUTONOMOUS_AUTOMATIONS_META_KEY
 
 import ahp_gateway
 from ahp_gateway.core.node import NodeConnector, NodeLink, open_node_link
@@ -838,17 +839,25 @@ class _SurfaceConnection:
             values = [handshake.get(key) for handshake in handshakes]
             if values[0] is not None and all(value == values[0] for value in values):
                 agreed[key] = values[0]
-        capabilities = [
-            handshake["automations"]
+        hosting = [
+            handshake
             for node, handshake in zip(self.nodes.values(), handshakes, strict=True)
             if node.automations is not None and isinstance(handshake.get("automations"), Mapping)
         ]
+        capabilities = [handshake["automations"] for handshake in hosting]
         if capabilities:
             # Unlike the fields above, advertised when ANY node hosts
             # automations: the catalogue holds only theirs, and a new one is
             # only ever sent to one of them, so nothing is promised that the
             # fleet cannot keep. The options are those all of them offer.
             agreed["automations"] = _common_capabilities(capabilities)
+            # Every hosting node must say it runs its own automations: one that
+            # needs a client to activate them would be promised otherwise.
+            if all(
+                _meta_of(handshake).get(AUTONOMOUS_AUTOMATIONS_META_KEY) is True
+                for handshake in hosting
+            ):
+                agreed["_meta"] = {AUTONOMOUS_AUTOMATIONS_META_KEY: True}
         # Likewise per signal: any node that emits one (`core.telemetry`).
         telemetry = advertised([node.telemetry for node in self.nodes.values()])
         if telemetry is not None:
@@ -1786,6 +1795,11 @@ def _is_content_ref(uri: Any) -> bool:
 def _node_telemetry_channel(advertised_uri: str, wanted: Wanted) -> str:
     """The node's own channel for what the surface asked, its template expanded."""
     return expand(advertised_uri, {"level": wanted.level} if wanted.level is not None else {})
+
+
+def _meta_of(handshake: Mapping[str, Any]) -> Mapping[str, Any]:
+    meta = handshake.get("_meta")
+    return meta if isinstance(meta, Mapping) else {}
 
 
 def _common_capabilities(capabilities: Sequence[Mapping[str, Any]]) -> dict[str, Any]:

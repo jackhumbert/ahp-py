@@ -8,6 +8,11 @@ the spec revision it targets.
 
 ## [Unreleased]
 
+### Added
+
+- **`ahp_protocol.ext.client_meta.AUTONOMOUS_AUTOMATIONS_META_KEY`** (`"vscode.autonomousAutomations"`),
+  the `InitializeResult._meta` key the VS Code client requires before it uses a host's automations.
+
 ## [0.1.0] - unreleased
 
 ### Added — release preparation (M18)

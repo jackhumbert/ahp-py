@@ -134,6 +134,7 @@ class TestOffWithoutAStore:
         try:
             client, result = await _client(host)
             assert "automations" not in result
+            assert "vscode.autonomousAutomations" not in (result.get("_meta") or {})
             assert not host.sequencer.has_channel(AUTOMATIONS_URI)
             reply = await client.request(
                 "runAutomation",
@@ -151,6 +152,8 @@ class TestTheCatalogue:
             client, result = await _client(host)
             assert result["automations"]["runHistoryLimit"] == 20
             assert "create" in result["automations"]
+            # VS Code uses the catalogue only when the host says it runs automations itself.
+            assert result["_meta"]["vscode.autonomousAutomations"] is True
             snapshot = (await client.request("subscribe", {"channel": AUTOMATIONS_URI}))["result"]
             assert snapshot["snapshot"]["state"] == {"entries": []}
             listed = await client.request("listAutomationTriggerDefinitions", {"channel": ROOT_URI})

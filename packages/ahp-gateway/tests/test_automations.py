@@ -99,6 +99,7 @@ async def test_one_catalogue_and_a_new_automation_goes_where_its_folder_is(
     try:
         raw, handshake = await _connect(fleet)
         assert "create" in handshake["automations"]
+        assert handshake["_meta"]["vscode.autonomousAutomations"] is True
         result, subscription = await raw.subscribe(AUTOMATIONS_URI)
         assert result["snapshot"]["state"] == {"entries": []}
         watch = _Watch(subscription)
@@ -227,6 +228,7 @@ async def test_without_any_host_there_is_no_catalogue(tmp_path: Path) -> None:
     try:
         raw, handshake = await _connect(fleet)
         assert "automations" not in handshake
+        assert "vscode.autonomousAutomations" not in (handshake.get("_meta") or {})
         result, _ = await raw.subscribe(AUTOMATIONS_URI)
         assert "snapshot" not in result
         await raw.shutdown()

@@ -8,6 +8,9 @@ Every release states the protocol versions it speaks.
 
 ### Added
 
+- **`_meta["vscode.autonomousAutomations"]: true`** in the handshake when every node that hosts
+  automations advertises it, so VS Code accepts the merged catalogue.
+
 - **`Gateway(passthrough_node=...)`.** Opt-in, per connection: a node id, or a callable taking
   the authenticated `Principal` and returning one or `None`. That node's `file:` URIs cross
   the gateway verbatim in both directions, so the client sees real absolute paths; the root
