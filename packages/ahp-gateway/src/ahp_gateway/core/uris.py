@@ -38,6 +38,14 @@ bare ``ahp-file:///<N>``), and ``ahp-file:///`` lists one ``<N>: <root>`` entry 
 root each node serves. A first segment without ``": "`` keeps the nested
 meaning, so older URIs still route. Node ids never contain ``": "``.
 
+**Passthrough** (opt-in, ``passthrough_node``, per connection). When a connection
+is narrowed to one file-serving node, none of the above is needed: that node's
+`file:` URIs cross verbatim in both directions, so a client sees its real
+absolute paths, and every `file:` URI the client sends is that node's, so the
+client's `file:///<node>/...` alias is not read there (it is a real path on the
+passthrough node). `ahp-file` URIs still route, and other nodes on the connection
+are reachable only by those explicit `ahp-file` URIs.
+
 The nodes keep speaking plain `file:`; the gateway translates at the edge. Only
 whole string values are rewritten; a path quoted inside prose is left alone,
 because rewriting free text would corrupt what the agent said.

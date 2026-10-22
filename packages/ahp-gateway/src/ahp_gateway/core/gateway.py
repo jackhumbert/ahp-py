@@ -176,6 +176,7 @@ class Gateway:
         orchestrator: OrchestratorConfig | None = None,
         client_files: Literal["passthrough", "refuse"] = "passthrough",
         flat_places: bool | Callable[[Principal], bool] = False,
+        passthrough_node: str | Callable[[Principal], str | None] | None = None,
     ) -> None:
         if client_files not in ("passthrough", "refuse"):
             raise ValueError(
@@ -212,6 +213,10 @@ class Gateway:
         #: `ahp-file:///<node>: <root>/...`, so an editor that labels a folder by
         #: its last segment still shows which node it is on. See `core.uris`.
         self.flat_places = flat_places
+        #: Opt-in per-connection passthrough: the one file-serving node whose
+        #: `file:` URIs cross the gateway verbatim (a node id, or a callable
+        #: from the principal to one or None). See `core.uris`.
+        self.passthrough_node = passthrough_node
 
     async def start(self) -> None:
         """Take up what outlives a connection: the orchestrators, if any."""
@@ -284,6 +289,8 @@ class _SurfaceConnection:
         #: `flat_places` is asked about the principal).
         fp = gateway.flat_places
         self.flat_places = False if callable(fp) else bool(fp)
+        #: Likewise resolved after authentication, and only if admitted.
+        self.passthrough_node: str | None = None
         self.client_id = ""
         self.version = ""
         self.client_info: Mapping[str, Any] | None = None
@@ -487,6 +494,8 @@ class _SurfaceConnection:
 
     def _from_client(self, method: str, params: Mapping[str, Any]) -> Mapping[str, Any]:
         """Read a client's `file:///<node>/...` (how VS Code browses the tree) as `ahp-file`."""
+        if self.passthrough_node is not None:
+            return params
         nodes = set(self.records)
         aliased = from_client_alias(params, nodes, flat=self.flat_places)
         if method.startswith("resource") and isinstance(aliased, Mapping):
@@ -496,6 +505,12 @@ class _SurfaceConnection:
                 "uri": from_client_alias(uri, nodes, root_uri=True, flat=self.flat_places),
             }
         return aliased if isinstance(aliased, Mapping) else params
+
+    def _qualify(self, value: Any, node_id: str, root: str | None) -> Any:
+        """Node -> surface, except that the passthrough node's `file:` URIs stay as they are."""
+        if node_id == self.passthrough_node:
+            return value
+        return qualify_file_uris(value, node_id, root, flat=self.flat_places)
 
     async def _virtual_root(self, method: str) -> Any:
         """`ahp-file:///`: a read-only directory with one entry per node.
@@ -637,11 +652,16 @@ class _SurfaceConnection:
         self.principal, self.client_id, self.version = principal, client_id, version
         fp = self.gateway.flat_places
         self.flat_places = bool(fp(principal)) if callable(fp) else bool(fp)
+        pt = self.gateway.passthrough_node
+        self.passthrough_node = pt(principal) if callable(pt) else pt
         self.client_info, self.locale = client_info, locale
 
         # Admission before AHP (invariant 2): only nodes the registry admits
         # this principal to are ever dialed, so the rest cannot even appear.
         self.records = {r.node_id: r for r in self.gateway.directory.nodes_for(principal)}
+        if self.passthrough_node is not None and self.passthrough_node not in self.records:
+            _log.debug("passthrough node %r is not admitted; ignored", self.passthrough_node)
+            self.passthrough_node = None
         if self.flat_places:
             for node_id in self.records:
                 if PLACE_SEPARATOR in node_id:
@@ -775,9 +795,7 @@ class _SurfaceConnection:
         for snapshot in handshake.get("snapshots") or []:
             if not isinstance(snapshot, Mapping):
                 continue
-            state = qualify_file_uris(
-                snapshot.get("state"), record.node_id, path_root, flat=self.flat_places
-            )
+            state = self._qualify(snapshot.get("state"), record.node_id, path_root)
             if snapshot.get("resource") == ROOT_URI:
                 root = state if isinstance(state, dict) else {}
             elif (
@@ -840,12 +858,13 @@ class _SurfaceConnection:
             ((node_id, node),) = self.nodes.items()
             directory = node.link.handshake.get("defaultDirectory")
             if isinstance(directory, str):
-                agreed["defaultDirectory"] = qualify_file_uris(
-                    directory, node_id, node.path_root, flat=self.flat_places
-                )
+                agreed["defaultDirectory"] = self._qualify(directory, node_id, node.path_root)
         else:
-            # Several: the list of nodes, each of which is its own root.
-            agreed["defaultDirectory"] = VIRTUAL_ROOT
+            # Several: the list of nodes, each of which is its own root; on a
+            # passthrough connection, the passthrough node's own root.
+            pnode = self.nodes.get(self.passthrough_node or "")
+            pdir = pnode.link.handshake.get("defaultDirectory") if pnode else None
+            agreed["defaultDirectory"] = pdir if isinstance(pdir, str) else VIRTUAL_ROOT
         return agreed
 
     def _subscribe_root(self) -> dict[str, Any]:
@@ -1254,7 +1273,7 @@ class _SurfaceConnection:
         of this connection - a mistyped id, or bare `file:///`. Passed through
         it would route by provider to a node that opens it at its own root.
         """
-        if self.gateway.client_files != "refuse":
+        if self.gateway.client_files != "refuse" or self.passthrough_node is not None:
             return
         candidates: list[Any] = [params.get(key) for key in _FOLDER_KEYS]
         directories = params.get("workingDirectories")
@@ -1283,7 +1302,7 @@ class _SurfaceConnection:
             if authority
         }
         if not authorities:
-            return None
+            return self._passthrough_named(params)
         if len(authorities) > 1:
             raise invalid_params(
                 f"request names files on more than one node: {', '.join(sorted(authorities))}"
@@ -1292,6 +1311,19 @@ class _SurfaceConnection:
         if authority not in self.nodes:
             raise invalid_params(f"no node {authority!r} is available to this connection")
         return authority
+
+    def _passthrough_named(self, params: Mapping[str, Any]) -> str | None:
+        """The passthrough node, when the request carries a plain `file:` folder."""
+        node_id = self.passthrough_node
+        if node_id is None or node_id not in self.nodes:
+            return None
+        candidates: list[Any] = [params.get(key) for key in _FOLDER_KEYS]
+        directories = params.get("workingDirectories")
+        if isinstance(directories, list):
+            candidates.extend(directories)
+        if any(isinstance(v, str) and v.startswith("file:") for v in candidates):
+            return node_id
+        return None
 
     def _route(self, params: Mapping[str, Any]) -> str | None:
         for key in _CHANNEL_KEYS:
@@ -1325,11 +1357,10 @@ class _SurfaceConnection:
             outgoing = unqualify_file_uris(params, node_id, node.path_root, flat=self.flat_places)
         except ForeignUriError as exc:
             raise invalid_params(str(exc)) from exc
-        result = qualify_file_uris(
+        result = self._qualify(
             await node.link.request(method, outgoing),
             node_id,
             node.path_root,
-            flat=self.flat_places,
         )
         self._learn(node_id, result)
         return result
@@ -1393,8 +1424,9 @@ class _SurfaceConnection:
                     node.link.notify("unsubscribe", {"channel": channel})
         elif method == "dispatchAction":
             # A message's attachments and a chat's working directory arrive here.
-            aliased = from_client_alias(params, set(self.records), flat=self.flat_places)
-            params = aliased if isinstance(aliased, Mapping) else params
+            if self.passthrough_node is None:
+                aliased = from_client_alias(params, set(self.records), flat=self.flat_places)
+                params = aliased if isinstance(aliased, Mapping) else params
             channel = params.get("channel")
             if channel == ROOT_URI:
                 # The merged root has no config to change (see core.root), and
@@ -1503,7 +1535,7 @@ class _SurfaceConnection:
             # translation of a later `fromSeq` depends on every action this
             # link has carried, not only the ones the surface saw.
             stamp = node.sequence.stamp(node_seq if isinstance(node_seq, int) else None)
-            envelope = qualify_file_uris(params, node_id, node.path_root, flat=self.flat_places)
+            envelope = self._qualify(params, node_id, node.path_root)
             channel = envelope.get("channel")
             if channel == ROOT_URI:
                 self._apply_root(node, envelope.get("action"))
@@ -1527,7 +1559,7 @@ class _SurfaceConnection:
         if isinstance(method, str) and method.startswith("otlp/"):
             self._relay_telemetry(node, method, params)
             return
-        qualified = qualify_file_uris(params, node_id, node.path_root, flat=self.flat_places)
+        qualified = self._qualify(params, node_id, node.path_root)
         self._learn(node_id, qualified)
         if qualified.get("channel") == ROOT_URI and ROOT_URI not in self.subscriptions:
             return
@@ -1711,9 +1743,7 @@ class _SurfaceConnection:
                 "jsonrpc": "2.0",
                 "id": request_id,
                 "method": method,
-                "params": qualify_file_uris(
-                    params, node_id, self._path_root(node_id), flat=self.flat_places
-                ),
+                "params": self._qualify(params, node_id, self._path_root(node_id)),
             }
         )
         try:

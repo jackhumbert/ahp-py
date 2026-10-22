@@ -8,6 +8,12 @@ Every release states the protocol versions it speaks.
 
 ### Added
 
+- **`Gateway(passthrough_node=...)`.** Opt-in, per connection: a node id, or a callable taking
+  the authenticated `Principal` and returning one or `None`. That node's `file:` URIs cross
+  the gateway verbatim in both directions, so the client sees real absolute paths; the root
+  `defaultDirectory` is the node's own; `client_files="refuse"` does not apply. `ahp-file`
+  URIs still route (other nodes are reachable only by them: the `file:///<node>/...` client
+  alias is not read on such a connection). An id the principal is not admitted to is ignored. Default `None`: no change.
 - **`Gateway(flat_places=<callable>)`.** `flat_places` also accepts a callable taking the
   authenticated `Principal` and returning a bool, resolved once per connection after
   authentication. A bool behaves exactly as before.

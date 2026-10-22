@@ -59,6 +59,22 @@ returning a bool. It is resolved once per connection, right after authentication
 so an embedder can choose per person: a connection narrowed to a single node has
 no need to fold the node into the folder name, and can get plain root names.
 
+## Passthrough
+
+When an embedder narrows a connection to one file-serving node, translating that
+node's paths into the aggregated namespace is pointless. Pass
+`Gateway(..., passthrough_node="node-a")` (or a callable taking the authenticated
+`Principal` and returning a node id or `None`; default `None`) and on that
+connection `file:` URIs to and from that node cross the gateway verbatim: the
+client sees the node's real absolute paths, the root `defaultDirectory` is the
+node's own, and `client_files="refuse"` does not apply (every `file:` URI is that
+node's). `ahp-file` URIs still route as before, so an older client URI keeps
+working, and other nodes on the connection are reachable only by explicit `ahp-file`
+URIs (the client's `file:///<node>/...` alias is not read there: a plain `file:` path is
+always the passthrough node's). It is
+resolved once per connection after authentication; an id the principal is not
+admitted to is ignored. `flat_places` does not affect the passthrough node.
+
 ## Fleet tools: the orchestrator and flow sessions
 
 With an `OrchestratorConfig` (`Gateway(orchestrator=...)`), the gateway joins
