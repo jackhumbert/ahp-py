@@ -58,7 +58,7 @@ from ahp_protocol import (
     TransportClosed,
     negotiate,
 )
-from ahp_protocol.channels import AUTOMATIONS_URI
+from ahp_protocol.channels import AUTOMATIONS_URI, canonical_channel
 from ahp_protocol.errors import (
     internal_error,
     invalid_params,
@@ -599,7 +599,16 @@ class _SurfaceConnection:
         )
 
         snapshots: list[dict[str, Any]] = []
-        wanted = params.get("initialSubscriptions") or []
+        wanted = [
+            canonical_channel(uri) if isinstance(uri, str) else uri
+            for uri in params.get("initialSubscriptions") or []
+        ]
+        # A URI-equivalent spelling of a merged channel is echoed back as sent.
+        spelled = {
+            canonical_channel(uri): uri
+            for uri in params.get("initialSubscriptions") or []
+            if isinstance(uri, str)
+        }
         for uri in wanted:
             if not isinstance(uri, str) or uri in _MERGED:
                 continue
@@ -618,9 +627,9 @@ class _SurfaceConnection:
         if AUTOMATIONS_URI in wanted:
             catalogue = self._subscribe_automations()
             if catalogue is not None:
-                snapshots.insert(0, catalogue)
+                snapshots.insert(0, {**catalogue, "resource": spelled[AUTOMATIONS_URI]})
         if ROOT_URI in wanted:
-            snapshots.insert(0, self._subscribe_root())
+            snapshots.insert(0, {**self._subscribe_root(), "resource": spelled[ROOT_URI]})
 
         result: dict[str, Any] = {
             "protocolVersion": chosen,
@@ -699,7 +708,16 @@ class _SurfaceConnection:
         # sibling host does.
         await self._admit(params.get("clientId"), self.gateway.supported_versions[0], None)
 
-        wanted = [uri for uri in params.get("subscriptions") or [] if isinstance(uri, str)]
+        wanted = [
+            canonical_channel(uri)
+            for uri in params.get("subscriptions") or []
+            if isinstance(uri, str)
+        ]
+        spelled = {
+            canonical_channel(uri): uri
+            for uri in reversed(params.get("subscriptions") or [])
+            if isinstance(uri, str)
+        }
         snapshots: list[dict[str, Any]] = []
         for uri in dict.fromkeys(wanted):
             if uri in _MERGED or uri.startswith(TELEMETRY_SCHEME):
@@ -714,9 +732,9 @@ class _SurfaceConnection:
         if AUTOMATIONS_URI in wanted:
             catalogue = self._subscribe_automations()
             if catalogue is not None:
-                snapshots.insert(0, catalogue)
+                snapshots.insert(0, {**catalogue, "resource": spelled[AUTOMATIONS_URI]})
         if ROOT_URI in wanted:
-            snapshots.insert(0, self._subscribe_root())
+            snapshots.insert(0, {**self._subscribe_root(), "resource": spelled[ROOT_URI]})
         return {"type": "snapshot", "snapshots": snapshots}
 
     async def _redial(self, node_id: str) -> None:
@@ -950,13 +968,19 @@ class _SurfaceConnection:
         channel = params.get("channel")
         if not isinstance(channel, str):
             raise invalid_params("channel is required")
+        # A URI-equivalent spelling of a merged channel is that channel, and is
+        # echoed back as the client sent it so the client can match its request.
+        requested = channel
+        channel = canonical_channel(channel)
         if channel == ROOT_URI:
-            return {"snapshot": self._subscribe_root()}
+            return {"snapshot": {**self._subscribe_root(), "resource": requested}}
         if channel == AUTOMATIONS_URI:
             catalogue = self._subscribe_automations()
             # No node hosts automations: the answer a host gives for a channel
             # it does not have.
-            return {"snapshot": catalogue} if catalogue is not None else {}
+            if catalogue is None:
+                return {}
+            return {"snapshot": {**catalogue, "resource": requested}}
         # `view` and `delivery` (and whatever a later version adds) are the
         # surface's to ask of the node, so they ride along untouched -- all
         # but `flowControl`. Windowed delivery (1.1.0, experimental) is a
@@ -1337,7 +1361,7 @@ class _SurfaceConnection:
     def _route(self, params: Mapping[str, Any]) -> str | None:
         for key in _CHANNEL_KEYS:
             value = params.get(key)
-            if isinstance(value, str) and value not in _MERGED:
+            if isinstance(value, str) and canonical_channel(value) not in _MERGED:
                 owner = self.owners.owner_of(value)
                 if owner is None:
                     continue
@@ -1423,6 +1447,7 @@ class _SurfaceConnection:
             channel = params.get("channel")
             if not isinstance(channel, str):
                 return
+            channel = canonical_channel(channel)
             self.subscriptions.discard(channel)
             if channel.startswith(TELEMETRY_SCHEME):
                 self._unsubscribe_telemetry(channel)
@@ -1437,6 +1462,9 @@ class _SurfaceConnection:
                 aliased = from_client_alias(params, set(self.records), flat=self.flat_places)
                 params = aliased if isinstance(aliased, Mapping) else params
             channel = params.get("channel")
+            if isinstance(channel, str) and canonical_channel(channel) != channel:
+                channel = canonical_channel(channel)
+                params = {**params, "channel": channel}
             if channel == ROOT_URI:
                 # The merged root has no config to change (see core.root), and
                 # no single node owns the others.

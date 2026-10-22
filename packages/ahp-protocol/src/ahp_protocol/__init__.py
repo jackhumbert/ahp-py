@@ -24,6 +24,7 @@ from __future__ import annotations
 from ahp_protocol.channels import (
     ROOT_URI,
     ChannelKind,
+    canonical_channel,
     classify,
     reducer_for_state,
 )
@@ -81,6 +82,7 @@ __all__ = [
     "Transport",
     "TransportClosed",
     "__version__",
+    "canonical_channel",
     "classify",
     "coalesce",
     "drop_none",

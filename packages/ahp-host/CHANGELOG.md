@@ -44,6 +44,13 @@ versions each release speaks.
   the key), it follows a restart and a fork, and other `_meta` keys are kept. The key is exported
   as `ahp_host.core.WORKSPACELESS_META_KEY`.
 
+### Fixed
+
+- A client that spells the catalogue or root channel without the empty authority
+  (`ahp-automations:`, `ahp-root:`) now gets the snapshot from `subscribe` and `initialize`, and its
+  `unsubscribe`, `dispatchAction`, reconnect subscriptions and policy checks all reach the same
+  channel. The snapshot's `resource` echoes the client's spelling; actions carry the canonical one.
+
 ## [0.1.0] - unreleased
 
 The first release. It offers protocol versions **1.0.0, 0.9.0, 0.8.0, 0.7.0 and 0.6.0**

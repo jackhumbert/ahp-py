@@ -88,6 +88,34 @@ class _Watch:
         self._task.cancel()
 
 
+async def test_the_alias_spelling_is_the_merged_catalogue(tmp_path: Path) -> None:
+    fleet = _fleet(tmp_path, "mac", "box")
+    try:
+        raw, _ = await _connect(fleet)
+        result, _ = await raw.subscribe("ahp-automations:")
+        assert result["snapshot"]["resource"] == "ahp-automations:"
+        assert result["snapshot"]["state"] == {"entries": []}
+        root, _ = await raw.subscribe("ahp-root:")
+        assert root["snapshot"]["resource"] == "ahp-root:"
+        raw.dispatch(
+            "ahp-automations:",
+            {
+                "type": "automation/createRequested",
+                "resource": "ahp-automation:/on-box",
+                "definition": _definition(workingDirectories=["ahp-file:///box/project"]),
+            },
+        )
+        # Actions carry the canonical channel, which this client does not match to
+        # its alias subscription, so the effect is read off the node instead.
+        async with asyncio.timeout(5):
+            while not _owned_by(fleet, "box"):
+                await asyncio.sleep(0.01)
+        assert _owned_by(fleet, "box") == {"ahp-automation:/on-box"}
+        await raw.shutdown()
+    finally:
+        await fleet.aclose()
+
+
 def _owned_by(fleet: Fleet, node: str) -> set[str]:
     return set(fleet.hosts[node]._automations)
 

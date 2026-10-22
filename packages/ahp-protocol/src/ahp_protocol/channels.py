@@ -35,6 +35,7 @@ __all__ = [
     "AUTOMATIONS_URI",
     "ROOT_URI",
     "ChannelKind",
+    "canonical_channel",
     "chat_uri",
     "classify",
     "reducer_for_state",
@@ -54,6 +55,26 @@ AUTOMATIONS_URI: Final = "ahp-automations://"
 _AUTOMATION_RUN_PREFIX: Final = "ahp-automation-run:"
 #: One live canvas a chat advertises in `ChatState.canvases` (1.0.0, experimental).
 _CANVAS_PREFIX: Final = "ahp-canvas:"
+
+
+_SINGLETONS: Final = {"ahp-root": ROOT_URI, "ahp-automations": AUTOMATIONS_URI}
+
+
+def canonical_channel(uri: str) -> str:
+    """Fold a URI-equivalent spelling of a singleton channel to its constant.
+
+    A URI library may print ``ahp-automations://`` (empty authority) as
+    ``ahp-automations:``. For the singleton schemes (root and the automation
+    catalogue), a value whose remainder after ``scheme:`` is empty or only
+    slashes returns :data:`ROOT_URI` or :data:`AUTOMATIONS_URI`. Anything
+    else, including a non-string, is returned unchanged.
+    """
+    if not isinstance(uri, str):
+        return uri
+    scheme, sep, rest = uri.partition(":")
+    if sep and not rest.strip("/"):
+        return _SINGLETONS.get(scheme, uri)
+    return uri
 
 
 class ChannelKind(Enum):

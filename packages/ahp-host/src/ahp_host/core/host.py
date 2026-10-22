@@ -27,7 +27,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Final
 
 from ahp_protocol import errors
-from ahp_protocol.channels import AUTOMATIONS_URI, ROOT_URI
+from ahp_protocol.channels import AUTOMATIONS_URI, ROOT_URI, canonical_channel
 from ahp_protocol.ext.client_meta import AUTONOMOUS_AUTOMATIONS_META_KEY
 from ahp_protocol.ext.delegation import ORIGIN_META_KEY, parse_delegation
 from ahp_protocol.ext.operation import operation_params
@@ -2990,7 +2990,7 @@ class Host:
         if method == "unsubscribe":
             channel = params.get("channel")
             if isinstance(channel, str):
-                await self.sequencer.unsubscribe(connection, channel)
+                await self.sequencer.unsubscribe(connection, canonical_channel(channel))
         elif method == "dispatchAction":
             await self._dispatch_action(connection, params)
         # Unknown notifications are ignored, per the additive-change guarantee.
@@ -3043,11 +3043,15 @@ class Host:
 
         snapshots: list[dict[str, Any]] = []
         for uri in params.get("initialSubscriptions") or []:
-            if not isinstance(uri, str) or not self._may_observe(connection, uri):
+            if not isinstance(uri, str):
                 continue
-            snapshot = await self.sequencer.subscribe(connection, uri)
+            canonical = canonical_channel(uri)
+            if not self._may_observe(connection, canonical):
+                continue
+            snapshot = await self.sequencer.subscribe(connection, canonical)
             if snapshot is not None:
-                snapshots.append(snapshot)
+                # A URI-equivalent spelling is echoed back as the client sent it.
+                snapshots.append({**snapshot, "resource": uri})
 
         # `snapshots` is ALWAYS an array. MultiHostClient calls .find() on it
         # with no guard, so omitting it puts the client in an endless reconnect
@@ -3104,9 +3108,14 @@ class Host:
         channel = params.get("channel")
         if not isinstance(channel, str):
             raise errors.invalid_params("channel is required")
+        requested = channel
+        channel = canonical_channel(channel)
         if not self._may_observe(connection, channel):
-            raise errors.AhpError(-32009, f"Not permitted to observe {channel}")
+            raise errors.AhpError(-32009, f"Not permitted to observe {requested}")
         snapshot = await self.sequencer.subscribe(connection, channel)
+        if snapshot is not None:
+            # A URI-equivalent spelling is echoed back as the client sent it.
+            snapshot = {**snapshot, "resource": requested}
         # A stateless or unknown channel yields `{}` -- the shape the spec gives
         # for channels that carry no snapshot.
         return {"snapshot": snapshot} if snapshot is not None else {}
@@ -7636,8 +7645,19 @@ class Host:
         # peer-supplied and the schema does not forbid repeats; `Sequencer.replay`
         # dedupes too, but `refused` and the policy calls are computed here.
         requested = list(
-            dict.fromkeys(uri for uri in params.get("subscriptions") or [] if isinstance(uri, str))
+            dict.fromkeys(
+                canonical_channel(uri)
+                for uri in params.get("subscriptions") or []
+                if isinstance(uri, str)
+            )
         )
+        # The client's own spelling of each channel, echoed back in the result
+        # as `subscribe` and `initialize` do.
+        spelled = {
+            canonical_channel(uri): uri
+            for uri in reversed(params.get("subscriptions") or [])
+            if isinstance(uri, str)
+        }
         allowed = [uri for uri in requested if self._may_observe(connection, uri)]
         # Refused channels are NOT silently dropped. `missing` is documented as
         # "subscriptions that cannot be resumed -- disposed sessions, or
@@ -7673,6 +7693,15 @@ class Host:
         if result.get("type") == "replay":
             missing = [uri for uri in result.get("missing", []) if uri not in resumed_stateless]
             result["missing"] = [*missing, *refused]
+            result["missing"] = [spelled.get(uri, uri) for uri in result["missing"]]
+        snapshots = result.get("snapshots")
+        if isinstance(snapshots, list):
+            result["snapshots"] = [
+                {**snap, "resource": spelled[snap["resource"]]}
+                if isinstance(snap, Mapping) and snap.get("resource") in spelled
+                else snap
+                for snap in snapshots
+            ]
         return result
 
     # ─── client-dispatched actions ───────────────────────────────────────
@@ -7682,6 +7711,7 @@ class Host:
         action = params.get("action")
         if not isinstance(channel, str) or not isinstance(action, Mapping):
             return
+        channel = canonical_channel(channel)
         if not self.sequencer.has_channel(channel):
             # Unknown channel: silently ignore, no echo. Specified asymmetry.
             return

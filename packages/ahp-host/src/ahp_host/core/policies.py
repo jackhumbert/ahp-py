@@ -37,7 +37,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 from typing import Any
 
-from ahp_protocol.channels import AUTOMATIONS_URI
+from ahp_protocol.channels import AUTOMATIONS_URI, canonical_channel
 
 from ahp_host.core.policy import ConnectionInfo
 
@@ -199,6 +199,7 @@ class OwnedSessionPolicy:
         return owner is None or owner == self.principal_of(info)
 
     def may_see_channel(self, info: ConnectionInfo, channel: str) -> bool:
+        channel = canonical_channel(channel)
         if channel == "ahp-root://":
             return True
         if channel == AUTOMATIONS_URI:

@@ -376,6 +376,11 @@ are validated before they are saved, with the refusal echoed as
 trigger id, a message whose origin is not `automation`, an unknown provider.
 **Event triggers are refused** — their types are host-defined, and this host
 defines none, so `listAutomationTriggerDefinitions` answers an empty list.
+**The catalogue channel has URI-equivalent spellings.** A URI library may print
+`ahp-automations://` as `ahp-automations:`; the host treats that, and `ahp-root:`, as the same
+channel (`ahp_protocol.canonical_channel`) in `subscribe`, `unsubscribe`, `initialize`,
+`reconnect`, `dispatchAction` and policy checks. The snapshot's `resource` echoes the client's
+spelling; actions carry the canonical one.
 **A client can name the session it started a session for.** `createSession`
 `_meta["ahp-py/origin"]` with `{kind: "ahp-py/delegation", session, chat,
 toolCallId}` (`ahp_protocol.ext.delegation`) is seeded into the session's

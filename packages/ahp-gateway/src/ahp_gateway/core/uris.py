@@ -67,7 +67,7 @@ from typing import Any, Final
 from urllib.parse import quote, unquote
 
 from ahp_protocol import ROOT_URI
-from ahp_protocol.channels import AUTOMATIONS_URI
+from ahp_protocol.channels import AUTOMATIONS_URI, canonical_channel
 
 __all__ = [
     "PLACE_SEPARATOR",
@@ -311,8 +311,7 @@ def learn_owned(value: Any) -> tuple[set[str], set[str]]:
     # The two singletons every node has its own copy of. Claimed, the first
     # node to mention one would own it, and every request for the merged
     # channel would go there.
-    channels.discard(ROOT_URI)
-    channels.discard(AUTOMATIONS_URI)
+    channels -= {uri for uri in channels if canonical_channel(uri) in (ROOT_URI, AUTOMATIONS_URI)}
     # Files route by the node their URI names, never by who mentioned them.
     files = (_FILE_PREFIX, _PREFIX)
     return (

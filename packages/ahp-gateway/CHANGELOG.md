@@ -29,6 +29,13 @@ Every release states the protocol versions it speaks.
   `sessionConfigCompletions` default-node fallback, and a new automation's session template.
   `tests/test_gateway.py`.
 
+### Fixed
+
+- A surface that spells the catalogue or root channel without the empty authority
+  (`ahp-automations:`, `ahp-root:`) gets the merged snapshot from `subscribe`, `initialize` and
+  `reconnect`, and its `unsubscribe` and `dispatchAction` are treated as the merged channel, never
+  routed to a node. The snapshot's `resource` echoes the surface's spelling.
+
 ## [0.1.0] - unreleased
 
 ### Added — release preparation (M18)

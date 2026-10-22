@@ -128,6 +128,65 @@ async def _create(client: FakeClient, host: Host, definition: dict[str, Any]) ->
     await _until(lambda: any(e["resource"] == AUTOMATION for e in _entries(host)))
 
 
+class TestUriEquivalentChannels:
+    async def test_subscribe_to_the_alias_returns_the_catalogue_snapshot(self) -> None:
+        host = _host(InMemoryAutomationStore())
+        try:
+            client, _ = await _client(host)
+            reply = await client.request("subscribe", {"channel": "ahp-automations:"})
+            snapshot = reply["result"]["snapshot"]
+            assert snapshot["resource"] == "ahp-automations:"
+            assert snapshot["state"] == {"entries": []}
+        finally:
+            await host.aclose()
+
+    async def test_dispatch_on_the_alias_creates_and_the_subscriber_sees_it(self) -> None:
+        host = _host(InMemoryAutomationStore())
+        client, _ = await _client(host)
+        await client.request("subscribe", {"channel": "ahp-automations:"})
+        await _dispatch(
+            client,
+            "ahp-automations:",
+            {
+                "type": "automation/createRequested",
+                "resource": AUTOMATION,
+                "definition": _definition(),
+            },
+        )
+        await _until(lambda: any(e["resource"] == AUTOMATION for e in _entries(host)))
+        await client.collect()
+        envelope = _echo_of(client, "automation/set")
+        assert envelope is not None
+        assert envelope["channel"] == AUTOMATIONS_URI
+        await host.aclose()
+
+    async def test_initial_subscriptions_with_the_alias_return_the_snapshot(self) -> None:
+        host = _host(InMemoryAutomationStore())
+        client_transport, server_transport = memory_pair()
+        serving = asyncio.create_task(host.serve(server_transport))
+        client = FakeClient(client_transport)
+        reply = await client.request(
+            "initialize",
+            {
+                "channel": ROOT_URI,
+                "clientId": "c1",
+                "protocolVersions": ["0.9.0"],
+                "initialSubscriptions": ["ahp-root:", "ahp-automations:"],
+            },
+        )
+        resources = {s["resource"] for s in reply["result"]["snapshots"]}
+        assert resources == {"ahp-root:", "ahp-automations:"}
+        await host.aclose()
+        await serving
+
+    async def test_subscribe_to_the_root_alias_returns_the_root_snapshot(self) -> None:
+        host = _host(InMemoryAutomationStore())
+        client, _ = await _client(host)
+        reply = await client.request("subscribe", {"channel": "ahp-root:"})
+        assert reply["result"]["snapshot"]["resource"] == "ahp-root:"
+        await host.aclose()
+
+
 class TestOffWithoutAStore:
     async def test_no_capability_no_channel_and_a_named_refusal(self) -> None:
         host = _host()
