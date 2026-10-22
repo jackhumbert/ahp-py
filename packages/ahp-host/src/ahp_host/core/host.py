@@ -121,7 +121,7 @@ from ahp_host.core.resources import (
 )
 from ahp_host.core.restart import RestoredInputRequest, restored_requests, withdrawn_notice
 from ahp_host.core.seq import FileSequence
-from ahp_host.core.sequencer import Sequencer
+from ahp_host.core.sequencer import Sequencer, Subscriber
 from ahp_host.core.store import InMemorySessionStore, SessionStore, StoredSession
 from ahp_host.core.terminals import (
     CLAIM_GATED_ACTIONS,
@@ -1848,6 +1848,66 @@ def _with_origin(summary: dict[str, Any], origin: Mapping[str, Any] | None) -> d
     return summary
 
 
+class _AutomationCatalogue:
+    """What each subscriber may see of the shared automation catalogue.
+
+    The catalogue is one channel with one state, so ownership cannot be applied
+    by who may subscribe: this is asked per subscriber instead, for the snapshot
+    and for every envelope. A subscriber that is not a `Connection` (nothing in
+    this library) is shown everything.
+    """
+
+    def __init__(self, host: Host) -> None:
+        self._host = host
+
+    def _entry(self, subscriber: Subscriber, resource: Any) -> bool:
+        host = self._host
+        if not isinstance(subscriber, Connection) or not isinstance(resource, str):
+            return True
+        if resource not in host._automation_owners:
+            return False
+        return host._may_manage_automation(subscriber, resource, host._automation_owners[resource])
+
+    def state(self, subscriber: Subscriber, state: Any) -> Any:
+        entries = state.get("entries") if isinstance(state, Mapping) else None
+        if not isinstance(entries, list):
+            return state
+        kept = [
+            e
+            for e in entries
+            if isinstance(e, Mapping) and self._entry(subscriber, e.get("resource"))
+        ]
+        return state if len(kept) == len(entries) else {**state, "entries": kept}
+
+    def delivers(self, subscriber: Subscriber, envelope: Mapping[str, Any]) -> bool:
+        if (
+            isinstance(subscriber, Connection)
+            and self._host._principal_of(subscriber) is None
+            and not callable(getattr(self._host.policy, "may_manage_automation", None))
+        ):
+            # No principal and no policy hook: nothing to filter by, so every
+            # client sees every echo, as before ownership existed.
+            return True
+        origin = envelope.get("origin")
+        if isinstance(origin, Mapping) and origin.get("clientId") == subscriber.client_id:
+            # Its own action, accepted or rejected: it needs the echo to
+            # reconcile its optimistic copy.
+            return True
+        action = envelope.get("action")
+        if not isinstance(action, Mapping) or "rejectionReason" in envelope:
+            # A refusal is the originator's alone: it names an automation the
+            # others may not own.
+            return False
+        automation = action.get("automation")
+        resource = automation.get("resource") if isinstance(automation, Mapping) else None
+        resource = resource or action.get("resource")
+        if not isinstance(resource, str):
+            # No resource to judge by (createRequested carries the definition
+            # and the host has not minted one yet): only the originator, above.
+            return False
+        return self._entry(subscriber, resource)
+
+
 class Host:
     """An AHP host over one or more client connections.
 
@@ -2065,6 +2125,10 @@ class Host:
         #: automation before `fetchAutomationRuns` pages in more.
         self.automation_history = max(1, automation_history)
         self._automations: dict[str, AutomationRecord] = {}
+        #: Automation resource -> the principal that created it. Kept after the
+        #: automation is removed, so a replayed `automation/removed` is still
+        #: delivered only to those who could see the automation.
+        self._automation_owners: dict[str, str | None] = {}
         #: Run URI -> the task executing it, while it executes.
         self._run_tasks: dict[str, asyncio.Task[None]] = {}
         #: Runs a client asked to cancel. Read when the run's turn ends, so a
@@ -2973,7 +3037,7 @@ class Host:
 
         snapshots: list[dict[str, Any]] = []
         for uri in params.get("initialSubscriptions") or []:
-            if not isinstance(uri, str) or not self.policy.may_see_channel(connection.info, uri):
+            if not isinstance(uri, str) or not self._may_observe(connection, uri):
                 continue
             snapshot = await self.sequencer.subscribe(connection, uri)
             if snapshot is not None:
@@ -3030,7 +3094,7 @@ class Host:
         channel = params.get("channel")
         if not isinstance(channel, str):
             raise errors.invalid_params("channel is required")
-        if not self.policy.may_see_channel(connection.info, channel):
+        if not self._may_observe(connection, channel):
             raise errors.AhpError(-32009, f"Not permitted to observe {channel}")
         snapshot = await self.sequencer.subscribe(connection, channel)
         # A stateless or unknown channel yields `{}` -- the shape the spec gives
@@ -5423,6 +5487,64 @@ class Host:
             return metadata
         return {**(metadata or {}), PRINCIPAL_METADATA_KEY: session.principal}
 
+    def _may_manage_automation(self, connection: Connection, uri: str, owner: str | None) -> bool:
+        """Whether *connection* may see or act on the automation (or run) *uri*.
+
+        The policy's optional `may_manage_automation` decides when it has one.
+        Otherwise: allowed when the automation has no owner or the connection
+        has no principal, and an owner match when both are known. A raise from
+        the hook refuses.
+        """
+        hook = getattr(self.policy, "may_manage_automation", None)
+        if callable(hook):
+            try:
+                return bool(hook(connection.info, uri, owner))
+            except Exception:
+                _log.warning("policy.may_manage_automation failed; refusing", exc_info=True)
+                return False
+        principal = self._principal_of(connection)
+        return owner is None or principal is None or owner == principal
+
+    def _may_observe(self, connection: Connection, channel: str) -> bool:
+        """`Policy.may_see_channel`, and for a run channel also its automation's owner.
+
+        The second half holds under any policy with a principal, not only one
+        that tracks channels: a run's URI is unguessable but not secret.
+        """
+        if not self.policy.may_see_channel(connection.info, channel):
+            return False
+        if self.sequencer.reducer_of(channel) == "automationRun":
+            record = self._record_of_run(channel)
+            if record is not None:
+                return self._may_manage_automation(connection, channel, record.principal)
+        return True
+
+    def _record_of_run(self, run_uri: str) -> AutomationRecord | None:
+        return next((r for r in self._automations.values() if r.run(run_uri) is not None), None)
+
+    def _plugin_copy_owner(self, uri: str) -> AutomationRecord | None:
+        parts = split_copy_uri(uri)
+        if parts is None:
+            return None
+        owner, plugin_id, _ = parts
+        for record in self._automations.values():
+            if (
+                plugin_id in record.captures
+                and copy_root(record.resource, plugin_id).split("/")[1] == owner
+            ):
+                return record
+        return None
+
+    def _claim_for(self, principal: str | None, *channels: str) -> None:
+        """Tell a policy that tracks owners (`claim`) who owns these channels.
+
+        For what the host creates on its own, where no connection exists to ask
+        `channel_created` about: an automation, its runs, and a run's session.
+        """
+        claim = getattr(self.policy, "claim", None)
+        if principal is not None and callable(claim):
+            claim(principal, *channels)
+
     def _principal_of(self, connection: Connection | None) -> str | None:
         """Who *connection* is, by the policy's optional `principal_of` hook.
 
@@ -5450,6 +5572,11 @@ class Host:
         found = self._plugin_copy_at(uri)
         if found is None:
             raise errors.AhpError(-32008, f"No such content: {uri}")
+        owner = self._plugin_copy_owner(uri)
+        if owner is not None and not self._may_manage_automation(
+            connection, owner.resource, owner.principal
+        ):
+            raise errors.AhpError(-32009, f"Not permitted to read {uri}")
         copy_, path = found
         data = copy_.files.get(path)
         if data is not None:
@@ -7053,6 +7180,7 @@ class Host:
         origin: Mapping[str, Any] | None = None,
         title: str | None = None,
         adopt_chat: str | None = None,
+        principal: str | None = None,
     ) -> asyncio.Task[None]:
         """`createSession`, and the host creating one of its own.
 
@@ -7065,6 +7193,10 @@ class Host:
         to check, and nothing to fork. Who may make the host do this was
         decided when the automation was created -- `Policy.may_dispatch` on
         `automation/createRequested`. The working-directory jail still applies.
+
+        *principal* is for that no-connection case only: an automation run's
+        session belongs to the automation's owner, so a policy that partitions
+        by owner lets them reach it.
 
         Returns the bring-up task, which a caller that must wait for the
         session to be `ready` awaits.
@@ -7179,7 +7311,7 @@ class Host:
             else title or _DEFAULT_SESSION_TITLE,
             created_at=created_at,
             content=self._content_store(),
-            principal=self._principal_of(connection),
+            principal=self._principal_of(connection) if connection is not None else principal,
         )
         session.chat_uris.add(chat_uri)
         token = params.get("progressToken")
@@ -7215,6 +7347,8 @@ class Host:
         # Before the response goes out, so a policy that refuses unowned
         # channels never has a window in which the peer's own session is
         # unreachable.
+        if connection is None:
+            self._claim_for(principal, channel)
         self._channel_created(connection, channel)
         if adopt_chat is None:
             await self._register_default_chat(connection, session, forked, created_at)
@@ -7487,7 +7621,7 @@ class Host:
         requested = list(
             dict.fromkeys(uri for uri in params.get("subscriptions") or [] if isinstance(uri, str))
         )
-        allowed = [uri for uri in requested if self.policy.may_see_channel(connection.info, uri)]
+        allowed = [uri for uri in requested if self._may_observe(connection, uri)]
         # Refused channels are NOT silently dropped. `missing` is documented as
         # "subscriptions that cannot be resumed -- disposed sessions, or
         # resources the client may no longer observe", and a client uses it to
@@ -7718,7 +7852,7 @@ class Host:
             return "rejected by policy"
 
         if action_type.startswith(("automation/", "automationRun/")):
-            return self._validate_automation_action(channel, action)
+            return self._validate_automation_action(connection, channel, action)
 
         # Shape before meaning: a tool-call action missing a REQUIRED field is
         # sequenced and fanned out, then applied by no reducer -- while the host
@@ -7868,7 +8002,7 @@ class Host:
         if isinstance(action_type, str) and action_type.startswith(
             ("automation/", "automationRun/")
         ):
-            await self._react_to_automation(channel, action)
+            await self._react_to_automation(channel, action, connection)
             return
         if action_type == "session/customizationToggled":
             await self._react_to_toggle(channel, action)
@@ -8990,6 +9124,12 @@ class Host:
             if record.resource in self._automations:
                 continue
             self._automations[record.resource] = record
+            self._automation_owners[record.resource] = record.principal
+            self._claim_for(
+                record.principal,
+                record.resource,
+                *(str(run.get("resource")) for run in record.runs),
+            )
             repaired = False
             for run in record.runs:
                 lifecycle = run.get("lifecycle")
@@ -9008,6 +9148,7 @@ class Host:
                 await self.automations.save(record)
             entries.append(self._automation_entry(record))
         await self.sequencer.register_channel(AUTOMATIONS_URI, {"entries": entries}, "automation")
+        self.sequencer.set_view(AUTOMATIONS_URI, _AutomationCatalogue(self))
         self._scheduler = asyncio.create_task(self._schedule_loop())
 
     def _automation_entry(self, record: AutomationRecord) -> dict[str, Any]:
@@ -9080,7 +9221,9 @@ class Host:
         if self.automations is not None and self._automations.get(record.resource) is record:
             await self.automations.save(record)
 
-    def _validate_automation_action(self, channel: str, action: Mapping[str, Any]) -> str | None:
+    def _validate_automation_action(
+        self, connection: Connection, channel: str, action: Mapping[str, Any]
+    ) -> str | None:
         """Reject what the reducers accept and the host cannot honour.
 
         Every automation request is checked against the channel it names as
@@ -9097,6 +9240,11 @@ class Host:
             if not isinstance(lifecycle, Mapping) or lifecycle.get("status") in TERMINAL_STATUSES:
                 # "The host revalidates that the run is non-terminal."
                 return "the run has already finished"
+            owner = self._record_of_run(channel)
+            if owner is not None and not self._may_manage_automation(
+                connection, channel, owner.principal
+            ):
+                return "rejected by policy"
             return None
         if channel != AUTOMATIONS_URI or self.automations is None:
             return f"{action_type} belongs on {AUTOMATIONS_URI}"
@@ -9115,6 +9263,8 @@ class Host:
             # no-op; rejected rather than sequenced, so it cannot remove a
             # coincidentally matching entry some other way.
             return f"no automation {resource}"
+        if not self._may_manage_automation(connection, resource, record.principal):
+            return "rejected by policy"
         if action_type == "automation/updateRequested":
             changes = action.get("changes")
             if not isinstance(changes, Mapping):
@@ -9124,7 +9274,9 @@ class Host:
             return None
         return f"{action_type} is not an action this host accepts"
 
-    async def _react_to_automation(self, channel: str, action: Mapping[str, Any]) -> None:
+    async def _react_to_automation(
+        self, channel: str, action: Mapping[str, Any], connection: Connection | None = None
+    ) -> None:
         action_type = action.get("type")
         if action_type == "automationRun/cancelRequested":
             await self._cancel_run(channel)
@@ -9145,9 +9297,12 @@ class Host:
                 created_at=stamp,
                 modified_at=stamp,
                 run_count=0 if after_runs(definition) is not None else None,
+                principal=self._principal_of(connection),
             )
             self._take_copies(created, created.definition)
             self._automations[resource] = created
+            self._automation_owners[resource] = created.principal
+            self._claim_for(created.principal, resource)
             await store.save(created)
             await self._publish_automation(created)
         elif action_type == "automation/updateRequested":
@@ -9261,7 +9416,9 @@ class Host:
                 return copy_, path
         return None
 
-    def _automation_named(self, params: Mapping[str, Any]) -> AutomationRecord:
+    def _automation_named(
+        self, connection: Connection, params: Mapping[str, Any], verb: str
+    ) -> AutomationRecord:
         self._require_automations()
         resource = params.get("automation")
         if not isinstance(resource, str):
@@ -9269,12 +9426,14 @@ class Host:
         record = self._automations.get(resource)
         if record is None:
             raise errors.AhpError(-32008, f"No such automation: {resource}")
+        if not self._may_manage_automation(connection, resource, record.principal):
+            raise errors.AhpError(-32009, f"Not permitted to {verb} {resource}")
         return record
 
     async def _run_automation(
         self, connection: Connection, params: Mapping[str, Any]
     ) -> dict[str, Any]:
-        record = self._automation_named(params)
+        record = self._automation_named(connection, params, "run")
         request_id = params.get("requestId")
         if not isinstance(request_id, str) or not request_id:
             raise errors.invalid_params("requestId is required")
@@ -9292,7 +9451,7 @@ class Host:
     async def _fetch_automation_runs(
         self, connection: Connection, params: Mapping[str, Any]
     ) -> dict[str, Any]:
-        record = self._automation_named(params)
+        record = self._automation_named(connection, params, "observe")
         if not self.policy.may_see_channel(connection.info, AUTOMATIONS_URI):
             raise errors.AhpError(-32009, f"Not permitted to observe {AUTOMATIONS_URI}")
         cursor = params.get("cursor")
@@ -9354,6 +9513,7 @@ class Host:
         for dropped in self._prune_runs(record):
             await self.sequencer.drop_channel(dropped)
         await self.sequencer.register_channel(run_uri, copy.deepcopy(run), "automationRun")
+        self._claim_for(record.principal, run_uri)
         # "The host persists the run before beginning session side effects."
         await self._save_automation(record)
         await self._publish_automation(record)
@@ -9444,6 +9604,7 @@ class Host:
                 None,
                 params,
                 origin={"kind": "automation", "automation": record.resource, "run": run_uri},
+                principal=record.principal,
                 title=title if isinstance(title, str) and title else None,
             )
             session_uri = params["channel"]
@@ -9552,7 +9713,7 @@ class Host:
             await self._finish_run(record, run_uri, "failed", "the run's turn ended in an error")
 
     async def _cancel_run(self, run_uri: str) -> None:
-        record = next((r for r in self._automations.values() if r.run(run_uri) is not None), None)
+        record = self._record_of_run(run_uri)
         if record is None:
             return
         self._cancelled_runs.add(run_uri)

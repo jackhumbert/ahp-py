@@ -393,6 +393,18 @@ that fails rejects the whole action.
 `AutomationEntry.runCount` counts each scheduled run when it is admitted, a met
 condition sets `enabled` to false and leaves the conditions in place, and
 manual runs neither spend the allowance nor are blocked by it.
+**Automations are owned.** With a policy that defines `principal_of`, the creating
+connection's principal is stamped on the automation (host-private: persisted on
+its record, never in an `AutomationEntry` or any wire type; a record written
+before this loads as ownerless). The catalogue `ahp-automations://` is then
+filtered per subscriber — snapshot, replay and live actions — to that principal's
+own automations, and so are the run channels. Updating, removing, running,
+`fetchAutomationRuns` and cancelling a run are refused for anyone else: a
+dispatched action echoes `rejectionReason: "rejected by policy"` to its sender
+only, a method answers `-32009`. A run, and the session it starts, belong to the
+automation's owner, scheduled or manual. With no principal (a single-user policy)
+everyone sees and manages everything, as before. `OwnedSessionPolicy` does all of
+this; a custom policy may define `may_manage_automation` (below).
 
 **Changesets** are driven from a real git working tree: two changesets
 (`uncommitted` and `session`), per-file review flags, and operations wired to
@@ -690,7 +702,13 @@ connection's principal on `AgentSessionContext.principal` and each
 an input or confirmation request as `answered_by` on `InputOutcome` and
 `ToolConfirmationOutcome` (a `clientId` is never an identity). The principal is
 persisted under `metadata["ahp-py/principal"]`. Without the hook every one is
-`None`. For the socket, `bearer_token_validator(token)` checks an
+`None`. A policy may also define `may_manage_automation(info, uri, owner) -> bool`,
+optional in the same way: whether a peer may see or act on the automation or run
+`uri`, whose creator's principal is `owner` (persisted on the automation record).
+Absent, the default is an owner match when both principals are known and allow
+when either is `None`; a raise refuses. `OwnedSessionPolicy` implements it and
+claims the automation, run and run-session channels for their owner through
+`claim`, which the host calls for what it creates with no connection. For the socket, `bearer_token_validator(token)` checks an
 `Authorization: Bearer` header, and `serve_websocket` takes `ping_interval` (so a
 proxy's idle timeout does not cut a quiet connection) and `max_size` (the frame
 limit; keep a proxy's at or above it).

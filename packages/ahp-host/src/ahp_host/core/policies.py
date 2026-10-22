@@ -37,6 +37,8 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 from typing import Any
 
+from ahp_protocol.channels import AUTOMATIONS_URI
+
 from ahp_host.core.policy import ConnectionInfo
 
 __all__ = ["OwnedSessionPolicy", "principal_from_header"]
@@ -68,6 +70,11 @@ class OwnedSessionPolicy:
     it carries the agent list and the session *count*, not session identities --
     and `listSessions` is filtered by `may_see_channel`, which is the only place
     it can be.
+
+    Automations are owned the same way: the catalogue channel is open to any
+    admitted peer but shows each one only its own automations, and an
+    automation's run channels (and the sessions a run starts) belong to the
+    automation's owner. The host registers them with `claim`.
 
     Resources and root config are refused outright. A multi-user host has no
     single filesystem to expose and no user who owns the host-wide settings; an
@@ -184,8 +191,20 @@ class OwnedSessionPolicy:
         """No principal, no connection. An anonymous peer is not a user."""
         return self.principal_of(info) is not None
 
+    def may_manage_automation(self, info: ConnectionInfo, uri: str, owner: str | None) -> bool:
+        """An automation, and its runs, belong to the principal that created it.
+
+        One made with no recorded owner (before owners existed) is everyone's.
+        """
+        return owner is None or owner == self.principal_of(info)
+
     def may_see_channel(self, info: ConnectionInfo, channel: str) -> bool:
         if channel == "ahp-root://":
+            return True
+        if channel == AUTOMATIONS_URI:
+            # Like the root channel it is one shared URI, so it cannot be owned.
+            # What is IN it is filtered per subscriber by the host, from the
+            # owner each automation records.
             return True
         owner = self.owner_of(channel)
         if owner is None:

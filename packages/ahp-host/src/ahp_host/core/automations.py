@@ -514,6 +514,11 @@ class AutomationRecord:
     #: (`plugin_copies.py`). Persisted with the record: a run uses exactly what
     #: was captured when the definition was saved.
     captures: dict[str, PluginCopy] = field(default_factory=dict)
+    #: Who created it, by the policy's `principal_of`. Host-private: never on
+    #: the wire, never in an `AutomationEntry`. ``None`` for a record made with
+    #: no principal (a single-user policy) and for one written before this field
+    #: existed -- both are visible to, and manageable by, everyone.
+    principal: str | None = None
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -526,6 +531,7 @@ class AutomationRecord:
             "runs": self.runs,
             "requests": self.requests,
             **({} if self.run_count is None else {"runCount": self.run_count}),
+            **({} if self.principal is None else {"principal": self.principal}),
             **(
                 {"captures": {k: v.to_json() for k, v in self.captures.items()}}
                 if self.captures
@@ -546,6 +552,7 @@ class AutomationRecord:
         requests = payload.get("requests")
         run_count = payload.get("runCount")
         stored = payload.get("captures")
+        principal = payload.get("principal")
         captures: dict[str, PluginCopy] = {}
         for key, value in stored.items() if isinstance(stored, Mapping) else ():
             copy_ = PluginCopy.from_json(value)
@@ -567,6 +574,7 @@ class AutomationRecord:
             if isinstance(run_count, int) and not isinstance(run_count, bool)
             else None,
             captures=captures,
+            principal=principal if isinstance(principal, str) and principal else None,
         )
 
     def run(self, uri: str) -> dict[str, Any] | None:

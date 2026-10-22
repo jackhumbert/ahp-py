@@ -96,6 +96,15 @@ class Policy(Protocol):
     ``UserMessage.principal`` (the turn's sender) and persists the creator under
     ``PRINCIPAL_METADATA_KEY``. A raise, ``None`` or an empty string is
     anonymous. Queued, steered and host-started turns carry none.
+
+    Likewise OPTIONAL and outside the Protocol: ``may_manage_automation(info:
+    ConnectionInfo, uri: str, owner: str | None) -> bool``. An automation
+    records the principal that created it (``owner``); this decides whether a
+    peer may see, update, remove, run, read the runs of, or cancel a run of the
+    automation or run named by ``uri``. Absent, the default is an owner match
+    when both principals are known, and allow when either is ``None`` -- so a
+    single-user policy, and an automation made before owners were recorded,
+    behave as before. A raise refuses.
     """
 
     def authorize_connection(self, info: ConnectionInfo) -> bool:

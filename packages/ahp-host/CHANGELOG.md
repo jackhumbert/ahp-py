@@ -12,6 +12,15 @@ versions each release speaks.
 
 ### Added
 
+- Automations are owned by the principal that created them. The creator's `principal_of` is stamped
+  on the `AutomationRecord` (`principal`, persisted by `FileAutomationStore`; older records load as
+  `None`; never on the wire). Under a policy with a principal, the catalogue and the run channels
+  show a connection only its own automations and runs, and update, remove, `runAutomation`,
+  `fetchAutomationRuns` and run cancellation are refused for anyone else (`rejected by policy` for an
+  action, `-32009` for a method). New optional `Policy.may_manage_automation(info, uri, owner)`, and
+  `OwnedSessionPolicy` implements it, admits the catalogue channel, and claims automation, run and
+  run-session channels for their owner. `Sequencer.set_view` / `ChannelView` filter a shared
+  channel's snapshot, replay and fan-out per subscriber. A single-user policy is unchanged.
 - Named roots can be served at their real paths: `roots_layout = "real"` in the node config, or
   `ahp-node --roots-layout real` (`Roots.named(roots, layout="real")`). Each root is its real
   absolute `file:` URI, the default directory is the primary root's, and a picker can browse down

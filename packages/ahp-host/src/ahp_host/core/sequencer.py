@@ -58,7 +58,7 @@ from ahp_protocol.reducers import REDUCERS
 from ahp_host.core.redaction import RedactionError
 from ahp_host.core.seq import InMemorySequence, SequenceAllocator
 
-__all__ = ["Sequencer", "Subscriber", "SubscriptionObserver"]
+__all__ = ["ChannelView", "Sequencer", "Subscriber", "SubscriptionObserver"]
 
 _log = logging.getLogger(__name__)
 
@@ -70,6 +70,23 @@ class Subscriber(Protocol):
 
     def enqueue(self, message: Mapping[str, Any]) -> None:
         """Queue an outbound message. MUST NOT block and MUST NOT reorder."""
+
+
+class ChannelView(Protocol):
+    """What one subscriber is allowed to see of a shared channel.
+
+    A channel has one state and one log, so a channel whose contents belong to
+    different people (the automation catalogue) cannot be partitioned by who
+    may subscribe. A view is asked, per subscriber, for the state it may have
+    and for each envelope it may be sent. Both MUST be pure and cheap: they run
+    inside the sequencer's critical section.
+    """
+
+    def state(self, subscriber: Subscriber, state: Any) -> Any:
+        """The part of *state* this subscriber may see."""
+
+    def delivers(self, subscriber: Subscriber, envelope: Mapping[str, Any]) -> bool:
+        """Whether this subscriber may be sent (or replayed) *envelope*."""
 
 
 class SubscriptionObserver(Protocol):
@@ -120,6 +137,8 @@ class Sequencer:
         #: can tell the truth.
         self._evicted_through: dict[str, int] = {}
         self._subscribers: dict[str, set[Subscriber]] = {}
+        #: Channel -> what each subscriber may see of it (`ChannelView`).
+        self._views: dict[str, ChannelView] = {}
         # channel -> {client id -> expiry}: clients that were subscribed when a
         # redaction was published but were not sent it (stock clients). Their
         # mirror still holds the original, so their next reconnect must get a
@@ -188,6 +207,31 @@ class Sequencer:
                 raise ValueError(f"channel already registered: {uri!r}")
             self._states[uri] = initial_state
             self._reducers[uri] = reducer
+
+    def set_view(self, uri: str, view: ChannelView) -> None:
+        """Filter what each subscriber of *uri* is sent, replayed and snapshotted."""
+        self._views[uri] = view
+
+    def _visible_state(self, subscriber: Subscriber | None, uri: str) -> Any:
+        state = self._states[uri]
+        view = self._views.get(uri)
+        if view is None or subscriber is None:
+            return state
+        return view.state(subscriber, state)
+
+    def _may_receive(
+        self, subscriber: Subscriber | None, uri: str, envelope: Mapping[str, Any]
+    ) -> bool:
+        view = self._views.get(uri)
+        if view is None or subscriber is None:
+            return True
+        try:
+            return view.delivers(subscriber, envelope)
+        except Exception:
+            # Inside the critical section: a raise must not wedge the host. And
+            # a view that cannot decide has not decided to allow.
+            _log.exception("channel view failed on %s", uri)
+            return False
 
     async def drop_channel(self, uri: str) -> None:
         async with self._lock:
@@ -281,7 +325,8 @@ class Sequencer:
 
             message = {"jsonrpc": "2.0", "method": "action", "params": envelope}
             for subscriber in self._subscribers.get(channel, ()):
-                subscriber.enqueue(message)
+                if self._may_receive(subscriber, channel, envelope):
+                    subscriber.enqueue(message)
 
             return envelope
 
@@ -391,7 +436,7 @@ class Sequencer:
             self._clear_owed(subscriber.client_id, [channel])
             return {
                 "resource": channel,
-                "state": self._states[channel],
+                "state": self._visible_state(subscriber, channel),
                 "fromSeq": self._seq,
             }
 
@@ -558,6 +603,7 @@ class Sequencer:
                         for uri in known
                         for envelope in self._log.get(uri, ())
                         if envelope["serverSeq"] > last_seen_server_seq
+                        and self._may_receive(subscriber, uri, envelope)
                     ),
                     key=lambda envelope: envelope["serverSeq"],
                 )
@@ -584,7 +630,11 @@ class Sequencer:
             return {
                 "type": "snapshot",
                 "snapshots": [
-                    {"resource": uri, "state": self._states[uri], "fromSeq": self._seq}
+                    {
+                        "resource": uri,
+                        "state": self._visible_state(subscriber, uri),
+                        "fromSeq": self._seq,
+                    }
                     for uri in known
                 ],
             }
