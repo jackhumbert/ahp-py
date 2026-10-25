@@ -561,13 +561,19 @@ class _SurfaceConnection:
         node that names no roots is listed as its bare id.
         """
         if method == "resourceList":
+            # Every node asked at once, listed in inventory order: one slow node
+            # costs the listing its own wait, not the sum of all of them.
+            listed = [
+                (node_id, self.nodes[node_id]) for node_id in self.records if node_id in self.nodes
+            ]
+            roots: Sequence[list[str]] = (
+                await asyncio.gather(*(self._node_roots(node.link) for _, node in listed))
+                if self.flat_places
+                else [[] for _ in listed]
+            )
             entries: list[dict[str, str]] = []
-            for node_id in self.records:
-                node = self.nodes.get(node_id)
-                if node is None:
-                    continue
-                roots = await self._node_roots(node.link) if self.flat_places else []
-                names = [f"{node_id}{PLACE_SEPARATOR}{root}" for root in roots] or [node_id]
+            for (node_id, _), named in zip(listed, roots, strict=True):
+                names = [f"{node_id}{PLACE_SEPARATOR}{root}" for root in named] or [node_id]
                 entries.extend({"name": name, "type": "directory"} for name in names)
             return {"entries": entries}
         if method == "resourceResolve":
