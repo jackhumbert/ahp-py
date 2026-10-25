@@ -9456,6 +9456,9 @@ class Host:
         if not isinstance(resource, str):
             return f"{action_type} needs a resource"
         record = self._automations.get(resource)
+        # One answer for "no such automation" and "not yours": which URIs exist
+        # is the owner's to know.
+        no_such = f"no automation {resource}"
         if action_type == "automation/createRequested":
             if self._names_principals() and self._principal_of(connection) is None:
                 # It would be saved with no owner, which is everyone's.
@@ -9463,12 +9466,14 @@ class Host:
             if not resource.startswith(AUTOMATION_SCHEME):
                 return f"an automation resource must use the {AUTOMATION_SCHEME} scheme"
             if record is not None:
+                if not self._may_manage_automation(connection, resource, record.principal):
+                    return no_such
                 return f"{resource} already exists"
             previous = self._automation_owners.get(resource)
             if previous is not None and previous != self._principal_of(connection):
                 # A removed automation's URI stays its owner's: reusing it would
                 # re-point the owner's replayed history at someone else.
-                return "rejected by policy"
+                return no_such
             return definition_rejection(
                 action.get("definition"), self.providers
             ) or self._template_directories_rejection(connection, resource, action["definition"])
@@ -9476,9 +9481,9 @@ class Host:
             # `automation/removed` of an unknown resource is specified as a
             # no-op; rejected rather than sequenced, so it cannot remove a
             # coincidentally matching entry some other way.
-            return f"no automation {resource}"
+            return no_such
         if not self._may_manage_automation(connection, resource, record.principal):
-            return "rejected by policy"
+            return no_such
         if action_type == "automation/updateRequested":
             changes = action.get("changes")
             if not isinstance(changes, Mapping):
@@ -9670,11 +9675,15 @@ class Host:
         resource = params.get("automation")
         if not isinstance(resource, str):
             raise errors.invalid_params("automation is required")
-        record = self._automations.get(resource)
-        if record is None:
-            raise errors.AhpError(-32008, f"No such automation: {resource}")
-        if not self._may_manage_automation(connection, resource, record.principal):
+        if not self.policy.may_see_channel(connection.info, AUTOMATIONS_URI):
             raise errors.AhpError(-32009, f"Not permitted to {verb} {resource}")
+        record = self._automations.get(resource)
+        if record is None or not self._may_manage_automation(
+            connection, resource, record.principal
+        ):
+            # One answer for "no such automation" and "not yours": which URIs
+            # exist is the owner's to know.
+            raise errors.AhpError(-32008, f"No such automation: {resource}")
         return record
 
     async def _run_automation(
@@ -9684,8 +9693,6 @@ class Host:
         request_id = params.get("requestId")
         if not isinstance(request_id, str) or not request_id:
             raise errors.invalid_params("requestId is required")
-        if not self.policy.may_see_channel(connection.info, AUTOMATIONS_URI):
-            raise errors.AhpError(-32009, f"Not permitted to run {record.resource}")
         existing = record.requests.get(request_id)
         if existing is not None:
             # "Retrying with the same key and automation MUST return the
@@ -9699,8 +9706,6 @@ class Host:
         self, connection: Connection, params: Mapping[str, Any]
     ) -> dict[str, Any]:
         record = self._automation_named(connection, params, "observe")
-        if not self.policy.may_see_channel(connection.info, AUTOMATIONS_URI):
-            raise errors.AhpError(-32009, f"Not permitted to observe {AUTOMATIONS_URI}")
         cursor = params.get("cursor")
         pages = self._run_pages.get(record.resource, 0)
         if isinstance(cursor, str) and cursor.isascii() and cursor.isdecimal():

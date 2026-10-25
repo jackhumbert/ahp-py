@@ -237,7 +237,8 @@ class TestMutation:
         for kind in ("automation/updateRequested", "automation/removed"):
             echo = _echo_of(bob, kind)
             assert echo is not None
-            assert echo["rejectionReason"] == "rejected by policy"
+            # The same words as for an automation that does not exist.
+            assert echo["rejectionReason"] == f"no automation {AUTOMATION}"
         (entry,) = _entries(host)
         assert entry["definition"]["title"] == "Nightly check"
         # Alice, who owns it, is told nothing of the attempt.
@@ -274,11 +275,18 @@ class TestMutation:
             "runAutomation",
             {"channel": AUTOMATIONS_URI, "automation": AUTOMATION, "requestId": "r1"},
         )
-        assert run["error"]["code"] == -32009
+        # NotFound, as for an automation that does not exist.
+        assert run["error"]["code"] == -32008
         runs = await bob.request(
             "fetchAutomationRuns", {"channel": AUTOMATIONS_URI, "automation": AUTOMATION}
         )
-        assert runs["error"]["code"] == -32009
+        assert runs["error"]["code"] == -32008
+        missing = await bob.request(
+            "runAutomation",
+            {"channel": AUTOMATIONS_URI, "automation": "ahp-automation:/none", "requestId": "r1"},
+        )
+        assert missing["error"]["code"] == run["error"]["code"]
+        assert missing["error"]["message"].replace("none", "nightly") == run["error"]["message"]
         assert _entries(host)[0]["runs"] == []
 
     async def test_the_owner_can_run_observe_and_cancel_the_run(
@@ -323,7 +331,7 @@ class TestARemovedAutomationKeepsItsOwner:
         )
         echo = _echo_of(bob, "automation/createRequested")
         assert echo is not None
-        assert echo["rejectionReason"] == "rejected by policy"
+        assert echo["rejectionReason"] == f"no automation {AUTOMATION}"
         assert _entries(host) == []
         # The owner may have it back.
         await _dispatch(alice, AUTOMATIONS_URI, create, seq=3)
@@ -360,6 +368,39 @@ class TestARemovedAutomationKeepsItsOwner:
             await _until(lambda: host.sequencer.state_of(run)["lifecycle"]["status"] == "cancelled")
         finally:
             await host.aclose()
+
+
+class TestACreateOverAnotherUsersUri:
+    async def test_it_is_refused_like_an_automation_that_does_not_exist(
+        self, shared: tuple[Host, OwnedSessionPolicy]
+    ) -> None:
+        host, _ = shared
+        alice, bob = await _alice_creates(host)
+        create = {
+            "type": "automation/createRequested",
+            "resource": AUTOMATION,
+            "definition": _definition(),
+        }
+        await _dispatch(bob, AUTOMATIONS_URI, create, seq=1)
+        await bob.collect_until(
+            lambda: _echo_of(bob, "automation/createRequested") is not None, timeout=2
+        )
+        echo = _echo_of(bob, "automation/createRequested")
+        assert echo is not None
+        assert echo["rejectionReason"] == f"no automation {AUTOMATION}"
+        # Alice, who owns it, is told it exists.
+        await _dispatch(alice, AUTOMATIONS_URI, create, seq=5)
+
+        def refusals() -> list[str]:
+            return [
+                n["params"]["rejectionReason"]
+                for n in alice.notifications
+                if n.get("method") == "action" and "rejectionReason" in n["params"]
+            ]
+
+        await alice.collect_until(lambda: bool(refusals()), timeout=2)
+        (own,) = [{"rejectionReason": reason} for reason in refusals()]
+        assert own["rejectionReason"] == f"{AUTOMATION} already exists"
 
 
 class TestRunCancelByOwnerOnly:
@@ -592,7 +633,7 @@ class TestPolicyHook:
                 "runAutomation",
                 {"channel": AUTOMATIONS_URI, "automation": AUTOMATION, "requestId": "r"},
             )
-            assert reply["error"]["code"] == -32009
+            assert reply["error"]["code"] == -32008
         finally:
             await host.aclose()
 
@@ -649,7 +690,7 @@ class TestAnAnonymousPeerUnderAPrincipalPolicy:
                 "runAutomation",
                 {"channel": AUTOMATIONS_URI, "automation": AUTOMATION, "requestId": "r1"},
             )
-            assert run["error"]["code"] == -32009
+            assert run["error"]["code"] == -32008
             await _dispatch(
                 stranger,
                 AUTOMATIONS_URI,
@@ -672,10 +713,13 @@ class TestAnAnonymousPeerUnderAPrincipalPolicy:
             await stranger.collect_until(
                 lambda: _echo_of(stranger, "automation/createRequested") is not None, timeout=2
             )
-            for kind in ("automation/updateRequested", "automation/createRequested"):
+            for kind, reason in (
+                ("automation/updateRequested", f"no automation {AUTOMATION}"),
+                ("automation/createRequested", "rejected by policy"),
+            ):
                 echo = _echo_of(stranger, kind)
                 assert echo is not None
-                assert echo["rejectionReason"] == "rejected by policy"
+                assert echo["rejectionReason"] == reason
             (entry,) = _entries(host)
             assert entry["definition"]["title"] == "Nightly check"
         finally:
