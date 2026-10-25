@@ -4,6 +4,13 @@
 
 ## [0.1.0] - unreleased
 
+### Fixed — sandbox realm escape through a replaced `JSON.stringify`
+
+- The JS runner's host hooks (`hostCall`, `hostNotify`, `hostStart`) parse the script's
+  JSON without letting a host-realm `SyntaxError` reach the script, so a script that
+  replaces `JSON.stringify` before `log()`, `phase()`, `canvas()`, a gate or `workflow()`
+  no longer reaches the host `Function` and `process`.
+
 ### Fixed — cancellation on Python 3.11
 
 - A remote worker's relayed request waits for `approval_timeout` under `asyncio.timeout`,

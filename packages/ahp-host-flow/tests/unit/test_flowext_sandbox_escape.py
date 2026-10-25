@@ -95,6 +95,44 @@ async def test_flowext_escape_gate_errors_stay_in_realm(node_path: str, throwing
 
 
 @pytest.mark.node
+@pytest.mark.parametrize("stringify", ["() => '{'", "() => ({})"])
+@pytest.mark.parametrize(
+    "verb", ["log('x')", "phase('x')", "canvas('https://example.com/')", "await ask('q')"]
+)
+async def test_flowext_escape_replaced_stringify_stays_in_realm(
+    node_path: str, stringify: str, verb: str
+) -> None:
+    # The script owns its JSON.stringify, so a hook can be handed anything; the host's
+    # parse error must not come back as a host-realm object.
+    source = (
+        f"JSON.stringify = {stringify}\n"
+        f"try {{ {verb} }} catch (e) {{\n"
+        f"  return [typeof e, e.constructor.constructor('{REACH}')()]\n"
+        "}\n"
+        "return 'no throw'\n"
+    )
+    assert await _js(source, node_path) == ["string", NO_HOST]
+
+
+@pytest.mark.node
+async def test_flowext_escape_replaced_stringify_child_args(node_path: str, tmp_path: Path) -> None:
+    # workflow()'s third stringify is the child's args, parsed by the host's hostStart.
+    (tmp_path / "child.js").write_text("return 1\n", encoding="utf-8")
+    source = (
+        "const real = JSON.stringify\n"
+        "let n = 0\n"
+        "JSON.stringify = (v) => (++n === 3 ? '{' : real(v))\n"
+        "try { await workflow({scriptPath: 'child.js'}, {a: 1}) } catch (e) {\n"
+        f"  return [e instanceof Error, e.constructor.constructor('{REACH}')(), e.message]\n"
+        "}\n"
+        "return 'no throw'\n"
+    )
+    result = await _js(source, node_path, tmp_path=tmp_path, filename="parent.js")
+    assert result[:2] == [True, NO_HOST]
+    assert "invalid JSON" in result[2]
+
+
+@pytest.mark.node
 async def test_flowext_escape_no_answer_path_error_in_realm(node_path: str) -> None:
     # gates=None: the host answers GATE_ERROR and the verb throws a script-realm Error.
     source = (

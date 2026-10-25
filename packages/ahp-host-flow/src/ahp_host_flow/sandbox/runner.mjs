@@ -445,7 +445,20 @@ const pending = new Map();
 let nextId = 1;
 let runActive = false;
 
+// Parses JSON the script handed a hook. The script controls its realm's
+// JSON.stringify, so the text can be anything; a host-realm SyntaxError thrown
+// back would hand the script the host Function. Throw a primitive instead.
+function fromScript(text) {
+  if (typeof text !== 'string') throw 'sandbox: a hook was given a non-string';
+  try {
+    return JSON.parse(text);
+  } catch {
+    throw 'sandbox: a hook was given invalid JSON';
+  }
+}
+
 function hostCall(method, paramsJson) {
+  const params = fromScript(paramsJson);
   return new Promise((resolve) => {
     const id = nextId++;
     pending.set(id, (msg) => {
@@ -457,12 +470,12 @@ function hostCall(method, paramsJson) {
         ),
       );
     });
-    send({ jsonrpc: '2.0', id, method, params: JSON.parse(paramsJson) });
+    send({ jsonrpc: '2.0', id, method, params });
   });
 }
 
 function hostNotify(method, paramsJson) {
-  send({ jsonrpc: '2.0', method, params: JSON.parse(paramsJson) });
+  send({ jsonrpc: '2.0', method, params: fromScript(paramsJson) });
 }
 
 function describeThrown(e) {
@@ -547,7 +560,13 @@ async function run(params) {
       return 'workflow ' + filename + ': ' + String(err && err.message ? err.message : err);
     }
     const childSettings = { hasArgs: argsJson !== null, limits, child: true, verbs: settings.verbs };
-    if (argsJson !== null) childSettings.args = JSON.parse(argsJson);
+    if (argsJson !== null) {
+      try {
+        childSettings.args = fromScript(argsJson);
+      } catch (err) {
+        return 'workflow ' + filename + ': ' + err;
+      }
+    }
     const installChild = vm.runInContext(PRELUDE, child);
     installChild(hostCall, hostNotify, hostStart, hostState, JSON.stringify(childSettings));
     return script.runInContext(child);
