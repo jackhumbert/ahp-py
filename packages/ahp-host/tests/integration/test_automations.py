@@ -456,7 +456,7 @@ class TestARun:
             (run,) = host._automations[AUTOMATION].runs
             host._cancelled_runs.add(run["resource"])
 
-        host._start_turn = start_then_cancel  # type: ignore[method-assign]
+        host._start_turn = start_then_cancel  # type: ignore[assignment]
         try:
             client, _ = await _client(host)
             await _create(client, host, _definition())
