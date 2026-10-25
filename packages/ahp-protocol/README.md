@@ -128,7 +128,8 @@ unclassifiable case.
 
 ### An extension a stock peer ignores
 
-`ahp_protocol.ext.structured` holds the shared constants and the wrap rule of
+`ahp_protocol.ext.structured` holds the shared constants, the wrap rule and the
+reader (`structured_result`, the one place a turn's result is picked out) of
 ahp-py's structured turns: a client names a JSON Schema in a namespaced
 `_meta` key and gets the validated value back on the completed turn. It is an
 ahp-py extension ahead of the spec, carried in `_meta` and a host-internal tool,

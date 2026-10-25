@@ -36,12 +36,7 @@ import ahp_protocol.ext.operation as operation_ext
 from ahp_protocol.channels import ROOT_URI
 from ahp_protocol.ext.delegation import ORIGIN_META_KEY, parse_delegation
 from ahp_protocol.ext.flow import EMPTY_RUN, RunView, WorkflowInfo, run_view
-from ahp_protocol.ext.structured import (
-    OUTPUT_SCHEMA_META_KEY,
-    STRUCTURED_OUTPUT_TOOL,
-    STRUCTURED_OUTPUT_TOOL_META_KEY,
-    unwrap,
-)
+from ahp_protocol.ext.structured import OUTPUT_SCHEMA_META_KEY, structured_result
 from ahp_protocol.transport import Transport
 from ahp_protocol.types import JsonObject
 
@@ -1978,27 +1973,7 @@ class TurnStream:
                 schema = self._output_schema
             if schema is None:
                 return None
-            parts = turn.get("responseParts")
-            if not isinstance(parts, list):
-                return None
-            for part in reversed(parts):
-                if not isinstance(part, Mapping) or part.get("kind") != "toolCall":
-                    continue
-                call = part.get("toolCall")
-                if not isinstance(call, Mapping):
-                    continue
-                call_meta = call.get("_meta")
-                content = call.get("structuredContent")
-                if (
-                    call.get("toolName") == STRUCTURED_OUTPUT_TOOL
-                    and call.get("status") == "completed"
-                    and call.get("success") is True
-                    and isinstance(call_meta, Mapping)
-                    and call_meta.get(STRUCTURED_OUTPUT_TOOL_META_KEY) is True
-                    and isinstance(content, Mapping)
-                ):
-                    return unwrap(content, schema)
-            return None
+            return structured_result(turn, schema)
         return None
 
     def text(self) -> str:

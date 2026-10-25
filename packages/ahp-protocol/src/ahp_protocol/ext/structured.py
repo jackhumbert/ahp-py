@@ -36,6 +36,7 @@ __all__ = [
     "STRUCTURED_OUTPUT_TOOL_META_KEY",
     "WRAPPED_KEY",
     "needs_wrapping",
+    "structured_result",
     "tool_input_schema",
     "unwrap",
     "wrap",
@@ -97,3 +98,36 @@ def unwrap(structured: Mapping[str, Any], schema: Mapping[str, Any]) -> Any:
     if needs_wrapping(schema):
         return structured.get(WRAPPED_KEY)
     return dict(structured)
+
+
+def structured_result(turn: Mapping[str, Any], schema: Mapping[str, Any]) -> Any:
+    """A turn's validated structured result under ``schema``, or None.
+
+    The last StructuredOutput tool call in the turn's ``responseParts`` that
+    completed successfully, carries the :data:`STRUCTURED_OUTPUT_TOOL_META_KEY`
+    marker and has an object ``structuredContent``, unwrapped. The host has
+    already validated it; this only decodes it. Every reader of a structured
+    turn (a client's turn stream, a gateway reading a worker) uses this, so
+    none can pick a different call than another.
+    """
+    parts = turn.get("responseParts")
+    if not isinstance(parts, list):
+        return None
+    for part in reversed(parts):
+        if not isinstance(part, Mapping) or part.get("kind") != "toolCall":
+            continue
+        call = part.get("toolCall")
+        if not isinstance(call, Mapping):
+            continue
+        call_meta = call.get("_meta")
+        content = call.get("structuredContent")
+        if (
+            call.get("toolName") == STRUCTURED_OUTPUT_TOOL
+            and call.get("status") == "completed"
+            and call.get("success") is True
+            and isinstance(call_meta, Mapping)
+            and call_meta.get(STRUCTURED_OUTPUT_TOOL_META_KEY) is True
+            and isinstance(content, Mapping)
+        ):
+            return unwrap(content, schema)
+    return None

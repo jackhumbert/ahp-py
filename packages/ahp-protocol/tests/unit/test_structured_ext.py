@@ -67,3 +67,47 @@ def test_wrap_unwrap_round_trip() -> None:
 def test_wrap_rejects_non_object_for_object_schema() -> None:
     with pytest.raises(TypeError):
         s.wrap([1], OBJECT_SCHEMA)
+
+
+def _call(content: Any, **overrides: Any) -> dict[str, Any]:
+    call: dict[str, Any] = {
+        "toolName": s.STRUCTURED_OUTPUT_TOOL,
+        "status": "completed",
+        "success": True,
+        "_meta": {s.STRUCTURED_OUTPUT_TOOL_META_KEY: True},
+        "structuredContent": content,
+    }
+    call.update(overrides)
+    return {"kind": "toolCall", "toolCall": call}
+
+
+def test_structured_result_takes_the_last_valid_call_unwrapped() -> None:
+    turn = {
+        "responseParts": [
+            _call({"value": [1]}),
+            {"kind": "markdown", "content": "x"},
+            _call({"value": [2]}),
+            _call({"value": [3]}, success=False),
+        ]
+    }
+    assert s.structured_result(turn, ARRAY_SCHEMA) == [2]
+    assert s.structured_result({"responseParts": [_call({"n": 4})]}, OBJECT_SCHEMA) == {"n": 4}
+
+
+@pytest.mark.parametrize(
+    "part",
+    [
+        _call({"n": 1}, toolName="Other"),
+        _call({"n": 1}, status="running"),
+        _call({"n": 1}, _meta={}),
+        _call([1]),
+        "not a part",
+    ],
+)
+def test_structured_result_ignores_anything_but_a_marked_completed_call(part: Any) -> None:
+    assert s.structured_result({"responseParts": [part]}, OBJECT_SCHEMA) is None
+
+
+def test_structured_result_without_parts_is_none() -> None:
+    assert s.structured_result({}, OBJECT_SCHEMA) is None
+    assert s.structured_result({"responseParts": "x"}, OBJECT_SCHEMA) is None

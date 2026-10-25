@@ -58,12 +58,7 @@ from ahp_client.serve.inputs import waiting_entries
 from ahp_protocol import AhpError, Transport
 from ahp_protocol.errors import invalid_params
 from ahp_protocol.ext.delegation import delegation_origin
-from ahp_protocol.ext.structured import (
-    OUTPUT_SCHEMA_META_KEY,
-    STRUCTURED_OUTPUT_TOOL,
-    STRUCTURED_OUTPUT_TOOL_META_KEY,
-    unwrap,
-)
+from ahp_protocol.ext.structured import OUTPUT_SCHEMA_META_KEY, structured_result
 
 from ahp_gateway.registry import NodeRecord, Principal
 
@@ -1208,22 +1203,7 @@ class Orchestrator:
         meta = message.get("_meta") if isinstance(message, Mapping) else None
         schema = meta.get(OUTPUT_SCHEMA_META_KEY) if isinstance(meta, Mapping) else None
         if isinstance(schema, Mapping):
-            for part in reversed(parts):
-                call = part.get("toolCall") if part.get("kind") == "toolCall" else None
-                if not isinstance(call, Mapping):
-                    continue
-                call_meta = call.get("_meta")
-                content = call.get("structuredContent")
-                if (
-                    call.get("toolName") == STRUCTURED_OUTPUT_TOOL
-                    and call.get("status") == "completed"
-                    and call.get("success") is True
-                    and isinstance(call_meta, Mapping)
-                    and call_meta.get(STRUCTURED_OUTPUT_TOOL_META_KEY) is True
-                    and isinstance(content, Mapping)
-                ):
-                    structured = unwrap(content, schema)
-                    break
+            structured = structured_result(turn, schema)
         raw_usage = turn.get("usage")
         usage = raw_usage if isinstance(raw_usage, Mapping) else {}
         out: dict[str, Any] = {
