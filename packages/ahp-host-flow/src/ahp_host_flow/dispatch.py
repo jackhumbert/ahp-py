@@ -1080,7 +1080,6 @@ class ProviderDispatcher(StepDispatcher):
                 interactivity="full" if spec.interactive else "read-only",
             )
         opened.append(worker.resource)
-        self.worker_providers[worker.resource] = name
         # `worker_chat` only for a call whose inner state may get recorded: the engine hands a
         # continued run the handle of a cut-off call only when it names a place to reattach to.
         report_dispatch(
@@ -1162,35 +1161,9 @@ class ProviderDispatcher(StepDispatcher):
             if chat_name is not None:
                 self._named[chat_name] = _NamedChat(name, worker, inner, title, config, folder)
         named = self._named.get(chat_name) if chat_name else None
-        # An unnamed, schema-less call keeps its session's state while the turn runs, so a
-        # restart can resume the turn in place (`ResumesTurns`) rather than send it again.
         durable = self.durable
         inner_state: Mapping[str, Any] | None = None
-        if (
-            durable is not None
-            and chat_name is None
-            and schema is None
-            and wt is None
-            and isinstance(provider, ResumableAgentProvider)
-        ):
-            try:
-                inner_state = await provider.resume_state_of(inner)
-            except Exception:
-                inner_state = None
         resume_turn_id = resumed[2] if resumed is not None else None
-        self.workers[worker.resource] = inner
-        self._live.add(worker.resource)
-        if self.client_tools is not None and isinstance(inner, FollowsActiveClients):
-            # A new session gets the full list; a named chat's one is refreshed between calls.
-            with contextlib.suppress(Exception):
-                await inner.active_clients_changed(self.client_tools.clients())
-        pending = (
-            self.pending_overlays.pop(worker.resource, None)
-            if self.pending_overlays is not None
-            else None
-        )
-        if pending:
-            await forward_overlay(inner, worker.resource, pending)
 
         state = _Worker()
         usage = {"input_tokens": 0, "output_tokens": 0, "cache_read_tokens": 0}
@@ -1337,7 +1310,38 @@ class ProviderDispatcher(StepDispatcher):
 
         #: Cancelled from outside while the turn ran (a shutdown): its record stays in the store.
         cut_off = False
+        #: The worker turn is being started (until then nothing waits on `done` or `over`).
+        launched = False
+        # From here every way out closes what the setup registered, the inner session too.
         try:
+            self.worker_providers[worker.resource] = name
+            # An unnamed, schema-less call keeps its session's state while the turn runs, so a
+            # restart can resume the turn in place (`ResumesTurns`) rather than send it again.
+            if (
+                durable is not None
+                and chat_name is None
+                and schema is None
+                and wt is None
+                and isinstance(provider, ResumableAgentProvider)
+            ):
+                try:
+                    inner_state = await provider.resume_state_of(inner)
+                except Exception:
+                    inner_state = None
+            self.workers[worker.resource] = inner
+            self._live.add(worker.resource)
+            if self.client_tools is not None and isinstance(inner, FollowsActiveClients):
+                # A new session gets the full list; a named chat's one is refreshed between calls.
+                with contextlib.suppress(Exception):
+                    await inner.active_clients_changed(self.client_tools.clients())
+            pending = (
+                self.pending_overlays.pop(worker.resource, None)
+                if self.pending_overlays is not None
+                else None
+            )
+            if pending:
+                await forward_overlay(inner, worker.resource, pending)
+            launched = True
             # `on_end` is the only word of a turn cancelled before `run` starts.
             if not await worker.run_turn(call.prompt, run, on_end=turn_ended):
                 raise FlowAgentError("could not start a turn in the worker chat")
@@ -1363,13 +1367,14 @@ class ProviderDispatcher(StepDispatcher):
             )
             with contextlib.suppress(Exception):
                 await inner.cancel("run aborted")
-            with contextlib.suppress(TimeoutError):
-                await asyncio.wait_for(state.done.wait(), ABORT_GRACE)
+            if launched:
+                with contextlib.suppress(TimeoutError):
+                    await asyncio.wait_for(state.done.wait(), ABORT_GRACE)
             if state.task is not None and not state.task.done():
                 # A host shutdown cancels the turn itself; any other stop is this call's own.
                 state.reaped = not cut_off
                 state.task.cancel()
-            if chat_name is not None:
+            if launched and chat_name is not None:
                 # The chat outlives this call (a timeout, say): the next call on it must find
                 # the turn ended, not still running, or its `run_turn` is refused.
                 with contextlib.suppress(TimeoutError):
