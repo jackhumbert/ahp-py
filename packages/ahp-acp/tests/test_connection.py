@@ -193,6 +193,21 @@ async def test_stderr_tail_without_a_callback() -> None:
         await conn.aclose()
 
 
+@pytest.mark.parametrize("stream_limit", [None, 64 * 1024])
+async def test_a_long_stderr_line_does_not_stop_the_drain(stream_limit: int | None) -> None:
+    # A line past the reader's limit used to end the drain for good; the pipe
+    # then filled and the agent blocked writing to it, so no reply ever came.
+    # With the default limit the line is read; with a small one it is dropped.
+    steps = [{"big_stderr": 100_000}, {"stderr_fill": 256}, {"stderr": "after"}]
+    kwargs: dict[str, Any] = {} if stream_limit is None else {"stream_limit": stream_limit}
+    conn = await spawn({"responses": {"go": {"ok": True}}, "before": {"go": steps}}, **kwargs)
+    try:
+        assert await conn.request("go", timeout=10) == {"ok": True}
+        await eventually(lambda: conn.stderr_tail.endswith("after"))
+    finally:
+        await conn.aclose()
+
+
 async def _env_of(monkeypatch: pytest.MonkeyPatch, **kwargs: Any) -> dict[str, str]:
     monkeypatch.setenv("AHP_ACP_TEST_PARENT_VAR", "parent")
     got: dict[str, Any] = {}

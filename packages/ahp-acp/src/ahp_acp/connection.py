@@ -169,6 +169,8 @@ class AcpConnection:
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            # The readers' line limit: stderr is read by line.
+            limit=stream_limit,
             **kwargs,
         )
         assert process.stdout is not None
@@ -361,8 +363,21 @@ class AcpConnection:
             await self._send(reply)
 
     async def _drain_stderr(self, stream: asyncio.StreamReader) -> None:
+        """Keep reading stderr to EOF: an agent whose stderr pipe fills blocks.
+
+        A line past the reader's limit is dropped (`readline` discards what it
+        buffered and raises `ValueError`); its remainder reads as a line of its
+        own, so the drain carries on in step with the stream.
+        """
         with contextlib.suppress(Exception):
-            while line := await stream.readline():
+            while True:
+                try:
+                    line = await stream.readline()
+                except ValueError:
+                    log.debug("the ACP agent wrote a stderr line over the limit; dropped")
+                    continue
+                if not line:
+                    break
                 text = line.decode("utf-8", errors="replace").rstrip()
                 if not text:
                     continue

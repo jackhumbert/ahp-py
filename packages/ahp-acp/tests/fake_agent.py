@@ -15,7 +15,8 @@ The script is one JSON object:
 Steps: {"send": <message>} writes it to stdout; {"await": [<id>, ...]} waits for
 the client's replies to those ids and stores them; {"stderr": "text"};
 {"raw": "text"} writes a line verbatim; {"big_line": n} writes n bytes then a
-newline; {"grandchild": true} starts a sleeping child and reports its pid in an
+newline; {"big_stderr": n} does the same on stderr; {"stderr_fill": n} writes n
+1 KB lines to stderr; {"grandchild": true} starts a sleeping child and reports its pid in an
 `_example/pid` notification; {"sleep": seconds}; {"exit": code} ends the process
 at once; {"env": true} reports the environment in an `_example/env` notification.
 A result containing "$replies" gets the stored replies.
@@ -76,6 +77,13 @@ def run_steps(steps: list[dict[str, Any]]) -> None:
         elif "big_line" in step:
             sys.stdout.write("x" * step["big_line"] + "\n")
             sys.stdout.flush()
+        elif "big_stderr" in step:
+            sys.stderr.write("e" * step["big_stderr"] + "\n")
+            sys.stderr.flush()
+        elif "stderr_fill" in step:
+            for n in range(step["stderr_fill"]):
+                sys.stderr.write(f"{n:06d}" + "f" * 1017 + "\n")
+            sys.stderr.flush()
         elif "grandchild" in step:
             child = subprocess.Popen(
                 [sys.executable, "-c", "import time; time.sleep(60)"],
