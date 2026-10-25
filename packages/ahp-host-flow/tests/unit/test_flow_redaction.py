@@ -13,7 +13,7 @@ from ahp_host.core.redaction import RedactionError as HostRedactionError
 from ahp_host.provider.echo import EchoProvider
 from ahp_protocol.ext import flow
 
-from ahp_host_flow import FlowProvider, load_config
+from ahp_host_flow import FlowProvider, load_config, redaction
 from ahp_host_flow.engine.journal import AgentRecord, JournalWriter, RunHeader
 from ahp_host_flow.redaction import (
     REQUEST_SUFFIX,
@@ -202,6 +202,33 @@ async def test_flow_redaction_request_spool(tmp_path: Path) -> None:
     assert ok["ok"] is True
     assert ok["runId"] == RUN
     assert json.loads(result_path(bad).read_text(encoding="utf-8"))["ok"] is False
+
+
+async def test_flow_redaction_spool_survives_a_failing_request(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An unexpected error on one request is its result; the requests after it still run."""
+    host, provider = flow_host(tmp_path)
+    state_dir = provider.config.state_dir
+    write_journal(state_dir)
+    first = queue_request(state_dir, RUN, 0, "boom")
+    second = queue_request(state_dir, RUN, 0, "leak")
+    real = redaction.redact_step
+
+    async def flaky(host: Host, **kwargs: Any) -> Any:
+        if kwargs["reason"] == "boom":
+            raise OSError("the store is unwritable")
+        return await real(host, **kwargs)
+
+    monkeypatch.setattr(redaction, "redact_step", flaky)
+    results = await process_requests(host, provider)
+    assert results == [result_path(first), result_path(second)]
+    failed = json.loads(result_path(first).read_text(encoding="utf-8"))
+    assert failed["ok"] is False
+    assert "the store is unwritable" in failed["error"]
+    assert json.loads(result_path(second).read_text(encoding="utf-8"))["ok"] is True
+    assert not first.exists()
+    assert not second.exists()
 
 
 async def test_flow_redaction_poller_only_for_flow_hosts(tmp_path: Path) -> None:

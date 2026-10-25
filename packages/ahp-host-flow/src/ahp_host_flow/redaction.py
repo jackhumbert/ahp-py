@@ -404,6 +404,11 @@ async def process_requests(host: Host, provider: FlowProvider) -> list[Path]:
                 result = {"ok": True, **report.to_json()}
             except RedactionError as exc:
                 result = {"ok": False, "error": str(exc), "done": list(exc.done)}
+            except Exception as exc:
+                # Answered, not left queued: a request that fails every time would otherwise
+                # block every one after it.
+                _log.exception("redaction request %s failed", request.name)
+                result = {"ok": False, "error": f"redaction failed: {exc}", "done": []}
         out = result_path(request)
         tmp = out.with_name(out.name + ".tmp")
         tmp.write_text(json.dumps(result), encoding="utf-8")
