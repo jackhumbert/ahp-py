@@ -11,7 +11,7 @@ import pytest
 
 import ahp_host_flow
 from ahp_host_flow import library
-from ahp_host_flow.engine import BudgetExhaustedError, RunOptions
+from ahp_host_flow.engine import BudgetExhaustedError, RunOptions, journal
 from ahp_host_flow.engine.scheduler import AgentLimitError
 
 from ..fakes import FakeDispatcher  # noqa: TID252
@@ -48,6 +48,23 @@ async def test_library_run_budget() -> None:
         assert r.budget.remaining() == 0
         assert r.budget.total == 15
         assert r.budget.spent() == 20
+
+
+async def test_library_run_setup_failure_releases_the_journal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def broken(*args: Any, **kwargs: Any) -> Any:
+        raise RuntimeError("registry setup failed")
+
+    monkeypatch.setattr(library, "Registry", broken)
+    # The caller keeps the error (and so its traceback's frames): only closing frees the lock.
+    with pytest.raises(RuntimeError, match="registry setup failed") as info:
+        async with library.run(FakeDispatcher(), RunOptions(state_dir=tmp_path, run_id="r1")):
+            pass
+    assert info.traceback
+    with (tmp_path / "runs" / "r1" / journal.LOCK_FILE).open("a+b") as handle:
+        assert journal._try_lock(handle), "journal.lock is still held"
+        journal._unlock(handle)
 
 
 async def test_library_run_cap() -> None:

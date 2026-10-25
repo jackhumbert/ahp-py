@@ -188,8 +188,15 @@ async def run(
             scriptless=True,
         )
         options = jr.options
+    scheduler: Scheduler | None = None
+    gate_runner: GateRunner | None = None
+    verb_runner: VerbRunner | None = None
+    state: RunState | None = None
+    flow: FlowRun | None = None
+    # Everything is built inside the `try`, so a setup failure still closes the journal
+    # (and releases `journal.lock`).
     try:
-        scheduler = Scheduler(
+        scheduler = sched = Scheduler(
             dispatcher,
             options,
             abort=abort,
@@ -199,47 +206,49 @@ async def run(
             journal=jr.writer if jr else None,
             replay=jr.replay if jr else None,
         )
-    except BaseException:
-        if jr is not None:
-            jr.close()
-        raise
-    # No gate answerer in-process: ask()/approve() fail clearly (like headless flow run).
-    gate_runner = GateRunner(None, abort=abort, mask=options.redact, on_log=on_log)
-    verb_runner = VerbRunner(
-        options.verbs,
-        abort=abort,
-        mask=options.redact,
-        on_log=on_log,
-        journal=jr.writer if jr else None,
-        replay=jr.verb_replay if jr else None,
-        run_id=jr.run_id if jr else None,
-        phase_of=lambda: scheduler.phase,
-    )
-    state = RunState(
-        scheduler=scheduler,
-        options=options,
-        registry=Registry(
-            options.workflow_dirs,
-            python_dirs=options.python_dirs,
-            client=options.client_workflows,
-        ),
-        journal=jr,
-        node=node,
-        on_log=on_log,
-        on_phase=on_phase,
-        gates=gate_runner,
-        verbs=verb_runner,
-    )
-    flow = FlowRun(state, jr.run_id if jr else None)
-    try:
+        # No gate answerer in-process: ask()/approve() fail clearly (like headless flow run).
+        gate_runner = GateRunner(None, abort=abort, mask=options.redact, on_log=on_log)
+        verb_runner = VerbRunner(
+            options.verbs,
+            abort=abort,
+            mask=options.redact,
+            on_log=on_log,
+            journal=jr.writer if jr else None,
+            replay=jr.verb_replay if jr else None,
+            run_id=jr.run_id if jr else None,
+            phase_of=lambda: sched.phase,
+        )
+        state = RunState(
+            scheduler=sched,
+            options=options,
+            registry=Registry(
+                options.workflow_dirs,
+                python_dirs=options.python_dirs,
+                client=options.client_workflows,
+            ),
+            journal=jr,
+            node=node,
+            on_log=on_log,
+            on_phase=on_phase,
+            gates=gate_runner,
+            verbs=verb_runner,
+        )
+        flow = FlowRun(state, jr.run_id if jr else None)
         if jr is not None and on_run_start is not None:
             on_run_start(jr.run_id)
         yield flow
     finally:
-        await flow._cancel_pending()
-        state.kill_children(SandboxError("run ended"))
-        gate_runner.close()
-        verb_runner.close()
-        scheduler.close()
-        if jr is not None:
-            jr.close()
+        try:
+            if flow is not None:
+                await flow._cancel_pending()
+            if state is not None:
+                state.kill_children(SandboxError("run ended"))
+            if gate_runner is not None:
+                gate_runner.close()
+            if verb_runner is not None:
+                verb_runner.close()
+            if scheduler is not None:
+                scheduler.close()
+        finally:
+            if jr is not None:
+                jr.close()
