@@ -15,6 +15,8 @@ from ahp_acp import (
     AgentExitedError,
     MethodNotFoundError,
     RequestTimeoutError,
+    kill_tree,
+    signal_group,
 )
 from tests.support import argv_for
 
@@ -393,3 +395,49 @@ async def test_user_without_a_passwd_entry_needs_a_group(monkeypatch: pytest.Mon
 async def test_extra_groups_keeps_the_named_groups(monkeypatch: pytest.MonkeyPatch) -> None:
     kwargs = await _spawn_kwargs(monkeypatch, user="nobody", extra_groups=(100, "staff"))
     assert kwargs["extra_groups"] == [100, "staff"]
+
+
+async def _leader_with_child() -> tuple[asyncio.subprocess.Process, int]:
+    """A session leader whose grandchild survives it: (the leader, the child's pid)."""
+    script = "sleep 60 >/dev/null 2>&1 & echo $!; exit 0"
+    process = await asyncio.create_subprocess_exec(
+        "sh",
+        "-c",
+        script,
+        stdout=asyncio.subprocess.PIPE,
+        start_new_session=True,
+    )
+    assert process.stdout is not None
+    child = int((await process.stdout.readline()).decode())
+    await process.wait()
+    return process, child
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX process groups")
+async def test_kill_tree_kills_a_grandchild_the_leader_left_behind() -> None:
+    process, child = await _leader_with_child()
+    os.kill(child, 0)  # still running, though its leader exited
+    await kill_tree(process)
+    await eventually(lambda: not _running(child))
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX process groups")
+async def test_signal_group_ignores_a_group_that_is_gone() -> None:
+    import signal
+
+    process, child = await _leader_with_child()
+    signal_group(process, signal.SIGKILL)
+    await eventually(lambda: not _running(child))
+    signal_group(process, signal.SIGKILL)  # nothing left: not an error
+    signal_group(process, signal.SIGKILL, group=False)
+
+
+def _running(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    try:  # a zombie, not yet reaped by init, is dead
+        return Path(f"/proc/{pid}/stat").read_text().split(")")[-1].split()[0] != "Z"
+    except OSError:
+        return True

@@ -471,7 +471,7 @@ class AcpConnection:
         for sig in (signal.SIGTERM, signal.SIGKILL):
             if not self._alive(process):
                 return
-            self._signal(process, sig)
+            signal_group(process, sig, group=self._process_group)
             deadline = asyncio.get_running_loop().time() + self._grace
             while self._alive(process) and asyncio.get_running_loop().time() < deadline:
                 await asyncio.sleep(0.02)
@@ -490,14 +490,36 @@ class AcpConnection:
             return False
         return True
 
-    def _signal(self, process: asyncio.subprocess.Process, sig: int) -> None:
-        try:
-            if self._process_group:
-                os.killpg(process.pid, sig)
-            else:
-                process.send_signal(sig)
-        except (ProcessLookupError, PermissionError):
-            pass
+
+def signal_group(process: asyncio.subprocess.Process, sig: int, *, group: bool = True) -> None:
+    """Send `sig` to `process`'s process group (`group`, the process must lead its
+    own: `start_new_session`), or to the process alone. POSIX only. A group or
+    process that is already gone, or not ours to signal, is not an error."""
+    try:
+        if group:
+            os.killpg(process.pid, sig)
+        else:
+            process.send_signal(sig)
+    except (ProcessLookupError, PermissionError):
+        pass
+
+
+async def kill_tree(process: asyncio.subprocess.Process) -> None:
+    """Kill `process` and everything it started.
+
+    On POSIX the process must lead its own session (`start_new_session`): the
+    whole group gets `SIGKILL`, even after the leader exited and left a
+    grandchild behind. On Windows `taskkill /T` takes the tree, while the
+    leader still runs.
+    """
+    if sys.platform == "win32":
+        if process.returncode is None:
+            with contextlib.suppress(OSError):
+                await _taskkill(process)
+            with contextlib.suppress(ProcessLookupError):
+                process.kill()
+        return
+    signal_group(process, signal.SIGKILL)
 
 
 async def _taskkill(process: asyncio.subprocess.Process) -> None:

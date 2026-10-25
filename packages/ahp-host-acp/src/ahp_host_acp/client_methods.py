@@ -35,7 +35,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Final, TypeGuard
 
-from ahp_acp import AcpError
+from ahp_acp import AcpError, kill_tree
 from ahp_host.provider.base import ToolConfirmation, TurnSink
 from ahp_host.provider.policy import ToolPolicy, ToolRequest
 from ahp_host.provider.spawn import child_env
@@ -125,36 +125,9 @@ class _Terminal:
         return {"exitCode": code, "signal": None}
 
     async def kill(self) -> None:
-        """Kill the command and everything it started.
-
-        As `ahp_acp.connection` does for an agent: on POSIX the command leads
-        its own session (`start_new_session`), so the whole group is killed,
-        even after the leader exited and left a grandchild behind; on Windows
-        `taskkill /T` takes the tree while the leader still runs.
-        """
-        if sys.platform == "win32":
-            if self.process.returncode is None:
-                await _taskkill(self.process.pid)
-                with contextlib.suppress(ProcessLookupError):
-                    self.process.kill()
-            return
-        with contextlib.suppress(ProcessLookupError, PermissionError):
-            os.killpg(self.process.pid, signal.SIGKILL)
-
-
-async def _taskkill(pid: int) -> None:
-    with contextlib.suppress(OSError):
-        killer = await asyncio.create_subprocess_exec(
-            "taskkill",
-            "/T",
-            "/F",
-            "/PID",
-            str(pid),
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-        )
-        await killer.wait()
+        """Kill the command and everything it started (the command leads its own
+        session, `start_new_session`: see `ahp_acp.kill_tree`)."""
+        await kill_tree(self.process)
 
 
 class ClientMethods:

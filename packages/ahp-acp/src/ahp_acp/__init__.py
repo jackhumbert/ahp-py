@@ -8,7 +8,7 @@ from ahp_acp.client import (
     mcp_server_stdio,
     reject_once,
 )
-from ahp_acp.connection import AcpConnection
+from ahp_acp.connection import AcpConnection, kill_tree, signal_group
 from ahp_acp.errors import (
     AcpError,
     AgentExitedError,
@@ -71,8 +71,10 @@ __all__ = [
     "UserMessageChunk",
     "__version__",
     "allow_once",
+    "kill_tree",
     "mcp_server_http",
     "mcp_server_stdio",
     "parse_update",
     "reject_once",
+    "signal_group",
 ]
