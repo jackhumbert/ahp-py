@@ -478,7 +478,25 @@ function hostNotify(method, paramsJson) {
   send({ jsonrpc: '2.0', method, params: fromScript(paramsJson) });
 }
 
-function describeThrown(e) {
+// The stack's header (the error's own lines) and only the frames in the script's file:
+// the runner's, Node's and the prelude's frames name host paths and internals.
+function scriptFrames(stack, filename) {
+  const out = [];
+  let inFrames = false;
+  for (const line of stack.split('\n')) {
+    const t = line.trim();
+    if (t.startsWith('at ')) inFrames = true;
+    if (!inFrames) {
+      out.push(line);
+      continue;
+    }
+    const where = t.replace(/^at (async )?/, '');
+    if (where.startsWith(filename + ':') || where.includes('(' + filename + ':')) out.push(line);
+  }
+  return out.join('\n');
+}
+
+function describeThrown(e, filename) {
   // The thrown value is a context-realm object, so `instanceof Object` would be false.
   let message;
   let name = null;
@@ -497,7 +515,7 @@ function describeThrown(e) {
   }
   try {
     stack = e?.stack ?? null;
-    if (typeof stack !== 'string') stack = null;
+    stack = typeof stack === 'string' ? scriptFrames(stack, filename) : null;
   } catch {
     stack = null;
   }
@@ -585,7 +603,7 @@ async function run(params) {
   try {
     value = await script.runInContext(ctx);
   } catch (e) {
-    const { message, data } = describeThrown(e);
+    const { message, data } = describeThrown(e, filename);
     throw new RpcError(SCRIPT_ERROR, message, data);
   }
   let json;

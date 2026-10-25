@@ -623,11 +623,34 @@ async def _call_main(main: Callable[[Any], Coroutine[Any, Any, Any]], args: Any)
 # --- the run and the wire -------------------------------------------------------
 
 
-def _script_error(exc: BaseException) -> RpcError:
+def _script_stack(exc: BaseException, filename: str, seen: set[int] | None = None) -> str:
+    """`traceback.format_exception(exc)` with only the frames in the script's file.
+
+    The runner's, the verbs' and the standard library's frames name host paths.
+    """
+    seen = set() if seen is None else seen
+    seen.add(id(exc))
+    parts: list[str] = []
+    cause, context = exc.__cause__, exc.__context__
+    if cause is not None and id(cause) not in seen:
+        parts.append(_script_stack(cause, filename, seen))
+        parts.append("\nThe above exception was the direct cause of the following exception:\n\n")
+    elif context is not None and not exc.__suppress_context__ and id(context) not in seen:
+        parts.append(_script_stack(context, filename, seen))
+        parts.append("\nDuring handling of the above exception, another exception occurred:\n\n")
+    frames = [f for f in traceback.extract_tb(exc.__traceback__) if f.filename == filename]
+    if frames:
+        parts.append("Traceback (most recent call last):\n")
+        parts.extend(traceback.StackSummary.from_list(frames).format())
+    parts.extend(traceback.format_exception_only(exc))
+    return "".join(parts)
+
+
+def _script_error(exc: BaseException, filename: str) -> RpcError:
     return RpcError(
         protocol.SCRIPT_ERROR,
         str(exc),
-        {"name": type(exc).__name__, "stack": "".join(traceback.format_exception(exc))},
+        {"name": type(exc).__name__, "stack": _script_stack(exc, filename)},
     )
 
 
@@ -671,9 +694,9 @@ async def _run(link: _Link, params: dict[str, Any]) -> dict[str, Any]:
     except RpcError:
         raise
     except _ExitError as exc:
-        raise _script_error(exc.original) from None
+        raise _script_error(exc.original, filename) from None
     except (Exception, SystemExit) as exc:
-        raise _script_error(exc) from None
+        raise _script_error(exc, filename) from None
     try:
         return {"value": clone_json(value)}
     except (TypeError, ValueError) as exc:
