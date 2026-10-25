@@ -16,7 +16,10 @@ from typing import Any
 
 import pytest
 from ahp_client.client import actions
+from ahp_protocol import Transport
 
+import ahp_gateway.core.orchestrator as orchestrator_module
+from ahp_gateway.registry import NodeRecord, Principal
 from tests.fleet import Fleet
 from tests.flowfleet import (
     RecordingEcho,
@@ -207,6 +210,49 @@ async def test_fleetgw_e2e_max_running_holds_across_a_gateway_restart(tmp_path: 
         result = await asyncio.wait_for(task, 10)
         assert result["success"] is True
         assert result["structuredContent"]["session"] in _sessions_on(second, "alpha")
+    finally:
+        await _close(second)
+
+
+async def test_fleetgw_e2e_a_down_nodes_child_is_not_redialed_on_every_start(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A child whose node does not answer costs one bounded dial, then is left alone a while."""
+    monkeypatch.setattr(orchestrator_module, "FLOW_OPEN_TIMEOUT", 0.3)
+    state_path = tmp_path / "state.json"
+    first = flow_fleet(tmp_path, state_path=state_path)
+    await start_flow(first)
+    await _joined(first)
+    await run_tool(first, RUN, "start_session", node="asker", agent="claude", prompt="w")
+    await first.gateway.aclose()
+
+    second = flow_fleet(tmp_path, state_path=state_path, hosts=first.hosts)
+    dials: list[str] = []
+    real = second.connector.connect
+
+    async def connect(record: NodeRecord, principal: Principal) -> Transport:
+        if record.node_id == "asker":
+            # Off, and not refusing: the dial hangs until it is given up on.
+            dials.append(record.node_id)
+            await asyncio.Event().wait()
+        return await real(record, principal)
+
+    second.connector.connect = connect  # type: ignore[method-assign]
+    try:
+        await second.gateway.start()
+        orchestrator = second.gateway.orchestrator
+        assert orchestrator is not None
+        await eventually(lambda: orchestrator._adopted[RUN].tools is not None)
+        loop = asyncio.get_running_loop()
+        for index, prompt in enumerate(("one", "two", "three")):
+            began = loop.time()
+            result = await run_tool(
+                second, RUN, "start_session", node="alpha", agent="claude", prompt=prompt
+            )
+            assert result["success"] is True, result
+            # The first start waits out the one dial; the next ones do not dial at all.
+            assert loop.time() - began < (1.0 if index == 0 else 0.2)
+        assert dials == ["asker"]
     finally:
         await _close(second)
 

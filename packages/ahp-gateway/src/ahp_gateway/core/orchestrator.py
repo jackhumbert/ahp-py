@@ -87,6 +87,11 @@ EFFORT_LEVELS: Final = ("low", "medium", "high", "xhigh", "max")
 #: Seconds `max_running` waits to open a flow child it has not seen finished.
 FLOW_OPEN_TIMEOUT: Final = 5.0
 
+#: Seconds a flow child whose node did not answer is left uncounted before it is
+#: dialed again, doubling on each failure up to the ceiling.
+FLOW_RETRY: Final = 5.0
+FLOW_RETRY_CEILING: Final = 60.0
+
 #: Seconds between looks at the mirror while a flow call waits. In-memory turns
 #: settle in milliseconds, and 50 ms keeps a 600 s wait to 12000 reads at most.
 FLOW_POLL: Final = 0.05
@@ -340,6 +345,10 @@ class _Spawned:
     #: Seen finished (done, stopped, failed or gone). Persisted, so a restarted
     #: gateway counts toward `max_running` only the children that may still run.
     finished: bool = False
+    #: Not before this loop time is its node dialed again, after it did not
+    #: answer; and the wait that set it, doubled on each failure. In memory only.
+    retry_at: float = 0.0
+    backoff: float = 0.0
 
 
 @dataclass
@@ -1095,13 +1104,27 @@ class Orchestrator:
         `FLOW_OPEN_TIMEOUT`, or that is gone, cannot hold a slot and is not
         counted. One seen finished is remembered as such (and saved), so it is
         never opened again.
+
+        One that did not answer is left alone for a backoff (`FLOW_RETRY`,
+        doubling to `FLOW_RETRY_CEILING`): a start waiting for a slot re-counts
+        every `FLOW_POLL` while holding the flow session's lock, and redialing a
+        dead node each time would cost every poll, and every start, a timeout.
         """
         if child.finished:
             return False
-        try:
-            client, _ = await asyncio.wait_for(self._worker(adopted, child), FLOW_OPEN_TIMEOUT)
-        except Exception:
+        loop = asyncio.get_running_loop()
+        if loop.time() < child.retry_at:
             return False
+        try:
+            async with asyncio.timeout(FLOW_OPEN_TIMEOUT):
+                client, _ = await self._worker(adopted, child)
+        except Exception:
+            child.backoff = (
+                min(child.backoff * 2, FLOW_RETRY_CEILING) if child.backoff else FLOW_RETRY
+            )
+            child.retry_at = loop.time() + child.backoff
+            return False
+        child.backoff = child.retry_at = 0.0
         if self._flow_status(client, child)["done"]:
             child.finished = True
             self._save()

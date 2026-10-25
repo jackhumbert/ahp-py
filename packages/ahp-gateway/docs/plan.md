@@ -446,7 +446,9 @@ validated structured result, usage, status, error) and `stop_session`.
   the nodes, not from what this process has open: a restarted gateway opens
   each recorded child not yet seen finished and asks; one seen finished is
   remembered in `state_path` and never opened again; one whose node does not
-  answer within 5 s, or that is gone, is not counted.
+  answer within 5 s, or that is gone, is not counted, and a node that did not
+  answer is not dialed again for that child for a backoff (5 s, doubling to
+  60 s), so a start waiting for a slot does not pay a dial on every poll.
 - **Restarts.** Flow sessions and their children (with each child's chat and
   whether it finished) are kept in `state_path` and rejoined like
   orchestrators. A run that was waiting when the gateway went retries its call
