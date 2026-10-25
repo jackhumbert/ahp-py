@@ -302,6 +302,8 @@ class _Worker:
     skipped: bool = False
     #: The idle watchdog expired and cancelled the turn.
     timed_out: bool = False
+    #: The call cancelled the turn's task itself, after the inner session's grace ran out.
+    reaped: bool = False
     started: bool = False
     error: str | None = None
     kind: ErrorKind = "failed"
@@ -1266,7 +1268,19 @@ class ProviderDispatcher(StepDispatcher):
                     state.skipped = True
                     with contextlib.suppress(Exception):
                         await inner.cancel("skipped")
-                raise
+                if not (state.timed_out or state.reaped):
+                    raise
+                # The call stopped its own turn: a cancelled turn task leaves the worker chat's
+                # turn active (only a client's `chat/turnCancelled` ends one), and a named
+                # chat's next call could not start a turn. End it as a failed turn instead.
+                current = asyncio.current_task()
+                if current is not None:
+                    current.uncancel()
+                with contextlib.suppress(Exception):
+                    await tee.turn_failed(
+                        "no activity (idle_timeout)" if state.timed_out else "agent() stopped",
+                        "flow.stopped",
+                    )
             except Exception as exc:
                 state.error = self.redactor.mask(str(exc))
                 raise
@@ -1332,7 +1346,14 @@ class ProviderDispatcher(StepDispatcher):
             with contextlib.suppress(TimeoutError):
                 await asyncio.wait_for(state.done.wait(), ABORT_GRACE)
             if state.task is not None and not state.task.done():
+                # A host shutdown cancels the turn itself; any other stop is this call's own.
+                state.reaped = not cut_off
                 state.task.cancel()
+            if chat_name is not None:
+                # The chat outlives this call (a timeout, say): the next call on it must find
+                # the turn ended, not still running, or its `run_turn` is refused.
+                with contextlib.suppress(TimeoutError):
+                    await asyncio.wait_for(state.over.wait(), ABORT_GRACE)
             raise
         finally:
             self.workers.pop(worker.resource, None)

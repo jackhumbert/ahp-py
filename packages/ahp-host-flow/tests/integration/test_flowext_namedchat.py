@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from ahp_host_flow import dispatch
 from tests import flow_fakes
 from tests.flow_fakes import RecordingProvider, RestartHoldProvider
 from tests.flow_hosting import SESSION, boot_flow, final_json, restart_flow, store_for
@@ -212,3 +213,33 @@ async def test_flowext_namedchat_keeps_first_config_py(tmp_path: Path) -> None:
     user.mkdir(parents=True, exist_ok=True)
     (user / "cfg.py").write_text(CONFIG_PY, encoding="utf-8")
     await _keeps_first_config(tmp_path, str(tmp_path / "no-node"), "/cfg")
+
+
+TIMEOUT_PY = (
+    "meta = {{'name': 'late', 'description': 'd'}}\n"
+    "\n"
+    "async def main(args):\n"
+    "{first}"
+    "    a = await agent('hold-1', x={{'chat': 's', 'timeout': 0.3}})\n"
+    "    b = await agent('two', x={{'chat': 's'}})\n"
+    "    return [a, b]\n"
+)
+
+
+@pytest.mark.parametrize("first", ["", "    await agent('one', x={'chat': 's'})\n"])
+async def test_flowext_namedchat_usable_after_a_timed_out_call(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, first: str
+) -> None:
+    # The timed-out turn's inner session ignores the cancel: the call ends only once the
+    # grace runs out and its turn task is cancelled, and the next call on the chat must wait
+    # for that turn to end rather than find it still running.
+    monkeypatch.setattr(dispatch, "ABORT_GRACE", 0.5)
+    user = tmp_path / "user"
+    user.mkdir(parents=True, exist_ok=True)
+    (user / "late.py").write_text(TIMEOUT_PY.format(first=first), encoding="utf-8")
+    fx = await boot_flow(tmp_path, str(tmp_path / "no-node"), TOML)
+    try:
+        turn = await run_turn(fx.wire, fx.chat, "t1", "/late")
+        assert final_json(turn) == [None, "rec: two"], notifications(turn)
+    finally:
+        await fx.shut()
