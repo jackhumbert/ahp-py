@@ -504,10 +504,12 @@ class Scheduler:
             _DISPATCH_REPORT.reset(token)
         self._inflight.add(task)
         self._tasks[n] = task
+        outer_cancelled = True
         try:
             # wait() never raises the inner task's cancellation; an outer one still
             # raises here, and the finally cancels the dispatch.
             await asyncio.wait({task})
+            outer_cancelled = False
         finally:
             if not task.done():
                 task.cancel()
@@ -515,6 +517,11 @@ class Scheduler:
             self._inflight.discard(task)
             # A start record always precedes the agent record.
             report(None)
+            if outer_cancelled:
+                # Cancelled from outside (an abort, then the run's own cancel of its agent()
+                # tasks): what the call used is still charged to the budget and the quota.
+                done = not task.cancelled() and task.exception() is None
+                self._settle_live(n, task.result() if done else None)
         if task.cancelled() and n in self._budget_cancelled:
             # The hard cap stopped it: it throws in the script like a refused call, and a
             # resume runs it again (the record is not replayed).
