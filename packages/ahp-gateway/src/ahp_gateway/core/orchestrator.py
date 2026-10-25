@@ -525,13 +525,19 @@ class Orchestrator:
         raise ToolError(f"there is no machine {node_id!r} you may use")
 
     async def _client(self, principal: Principal, node_id: str) -> Client:
+        """The (subject, node) link, after asking admission again.
+
+        Asked on every call, cached link or not: the cache is keyed by subject,
+        so a principal who has since lost the group that admitted them would
+        otherwise keep using the link dialed while they had it.
+        """
+        record = self._record(principal, node_id)
         key = (principal.subject, node_id)
         lock = self._connecting.setdefault(key, asyncio.Lock())
         async with lock:
             existing = self._clients.get(key)
             if existing is not None:
                 return existing
-            record = self._record(principal, node_id)
             connector = self.gateway.connector
 
             async def dial() -> Transport:

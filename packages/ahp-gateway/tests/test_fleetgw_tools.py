@@ -11,6 +11,7 @@ from typing import Any
 
 import pytest
 
+from ahp_gateway.registry import Principal
 from tests.fleet import Fleet
 from tests.flowfleet import (
     RecordingEcho,
@@ -251,3 +252,28 @@ async def test_fleetgw_tools_a_restarted_gateway_rejoins_the_flow_session(tmp_pa
         assert result["success"] is True
     finally:
         await _close(second)
+
+
+async def test_fleetgw_tools_a_principal_who_loses_a_group_is_refused_on_its_next_flow(
+    tmp_path: Path,
+) -> None:
+    """Admission is asked on every call, not only when a link is first dialed and cached."""
+    groups = {"person": frozenset({"dev", "ops"})}
+    fleet = flow_fleet(tmp_path)
+    fleet.gateway.authenticate = lambda info: Principal(info.client_id, groups[info.client_id])
+    try:
+        await start_flow(fleet, "flow:/r1", "person")
+        first = await run_tool(
+            fleet, "flow:/r1", "start_session", node="vault", agent="claude", prompt="one"
+        )
+        assert first["success"] is True, first
+
+        groups["person"] = frozenset({"dev"})
+        await start_flow(fleet, "flow:/r2", "person")
+        second = await run_tool(
+            fleet, "flow:/r2", "start_session", node="vault", agent="claude", prompt="two"
+        )
+        assert second["success"] is False
+        assert "no machine 'vault'" in _text(second)
+    finally:
+        await _close(fleet)
