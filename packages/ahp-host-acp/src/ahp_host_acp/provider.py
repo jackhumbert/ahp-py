@@ -1551,16 +1551,26 @@ class AcpSession:
         `_meta.turnTokenTotals` (`[{model, inputTokens, cachedTokens,
         outputTokens}]`) and is `inputTokens` only for an agent that sends no
         `usage_update`.
+
+        The cache reads beside `inputTokens` are the same call's: ACP reports
+        them only for the turn, so beside the latest call's input there are
+        none, and the turn's go with the turn's input. ACP's cache reads are
+        part of its input (`totalTokens` is input plus output), so they are
+        capped at the input they go with, here and in `turnTokenTotals`.
         """
         usage = _mapping(result.get("usage"))
         turn_input = usage.get("inputTokens")
         input_tokens = turn_input
         # With no per-turn usage the agent's context size is a gauge, not a count.
         gauge = chat.context_used is not None and not isinstance(turn_input, int)
+        output_tokens = usage.get("outputTokens")
+        turn_cached = usage.get("cachedReadTokens")
+        if isinstance(turn_cached, int):
+            turn_cached = min(turn_cached, turn_input) if isinstance(turn_input, int) else None
+        cached = turn_cached
         if chat.context_used is not None:
             input_tokens = chat.context_used
-        output_tokens = usage.get("outputTokens")
-        cached = usage.get("cachedReadTokens")
+            cached = None
         acp_usage: dict[str, Any] = {}
         for key, value in (
             ("used", chat.context_used),
@@ -1581,7 +1591,7 @@ class AcpSession:
                 {
                     "model": _current_model(chat) or "",
                     "inputTokens": turn_input if isinstance(turn_input, int) else 0,
-                    "cachedTokens": cached if isinstance(cached, int) else 0,
+                    "cachedTokens": turn_cached if isinstance(turn_cached, int) else 0,
                     "outputTokens": output_tokens if isinstance(output_tokens, int) else 0,
                 }
             ]

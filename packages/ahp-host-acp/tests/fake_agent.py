@@ -16,6 +16,7 @@ The prompt text picks the behaviour:
 - ``usage``        a `usage_update` with a context size and a cost
 - ``rounds``       three `usage_update`s (used 100, 200, 300), then a turn usage summing them
 - ``sumonly``      a turn usage (input 600) and no `usage_update`
+- ``overcached``   a turn usage whose cache reads (90) exceed its input (50)
 - ``edit``         edit `notes.txt` (whole-file diff, shown only before it is written)
 - ``fragment``     edit `code.py` with a fragment diff, reported only once written
 - ``create``       create `new.txt`
@@ -623,6 +624,16 @@ def prompt(session_id: str, words: str) -> dict[str, Any]:
         return {
             "stopReason": "end_turn",
             "usage": {"inputTokens": 600, "outputTokens": 40, "totalTokens": 640},
+        }
+    if words == "overcached":
+        return {
+            "stopReason": "end_turn",
+            "usage": {
+                "inputTokens": 50,
+                "outputTokens": 4,
+                "cachedReadTokens": 90,
+                "totalTokens": 54,
+            },
         }
     if words == "edit":
         path = cwd / "notes.txt"

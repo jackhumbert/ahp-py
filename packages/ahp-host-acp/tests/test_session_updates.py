@@ -370,10 +370,13 @@ async def test_usage_reports_the_latest_call_and_the_turn_sum_apart(
     try:
         rounds = await _say(session, "rounds")
         sum_only = await _say(session, "sumonly")
+        over = await _say(session, "overcached")
     finally:
         await session.aclose()
     # (a) inputTokens is the last call's prompt; the turn sum rides in turnTokenTotals.
-    assert [e for e in rounds.events if e[0] == "usage"] == [("usage", 300, 40, 7, None)]
+    # The cache reads beside it would be the last call's too, which ACP does not
+    # report per call: none, rather than the turn's sum beside one call's input.
+    assert [e for e in rounds.events if e[0] == "usage"] == [("usage", 300, 40, None, None)]
     (meta,) = rounds.usage_meta
     assert meta is not None
     totals = meta["turnTokenTotals"]
@@ -393,6 +396,12 @@ async def test_usage_reports_the_latest_call_and_the_turn_sum_apart(
     (meta2,) = sum_only.usage_meta
     assert meta2 is not None
     assert meta2["turnTokenTotals"][0]["inputTokens"] == 600
+    # Cache reads are part of the input: never more than it, in either place.
+    assert [e for e in over.events if e[0] == "usage"] == [("usage", 50, 4, 50, None)]
+    (meta3,) = over.usage_meta
+    assert meta3 is not None
+    (totals3,) = meta3["turnTokenTotals"]
+    assert (totals3["inputTokens"], totals3["cachedTokens"], totals3["outputTokens"]) == (50, 50, 4)
 
 
 # -- edits -> changeset -------------------------------------------------------------------
