@@ -179,6 +179,11 @@ is the design; milestones M0–M18 there say what exists (all done).
   attempt k's main-chat tool call id is `agent-<n>-a<k>`.
 - A `.py` workflow from a client is never read or loaded (plan §4.10 trust);
   `python_sources` refuses `client`.
+- Security decision: `workflow({scriptPath})` to a `.js` under `run_root` is allowed for every
+  caller, a client-published workflow included; only `.py` is gated (`python_dirs`). A `.js`
+  child runs in the same Node sandbox with the same verbs and caps as its caller, so it grants
+  nothing the caller lacks (plan §4.3: a path in the session's working directories); a `.py` is
+  host code (§4.10). `test_scriptpath_trust` pins it; keep the Node sandbox the boundary.
 - Client workflows reach the engine as plain data: `RunOptions.client_workflows`
   (`ClientWorkflow(name, source, filename)`, `.js` only; the registry drops any other) and
   the labeled `WorkflowDir`s in `workflow_dirs`. The engine never imports the catalog, and
