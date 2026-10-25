@@ -298,9 +298,11 @@ named worker chat and its inner session, created by the first call that names
 it. Calls that name one chat are serialized, so each sees the earlier turns.
 The chat closes when the run ends. It works for in-process providers only: a
 fleet or remote provider, and `isolation: 'worktree'`, fail the call. The inner
-session is created by the first call, so the chat keeps that call's config
-(`effort`, and the approval mode): a later call to the same name that asks for
-another one runs with the first, and a `log()` line says so. `model` is sent
+session is created by the first call, so the chat keeps that call's `effort`:
+a later call to the same name that asks for another one runs with the first,
+and a `log()` line says so. The approval mode follows the run's Approvals
+setting: a change made between calls is handed to the chat's session before
+its next call. `model` is sent
 with each message, so it may change from call to call. On resume
 the chat and its session are created again; the inner agent remembers earlier
 turns only if its provider can resume sessions.

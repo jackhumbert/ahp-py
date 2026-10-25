@@ -949,7 +949,9 @@ with the reason. Worker chats of a provider that is not interactive stay
 read-only.
 
 Changing the session's Approvals config reaches the workers that are running: "approve
-all for this run" applies to their next prompt at once (effort is not fanned out).
+all for this run" applies to their next prompt at once (effort is not fanned out). So does
+an Approvals overlay on a run's main chat, for that run's running workers, and a named chat
+(`opts.x.chat`) gets the run's current Approvals before each of its calls.
 
 ### Approval rules
 

@@ -564,6 +564,9 @@ class FlowSession:
         self._workers: dict[str, AgentSession] = {}
         #: The provider name of each live worker chat (shared with the dispatcher).
         self._worker_providers: dict[str, str] = {}
+        #: Each live run's in-process dispatcher, by main chat (an Approvals overlay on the main
+        #: chat reaches that run's running workers through it).
+        self._inprocess: dict[str, ProviderDispatcher] = {}
         self._aborts: dict[str, AbortSignal] = {}
         #: Live runs by main chat.
         self._runs: dict[str, RunEntry] = {}
@@ -1202,32 +1205,34 @@ class FlowSession:
             if resumed is not None and resumed.durable is not None
             else DurableWorkers()
         )
+        inprocess = ProviderDispatcher(
+            config=config,
+            providers=self.provider.providers,
+            sink=sink,
+            publisher=publisher,
+            chat=chat,
+            session_uri=context.session_uri,
+            working_directories=context.working_directories,
+            run_values=lambda: {**self._values, **self._chat_overlays.get(chat, {})},
+            run_model=model,
+            workers=self._workers,
+            pending_overlays=self._chat_overlays,
+            redactor=redactor,
+            on_log=on_log,
+            call_id_prefix=call_id_prefix,
+            changesets=self.provider.worktree_changesets,
+            worker_providers=self._worker_providers,
+            session_view=view,
+            principal=principal,
+            client_tools=self._client_tools,
+            durable=durable,
+            aborted=lambda: abort.aborted,
+        )
+        self._inprocess[chat] = inprocess
         dispatcher = RoutingDispatcher(
             config,
             slots=self.provider.provider_slots,
-            inprocess=ProviderDispatcher(
-                config=config,
-                providers=self.provider.providers,
-                sink=sink,
-                publisher=publisher,
-                chat=chat,
-                session_uri=context.session_uri,
-                working_directories=context.working_directories,
-                run_values=lambda: {**self._values, **self._chat_overlays.get(chat, {})},
-                run_model=model,
-                workers=self._workers,
-                pending_overlays=self._chat_overlays,
-                redactor=redactor,
-                on_log=on_log,
-                call_id_prefix=call_id_prefix,
-                changesets=self.provider.worktree_changesets,
-                worker_providers=self._worker_providers,
-                session_view=view,
-                principal=principal,
-                client_tools=self._client_tools,
-                durable=durable,
-                aborted=lambda: abort.aborted,
-            ),
+            inprocess=inprocess,
             fleet=FleetDispatcher(
                 config=config,
                 sink=sink,
@@ -1380,6 +1385,8 @@ class FlowSession:
                 self.provider._reserved_run_ids.discard(reserved)
             self._aborts.pop(chat, None)
             self._runs.pop(chat, None)
+            if self._inprocess.get(chat) is inprocess:
+                del self._inprocess[chat]
             if not drainer.done():
                 drainer.cancel()
             with contextlib.suppress(Exception):
@@ -1406,6 +1413,11 @@ class FlowSession:
         if inner is None:
             # Applies to the calls a run on this chat makes from now on.
             self._chat_overlays[chat] = mapped
+            mode = mapped.get(APPROVAL_KEY)
+            run = self._inprocess.get(chat)
+            if run is not None and isinstance(mode, str) and mode in APPROVAL_MODES:
+                # And at once to the run's running workers, as a session-wide change does.
+                await run.approval_changed(mode)
         else:
             await forward_overlay(inner, chat, mapped)
 

@@ -691,6 +691,17 @@ class ProviderDispatcher(StepDispatcher):
         #: Named worker chats (`opts.x.chat`) of this run and a lock per name.
         self._named: dict[str, _NamedChat] = {}
         self._named_locks: dict[str, asyncio.Lock] = {}
+        #: This run's worker chats whose inner session is in `workers` (a turn is running).
+        self._live: set[str] = set()
+
+    async def approval_changed(self, mode: str) -> None:
+        """Hand an Approvals change on the run's main chat to the run's running workers."""
+        for chat in list(self._live):
+            inner = self.workers.get(chat)
+            if inner is not None:
+                # One worker failing never stops the others.
+                with contextlib.suppress(Exception):
+                    await forward_overlay(inner, chat, {APPROVAL_KEY: mode})
 
     def _roots(self) -> list[Path]:
         return [p for w in self.working_directories if (p := catalog.directory_of(w)) is not None]
@@ -1036,8 +1047,16 @@ class ProviderDispatcher(StepDispatcher):
             worker = existing.worker
             title = existing.title
             # The session was created with the first call's config; only the model is per
-            # message. A follow-up asking for another effort or approval mode keeps the first.
+            # message, and the approval mode, which the run's Approvals setting changes at any
+            # time, is handed to the session as an overlay. A follow-up asking for another
+            # effort keeps the first.
             wanted = inner_config(spec, self.run_values(), opts)
+            mode = wanted.get(APPROVAL_KEY)
+            if mode is not None and mode != existing.config.get(APPROVAL_KEY):
+                await forward_overlay(
+                    existing.inner, existing.worker.resource, {APPROVAL_KEY: mode}
+                )
+                existing.config = {**existing.config, APPROVAL_KEY: mode}
             if wanted != dict(existing.config):
                 self._note(
                     f"agent() #{call.ordinal}: opts.x.chat {chat_name!r} keeps its first call's "
@@ -1160,6 +1179,7 @@ class ProviderDispatcher(StepDispatcher):
                 inner_state = None
         resume_turn_id = resumed[2] if resumed is not None else None
         self.workers[worker.resource] = inner
+        self._live.add(worker.resource)
         if self.client_tools is not None and isinstance(inner, FollowsActiveClients):
             # A new session gets the full list; a named chat's one is refreshed between calls.
             with contextlib.suppress(Exception):
@@ -1357,6 +1377,7 @@ class ProviderDispatcher(StepDispatcher):
             raise
         finally:
             self.workers.pop(worker.resource, None)
+            self._live.discard(worker.resource)
             if durable is not None and not cut_off:
                 durable.inflight.pop(worker.resource, None)
             self.worker_providers.pop(worker.resource, None)
