@@ -978,7 +978,10 @@ class ProviderDispatcher(StepDispatcher):
                 raise FlowAgentError("isolation 'worktree' needs a journaled run")
             try:
                 wt = await create_worktree(
-                    workdir, worktree_path(self.config.state_dir, self.run_id, call.ordinal)
+                    workdir,
+                    worktree_path(
+                        self.config.state_dir, self.run_id, call.ordinal, attempt=_ATTEMPT.get()
+                    ),
                 )
             except WorktreeError as exc:
                 raise FlowAgentError(str(exc)) from exc

@@ -18,7 +18,7 @@ from ahp_host_flow.worktree import (
     worktree_path,
 )
 from tests.flow_fakes import reset_fakes
-from tests.flow_hosting import SESSION, FlowFixture, boot_flow
+from tests.flow_hosting import SESSION, FlowFixture, boot_flow, final_json
 from tests.hosting import notifications, run_turn, state, worker_chats
 
 pytestmark = [
@@ -183,5 +183,32 @@ async def test_flow_changesets_nothing_to_review_keeps_and_says_how_to_remove(
         assert ", but no reviewable changes; remove with `git worktree remove --force " in line
         assert str(path) in line
         assert "its changeset" not in line
+    finally:
+        await fx.shut()
+
+
+RETRY_TOML = (
+    '[providers.fw]\nload = "tests.flow_fakes:FileWriterProvider"\nretry_empty = 1\n'
+    '\n[routing]\ndefault = "fw"\n'
+)
+
+
+async def test_flow_changesets_retry_gets_its_own_worktree(tmp_path: Path, node_path: str) -> None:
+    """A retried attempt runs in a worktree of its own, `<n>-a<k>`; each is kept."""
+    init_repo(tmp_path / "ws")
+    fx = await boot_flow(tmp_path, node_path, RETRY_TOML)
+    try:
+        turn = await run_turn(fx.wire, fx.chat, "t1", script("write-empty-first notes.txt"))
+        run_id = run_id_of(turn)
+        first = worktree_path(tmp_path / "state", run_id, 0)
+        second = worktree_path(tmp_path / "state", run_id, 0, attempt=1)
+        assert second == first.with_name("0-a1")
+        assert final_json(turn) == str(second)
+        assert (first / "notes.txt").exists()
+        assert (second / "notes.txt").exists()
+        chats = worker_chats(fx.host, SESSION)
+        assert len(chats) == 2
+        for chat in chats:
+            assert len(state(fx.host, str(chat["resource"])).get("changesets", [])) == 1
     finally:
         await fx.shut()

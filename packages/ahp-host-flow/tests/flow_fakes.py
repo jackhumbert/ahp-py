@@ -442,6 +442,14 @@ class FileWriterSession:
         assert cwd is not None
         if message.text.startswith("write "):
             (cwd / message.text.removeprefix("write ").strip()).write_text("x", encoding="utf-8")
+        if message.text.startswith("write-empty-first "):
+            # Writes the file, and the first time any session is sent this replies nothing.
+            (cwd / message.text.split(" ", 1)[1].strip()).write_text("x", encoding="utf-8")
+            seen = FileWriterProvider.sends.get(message.text, 0)
+            FileWriterProvider.sends[message.text] = seen + 1
+            if seen == 0:
+                await sink.usage(input_tokens=1, output_tokens=1)
+                return
         if message.text.strip() == "commit-empty":
             # HEAD moves but the tree does not: kept as changed, yet nothing to review.
             subprocess.run(
@@ -472,9 +480,11 @@ class FileWriterSession:
 
 
 class FileWriterProvider:
-    """Replies with its working directory; `write <name>` first writes that file there."""
+    """Replies with its working directory; `write <name>` first writes that file there, and
+    `write-empty-first <name>` too but replies nothing the first time (`sends` counts)."""
 
     instances: ClassVar[list[FileWriterProvider]] = []
+    sends: ClassVar[dict[str, int]] = {}
 
     def __init__(self, *, provider_id: str = "fw") -> None:
         self.provider_id = provider_id
@@ -1005,6 +1015,7 @@ def reset_fakes() -> None:
     AuthProvider.instances.clear()
     ModalProvider.instances.clear()
     FileWriterProvider.instances.clear()
+    FileWriterProvider.sends.clear()
     EmptyFirstProvider.sends.clear()
     RestartHoldProvider.prompts.clear()
     RestartHoldProvider.holding = True

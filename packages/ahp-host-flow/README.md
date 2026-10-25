@@ -273,8 +273,9 @@ async with ahp_host_flow.run(dispatcher, RunOptions(budget_total=50_000)) as r:
   `heartbeat`) still needs a longer `idle_timeout` or `None`.
 - `agent()` accepts `isolation: 'worktree'`. When the run's working directory is
   a git repository, the inner session runs in a new git worktree under
-  `<state_dir>/runs/<runId>/worktrees/<ordinal>`. It is removed afterwards if it
-  has no changes; otherwise it is kept and its path is logged. Outside a git
+  `<state_dir>/runs/<runId>/worktrees/<ordinal>` (a `retry_empty` retry or a
+  fallback attempt k gets its own, `<ordinal>-a<k>`). It is removed afterwards if
+  it has no changes; otherwise it is kept and its path is logged. Outside a git
   repository the call logs why and returns `null`.
 - With `state_dir` set, the journal writes a `started` record (ordinal, key,
   provider and worker chat) when a call is dispatched, before its result. A

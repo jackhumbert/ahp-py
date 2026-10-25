@@ -51,8 +51,11 @@ class Worktree:
     base: str
 
 
-def worktree_path(state_dir: Path, run_id: str, ordinal: int) -> Path:
-    return run_dir(state_dir, run_id) / WORKTREES_DIR / str(ordinal)
+def worktree_path(state_dir: Path, run_id: str, ordinal: int, *, attempt: int = 0) -> Path:
+    """Where call *ordinal*'s worktree goes: `worktrees/<n>`, and `worktrees/<n>-a<k>` for
+    attempt k of a `retry_empty` retry or a fallback, so each attempt has one of its own."""
+    name = f"{ordinal}-a{attempt}" if attempt else str(ordinal)
+    return run_dir(state_dir, run_id) / WORKTREES_DIR / name
 
 
 async def _git_bytes(*args: str, cwd: Path, stdin: bytes | None = None) -> tuple[int, bytes, str]:
