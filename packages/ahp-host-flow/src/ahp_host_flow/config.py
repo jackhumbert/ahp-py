@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 import re
+import subprocess
 import tomllib
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -610,12 +611,40 @@ def _parse_resume(raw: Any) -> ResumeConfig:
     return ResumeConfig(key)
 
 
+#: A run id to try `changesets.branch` with (the shape `engine.RUN_ID` allows).
+_SAMPLE_RUN_ID: Final = "0123456789abcdef0123456789abcdef"
+
+
+def _branch_name_ok(name: str) -> bool:
+    """Whether git takes *name* as a branch name (True when git is not there to ask: a
+    worktree needs git anyway, and Commit checks the name again)."""
+    try:
+        done = subprocess.run(
+            ["git", "check-ref-format", "--branch", name],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            timeout=30,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return True
+    return done.returncode == 0
+
+
 def _parse_changesets(raw: Any) -> ChangesetsConfig:
     table = _table(raw, "changesets")
     _check_keys(table, ("branch", "trailer"), "changesets")
     branch = table.get("branch", ChangesetsConfig.branch)
     if not isinstance(branch, str) or not branch.strip():
         raise ConfigError(f"changesets.branch must be a non-empty string, got {branch!r}")
+    if "{runId}" not in branch and "{ordinal}" not in branch:
+        # A fixed name would be taken by the first Commit and refused for every later one.
+        raise ConfigError(
+            f"changesets.branch must contain {{runId}} or {{ordinal}}, got {branch!r}"
+        )
+    sample = branch.replace("{runId}", _SAMPLE_RUN_ID).replace("{ordinal}", "0")
+    if not _branch_name_ok(sample):
+        raise ConfigError(f"changesets.branch {branch!r} is not a valid branch name ({sample!r})")
     trailer = table.get("trailer", ChangesetsConfig.trailer)
     if not isinstance(trailer, bool):
         raise ConfigError(f"changesets.trailer must be a boolean, got {trailer!r}")

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import shutil
 import tomllib
 from pathlib import Path
 from typing import Any
@@ -265,6 +266,32 @@ def test_provider_interactive(tmp_path: Path) -> None:
 def test_missing_file(tmp_path: Path) -> None:
     with pytest.raises(ConfigError, match="no config file"):
         load_config(tmp_path / "nope.toml")
+
+
+_NEEDS_GIT = pytest.mark.skipif(shutil.which("git") is None, reason="git not found on PATH")
+
+
+@pytest.mark.parametrize("branch", ["flow/{runId}-{ordinal}", "agent/{ordinal}", "r/{runId}"])
+def test_changesets_branch_accepted(branch: str, tmp_path: Path) -> None:
+    config = parse_config(
+        {"providers": _providers(), "changesets": {"branch": branch}}, base=tmp_path
+    )
+    assert config.changesets.branch == branch
+
+
+@pytest.mark.parametrize(
+    ("branch", "match"),
+    [
+        ("flow/fixed", r"must contain \{runId\} or \{ordinal\}"),
+        pytest.param("flow..{runId}", "not a valid branch name", marks=_NEEDS_GIT),
+        pytest.param("flow/{runId}.lock", "not a valid branch name", marks=_NEEDS_GIT),
+        pytest.param("-{ordinal}", "not a valid branch name", marks=_NEEDS_GIT),
+        pytest.param("flow {runId}", "not a valid branch name", marks=_NEEDS_GIT),
+    ],
+)
+def test_changesets_branch_rejected(branch: str, match: str, tmp_path: Path) -> None:
+    with pytest.raises(ConfigError, match=match):
+        parse_config({"providers": _providers(), "changesets": {"branch": branch}}, base=tmp_path)
 
 
 def test_unreadable_config_is_a_config_error(tmp_path: Path) -> None:

@@ -929,7 +929,8 @@ alone. `params` come from the invoking client (`Session.invoke_operation(params=
 cut at 72 characters, else `flow: run <runId> step <ordinal>`, masked by the run's redactor)
 and `apply` a bool. A rename or a delete is committed whole either way. Author and hooks are
 git's own config; nothing is ever pushed. `[changesets]` sets `branch` (a template; `{runId}`
-and `{ordinal}` are replaced) and `trailer` (add a `Flow-Principal:` line naming who pressed
+and `{ordinal}` are replaced; it must hold at least one of them, and the name it gives must
+pass `git check-ref-format --branch`, both checked when flow.toml loads) and `trailer` (add a `Flow-Principal:` line naming who pressed
 Commit, when the policy knows them; CR, LF and other control characters are removed from
 the name, so it cannot add lines of its own). Discard takes an optional
 `params.reason`: it is logged (masked), shown in the changeset's description, posted as a
