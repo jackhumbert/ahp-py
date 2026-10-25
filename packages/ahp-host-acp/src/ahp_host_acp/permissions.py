@@ -48,6 +48,8 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any, Final
 
+from ahp_acp import CANCELLED as _CANCELLED
+from ahp_acp import allow_once, reject_once
 from ahp_host.provider.base import ConfirmationOption, ToolConfirmationOutcome
 from ahp_host.provider.policy import ToolRequest
 
@@ -61,7 +63,14 @@ _KINDS: Final[Mapping[str, tuple[str, int, str]]] = {
     "reject_always": ("deny", 2, "Always reject"),
 }
 
-CANCELLED: Final = {"outcome": {"outcome": "cancelled"}}
+#: A `session/request_permission` result that grants nothing: `ahp_acp.CANCELLED`
+#: as the response's `outcome`.
+CANCELLED: Final = {"outcome": dict(_CANCELLED)}
+
+
+def _selected(outcome: Mapping[str, Any]) -> dict[str, Any] | None:
+    """*outcome* (`ahp_acp.allow_once`/`reject_once`) as a response, None if it picked nothing."""
+    return {"outcome": outcome} if outcome.get("outcome") == "selected" else None
 
 
 def acp_options(raw: Any) -> list[Mapping[str, Any]]:
@@ -111,11 +120,8 @@ def answer(
         # The host checks both; an answer that still disagrees grants nothing.
         log.warning("a confirmation picked %r, which this call did not offer as such", picked)
         return CANCELLED
-    wanted = "allow_once" if outcome.approved else "reject_once"
-    for option in offered:
-        if option["kind"] == wanted:
-            return {"outcome": {"outcome": "selected", "optionId": option["optionId"]}}
-    return CANCELLED
+    pick = allow_once if outcome.approved else reject_once
+    return _selected(pick(offered)) or CANCELLED
 
 
 def relayed_answer(offered: Sequence[Mapping[str, Any]]) -> dict[str, Any] | None:
@@ -133,10 +139,7 @@ def relayed_answer(offered: Sequence[Mapping[str, Any]]) -> dict[str, Any] | Non
     therefore also requires an MCP-shaped kind and a raw input shaped like the
     tool's (`client_tools.looks_relayed`) before this is used.
     """
-    for option in offered:
-        if option["kind"] == "allow_once":
-            return {"outcome": {"outcome": "selected", "optionId": option["optionId"]}}
-    return None
+    return _selected(allow_once(offered))
 
 
 #: ACP tool kind -> the policy's kind; any other kind is a plain `tool`.
@@ -233,8 +236,9 @@ def tool_request(update: Mapping[str, Any], *, cwd: Path, roots: tuple[Path, ...
 
 def rejected_answer(offered: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     """The agent's own reject option, *once* before *always*, else `cancelled`."""
-    for wanted in ("reject_once", "reject_always"):
-        for option in offered:
-            if option["kind"] == wanted:
-                return {"outcome": {"outcome": "selected", "optionId": option["optionId"]}}
+    if (once := _selected(reject_once(offered))) is not None:
+        return once
+    for option in offered:
+        if option["kind"] == "reject_always":
+            return {"outcome": {"outcome": "selected", "optionId": option["optionId"]}}
     return CANCELLED
