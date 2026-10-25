@@ -396,12 +396,13 @@ async def test_usage_reports_the_latest_call_and_the_turn_sum_apart(
     (meta2,) = sum_only.usage_meta
     assert meta2 is not None
     assert meta2["turnTokenTotals"][0]["inputTokens"] == 600
-    # Cache reads are part of the input: never more than it, in either place.
+    # The cache reads reported beside an input never exceed it; the turn's
+    # totals stay as the agent summed them.
     assert [e for e in over.events if e[0] == "usage"] == [("usage", 50, 4, 50, None)]
     (meta3,) = over.usage_meta
     assert meta3 is not None
     (totals3,) = meta3["turnTokenTotals"]
-    assert (totals3["inputTokens"], totals3["cachedTokens"], totals3["outputTokens"]) == (50, 50, 4)
+    assert (totals3["inputTokens"], totals3["cachedTokens"], totals3["outputTokens"]) == (50, 90, 4)
 
 
 # -- edits -> changeset -------------------------------------------------------------------
