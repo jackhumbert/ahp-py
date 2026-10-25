@@ -38,6 +38,41 @@ async def _close(fleet: Fleet) -> None:
     await fleet.aclose()
 
 
+class _Mirror:
+    def __init__(self, states: Mapping[str, Any]) -> None:
+        self.states = states
+
+    def state(self, uri: str) -> Any:
+        return self.states.get(uri)
+
+
+class _Client:
+    def __init__(self, states: Mapping[str, Any]) -> None:
+        self.mirror = _Mirror(states)
+
+
+@pytest.mark.parametrize(
+    ("kind", "status"),
+    [("toolClientExecution", "working"), ("toolConfirmation", "waiting")],
+)
+def test_fleetgw_wait_only_input_for_a_person_is_waiting(
+    tmp_path: Path, kind: str, status: str
+) -> None:
+    """A client tool the session is running asks no person: it is not `waiting`."""
+    fleet = flow_fleet(tmp_path)
+    orchestrator = fleet.gateway.orchestrator
+    assert orchestrator is not None
+    child = _Spawned(uri="claude:/c", node="alpha", parent="flow:/r1", title="c")
+    entry = {"id": "i1", "kind": kind, "chat": "ahp-chat:/c", "turnId": "t1"}
+    client: Any = _Client(
+        {
+            "claude:/c": {"defaultChat": "ahp-chat:/c", "inputNeeded": [entry]},
+            "ahp-chat:/c": {"turns": [], "activeTurn": {"id": "t1"}},
+        }
+    )
+    assert orchestrator._flow_status(client, child)["status"] == status
+
+
 async def _start(fleet: Fleet, uri: str = "flow:/r1", node: str = "alpha", **extra: Any) -> Any:
     return await run_tool(
         fleet, uri, "start_session", node=node, agent="claude", **{"prompt": "hi", **extra}

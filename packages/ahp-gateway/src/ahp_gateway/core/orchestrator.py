@@ -54,6 +54,7 @@ from urllib.parse import quote
 from ahp_client import Client, Session, connect
 from ahp_client.client import actions
 from ahp_client.serve import ClientToolHost
+from ahp_client.serve.inputs import waiting_entries
 from ahp_protocol import AhpError, Transport
 from ahp_protocol.errors import invalid_params
 from ahp_protocol.ext.delegation import delegation_origin
@@ -1077,7 +1078,9 @@ class Orchestrator:
             last = turns[-1] if turns and isinstance(turns[-1], Mapping) else {}
             if session.get("lifecycle") == "creationFailed":
                 status = "failed"
-            elif session.get("inputNeeded"):
+            elif waiting_entries(client.mirror, child.uri):
+                # Only what blocks a person: a client tool the session is
+                # running (`toolClientExecution`) is work, not a wait.
                 status = "waiting"
             elif chat.get("activeTurn") is not None:
                 status = "working"
