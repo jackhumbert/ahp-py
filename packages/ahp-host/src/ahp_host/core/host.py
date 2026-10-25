@@ -9883,6 +9883,12 @@ class Host:
                 # a turn carries them.
                 if key in template and key not in message:
                     message[key] = copy.deepcopy(template[key])
+            if run_uri in self._cancelled_runs:
+                # Again, now that nothing is awaited before the turn starts: the
+                # check above was several awaits ago, and a cancel that arrived
+                # since found no turn to stop and left it to this method.
+                await self._finish_run(record, run_uri, "cancelled")
+                return
             turn_id = str(uuid.uuid4())
             started = {
                 "type": "chat/turnStarted",
@@ -9917,10 +9923,12 @@ class Host:
             None,
         )
         outcome = ended.get("state") if ended is not None else None
-        if outcome == "complete":
-            await self._finish_run(record, run_uri, "completed")
-        elif outcome == "cancelled" or run_uri in self._cancelled_runs:
+        if outcome == "cancelled" or run_uri in self._cancelled_runs:
+            # Cancellation first: a turn that reached `complete` before the
+            # cancel reached it still ran for a run someone asked to stop.
             await self._finish_run(record, run_uri, "cancelled")
+        elif outcome == "complete":
+            await self._finish_run(record, run_uri, "completed")
         else:
             await self._finish_run(record, run_uri, "failed", "the run's turn ended in an error")
 

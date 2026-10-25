@@ -415,6 +415,62 @@ class TestARun:
         finally:
             await host.aclose()
 
+    async def test_a_cancel_during_start_up_starts_no_turn(self) -> None:
+        # The cancel lands after the session is ready -- the window
+        # `_cancel_run` leaves to `_execute_run` -- but before the turn starts.
+        host = _host(InMemoryAutomationStore())
+        original = host._run_changed
+
+        async def cancel_once_running(record: Any, run_uri: str, action: dict[str, Any]) -> None:
+            await original(record, run_uri, action)
+            lifecycle = action.get("lifecycle") or {}
+            if lifecycle.get("status") == "running":
+                await host._cancel_run(run_uri)
+
+        host._run_changed = cancel_once_running  # type: ignore[method-assign]
+        try:
+            client, _ = await _client(host)
+            await _create(client, host, _definition())
+            run = (
+                await client.request(
+                    "runAutomation",
+                    {"channel": AUTOMATIONS_URI, "automation": AUTOMATION, "requestId": "r"},
+                )
+            )["result"]["resource"]
+            await _until(lambda: _status(host, run) in ("cancelled", "completed", "failed"))
+            assert _status(host, run) == "cancelled"
+            session = host.sequencer.state_of(run)["primarySession"]
+            chat = host.sequencer.state_of(host.sequencer.state_of(session)["defaultChat"])
+            assert chat["turns"] == [] or chat["turns"][0]["state"] == "cancelled"
+        finally:
+            await host.aclose()
+
+    async def test_a_cancel_wins_over_a_turn_that_completed_anyway(self) -> None:
+        # Requested while the turn was finishing: the turn got to `complete`
+        # before the cancel reached it. The run was still asked to stop.
+        host = _host(InMemoryAutomationStore())
+        original = host._start_turn
+
+        async def start_then_cancel(session: Any, chat: str, started: Any) -> None:
+            await original(session, chat, started)
+            (run,) = host._automations[AUTOMATION].runs
+            host._cancelled_runs.add(run["resource"])
+
+        host._start_turn = start_then_cancel  # type: ignore[method-assign]
+        try:
+            client, _ = await _client(host)
+            await _create(client, host, _definition())
+            run = (
+                await client.request(
+                    "runAutomation",
+                    {"channel": AUTOMATIONS_URI, "automation": AUTOMATION, "requestId": "r"},
+                )
+            )["result"]["resource"]
+            await _until(lambda: _status(host, run) in ("cancelled", "completed", "failed"))
+            assert _status(host, run) == "cancelled"
+        finally:
+            await host.aclose()
+
     async def test_a_missing_provider_fails_the_run_not_the_host(self) -> None:
         store = InMemoryAutomationStore()
         host = _host(store)
