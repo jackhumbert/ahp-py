@@ -861,6 +861,48 @@ class StrippedEchoProvider(EchoProvider):
         return StrippingSession(await super().resume_session(context))
 
 
+class EmptyFirstSession:
+    """Thinks out loud about its prompt and replies nothing the first time any session is
+    sent that prompt (an empty reply, so `retry_empty` dispatches it again); afterwards it
+    echoes it. `EmptyFirstProvider.sends` counts per prompt; `reset_fakes` clears it."""
+
+    def __init__(self, context: AgentSessionContext) -> None:
+        self.context = context
+
+    async def send_user_message(self, message: UserMessage, sink: TurnSink) -> None:
+        prompt = stripped(message).text
+        seen = EmptyFirstProvider.sends.get(prompt, 0)
+        EmptyFirstProvider.sends[prompt] = seen + 1
+        if seen == 0:
+            await sink.reasoning_delta(f"thinking about {prompt}")
+            return
+        await sink.text_delta(f"You said: {prompt}")
+
+    async def cancel(self, reason: str | None = None) -> None:
+        pass
+
+    async def aclose(self) -> None:
+        pass
+
+
+class EmptyFirstProvider:
+    """Sessions whose first reply to a prompt is empty (see `EmptyFirstSession`)."""
+
+    sends: ClassVar[dict[str, int]] = {}
+
+    @property
+    def agent(self) -> AgentInfo:
+        return AgentInfo(
+            provider="empty-first",
+            display_name="Empty first",
+            description="Replies nothing the first time, then echoes.",
+            models=(),
+        )
+
+    async def create_session(self, context: AgentSessionContext) -> EmptyFirstSession:
+        return EmptyFirstSession(context)
+
+
 def not_a_provider() -> object:
     return object()
 
@@ -963,6 +1005,7 @@ def reset_fakes() -> None:
     AuthProvider.instances.clear()
     ModalProvider.instances.clear()
     FileWriterProvider.instances.clear()
+    EmptyFirstProvider.sends.clear()
     RestartHoldProvider.prompts.clear()
     RestartHoldProvider.holding = True
     RestartHoldProvider.sessions_created = 0

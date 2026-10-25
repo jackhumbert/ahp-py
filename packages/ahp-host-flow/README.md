@@ -1171,7 +1171,8 @@ failed, and 3 means nobody picked it up yet (the request stays queued and runs
 when the host next starts). `--state-dir DIR` instead rewrites only the journal
 of a CLI or library run, with no host involved.
 
-What is redacted for the call with that ordinal:
+What is redacted for the call with that ordinal, on every attempt of it (the
+`agent-<n>-a<k>` tool calls and worker chats of `retry_empty` and fallbacks too):
 
 - the worker chat's markdown, reasoning and tool-call parts;
 - the step's `agent` tool call on the main chat: its result content, its

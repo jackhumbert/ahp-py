@@ -207,3 +207,48 @@ async def test_flow_redaction_survives_restart_and_resume(tmp_path: Path, node_p
     # The resumed run's own journal and the final store: still nothing.
     assert SECRET not in on_disk(tmp_path / "state")
     assert SECRET not in on_disk(sessions)
+
+
+RETRY_TOML = (
+    '[providers.first]\nload = "tests.flow_fakes:EmptyFirstProvider"\nretry_empty = 1\n'
+    '\n[routing]\ndefault = "first"\n'
+)
+
+
+def worker_parts(host: Host, chat: str) -> str:
+    """Every response part of *chat*, as JSON (not the turns' messages, the prompts)."""
+    return json.dumps([p for t in state(host, chat)["turns"] for p in t["responseParts"]])
+
+
+async def test_flow_redaction_every_attempt(tmp_path: Path, node_path: str) -> None:
+    """A retried call is redacted on every attempt's tool call and worker chat."""
+    reset_fakes()
+    fx = await boot_flow(tmp_path, node_path, RETRY_TOML)
+    try:
+        turn = await run_turn(fx.wire, fx.chat, "t1", SCRIPT)
+        assert turn["state"] == "complete"
+        run_id = next(d["runStarted"]["runId"] for d in descriptors(turn) if "runStarted" in d)
+        calls = found(state(fx.host, fx.chat), lambda m: m.get("toolName") == "agent")
+        assert {c["toolCallId"] for c in calls} == {"agent-0", "agent-0-a1"}
+        chats = [str(c["resource"]) for c in worker_chats(fx.host, SESSION)]
+        assert len(chats) == 2
+        for chat in chats:  # the first attempt thought it, the second said it
+            assert SECRET in worker_parts(fx.host, chat)
+
+        report = await redact_step(
+            fx.host,
+            state_dir=tmp_path / "state",
+            run_id=run_id,
+            ordinal=0,
+            reason="leak",
+            actor=ACTOR,
+        )
+        for chat in chats:
+            assert SECRET not in worker_parts(fx.host, chat)
+        calls = found(state(fx.host, fx.chat), lambda m: m.get("toolName") == "agent")
+        assert len(calls) == 2
+        assert SECRET not in json.dumps(calls)
+        assert set(report.tool_call_ids) == {"agent-0", "agent-0-a1"}
+        assert set(report.worker_chats) == set(chats)
+    finally:
+        await fx.shut()

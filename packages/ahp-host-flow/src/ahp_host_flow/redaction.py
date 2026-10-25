@@ -95,6 +95,10 @@ class StepRedaction:
     worker_parts: int
     skipped_parts: int
     descendants: tuple[str, ...]
+    #: Every attempt's `agent` tool call and worker chat, in order (`tool_call_id` and
+    #: `worker_chat` are the first attempt's).
+    tool_call_ids: tuple[str, ...] = ()
+    worker_chats: tuple[str, ...] = ()
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -105,6 +109,8 @@ class StepRedaction:
             "mainChat": self.main_chat,
             "toolCallId": self.tool_call_id,
             "workerChat": self.worker_chat,
+            "toolCallIds": list(self.tool_call_ids),
+            "workerChats": list(self.worker_chats),
             "workerParts": self.worker_parts,
             "skippedParts": self.skipped_parts,
             "descendants": list(self.descendants),
@@ -143,13 +149,17 @@ def _names_run(turn: Mapping[str, Any], run_id: str) -> bool:
     return False
 
 
-def find_step(host: Host, run_id: str, ordinal: int) -> StepLocation | None:
-    """Where call *ordinal* of run *run_id* is shown on this host, or `None`."""
+def find_steps(host: Host, run_id: str, ordinal: int) -> list[StepLocation]:
+    """Every `agent` tool call of call *ordinal* of run *run_id* on this host, in order.
+
+    A call has one per attempt: `agent-<n>`, then `agent-<n>-a<k>` for each `retry_empty`
+    attempt and fallback provider, each with its own worker chat.
+    """
+    found: list[StepLocation] = []
     for uri in host.sequencer.channels("chat"):
         for turn in _turns_of(host.sequencer.state_of(uri)):
             if not _names_run(turn, run_id):
                 continue
-            match: StepLocation | None = None
             for part in _parts_of(turn):
                 call = part.get("toolCall")
                 if part.get("kind") != "toolCall" or not isinstance(call, Mapping):
@@ -160,15 +170,21 @@ def find_step(host: Host, run_id: str, ordinal: int) -> StepLocation | None:
                 call_id = call.get("toolCallId")
                 if started["ordinal"] == ordinal and isinstance(call_id, str):
                     worker = started.get("chat")
-                    match = StepLocation(
-                        uri,
-                        str(turn.get("id")),
-                        call_id,
-                        worker if isinstance(worker, str) else None,
+                    found.append(
+                        StepLocation(
+                            uri,
+                            str(turn.get("id")),
+                            call_id,
+                            worker if isinstance(worker, str) else None,
+                        )
                     )
-            if match is not None:
-                return match
-    return None
+    return found
+
+
+def find_step(host: Host, run_id: str, ordinal: int) -> StepLocation | None:
+    """Where call *ordinal* of run *run_id* is shown on this host (its first attempt), or None."""
+    found = find_steps(host, run_id, ordinal)
+    return found[0] if found else None
 
 
 def descendants(state_dir: Path, run_id: str) -> tuple[str, ...]:
@@ -230,30 +246,32 @@ async def redact_step(
     except (JournalError, ValueError) as exc:
         raise RedactionError(str(exc)) from exc
     done = [f"journal of run {run_id}, call {ordinal}"]
-    loc = find_step(host, run_id, ordinal)
+    locs = find_steps(host, run_id, ordinal)
+    workers = list(dict.fromkeys(loc.worker_chat for loc in locs if loc.worker_chat is not None))
     worker_parts = skipped_parts = 0
-    if loc is not None:
-        try:
-            worker = loc.worker_chat
-            if worker is not None and host.sequencer.reducer_of(worker) == "chat":
-                for turn in _turns_of(host.sequencer.state_of(worker)):
-                    for part in _parts_of(turn):
-                        part_id = part_id_of(part)
-                        if marker_of(part) is not None:
-                            continue
-                        if part.get("kind") in REDACTABLE_PART_KINDS and part_id is not None:
-                            await host.redact(
-                                worker,
-                                str(turn.get("id")),
-                                part_id,
-                                reason,
-                                actor=actor,
-                                now=now,
-                            )
-                            worker_parts += 1
-                            done.append(f"part {part_id} of worker chat {worker}")
-                        else:
-                            skipped_parts += 1
+    try:
+        for worker in workers:
+            if host.sequencer.reducer_of(worker) != "chat":
+                continue
+            for turn in _turns_of(host.sequencer.state_of(worker)):
+                for part in _parts_of(turn):
+                    part_id = part_id_of(part)
+                    if marker_of(part) is not None:
+                        continue
+                    if part.get("kind") in REDACTABLE_PART_KINDS and part_id is not None:
+                        await host.redact(
+                            worker,
+                            str(turn.get("id")),
+                            part_id,
+                            reason,
+                            actor=actor,
+                            now=now,
+                        )
+                        worker_parts += 1
+                        done.append(f"part {part_id} of worker chat {worker}")
+                    else:
+                        skipped_parts += 1
+        for loc in locs:
             call_part = find_part(host.sequencer.state_of(loc.chat), loc.turn_id, loc.tool_call_id)
             call = call_part.get("toolCall") if call_part is not None else None
             desc = flow.descriptor_of(call.get("_meta")) if isinstance(call, Mapping) else None
@@ -267,23 +285,27 @@ async def redact_step(
                 keep_meta=keep,
                 now=now,
             )
-        except HostRedactionError as exc:
-            raise RedactionError(
-                f"{exc}. Partly redacted: {'; '.join(done)}. The call's tool call on the "
-                f"main chat may not be. Redact the same call again to finish it",
-                done=done,
-            ) from exc
+            done.append(f"tool call {loc.tool_call_id} of chat {loc.chat}")
+    except HostRedactionError as exc:
+        raise RedactionError(
+            f"{exc}. Partly redacted: {'; '.join(done)}. The call's tool calls on the "
+            f"main chat may not be. Redact the same call again to finish it",
+            done=done,
+        ) from exc
+    first = locs[0] if locs else None
     return StepRedaction(
         run_id=run_id,
         ordinal=ordinal,
         reason=reason,
         redacted_at=redacted_at,
-        main_chat=loc.chat if loc else None,
-        tool_call_id=loc.tool_call_id if loc else None,
-        worker_chat=loc.worker_chat if loc else None,
+        main_chat=first.chat if first else None,
+        tool_call_id=first.tool_call_id if first else None,
+        worker_chat=first.worker_chat if first else None,
         worker_parts=worker_parts,
         skipped_parts=skipped_parts,
         descendants=descendants(state_dir, run_id),
+        tool_call_ids=tuple(loc.tool_call_id for loc in locs),
+        worker_chats=tuple(workers),
     )
 
 
