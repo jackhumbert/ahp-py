@@ -126,6 +126,7 @@ async def _run(settings: Settings) -> None:
             chat_tools=CHAT_TOOLS if settings.chat_tools is None else settings.chat_tools,
             env_allow=settings.env_allow,
             policy=settings.policy,
+            usage_per_message=settings.usage_per_message,
             commands=found.commands,
             # Start-up could not say: try again until it can.
             rediscover=not models,

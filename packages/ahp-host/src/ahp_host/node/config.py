@@ -42,7 +42,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from ahp_host.node.roots import LAYOUTS, Roots, parse_root_arg
+from ahp_host.node.roots import Roots, layout_of, parse_root_arg
 
 DEFAULT_STATE = Path.home() / ".local/state/ahp-node"
 DEFAULT_PORT = 4321
@@ -177,12 +177,10 @@ def load(args: argparse.Namespace) -> NodeSettings:
     if unknown:
         raise ConfigError(f"{args.config}: unknown setting(s): {', '.join(unknown)}")
 
-    file_layout = data.get("roots_layout", "tree")
-    if not isinstance(file_layout, str):
-        raise ConfigError(f"{args.config}: roots_layout must be a string")
-    layout = getattr(args, "roots_layout", None) or file_layout
-    if layout not in LAYOUTS:
-        raise ConfigError(f"{args.config}: roots_layout must be one of: {', '.join(LAYOUTS)}")
+    try:
+        layout = layout_of(getattr(args, "roots_layout", None), data.get("roots_layout", "tree"))
+    except ValueError as exc:
+        raise ConfigError(f"{args.config}: {exc}") from exc
     roots = roots_from_flags(args.root, layout) if args.root else roots_from_file(data, layout)
     if roots is None:
         raise ConfigError("no folder to serve: give --root, or root / [roots] in the config")

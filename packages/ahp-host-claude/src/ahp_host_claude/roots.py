@@ -10,6 +10,7 @@ from ahp_host.node.roots import (
     Roots,
     as_roots,
     is_valid_root_name,
+    layout_of,
     parse_root_arg,
 )
 
@@ -19,5 +20,6 @@ __all__ = [
     "Roots",
     "as_roots",
     "is_valid_root_name",
+    "layout_of",
     "parse_root_arg",
 ]

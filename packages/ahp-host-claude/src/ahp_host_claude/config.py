@@ -32,7 +32,7 @@ from typing import Any
 from ahp_host.provider.policy import PolicyError, ToolPolicy, policy_from_table
 
 from ahp_host_claude.claude_ai import scope_of
-from ahp_host_claude.roots import LAYOUTS, Roots, parse_root_arg
+from ahp_host_claude.roots import Roots, layout_of, parse_root_arg
 
 DEFAULT_STATE = Path.home() / ".local/state/ahp-host-claude"
 DEFAULT_PORT = 4321
@@ -56,6 +56,7 @@ _KEYS = frozenset(
         "chat_tools",
         "env_allow",
         "policy",
+        "usage_per_message",
         "verbose",
     }
 )
@@ -91,6 +92,8 @@ class Settings:
     env_allow: tuple[str, ...] | None = None
     #: Commands and paths the agent may not touch; None: only the approval gate.
     policy: ToolPolicy | None = None
+    #: Also report each model request's usage as it arrives, not only the turn's.
+    usage_per_message: bool = False
     verbose: bool = False
 
 
@@ -119,16 +122,16 @@ def _named(roots: Mapping[str, Path], layout: str = "tree") -> Roots:
         raise ConfigError(str(exc)) from exc
 
 
-def layout_of(flag: str | None, data: Mapping[str, Any]) -> str:
+def _layout(flag: str | None, data: Mapping[str, Any]) -> str:
     """The roots layout: the flag, else the file's `roots_layout`, else "tree"."""
-    layout = flag or data.get("roots_layout", "tree")
-    if not isinstance(layout, str) or layout not in LAYOUTS:
-        raise ConfigError(f"roots_layout must be one of: {', '.join(LAYOUTS)}")
-    return layout
+    try:
+        return layout_of(flag, data.get("roots_layout", "tree"))
+    except ValueError as exc:
+        raise ConfigError(str(exc)) from exc
 
 
 def _roots_from_file(data: Mapping[str, Any], layout: str | None = None) -> Roots | None:
-    layout = layout_of(layout, data)
+    layout = _layout(layout, data)
     if "root" in data and "roots" in data:
         raise ConfigError("use either root or [roots], not both")
     if "root" in data:
@@ -191,15 +194,18 @@ def read_config_file(path: Path) -> dict[str, Any]:
     return data
 
 
-def roots_option(value: object) -> Roots:
-    """Roots given from Python: a `Roots`, a path, a list of paths or a name -> path table."""
+def roots_option(value: object, layout: str = "tree") -> Roots:
+    """Roots given from Python: a `Roots`, a path, a list of paths or a name -> path table.
+
+    *layout* is for the table only; a `Roots` carries its own.
+    """
     if isinstance(value, Roots):
         return value
     if isinstance(value, str | os.PathLike):
         return Roots.single(Path(value).expanduser())
     if isinstance(value, Mapping):
         if value and all(isinstance(v, str | os.PathLike) for v in value.values()):
-            return _named({str(k): Path(v).expanduser() for k, v in value.items()})
+            return _named({str(k): Path(v).expanduser() for k, v in value.items()}, layout)
         if value:
             raise ConfigError("roots must map names to paths")
     elif (
@@ -220,7 +226,7 @@ def load(args: argparse.Namespace) -> Settings:
     if args.config is not None:
         data = read_config_file(Path(args.config).expanduser())
 
-    layout = layout_of(getattr(args, "roots_layout", None), data)
+    layout = _layout(getattr(args, "roots_layout", None), data)
     roots = _roots_from_flags(args.root, layout) if args.root else _roots_from_file(data, layout)
     if roots is None:
         raise ConfigError("no folder to serve: give --root, or root / [roots] in a config file")
@@ -246,6 +252,9 @@ def load(args: argparse.Namespace) -> Settings:
     except ValueError as exc:
         raise ConfigError(str(exc)) from exc
     chat_tools = _chat_tools(args.chat_tools, data.get("chat_tools"))
+    usage_per_message = data.get("usage_per_message", False)
+    if not isinstance(usage_per_message, bool):
+        raise ConfigError("usage_per_message must be true or false")
     port = pick(args.port, "port", DEFAULT_PORT)
     if not isinstance(port, int) or isinstance(port, bool):
         raise ConfigError("port must be a number")
@@ -262,5 +271,6 @@ def load(args: argparse.Namespace) -> Settings:
         chat_tools=chat_tools,
         env_allow=_env_allow(data.get("env_allow")),
         policy=_policy(data.get("policy")),
+        usage_per_message=usage_per_message,
         verbose=bool(args.verbose or data.get("verbose", False)),
     )

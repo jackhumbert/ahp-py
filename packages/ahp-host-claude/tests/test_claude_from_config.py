@@ -256,3 +256,49 @@ def test_claude_from_config_refusals(tmp_path: Path) -> None:
         from_config(roots=[work], state_dir=tmp_path / "s", model="opus")
     with pytest.raises(ConfigError, match="no folder to serve"):
         from_config(state_dir=tmp_path / "s")
+
+
+def test_claude_from_config_reads_usage_per_message_from_the_file(tmp_path: Path) -> None:
+    work = tmp_path / "work"
+    work.mkdir()
+    config = tmp_path / "claude.toml"
+    config.write_text(f"usage_per_message = true\nroot = '{work}'\n", encoding="utf-8")
+    provider = from_config(config, state_dir=tmp_path / "s")
+    assert provider.usage_per_message is True
+    assert (
+        from_config(config, usage_per_message=False, state_dir=tmp_path / "s").usage_per_message
+        is False
+    )
+
+
+def test_usage_per_message_is_a_setting_of_the_standalone_server(tmp_path: Path) -> None:
+    from ahp_host_claude.__main__ import _parse_args
+    from ahp_host_claude.config import load
+
+    work = tmp_path / "work"
+    work.mkdir()
+    config = tmp_path / "claude.toml"
+    config.write_text(f"usage_per_message = true\nroot = '{work}'\n", encoding="utf-8")
+    assert load(_parse_args(["--config", str(config)])).usage_per_message is True
+    assert load(_parse_args(["--root", str(work)])).usage_per_message is False
+    config.write_text(f"usage_per_message = 'yes'\nroot = '{work}'\n", encoding="utf-8")
+    with pytest.raises(ConfigError, match="usage_per_message"):
+        load(_parse_args(["--config", str(config)]))
+
+
+def test_claude_from_config_applies_the_files_roots_layout_to_roots_keyword(
+    tmp_path: Path,
+) -> None:
+    one = tmp_path / "one"
+    two = tmp_path / "two"
+    one.mkdir()
+    two.mkdir()
+    config = tmp_path / "claude.toml"
+    config.write_text(f"roots_layout = 'real'\nroot = '{one}'\n", encoding="utf-8")
+    provider = from_config(config, roots={"a": one, "b": two}, state_dir=tmp_path / "s")
+    assert provider.roots.is_real
+    plain = from_config(roots={"a": one, "b": two}, state_dir=tmp_path / "s2")
+    assert not plain.roots.is_real
+    config.write_text(f"roots_layout = 'flat'\nroot = '{one}'\n", encoding="utf-8")
+    with pytest.raises(ConfigError, match="roots_layout"):
+        from_config(config, roots={"a": one}, state_dir=tmp_path / "s3")

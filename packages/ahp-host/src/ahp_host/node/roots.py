@@ -51,6 +51,17 @@ _TOP = "file:///"
 LAYOUTS = ("tree", "real")
 
 
+def layout_of(flag: str | None, file_value: object = "tree") -> str:
+    """The roots layout: the flag, else the config file's `roots_layout`, else "tree".
+
+    Raises ValueError for anything but one of `LAYOUTS`.
+    """
+    layout = flag or file_value
+    if not isinstance(layout, str) or layout not in LAYOUTS:
+        raise ValueError(f"roots_layout must be one of: {', '.join(LAYOUTS)}")
+    return layout
+
+
 def is_valid_root_name(name: str) -> bool:
     return _NAME.fullmatch(name) is not None and name not in (".", "..")
 

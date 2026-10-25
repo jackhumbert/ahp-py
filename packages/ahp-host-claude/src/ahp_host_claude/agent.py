@@ -35,6 +35,7 @@ from ahp_host_claude.config import (
     DEFAULT_STATE,
     SERVER_ONLY_KEYS,
     ConfigError,
+    _layout,
     _path,
     _roots_from_file,
     read_config_file,
@@ -209,7 +210,9 @@ def from_config(
         else:
             merged["policy"] = policy
     opts = parse_agent_options(merged)
-    served = roots_option(roots) if roots is not None else _roots_from_file(data)
+    served = (
+        roots_option(roots, _layout(None, data)) if roots is not None else _roots_from_file(data)
+    )
     if served is None:
         raise ConfigError(
             "no folder to serve: pass roots=, or set root / [roots] in the config file"

@@ -152,3 +152,15 @@ async def test_a_real_path_outside_every_root_does_not_resolve_as_a_tree_spellin
         await provider.read("file:///tmp/other")
     # The root itself is still reachable at its real URI.
     assert (await provider.read((srvdata / "other").as_uri())).data == b"served"
+
+
+def test_layout_of_prefers_the_flag_then_the_file_then_tree() -> None:
+    from ahp_host.node.roots import layout_of
+
+    assert layout_of("real", "tree") == "real"
+    assert layout_of(None, "real") == "real"
+    assert layout_of(None) == "tree"
+    for bad in ("flat", 3, None):
+        if bad is not None:
+            with pytest.raises(ValueError, match="roots_layout"):
+                layout_of(None, bad)
