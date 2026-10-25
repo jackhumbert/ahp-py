@@ -563,7 +563,10 @@ What happens to each kind of work:
   resumed. A turn lost to a crash, which the drain never got to see, is resumable
   but is *not* resumed on its own; a client resumes it with `chat/turnResume`.
 - **An automation run** cut off at the deadline is marked failed on the next
-  start; its turn is not resumed, since no run would be attached to it.
+  start; its turn is not resumed, since no run would be attached to it. Nor is a
+  later turn in a session a run created: that session was made with the run's
+  `RunCredentials`, which a restored session does not have. Such a turn is left
+  failed and resumable, for a client to resume.
 - **A scheduled automation** is paused during the drain: nothing new is started,
   and no cursor moves, so a run that came due is still due after the restart.
 

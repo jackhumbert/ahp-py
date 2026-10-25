@@ -656,3 +656,80 @@ class TestAutomationRunsAreNotResumedByTheirTurn:
             assert turn["responseParts"][-1]["resumable"] is True
         finally:
             await second.aclose()
+
+    async def test_a_later_turn_in_a_run_session_is_not_resumed_either(
+        self, tmp_path: Path
+    ) -> None:
+        # The run is over; a follow-up turn in its session is cut off. The
+        # session was made with the run's credentials, which a restored session
+        # does not have, so the host does not start it again on its own.
+        def build(provider: Gated) -> Host:
+            return Host(
+                provider,
+                LoopbackSingleUserPolicy(),
+                store=FileSessionStore(tmp_path / "sessions", debounce=0.05),
+                sequence_file=tmp_path / "seq",
+                automations=FileAutomationStore(tmp_path / "automations"),
+            )
+
+        automation = "ahp-automation:/nightly"
+        provider = Resuming()
+        provider.gate.set()
+        host = build(provider)
+        try:
+            client = await _client(host)
+            await client.notify(
+                "dispatchAction",
+                {
+                    "channel": AUTOMATIONS_URI,
+                    "clientSeq": 1,
+                    "action": {
+                        "type": "automation/createRequested",
+                        "resource": automation,
+                        "definition": {
+                            "title": "Nightly",
+                            "message": {"text": "go", "origin": {"kind": "automation"}},
+                            "session": {"provider": "echo"},
+                            "enabled": True,
+                            "triggers": [],
+                        },
+                    },
+                },
+            )
+            for _ in range(250):
+                if automation in host._automations:
+                    break
+                await asyncio.sleep(0.02)
+            run = (
+                await client.request(
+                    "runAutomation",
+                    {"channel": AUTOMATIONS_URI, "automation": automation, "requestId": "r"},
+                )
+            )["result"]["resource"]
+            for _ in range(250):
+                lifecycle = (host.sequencer.state_of(run) or {}).get("lifecycle") or {}
+                if lifecycle.get("status") == "completed":
+                    break
+                await asyncio.sleep(0.02)
+            session = host.sequencer.state_of(run)["primarySession"]
+            chat = host.sequencer.state_of(session)["defaultChat"]
+            await client.request("subscribe", {"channel": chat})
+            provider.gate.clear()
+            await _say(client, chat, "and then?", "t2", seq=2)
+            await _running(host, chat)
+            assert await host.drain(0.2) == [chat]
+        finally:
+            await host.aclose()
+
+        after = Resuming()
+        after.gate.set()
+        second = build(after)
+        try:
+            await second.restore()
+            await asyncio.sleep(0.3)
+            assert after.resumed == [], "a run session's turn was resumed with no credentials"
+            turn = (second.sequencer.state_of(chat) or {})["turns"][-1]
+            assert turn["state"] == "error"
+            assert turn["responseParts"][-1]["resumable"] is True
+        finally:
+            await second.aclose()

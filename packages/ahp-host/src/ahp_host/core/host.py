@@ -2303,10 +2303,25 @@ class Host:
             with contextlib.suppress(Exception):
                 await self.store.flush()
             for chat in stored.interrupted_by_restart:
-                if chat in session.chat_uris:
+                if chat in session.chat_uris and not self._started_by_automation(session):
                     await self._resume_interrupted_turn(session, chat)
         for chat in sorted(session.chat_uris):
             await self._drain_queue(session, chat)
+
+    def _started_by_automation(self, session: _Session) -> bool:
+        """Whether an automation run created *session* (`origin.kind`).
+
+        Such a session's turns are never resumed by the host on its own after
+        a restart. Its agent session was made with what `RunCredentials`
+        supplied for the run, and a restored one has none: resuming would run
+        the owner's work without their credentials (or with whatever the host
+        has instead), under a run record a restart has already marked failed.
+        The turn is left failed and resumable, as a crash leaves one, for
+        someone with a connection to resume.
+        """
+        state = self.sequencer.state_of(session.uri)
+        origin = state.get("origin") if isinstance(state, Mapping) else None
+        return isinstance(origin, Mapping) and origin.get("kind") == "automation"
 
     async def _resume_interrupted_turn(self, session: _Session, chat: str) -> None:
         """Reopen *chat*'s latest turn, if the restart is what failed it, and run it.
@@ -10149,12 +10164,14 @@ class Host:
         # that no run is attached to, the catalogue saying "failed" while it
         # does. They are still REPORTED as unfinished -- they were cut off --
         # just not recorded for resuming.
+        # Nor is any later turn in a session a run created, its run over or not
+        # (`_started_by_automation`).
         in_runs = self._live_run_sessions()
         unfinished: list[str] = []
         for session in self._sessions.values():
             for chat, task in session.turns.items():
                 if not task.done():
-                    if session.uri not in in_runs:
+                    if session.uri not in in_runs and not self._started_by_automation(session):
                         session.interrupted.add(chat)
                     unfinished.append(chat)
         return unfinished
