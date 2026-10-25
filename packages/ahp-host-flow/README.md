@@ -604,7 +604,9 @@ Limits of a remote call, which a gateway's fleet dispatch does not have:
 In-process workers see the tools of the session's active clients (an editor
 that joined the run session): a worker's agent can call them, and the client
 runs them. `[workflows] client_tools` sets which: `true` (the default), `false`,
-or a list of tool names. The gateway's fleet tools are never offered. A client
+or a list of tool names. The gateway's fleet tools are never offered, nor any
+other tool of the client that offers them, and a worker's call of a tool it was not
+offered is refused as a tool error before it reaches a client. A client
 that joins, leaves or republishes its tools while a run is going reaches the
 running workers too, and a named chat (`opts.x.chat`) is refreshed before each
 call. Fleet workers use their node session's own clients.

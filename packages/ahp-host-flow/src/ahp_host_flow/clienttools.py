@@ -9,7 +9,9 @@ from typing import Any
 class ClientTools:
     """`activeClients` of the session, cut down by `[workflows] client_tools`.
 
-    The gateway's fleet tools are never offered, whatever the setting.
+    The gateway's fleet tools are never offered, whatever the setting: no tool of the client
+    that offers them (the gateway may offer more than the four), and no tool of another client
+    under one of their names.
     """
 
     def __init__(
@@ -35,8 +37,13 @@ class ClientTools:
         return True
 
     def clients(self) -> list[dict[str, Any]]:
+        # Imported here: fleet imports dispatch, which imports this module.
+        from ahp_host_flow.fleet import offers_fleet
+
         out: list[dict[str, Any]] = []
         for client in self._clients:
+            if offers_fleet(client):
+                continue
             tools = [
                 t
                 for t in client.get("tools") or ()
@@ -63,6 +70,13 @@ class ClientTools:
                     seen.add(tool["name"])
                     out.append(dict(tool))
         return out
+
+    def offers(self, client_id: str, name: str) -> bool:
+        """Whether *client_id*'s tool *name* is one the workers are offered."""
+        return any(
+            client["clientId"] == client_id and any(t["name"] == name for t in client["tools"])
+            for client in self.clients()
+        )
 
     def owner(self, name: str) -> str | None:
         for client in self.clients():

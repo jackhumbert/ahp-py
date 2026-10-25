@@ -53,7 +53,8 @@ def _slice_of(args: Mapping[str, Any]) -> float:
     return WAIT_SLICE
 
 
-def _offers_fleet(client: Mapping[str, Any]) -> bool:
+def offers_fleet(client: Mapping[str, Any]) -> bool:
+    """Whether the active client *client* offers every fleet tool (a gateway joined the run)."""
     tools = client.get("tools")
     names = (
         {t.get("name") for t in tools if isinstance(t, Mapping)}
@@ -86,7 +87,7 @@ class FleetClients:
             (
                 str(c["clientId"])
                 for c in clients
-                if isinstance(c.get("clientId"), str) and _offers_fleet(c)
+                if isinstance(c.get("clientId"), str) and offers_fleet(c)
             ),
             None,
         )

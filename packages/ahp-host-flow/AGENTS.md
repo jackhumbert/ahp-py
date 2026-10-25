@@ -12,7 +12,7 @@ is the design; milestones M0–M18 there say what exists (all done).
   are loaded by import path from config and never imported statically.
 - The top-level modules are `config` (flow.toml), `routing` (rule matching),
   `loading` (inner providers by import path), `clienttools` (`ClientTools`: the session's
-  client tools filtered by `[workflows] client_tools`, never the fleet tools), `bridge` (`ScopedPublisher`,
+  client tools filtered by `[workflows] client_tools`, never a tool of the client offering the fleet tools; `TurnTee` forwards only a tool it offers), `bridge` (`ScopedPublisher`,
   `TurnTee`), `catalog` (workflow sources as customizations), `commands`
   (parsing the message that starts a run), `dispatch` (`ProviderDispatcher`,
   worker chats), `worktree` (git worktrees for `isolation: 'worktree'`), `redaction`

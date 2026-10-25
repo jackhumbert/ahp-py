@@ -71,3 +71,24 @@ def test_ctoolcfg_filters() -> None:
     assert off.definitions() == []
     assert off.owner("lookup") is None
     assert off.first() == (None, ())
+
+
+def test_ctoolcfg_excludes_every_tool_of_the_fleet_client() -> None:
+    # The gateway offering the fleet tools may offer others too (`list_nodes`, its own
+    # extras): none of them reaches a worker, not just the four fleet names.
+    fleet = [
+        tool(n) for n in ("start_session", "wait_for_sessions", "read_session", "stop_session")
+    ]
+    active: list[dict[str, Any]] = [
+        {"clientId": "gw", "tools": [*fleet, tool("list_nodes"), tool("lookup")]},
+        {"clientId": "ed", "tools": [tool("rename")]},
+    ]
+    allowed = ClientTools(True, active)
+    assert [c["clientId"] for c in allowed.clients()] == ["ed"]
+    assert allowed.owner("list_nodes") is None
+    assert allowed.owner("lookup") is None
+    assert [d["name"] for d in allowed.definitions()] == ["rename"]
+    assert allowed.offers("ed", "rename")
+    assert not allowed.offers("gw", "lookup")
+    assert not allowed.offers("ed", "lookup")
+    assert not ClientTools(("lookup",), active).offers("ed", "rename")

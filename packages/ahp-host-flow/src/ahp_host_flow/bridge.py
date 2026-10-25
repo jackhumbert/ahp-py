@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any, Final
 
 from ahp_host import TurnSink
 from ahp_host.provider.base import (
+    HOST_CLIENT_ID,
     BackgroundWork,
     Canvas,
     ClientToolCall,
@@ -32,6 +33,7 @@ from ahp_host_flow.engine.usage import has_cost_usd, read_usage
 
 if TYPE_CHECKING:
     from ahp_host_flow.approvals import Approver
+    from ahp_host_flow.clienttools import ClientTools
 
 #: Most drop records kept: an inner session reporting progress in a loop must
 #: not grow memory without bound.
@@ -330,7 +332,8 @@ class TurnTee:
     answers a confirmation itself when the policy or a rule decides it, on the agent's unmasked
     call and without publishing anything; otherwise the confirmation goes to the sink. Every
     event forwarded touches the *watchdog*; an open confirmation or input request pauses it, and
-    so does a client tool call while the client runs it.
+    so does a client tool call while the client runs it. A client tool call runs only for a tool
+    *client_tools* offers the workers (none without it); the host's own per-turn tools always do.
     """
 
     def __init__(
@@ -343,8 +346,10 @@ class TurnTee:
         on_usage: Callable[[Mapping[str, Any]], None] | None = None,
         watchdog: Watchdog | None = None,
         cost_base: float = 0.0,
+        client_tools: ClientTools | None = None,
     ) -> None:
         self.sink = sink
+        self._client_tools = client_tools
         self.watchdog = watchdog
         self.text: list[str] = []
         self.input_tokens: int = 0
@@ -662,6 +667,14 @@ class TurnTee:
             await self._waiting(-1)
 
     async def run_client_tool(self, call: ClientToolCall) -> ToolResult:
+        offered = call.client_id == HOST_CLIENT_ID or (
+            self._client_tools is not None and self._client_tools.offers(call.client_id, call.name)
+        )
+        if not offered:
+            # The inner session asks for a tool it was never given (the fleet tools, another
+            # client's, one `[workflows] client_tools` leaves out): a tool error, as the host's
+            # own refusal of an unknown client is.
+            raise LookupError(f"{call.name!r} of client {call.client_id!r} is not offered here")
         self._touch()
         await self.flush()
         # The client runs it in its own time (a build, a search): not the inner agent idling.

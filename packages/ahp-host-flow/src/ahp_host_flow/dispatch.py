@@ -1250,6 +1250,7 @@ class ProviderDispatcher(StepDispatcher):
                 on_usage=reporter,
                 watchdog=watchdog,
                 cost_base=named.session_cost if named is not None else 0.0,
+                client_tools=self.client_tools,
             )
             try:
                 if schema is None:
