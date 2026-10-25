@@ -1928,7 +1928,7 @@ class _AutomationCatalogue:
     def delivers(self, subscriber: Subscriber, envelope: Mapping[str, Any]) -> bool:
         if (
             isinstance(subscriber, Connection)
-            and self._host._principal_of(subscriber) is None
+            and not self._host._names_principals()
             and not callable(getattr(self._host.policy, "may_manage_automation", None))
         ):
             # No principal and no policy hook: nothing to filter by, so every
@@ -5558,9 +5558,10 @@ class Host:
         """Whether *connection* may see or act on the automation (or run) *uri*.
 
         The policy's optional `may_manage_automation` decides when it has one.
-        Otherwise: allowed when the automation has no owner or the connection
-        has no principal, and an owner match when both are known. A raise from
-        the hook refuses.
+        Otherwise: allowed when the automation has no owner, an owner match
+        when the connection has a principal, and -- for a connection with none
+        -- allowed only when the policy has no `principal_of` at all. A raise
+        from the hook refuses.
         """
         hook = getattr(self.policy, "may_manage_automation", None)
         if callable(hook):
@@ -5569,8 +5570,19 @@ class Host:
             except Exception:
                 _log.warning("policy.may_manage_automation failed; refusing", exc_info=True)
                 return False
+        if owner is None:
+            return True
         principal = self._principal_of(connection)
-        return owner is None or principal is None or owner == principal
+        if principal is None:
+            # Anonymous. Under a policy with no `principal_of` that is everyone,
+            # and everything is everyone's. Under one WITH it, it is a peer the
+            # policy could not name (or whose lookup raised): not the owner.
+            return not self._names_principals()
+        return owner == principal
+
+    def _names_principals(self) -> bool:
+        """Whether the policy tells people apart (has `principal_of`)."""
+        return callable(getattr(self.policy, "principal_of", None))
 
     def _may_observe(self, connection: Connection, channel: str) -> bool:
         """`Policy.may_see_channel`, and for a run channel also its automation's owner.
@@ -9410,6 +9422,9 @@ class Host:
             return f"{action_type} needs a resource"
         record = self._automations.get(resource)
         if action_type == "automation/createRequested":
+            if self._names_principals() and self._principal_of(connection) is None:
+                # It would be saved with no owner, which is everyone's.
+                return "rejected by policy"
             if not resource.startswith(AUTOMATION_SCHEME):
                 return f"an automation resource must use the {AUTOMATION_SCHEME} scheme"
             if record is not None:

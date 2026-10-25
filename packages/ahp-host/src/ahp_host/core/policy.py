@@ -102,9 +102,11 @@ class Policy(Protocol):
     records the principal that created it (``owner``); this decides whether a
     peer may see, update, remove, run, read the runs of, or cancel a run of the
     automation or run named by ``uri``. Absent, the default is an owner match
-    when both principals are known, and allow when either is ``None`` -- so a
-    single-user policy, and an automation made before owners were recorded,
-    behave as before. A raise refuses.
+    when both principals are known, and allow when the owner is ``None`` (an
+    automation made before owners were recorded) or the policy has no
+    ``principal_of`` (single-user) -- so both behave as before. A peer that a
+    policy WITH ``principal_of`` names as ``None`` (or whose lookup raises) is
+    refused every owned automation, and may not create one. A raise refuses.
 
     And OPTIONAL: ``may_grant_working_directory_for(principal: str | None,
     session: str, directory: str) -> bool``, ``may_grant_working_directory``

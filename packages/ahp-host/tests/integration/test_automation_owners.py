@@ -537,6 +537,91 @@ class TestPolicyHook:
             await host.aclose()
 
 
+class _NamesSomeone(LoopbackSingleUserPolicy):
+    """Has `principal_of`, but no `may_manage_automation`: the host's default
+    ownership rule applies. A peer with no header is anonymous; one with
+    `x-broken` makes the hook raise."""
+
+    def principal_of(self, info: ConnectionInfo) -> str | None:
+        headers = info.headers or {}
+        if "x-broken" in headers:
+            raise RuntimeError("identity service down")
+        return headers.get(_HEADER)
+
+
+class TestAnAnonymousPeerUnderAPrincipalPolicy:
+    async def _alice_and(self, host: Host, headers: dict[str, str]) -> FakeClient:
+        alice, _ = await _user(host, "alice", "a1")
+        await _dispatch(
+            alice,
+            AUTOMATIONS_URI,
+            {
+                "type": "automation/createRequested",
+                "resource": AUTOMATION,
+                "definition": _definition(),
+            },
+        )
+        await _until(lambda: any(e["resource"] == AUTOMATION for e in _entries(host)))
+        client_transport, server_transport = memory_pair()
+        task = asyncio.create_task(host.serve(server_transport, peer="proxy", headers=headers))
+        stranger = FakeClient(client_transport)
+        stranger.serve_task = task  # type: ignore[attr-defined]
+        reply = await stranger.request(
+            "initialize",
+            {
+                "channel": ROOT_URI,
+                "clientId": "s1",
+                "protocolVersions": ["0.9.0"],
+                "initialSubscriptions": [ROOT_URI, AUTOMATIONS_URI],
+            },
+        )
+        assert _catalogue(reply["result"]) == []
+        return stranger
+
+    @pytest.mark.parametrize("headers", [{}, {"x-broken": "1"}], ids=["none", "raises"])
+    async def test_it_cannot_manage_an_owned_automation_or_create_one(
+        self, headers: dict[str, str]
+    ) -> None:
+        host = Host(EchoProvider(), _NamesSomeone(), automations=InMemoryAutomationStore())
+        try:
+            stranger = await self._alice_and(host, headers)
+            run = await stranger.request(
+                "runAutomation",
+                {"channel": AUTOMATIONS_URI, "automation": AUTOMATION, "requestId": "r1"},
+            )
+            assert run["error"]["code"] == -32009
+            await _dispatch(
+                stranger,
+                AUTOMATIONS_URI,
+                {
+                    "type": "automation/updateRequested",
+                    "resource": AUTOMATION,
+                    "changes": {"title": "mine now"},
+                },
+            )
+            await _dispatch(
+                stranger,
+                AUTOMATIONS_URI,
+                {
+                    "type": "automation/createRequested",
+                    "resource": "ahp-automation:/anonymous",
+                    "definition": _definition(),
+                },
+                seq=2,
+            )
+            await stranger.collect_until(
+                lambda: _echo_of(stranger, "automation/createRequested") is not None, timeout=2
+            )
+            for kind in ("automation/updateRequested", "automation/createRequested"):
+                echo = _echo_of(stranger, kind)
+                assert echo is not None
+                assert echo["rejectionReason"] == "rejected by policy"
+            (entry,) = _entries(host)
+            assert entry["definition"]["title"] == "Nightly check"
+        finally:
+            await host.aclose()
+
+
 class TestSingleUserPolicyIsUnchanged:
     async def test_no_principal_means_everyone_sees_and_manages_all(self) -> None:
         host = Host(

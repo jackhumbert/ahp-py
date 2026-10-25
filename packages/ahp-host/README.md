@@ -719,7 +719,9 @@ persisted under `metadata["ahp-py/principal"]`. Without the hook every one is
 optional in the same way: whether a peer may see or act on the automation or run
 `uri`, whose creator's principal is `owner` (persisted on the automation record).
 Absent, the default is an owner match when both principals are known and allow
-when either is `None`; a raise refuses. `OwnedSessionPolicy` implements it and
+when the owner is `None` or the policy has no `principal_of`; a peer such a
+policy names as `None` (or whose `principal_of` raises) may not create an
+automation or manage an owned one. A raise refuses. `OwnedSessionPolicy` implements it and
 claims the automation, run and run-session channels for their owner through
 `claim`, which the host calls for what it creates with no connection. An
 automation's `session.workingDirectories` go through `may_grant_working_directory`
