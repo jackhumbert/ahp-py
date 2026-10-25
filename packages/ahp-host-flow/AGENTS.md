@@ -115,6 +115,9 @@ is the design; milestones M0–M18 there say what exists (all done).
 - The Python runner starts as `python -I -m ahp_host_flow.sandbox.pyrunner`, and `-I`
   ignores `PYTHONPATH`: `ahp-host-flow` must be installed in that interpreter (an
   editable install counts), not merely importable through `PYTHONPATH`.
+- Both runners start with `sandbox.client.runner_env()` (the `RUNNER_ENV` allowlist plus
+  `LC_*`), never the host's whole environment, so no host secret reaches a script. A new
+  variable a runner needs is added there by name, never by inheriting everything.
 - `RunOptions.python_dirs=None` means a trusted caller (the CLI and library) and
   allows any `.py`. Every provider path must set it, to the trusted sources'
   workflow directories only (`catalog.python_dirs`: for the workspace that is

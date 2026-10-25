@@ -6,6 +6,7 @@ import asyncio
 import collections
 import contextlib
 import json
+import os
 import sys
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
@@ -65,6 +66,43 @@ _Issued = (
 def language_of(filename: str) -> Language:
     """The runner a script needs, by file type: `.py` is Python, anything else JavaScript."""
     return "py" if filename.lower().endswith(".py") else "js"
+
+
+# The host variables a runner starts with; nothing else of the host's environment (API
+# keys, tokens) reaches it, so a script that reaches `process.env` or `os.environ` finds
+# none. Neither runner reads a variable itself: these are what Node and Python need to
+# start and to format text and times (locale, time zone, temp directory), plus what a
+# Windows process needs (SYSTEMROOT and its neighbours). Every `LC_*` is kept too.
+RUNNER_ENV: Final = frozenset(
+    {
+        "PATH",
+        "LANG",
+        "LANGUAGE",
+        "TZ",
+        "TMPDIR",
+        "TMP",
+        "TEMP",
+        "SYSTEMROOT",
+        "SYSTEMDRIVE",
+        "WINDIR",
+        "COMSPEC",
+        "PATHEXT",
+    }
+)
+RUNNER_ENV_PREFIX: Final = "LC_"
+
+
+def runner_env(base: Mapping[str, str] = os.environ) -> dict[str, str]:
+    """The environment a runner starts with: `base` kept to `RUNNER_ENV` and `LC_*`.
+
+    Names compare case-insensitively on Windows, case-sensitively elsewhere.
+    """
+    fold = str.upper if sys.platform == "win32" else str
+    return {
+        name: value
+        for name, value in base.items()
+        if fold(name) in RUNNER_ENV or fold(name).startswith(RUNNER_ENV_PREFIX)
+    }
 
 
 def runner_command(language: Language, node: str | None, *, runner: Path = RUNNER) -> list[str]:
@@ -271,6 +309,7 @@ class Sandbox:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             limit=protocol.MAX_LINE_BYTES,
+            env=runner_env(),
         )
         proc = self._proc
         if proc.stdout is None or proc.stderr is None:

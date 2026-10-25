@@ -188,6 +188,12 @@ a clear error if called outside a runner. The script runs in a separate
 interpreter (an editable install counts); being importable through `PYTHONPATH`
 is not enough.
 
+Both runners, Node and Python, start with an allowlisted environment, not the
+host's: `PATH`, the locale (`LANG`, `LANGUAGE`, `LC_*`), `TZ`, the temp directory
+(`TMPDIR`, `TMP`, `TEMP`) and, on Windows, `SYSTEMROOT`, `SYSTEMDRIVE`, `WINDIR`,
+`COMSPEC` and `PATHEXT` (`sandbox.client.RUNNER_ENV`). A script that reaches
+`os.environ` or `process.env` finds no API key or token of the host's.
+
 Trust: a `.py` file is arbitrary code on the host, so by default `.py`
 workflows load only from the host and user sources. For a project's own
 `.claude/workflows/*.py`, add `workspace` to `python_sources`:
