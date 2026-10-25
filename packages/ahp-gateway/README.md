@@ -102,8 +102,10 @@ What holds for a flow session, whatever the engine asks:
 - **The principal who started it.** Every session its tools start is started
   as that principal, only on nodes the registry admits them to. A run can only
   wait on, read or stop the sessions it started. Another principal can neither
-  prompt the flow session nor read or drive (prompt, cancel, answer) a session
-  its run started: they are listed like any session, and refused.
+  read nor drive (prompt, queue, resume, cancel, answer, dispose) the flow
+  session, a session its run started, or any chat of either: they are listed
+  like any session, and refused on every path (a subscribe, `initialize` or
+  `reconnect` subscriptions, a request naming one, a client action on one).
 - **Delegation.** `start_session` takes optional `originChat` and
   `originToolCall`; with both, the node session is created with a delegation
   `origin` (`{kind: "ahp-py/delegation", session: <the flow session>, chat,

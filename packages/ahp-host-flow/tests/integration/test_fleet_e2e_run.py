@@ -5,7 +5,8 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
-from ahp_client import TurnCompleted, TurnFailed
+import pytest
+from ahp_client import TurnCompleted
 from ahp_protocol.channels import ROOT_URI
 
 from tests.fleet_hosting import (
@@ -176,12 +177,10 @@ async def test_fleet_e2e_run_another_user_cannot_prompt_the_run(tmp_path: Path) 
         async with fx.surface() as owner:
             assert isinstance(await start_run(owner, RUN, "/fan"), TurnCompleted)
         async with fx.surface("surface-2") as other:
-            session = await other.open_session(RUN)
-            chat = await session.chat()
-            async with asyncio.timeout(10):
-                refused = await chat.prompt("/fan")
-        assert isinstance(refused, TurnFailed), refused
-        assert "another user" in refused.reason
+            # The gateway refuses another principal the run session outright:
+            # not even opened, so never prompted.
+            with pytest.raises(Exception, match="another user's flow run"):
+                await other.open_session(RUN)
     finally:
         await fx.aclose()
 
