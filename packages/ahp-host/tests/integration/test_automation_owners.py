@@ -136,6 +136,55 @@ class TestVisibility:
         for message in bob.notifications:
             assert "createRequested" not in json.dumps(message)
 
+    async def test_a_borrowed_client_id_is_not_sent_anyone_elses_definitions(
+        self, shared: tuple[Host, OwnedSessionPolicy]
+    ) -> None:
+        # A clientId is client-asserted: bob can claim alice's. The origin
+        # echo is hers by identity, not by the id she happened to pick.
+        host, _ = shared
+        alice, _ = await _user(host, "alice", "a1")
+        bob, _ = await _user(host, "bob", "a1")
+        await _dispatch(
+            alice,
+            AUTOMATIONS_URI,
+            {
+                "type": "automation/createRequested",
+                "resource": AUTOMATION,
+                "definition": _definition(),
+            },
+        )
+        await _dispatch(
+            alice,
+            AUTOMATIONS_URI,
+            {
+                "type": "automation/createRequested",
+                "resource": "ahp-automation:/rejected",
+                "definition": {**_definition(), "title": 7, "message": {"text": "secret"}},
+            },
+            seq=2,
+        )
+        await _until(lambda: any(e["resource"] == AUTOMATION for e in _entries(host)))
+        await alice.collect_until(
+            lambda: _echo_of(alice, "automation/createRequested") is not None, timeout=2
+        )
+        await bob.collect(seconds=0.2)
+        for message in bob.notifications:
+            assert "nightly" not in json.dumps(message)
+            assert "secret" not in json.dumps(message)
+        reply = await bob.request(
+            "reconnect",
+            {"clientId": "a1", "lastSeenServerSeq": 0, "subscriptions": [AUTOMATIONS_URI]},
+        )
+        await bob.collect(seconds=0.1)
+        assert "nightly" not in json.dumps(reply["result"])
+        assert "secret" not in json.dumps(reply["result"])
+        # Alice, reconnecting, still gets her own echoes, the refusal included.
+        resumed = await alice.request(
+            "reconnect",
+            {"clientId": "a1", "lastSeenServerSeq": 0, "subscriptions": [AUTOMATIONS_URI]},
+        )
+        assert "secret" in json.dumps(resumed["result"])
+
     async def test_the_owner_is_never_on_the_wire(
         self, shared: tuple[Host, OwnedSessionPolicy]
     ) -> None:

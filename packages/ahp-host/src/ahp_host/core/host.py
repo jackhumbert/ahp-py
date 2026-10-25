@@ -13,6 +13,7 @@ import asyncio
 import base64
 import binascii
 import contextlib
+import contextvars
 import copy
 import inspect
 import json
@@ -1851,6 +1852,19 @@ def _with_origin(summary: dict[str, Any], origin: Mapping[str, Any] | None) -> d
     return summary
 
 
+#: The connection whose `dispatchAction` is being published, while it is. Read
+#: by `_AutomationCatalogue.delivers`, which runs inside `Sequencer.publish` and
+#: is handed only the envelope -- whose `origin` names a client-asserted
+#: `clientId`, not who sent it.
+_DISPATCHER: contextvars.ContextVar[Connection | None] = contextvars.ContextVar(
+    "_DISPATCHER", default=None
+)
+
+#: Catalogue envelopes whose sender `_AutomationCatalogue` remembers. Above the
+#: sequencer's per-channel replay limit, so nothing still replayable is forgotten.
+_REMEMBERED_ORIGINATORS: Final = 4096
+
+
 class _AutomationCatalogue:
     """What each subscriber may see of the shared automation catalogue.
 
@@ -1862,6 +1876,35 @@ class _AutomationCatalogue:
 
     def __init__(self, host: Host) -> None:
         self._host = host
+        #: serverSeq -> the principal of the connection that dispatched it.
+        self._originators: dict[int, str | None] = {}
+
+    def originated(self, envelope: Mapping[str, Any] | None, connection: Connection) -> None:
+        """Remember who dispatched *envelope*, for its replay."""
+        seq = envelope.get("serverSeq") if envelope is not None else None
+        if not isinstance(seq, int):
+            return
+        self._originators[seq] = self._host._principal_of(connection)
+        while len(self._originators) > _REMEMBERED_ORIGINATORS:
+            del self._originators[next(iter(self._originators))]
+
+    def _sent_by(self, subscriber: Subscriber, envelope: Mapping[str, Any]) -> bool:
+        """Whether *subscriber* is who dispatched *envelope*, as far as can be told.
+
+        By principal: the `clientId` in `origin` is client-asserted, so a peer
+        could pick another's and be sent their definitions -- refusals
+        included -- live and on every replay. Only when neither side has a
+        principal is the clientId match all there is to go on.
+        """
+        if not isinstance(subscriber, Connection):
+            return True
+        seq = envelope.get("serverSeq")
+        if isinstance(seq, int) and seq in self._originators:
+            sender = self._originators[seq]
+        else:
+            dispatcher = _DISPATCHER.get()
+            sender = self._host._principal_of(dispatcher) if dispatcher is not None else None
+        return sender == self._host._principal_of(subscriber)
 
     def _entry(self, subscriber: Subscriber, resource: Any) -> bool:
         host = self._host
@@ -1892,7 +1935,11 @@ class _AutomationCatalogue:
             # client sees every echo, as before ownership existed.
             return True
         origin = envelope.get("origin")
-        if isinstance(origin, Mapping) and origin.get("clientId") == subscriber.client_id:
+        if (
+            isinstance(origin, Mapping)
+            and origin.get("clientId") == subscriber.client_id
+            and self._sent_by(subscriber, envelope)
+        ):
             # Its own action, accepted or rejected: it needs the echo to
             # reconcile its optimistic copy.
             return True
@@ -2131,6 +2178,7 @@ class Host:
         #: automation before `fetchAutomationRuns` pages in more.
         self.automation_history = max(1, automation_history)
         self._automations: dict[str, AutomationRecord] = {}
+        self._catalogue = _AutomationCatalogue(self)
         #: Automation resource -> the principal that created it. Kept after the
         #: automation is removed, so a replayed `automation/removed` is still
         #: delivered only to those who could see the automation.
@@ -7775,7 +7823,7 @@ class Host:
                 reason=rejection,
                 detail={"action": action.get("type")},
             )
-            await self.sequencer.publish(channel, action, origin=origin, rejection_reason=rejection)
+            await self._publish_dispatched(connection, channel, action, origin, rejection)
             return
         message = action.get("message")
         if action.get("type") in _MESSAGE_ACTIONS and isinstance(message, Mapping):
@@ -7816,13 +7864,36 @@ class Host:
             self._spawn(self._capture_then_apply(connection, channel, action, origin, needed))
             return
 
-        await self.sequencer.publish(channel, action, origin=origin)
+        await self._publish_dispatched(connection, channel, action, origin)
         await self._react(channel, action, connection)
         session = self._session_for(channel)
         if session is not None:
             if action.get("type") == "chat/isReadChanged" and action.get("isRead") is True:
                 await self._roll_up_read(session)
             await self._mirror_summary(session)
+
+    async def _publish_dispatched(
+        self,
+        connection: Connection,
+        channel: str,
+        action: Mapping[str, Any],
+        origin: Mapping[str, Any],
+        rejection_reason: str | None = None,
+    ) -> None:
+        """Publish a peer's action, with the sender known to the catalogue view.
+
+        The automation catalogue delivers an origin echo by who sent it, not by
+        `origin.clientId` alone (`_AutomationCatalogue._sent_by`).
+        """
+        token = _DISPATCHER.set(connection)
+        try:
+            envelope = await self.sequencer.publish(
+                channel, action, origin=origin, rejection_reason=rejection_reason
+            )
+        finally:
+            _DISPATCHER.reset(token)
+        if channel == AUTOMATIONS_URI:
+            self._catalogue.originated(envelope, connection)
 
     async def _queue_instead_of_starting(
         self, channel: str, action: Mapping[str, Any], origin: Mapping[str, Any]
@@ -7910,12 +7981,12 @@ class Host:
                     )
                     copies[copy_.plugin_id] = copy_
             except CaptureError as exc:
-                await self.sequencer.publish(
-                    channel, action, origin=origin, rejection_reason=f"capture failed: {exc}"
+                await self._publish_dispatched(
+                    connection, channel, action, origin, f"capture failed: {exc}"
                 )
                 return
             self._pending_copies[str(action.get("resource"))] = copies
-            await self.sequencer.publish(channel, action, origin=origin)
+            await self._publish_dispatched(connection, channel, action, origin)
             await self._react(channel, action, connection)
 
     def _validate_client_action(
@@ -9234,7 +9305,7 @@ class Host:
                 await self.automations.save(record)
             entries.append(self._automation_entry(record))
         await self.sequencer.register_channel(AUTOMATIONS_URI, {"entries": entries}, "automation")
-        self.sequencer.set_view(AUTOMATIONS_URI, _AutomationCatalogue(self))
+        self.sequencer.set_view(AUTOMATIONS_URI, self._catalogue)
         self._scheduler = asyncio.create_task(self._schedule_loop())
 
     def _automation_entry(self, record: AutomationRecord) -> dict[str, Any]:

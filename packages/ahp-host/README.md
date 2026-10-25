@@ -413,7 +413,8 @@ filtered per subscriber — snapshot, replay and live actions — to that princi
 own automations, and so are the run channels. Updating, removing, running,
 `fetchAutomationRuns` and cancelling a run are refused for anyone else: a
 dispatched action echoes `rejectionReason: "rejected by policy"` to its sender
-only, a method answers `-32009`. A run, and the session it starts, belong to the
+only (the sender by principal: a peer asserting another's `clientId` is not sent
+their echoes, live or on replay), a method answers `-32009`. A run, and the session it starts, belong to the
 automation's owner, scheduled or manual. With no principal (a single-user policy)
 everyone sees and manages everything, as before. `OwnedSessionPolicy` does all of
 this; a custom policy may define `may_manage_automation` (below).
