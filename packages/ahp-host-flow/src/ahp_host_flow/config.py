@@ -243,16 +243,24 @@ def _str(table: Mapping[str, Any], key: str, where: str) -> str | None:
     return value
 
 
+def _is_number(value: Any, *, integer: bool = False) -> bool:
+    """Whether *value* is a finite number (an int, with *integer*); a bool never is.
+
+    The one check behind every numeric option: TOML has `nan` and `inf`, which no limit,
+    timeout or budget may be.
+    """
+    if isinstance(value, bool):
+        return False
+    if integer:
+        return isinstance(value, int)
+    return isinstance(value, int | float) and math.isfinite(value)
+
+
 def _seconds(table: Mapping[str, Any], key: str, where: str) -> float | None:
     value = table.get(key)
     if value is None:
         return None
-    if (
-        isinstance(value, bool)
-        or not isinstance(value, int | float)
-        or not math.isfinite(value)
-        or value <= 0
-    ):
+    if not _is_number(value) or value <= 0:
         raise ConfigError(f"{where}.{key} must be a positive number of seconds")
     return float(value)
 
@@ -398,15 +406,13 @@ def _parse_provider(name: str, raw: Any, base: Path) -> ProviderConfig:
     if not isinstance(preamble, bool) and (not isinstance(preamble, str) or not preamble.strip()):
         raise ConfigError(f"{where}.preamble must be true, false or a non-empty string")
     retry_empty = table.get("retry_empty", 0)
-    if isinstance(retry_empty, bool) or not isinstance(retry_empty, int) or retry_empty < 0:
+    if not _is_number(retry_empty, integer=True) or retry_empty < 0:
         raise ConfigError(f"{where}.retry_empty must be an integer >= 0")
     concurrency = table.get("concurrency")
     if concurrency == "probe":
         if kind != "inprocess":
             raise ConfigError(f'{where}.concurrency = "probe" needs an in-process provider (load)')
-    elif concurrency is not None and (
-        isinstance(concurrency, bool) or not isinstance(concurrency, int) or concurrency < 1
-    ):
+    elif concurrency is not None and (not _is_number(concurrency, integer=True) or concurrency < 1):
         raise ConfigError(f'{where}.concurrency must be an integer >= 1 or "probe"')
     fallback = tuple(_str_list(table.get("fallback", []), f"{where}.fallback"))
     return ProviderConfig(
@@ -534,12 +540,7 @@ def _parse_workflows(raw: Any, base: Path) -> WorkflowsConfig:
     if len(set(python_sources)) != len(python_sources):
         raise ConfigError("workflows.python_sources has duplicates")
     interval = table.get("watch_interval", WorkflowsConfig.watch_interval)
-    if (
-        isinstance(interval, bool)
-        or not isinstance(interval, int | float)
-        or not math.isfinite(interval)
-        or interval < 0
-    ):
+    if not _is_number(interval) or interval < 0:
         raise ConfigError(
             "workflows.watch_interval must be a number of seconds >= 0 (0 turns watching off)"
         )
@@ -651,13 +652,13 @@ def _parse_changesets(raw: Any) -> ChangesetsConfig:
     return ChangesetsConfig(branch, trailer)
 
 
-def _count(table: Mapping[str, Any], key: str, minimum: int) -> int | None:
+def _count(table: Mapping[str, Any], key: str, minimum: int, where: str) -> int | None:
     value = table.get(key)
     if value is None:
         return None
-    if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
-        raise ConfigError(f"limits.{key} must be an integer >= {minimum}")
-    return value
+    if not _is_number(value, integer=True) or value < minimum:
+        raise ConfigError(f"{where}.{key} must be an integer >= {minimum}")
+    return int(value)
 
 
 def _parse_limits(raw: Any) -> LimitsConfig:
@@ -678,25 +679,20 @@ def _parse_limits(raw: Any) -> LimitsConfig:
         "limits",
     )
     cost = table.get("cost_budget")
-    if cost is not None and (
-        isinstance(cost, bool)
-        or not isinstance(cost, int | float)
-        or not math.isfinite(cost)
-        or cost < 0
-    ):
+    if cost is not None and (not _is_number(cost) or cost < 0):
         raise ConfigError("limits.cost_budget must be a number >= 0")
     reserve: int | Literal["mean"] | None
-    reserve = "mean" if table.get("reserve") == "mean" else _count(table, "reserve", 0)
+    reserve = "mean" if table.get("reserve") == "mean" else _count(table, "reserve", 0, "limits")
     count_cache = table.get("count_cache", LimitsConfig.count_cache)
     if not isinstance(count_cache, bool):
         raise ConfigError("limits.count_cache must be true or false")
     return LimitsConfig(
-        budget=_count(table, "budget", 0),
-        input_budget=_count(table, "input_budget", 0),
+        budget=_count(table, "budget", 0, "limits"),
+        input_budget=_count(table, "input_budget", 0, "limits"),
         cost_budget=None if cost is None else float(cost),
         wall_budget=_seconds(table, "wall_budget", "limits"),
         timeout=_seconds(table, "timeout", "limits"),
-        concurrency=_count(table, "concurrency", 1),
+        concurrency=_count(table, "concurrency", 1, "limits"),
         reserve=reserve,
         count_cache=count_cache,
         heartbeat=_seconds(table, "heartbeat", "limits") or LimitsConfig.heartbeat,
@@ -707,25 +703,14 @@ def _parse_quotas(raw: Any) -> QuotaLimits:
     table = _table(raw, "quotas")
     keys = ("tokens_per_day", "tokens_per_run", "cost_per_day", "cost_per_run")
     _check_keys(table, keys, "quotas")
-    for key in keys[:2]:
-        value = table.get(key)
-        if value is not None and (
-            isinstance(value, bool) or not isinstance(value, int) or value < 1
-        ):
-            raise ConfigError(f"quotas.{key} must be an integer >= 1")
     for key in keys[2:]:
         value = table.get(key)
-        if value is not None and (
-            isinstance(value, bool)
-            or not isinstance(value, int | float)
-            or not math.isfinite(value)
-            or value <= 0
-        ):
+        if value is not None and (not _is_number(value) or value <= 0):
             raise ConfigError(f"quotas.{key} must be a number > 0")
     cost_day, cost_run = table.get("cost_per_day"), table.get("cost_per_run")
     return QuotaLimits(
-        tokens_per_day=table.get("tokens_per_day"),
-        tokens_per_run=table.get("tokens_per_run"),
+        tokens_per_day=_count(table, "tokens_per_day", 1, "quotas"),
+        tokens_per_run=_count(table, "tokens_per_run", 1, "quotas"),
         cost_per_day=None if cost_day is None else float(cost_day),
         cost_per_run=None if cost_run is None else float(cost_run),
     )

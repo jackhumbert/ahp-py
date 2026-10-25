@@ -90,6 +90,28 @@ def test_flowlimits_provider_seconds_must_be_finite(key: str, value: float) -> N
         parse(providers={"claude": {"load": "m:C", key: value}})
 
 
+@pytest.mark.parametrize(
+    ("quotas", "message"),
+    [
+        ({"tokens_per_day": 0}, r"^quotas\.tokens_per_day must be an integer >= 1$"),
+        ({"tokens_per_run": 1.5}, r"^quotas\.tokens_per_run must be an integer >= 1$"),
+        ({"tokens_per_run": True}, r"^quotas\.tokens_per_run must be an integer >= 1$"),
+        ({"cost_per_day": float("nan")}, r"^quotas\.cost_per_day must be a number > 0$"),
+        ({"cost_per_run": float("inf")}, r"^quotas\.cost_per_run must be a number > 0$"),
+    ],
+)
+def test_flowlimits_quotas_rejects(quotas: dict[str, Any], message: str) -> None:
+    with pytest.raises(ConfigError, match=message):
+        parse_config({"providers": PROVIDER, "quotas": quotas}, base=Path("."))
+
+
+def test_flowlimits_quotas_parse() -> None:
+    quotas = {"tokens_per_day": 10, "tokens_per_run": 5, "cost_per_day": 2, "cost_per_run": 0.5}
+    config = parse_config({"providers": PROVIDER, "quotas": quotas}, base=Path("."))
+    assert config.quotas.tokens_per_day == 10
+    assert config.quotas.cost_per_day == 2.0
+
+
 def test_flowlimits_call_timeout_all_kinds() -> None:
     config = parse(
         providers={
