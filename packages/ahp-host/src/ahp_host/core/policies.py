@@ -245,3 +245,16 @@ class OwnedSessionPolicy:
         self, info: ConnectionInfo, session: str, directory: str
     ) -> bool:
         return self.allow_resources and self.may_see_channel(info, session)
+
+    def may_grant_working_directory_for(
+        self, principal: str | None, session: str, directory: str
+    ) -> bool:
+        """The same question for an automation run, asked for its owner.
+
+        The run's session is being created FOR *principal*, so the ownership
+        half of the connection answer holds by construction; what is left is
+        whether this policy grants folders at all. A run with no owner (an
+        automation saved before owners were recorded) gets none: nobody can
+        be asked about it.
+        """
+        return self.allow_resources and principal is not None

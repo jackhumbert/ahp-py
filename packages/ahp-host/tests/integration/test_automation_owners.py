@@ -537,3 +537,207 @@ async def _user_loopback(host: Host, client_id: str) -> tuple[FakeClient, dict[s
         },
     )
     return client, reply["result"]
+
+
+class _HomeFolders(OwnedSessionPolicy):
+    """Each principal may grant only folders under `/Users/<principal>`."""
+
+    def __init__(self) -> None:
+        super().__init__(principal_from_header(_HEADER), allow_resources=True)
+        self.revoked: set[str] = set()
+
+    def _theirs(self, principal: str | None, directory: str) -> bool:
+        return (
+            principal is not None
+            and principal not in self.revoked
+            and directory.startswith(f"file:///Users/{principal}/")
+        )
+
+    def may_grant_working_directory(
+        self, info: ConnectionInfo, session: str, directory: str
+    ) -> bool:
+        return self._theirs(self.principal_of(info), directory)
+
+    def may_grant_working_directory_for(
+        self, principal: str | None, session: str, directory: str
+    ) -> bool:
+        return self._theirs(principal, directory)
+
+
+def _with_folder(folder: str) -> dict[str, Any]:
+    return _definition(session={"provider": "echo", "workingDirectories": [folder]})
+
+
+def _saved(definition: dict[str, Any], principal: str | None) -> AutomationRecord:
+    return AutomationRecord(
+        resource=AUTOMATION,
+        definition=definition,
+        created_at="2026-01-01T00:00:00.000Z",
+        modified_at="2026-01-01T00:00:00.000Z",
+        principal=principal,
+    )
+
+
+async def _run_session_folders(host: Host, client: FakeClient) -> list[str]:
+    reply = await client.request(
+        "runAutomation",
+        {"channel": AUTOMATIONS_URI, "automation": AUTOMATION, "requestId": "r1"},
+    )
+    run = reply["result"]["resource"]
+    await _until(lambda: "primarySession" in host.sequencer.state_of(run))
+    session = host.sequencer.state_of(run)["primarySession"]
+    await _until(lambda: host.sequencer.state_of(session).get("lifecycle") == "ready")
+    return list(host.sequencer.state_of(session).get("workingDirectories") or [])
+
+
+class TestWorkingDirectories:
+    async def test_the_default_policy_refuses_a_folder_at_create(
+        self, shared: tuple[Host, OwnedSessionPolicy]
+    ) -> None:
+        host, _ = shared
+        alice, _ = await _user(host, "alice", "a1")
+        await _dispatch(
+            alice,
+            AUTOMATIONS_URI,
+            {
+                "type": "automation/createRequested",
+                "resource": AUTOMATION,
+                "definition": _with_folder("file:///Users/bob/secrets"),
+            },
+        )
+        await alice.collect_until(
+            lambda: _echo_of(alice, "automation/createRequested") is not None, timeout=2
+        )
+        echo = _echo_of(alice, "automation/createRequested")
+        assert echo is not None
+        assert "rejected by policy" in echo["rejectionReason"]
+        assert _entries(host) == []
+
+    async def test_another_users_folder_is_refused_at_create_and_update(self) -> None:
+        host = Host(EchoProvider(), _HomeFolders(), automations=InMemoryAutomationStore())
+        try:
+            alice, _ = await _user(host, "alice", "a1")
+            await _dispatch(
+                alice,
+                AUTOMATIONS_URI,
+                {
+                    "type": "automation/createRequested",
+                    "resource": AUTOMATION,
+                    "definition": _with_folder("file:///Users/bob/secrets"),
+                },
+            )
+            await alice.collect_until(
+                lambda: _echo_of(alice, "automation/createRequested") is not None, timeout=2
+            )
+            assert "rejectionReason" in (_echo_of(alice, "automation/createRequested") or {})
+            assert _entries(host) == []
+            await _dispatch(
+                alice,
+                AUTOMATIONS_URI,
+                {
+                    "type": "automation/createRequested",
+                    "resource": AUTOMATION,
+                    "definition": _with_folder("file:///Users/alice/proj"),
+                },
+                seq=2,
+            )
+            await _until(lambda: any(e["resource"] == AUTOMATION for e in _entries(host)))
+            await _dispatch(
+                alice,
+                AUTOMATIONS_URI,
+                {
+                    "type": "automation/updateRequested",
+                    "resource": AUTOMATION,
+                    "changes": {
+                        "session": {
+                            "provider": "echo",
+                            "workingDirectories": ["file:///Users/bob/secrets"],
+                        }
+                    },
+                },
+                seq=3,
+            )
+            await alice.collect_until(
+                lambda: _echo_of(alice, "automation/updateRequested") is not None, timeout=2
+            )
+            assert "rejectionReason" in (_echo_of(alice, "automation/updateRequested") or {})
+            (entry,) = _entries(host)
+            assert entry["definition"]["session"]["workingDirectories"] == [
+                "file:///Users/alice/proj"
+            ]
+            assert await _run_session_folders(host, alice) == ["file:///Users/alice/proj"]
+        finally:
+            await host.aclose()
+
+    async def test_a_run_rechecks_the_folder_against_the_owner(self) -> None:
+        policy = _HomeFolders()
+        host = Host(EchoProvider(), policy, automations=InMemoryAutomationStore())
+        try:
+            alice, _ = await _user(host, "alice", "a1")
+            await _dispatch(
+                alice,
+                AUTOMATIONS_URI,
+                {
+                    "type": "automation/createRequested",
+                    "resource": AUTOMATION,
+                    "definition": _with_folder("file:///Users/alice/proj"),
+                },
+            )
+            await _until(lambda: any(e["resource"] == AUTOMATION for e in _entries(host)))
+            policy.revoked.add("alice")
+            assert await _run_session_folders(host, alice) == []
+        finally:
+            await host.aclose()
+
+    async def test_a_saved_foreign_folder_is_not_granted_to_a_run(self) -> None:
+        # Saved before the create-time check existed, naming bob's folder for
+        # alice: the run asks again, for alice.
+        store = InMemoryAutomationStore()
+        await store.save(_saved(_with_folder("file:///Users/bob/secrets"), "alice"))
+        host = Host(EchoProvider(), _HomeFolders(), automations=store)
+        try:
+            alice, _ = await _user(host, "alice", "a1")
+            assert await _run_session_folders(host, alice) == []
+        finally:
+            await host.aclose()
+
+    async def test_a_multi_user_policy_without_the_hook_grants_a_run_nothing(self) -> None:
+        class NoHook(OwnedSessionPolicy):
+            def __getattribute__(self, name: str) -> Any:
+                if name == "may_grant_working_directory_for":
+                    raise AttributeError(name)
+                return super().__getattribute__(name)
+
+            def may_grant_working_directory(
+                self, info: ConnectionInfo, session: str, directory: str
+            ) -> bool:
+                return True
+
+        store = InMemoryAutomationStore()
+        await store.save(_saved(_with_folder("file:///Users/alice/proj"), "alice"))
+        host = Host(EchoProvider(), NoHook(principal_from_header(_HEADER)), automations=store)
+        try:
+            alice, _ = await _user(host, "alice", "a1")
+            assert await _run_session_folders(host, alice) == []
+        finally:
+            await host.aclose()
+
+    async def test_a_single_user_run_keeps_its_folder(self) -> None:
+        host = Host(
+            EchoProvider(), LoopbackSingleUserPolicy(), automations=InMemoryAutomationStore()
+        )
+        try:
+            client, _ = await _user_loopback(host, "c1")
+            await _dispatch(
+                client,
+                AUTOMATIONS_URI,
+                {
+                    "type": "automation/createRequested",
+                    "resource": AUTOMATION,
+                    "definition": _with_folder("file:///Users/me/proj"),
+                },
+            )
+            await _until(lambda: any(e["resource"] == AUTOMATION for e in _entries(host)))
+            assert await _run_session_folders(host, client) == ["file:///Users/me/proj"]
+        finally:
+            await host.aclose()

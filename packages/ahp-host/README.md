@@ -720,7 +720,14 @@ optional in the same way: whether a peer may see or act on the automation or run
 Absent, the default is an owner match when both principals are known and allow
 when either is `None`; a raise refuses. `OwnedSessionPolicy` implements it and
 claims the automation, run and run-session channels for their owner through
-`claim`, which the host calls for what it creates with no connection. For the socket, `bearer_token_validator(token)` checks an
+`claim`, which the host calls for what it creates with no connection. An
+automation's `session.workingDirectories` go through `may_grant_working_directory`
+(with the automation's URI as `session`) on `automation/createRequested` and on an
+`updateRequested` that supplies `session`, and are asked about again, for the owner,
+each time a run starts: through the optional
+`may_grant_working_directory_for(principal, session, directory) -> bool`. A policy
+with `principal_of` and no such hook grants a run no folder (fail closed); a raise
+refuses. `OwnedSessionPolicy` implements it as `allow_resources` and an owner. For the socket, `bearer_token_validator(token)` checks an
 `Authorization: Bearer` header, and `serve_websocket` takes `ping_interval` (so a
 proxy's idle timeout does not cut a quiet connection) and `max_size` (the frame
 limit; keep a proxy's at or above it).

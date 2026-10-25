@@ -6789,9 +6789,19 @@ class Host:
         return capability if isinstance(capability, Mapping) else None
 
     def _admit_working_directories(
-        self, connection: Connection | None, session: str, params: Mapping[str, Any]
+        self,
+        connection: Connection | None,
+        session: str,
+        params: Mapping[str, Any],
+        *,
+        principal: str | None = None,
     ) -> list[str]:
-        """The directories `createSession` may seed, after capability and policy."""
+        """The directories `createSession` may seed, after capability and policy.
+
+        *principal* stands in for the connection when there is none -- an
+        automation run, whose folders are asked about again for the owner
+        (`_may_grant_for`) rather than trusted from when they were saved.
+        """
         requested = [d for d in params.get("workingDirectories") or () if isinstance(d, str)]
         asked = bool(requested)
         # Anything the resource provider will not serve is dropped HERE, before
@@ -6843,9 +6853,36 @@ class Host:
         return [
             directory
             for directory in requested
-            if connection is None
-            or self.policy.may_grant_working_directory(connection.info, session, directory)
+            if (
+                self.policy.may_grant_working_directory(connection.info, session, directory)
+                if connection is not None
+                else self._may_grant_for(principal, session, directory)
+            )
         ]
+
+    def _may_grant_for(self, principal: str | None, session: str, directory: str) -> bool:
+        """`may_grant_working_directory` with no connection: an automation run's.
+
+        The folders were checked against the connection that saved the
+        definition, but a run starts later -- possibly much later, after the
+        owner lost access -- and a definition saved before that check existed
+        was never checked at all. So the policy's optional
+        `may_grant_working_directory_for` is asked again, for the owner. A
+        policy that tells people apart (`principal_of`) but has no such hook
+        may restrict folders by who, and nothing here can ask it: the run gets
+        none. One with no principals at all already answered at save time.
+        A raise refuses.
+        """
+        hook = getattr(self.policy, "may_grant_working_directory_for", None)
+        if callable(hook):
+            try:
+                return bool(hook(principal, session, directory))
+            except Exception:
+                _log.warning(
+                    "policy.may_grant_working_directory_for failed; refusing", exc_info=True
+                )
+                return False
+        return not callable(getattr(self.policy, "principal_of", None))
 
     def _fallback_directory(self) -> str:
         """The advertised default directory, or the primary root for a named-roots host.
@@ -7288,7 +7325,9 @@ class Host:
             raise errors.provider_not_found(str(provider_id))
         forked = self._fork_source(connection, params) if connection is not None else None
         if forked is None:
-            working_directories = self._admit_working_directories(connection, channel, params)
+            working_directories = self._admit_working_directories(
+                connection, channel, params, principal=principal
+            )
         else:
             # "Ignored for forked sessions -- a fork inherits its working
             # directories from the source session." An OVERRIDE, not a
@@ -9304,7 +9343,9 @@ class Host:
                 return f"an automation resource must use the {AUTOMATION_SCHEME} scheme"
             if record is not None:
                 return f"{resource} already exists"
-            return definition_rejection(action.get("definition"), self.providers)
+            return definition_rejection(
+                action.get("definition"), self.providers
+            ) or self._template_directories_rejection(connection, resource, action["definition"])
         if record is None:
             # `automation/removed` of an unknown resource is specified as a
             # no-op; rejected rather than sequenced, so it cannot remove a
@@ -9316,10 +9357,33 @@ class Host:
             changes = action.get("changes")
             if not isinstance(changes, Mapping):
                 return "automation/updateRequested needs changes"
-            return definition_rejection(apply_patch(record.definition, changes), self.providers)
+            patched = apply_patch(record.definition, changes)
+            rejection = definition_rejection(patched, self.providers)
+            if rejection is None and "session" in changes:
+                rejection = self._template_directories_rejection(connection, resource, patched)
+            return rejection
         if action_type == "automation/removed":
             return None
         return f"{action_type} is not an action this host accepts"
+
+    def _template_directories_rejection(
+        self, connection: Connection, resource: str, definition: Mapping[str, Any]
+    ) -> str | None:
+        """Every folder a session template names, through the same policy a
+        `createSession` or `session/workingDirectorySet` asks.
+
+        A run's session is created with no connection, so without this a peer
+        who may not grant a folder could save an automation naming it and have
+        the host grant it on their behalf. Only a template the action supplies
+        is asked about: an update that leaves `session` alone grants nothing
+        new, and the run asks again anyway (`_may_grant_for`).
+        """
+        session = definition.get("session")
+        directories = session.get("workingDirectories") if isinstance(session, Mapping) else None
+        for directory in directories if isinstance(directories, list) else ():
+            if not self.policy.may_grant_working_directory(connection.info, resource, directory):
+                return f"working directory {directory} rejected by policy"
+        return None
 
     async def _react_to_automation(
         self, channel: str, action: Mapping[str, Any], connection: Connection | None = None

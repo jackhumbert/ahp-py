@@ -105,6 +105,16 @@ class Policy(Protocol):
     when both principals are known, and allow when either is ``None`` -- so a
     single-user policy, and an automation made before owners were recorded,
     behave as before. A raise refuses.
+
+    And OPTIONAL: ``may_grant_working_directory_for(principal: str | None,
+    session: str, directory: str) -> bool``, ``may_grant_working_directory``
+    with no connection. An automation's session template is checked with
+    ``may_grant_working_directory`` (``session`` is the automation's URI) when
+    a peer creates or updates it, and each run asks this again for the
+    automation's owner before its session gets the folder. A policy with
+    ``principal_of`` and no such hook grants a run no folder at all (fail
+    closed); one without ``principal_of`` keeps what was checked at save time.
+    A raise refuses.
     """
 
     def authorize_connection(self, info: ConnectionInfo) -> bool:
