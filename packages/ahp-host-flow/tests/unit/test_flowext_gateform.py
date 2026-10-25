@@ -212,13 +212,57 @@ async def test_flowext_gateform_title_masked() -> None:
     (q,) = sink.requests[0].questions
     assert "[redacted]" in q.extra["title"]
     assert AWS not in q.extra["title"]
-    # Option ids must match the answers, so they stay as typed; only the labels are masked.
-    sink.outcomes = [InputOutcome("accept", {"answer": sub("selected", AWS)})]
+
+
+async def test_flowext_gateform_choice_ids_masked() -> None:
+    """A secret choice is published under its masked id; the answer maps back to it."""
+    sink = RecordingSink()
+    gates = make(sink, [])
+    sink.outcomes = [InputOutcome("accept", {"answer": sub("selected", "[redacted]")})]
     assert await gates.ask(GateCall(1, "ask", "Pick", {"choices": [AWS, "no"]})) == AWS
+    (choice,) = sink.requests[0].questions
+    assert AWS not in json.dumps([choice.id, choice.message, list(choice.options)])
+    assert [o["id"] for o in choice.options] == ["[redacted]", "no"]
+    assert choice.options[0]["label"] == "[redacted]"
+    # Two secrets, and a choice that is literally the mask: every id is still its own.
+    other = "AKIA" + "Z" * 16
+    sink.outcomes = [InputOutcome("accept", {"answer": sub("selected", "[redacted] (2)")})]
+    choices = [AWS, other, "[redacted]"]
+    assert await gates.ask(GateCall(2, "ask", "Pick", {"choices": choices})) == other
     (choice,) = sink.requests[1].questions
-    assert [o["id"] for o in choice.options] == [AWS, "no"]
-    assert AWS not in choice.options[0]["label"]
-    assert "[redacted]" in choice.options[0]["label"]
+    ids = [o["id"] for o in choice.options]
+    assert ids == ["[redacted] (1)", "[redacted] (2)", "[redacted]"]
+    assert AWS not in json.dumps(list(choice.options))
+    assert other not in json.dumps(list(choice.options))
+
+
+async def test_flowext_gateform_schema_names_and_enums_masked() -> None:
+    schema = {
+        "type": "object",
+        "properties": {
+            AWS: {"type": "string"},
+            "pick": {"type": "string", "enum": [AWS, "plain"]},
+            "tags": {"type": "array", "items": {"type": "string", "enum": ["a", AWS]}},
+        },
+    }
+    sink = RecordingSink()
+    gates = make(sink, [])
+    sink.outcomes = [
+        InputOutcome(
+            "accept",
+            {
+                "[redacted]": sub("text", "v"),
+                "pick": sub("selected", "[redacted]"),
+                "tags": sub("selected", ["a", "[redacted]"]),
+            },
+        )
+    ]
+    value = await gates.ask(GateCall(0, "ask", "Q", {"schema": schema}))
+    assert value == {AWS: "v", "pick": AWS, "tags": ["a", AWS]}
+    (request,) = sink.requests
+    published = [(q.id, q.message, list(q.options), dict(q.extra)) for q in request.questions]
+    assert AWS not in json.dumps(published)
+    assert [q.id for q in request.questions] == ["[redacted]", "pick", "tags"]
 
 
 async def test_flowext_gateform_approve_string_diff() -> None:

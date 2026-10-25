@@ -170,6 +170,46 @@ def gate_answer(options: Mapping[str, Any], answers: Mapping[str, Any]) -> tuple
     return value, None
 
 
+def _published_ids(raw: Sequence[str], mask: Callable[[str], str]) -> list[str]:
+    """The id each of *raw* is published under: masked, and unique among them.
+
+    An id the mask leaves alone is kept as typed; a masked one that would meet another id
+    gets a ` (k)` suffix (its position, from 1), so every answer maps back to one raw id.
+    """
+    masks = [mask(v) for v in raw]
+    plain = {v for v, m in zip(raw, masks, strict=True) if m == v}
+    hidden = [m for v, m in zip(raw, masks, strict=True) if m != v]
+    taken = set(plain)
+    out: list[str] = []
+    for i, (value, masked) in enumerate(zip(raw, masks, strict=True)):
+        pid = masked
+        if masked != value:
+            k = i + 1
+            if masked in plain or hidden.count(masked) > 1:
+                pid = f"{masked} ({k})"
+            while pid in taken:
+                k += len(raw)
+                pid = f"{masked} ({k})"
+        taken.add(pid)
+        out.append(pid)
+    return out
+
+
+def _raw_answer(answer: Any, ids: Mapping[str, str]) -> Any:
+    """*answer* with the published option ids in its value mapped back to the raw ones."""
+    if not ids or not isinstance(answer, Mapping):
+        return answer
+    value = answer.get("value")
+    if not isinstance(value, Mapping):
+        return answer
+    v = value.get("value")
+    if isinstance(v, str):
+        v = ids.get(v, v)
+    elif isinstance(v, list):
+        v = [ids.get(x, x) if isinstance(x, str) else x for x in v]
+    return {**answer, "value": {**value, "value": v}}
+
+
 class MainChatGates:
     """The engine's `Gates` on the run's main chat."""
 
@@ -200,24 +240,47 @@ class MainChatGates:
 
     def _masked_form(
         self, question: str, options: Mapping[str, Any]
-    ) -> tuple[str | None, list[InputQuestion]]:
+    ) -> tuple[str | None, list[InputQuestion], Callable[[Mapping[str, Any]], dict[str, Any]]]:
+        """The form as published (masked), and what maps its answers back to the raw form.
+
+        Question and option ids are masked too (a choice or a property name can hold a
+        secret), each kept unique; the answers name those ids and are mapped back.
+        """
         mask = self._redactor.mask
         message, questions = gate_form(question, options)
+        qids = _published_ids([q.id for q in questions], mask)
         masked: list[InputQuestion] = []
-        for q in questions:
+        back: dict[str, tuple[str, dict[str, str]]] = {}
+        for qid, q in zip(qids, questions, strict=True):
             extra = (
                 {**q.extra, "title": mask(str(q.extra["title"]))} if "title" in q.extra else q.extra
             )
-            # Option ids stay as typed: an answer must match them.
-            labelled = [{**o, "label": mask(str(o["label"]))} for o in q.options]
-            masked.append(InputQuestion(q.id, q.kind, mask(q.message), labelled, extra))
-        return mask(message) if message is not None else None, masked
+            oids = _published_ids([str(o["id"]) for o in q.options], mask)
+            labelled = [
+                {**o, "id": oid, "label": mask(str(o["label"]))}
+                for oid, o in zip(oids, q.options, strict=True)
+            ]
+            back[qid] = (q.id, {oid: str(o["id"]) for oid, o in zip(oids, q.options, strict=True)})
+            masked.append(InputQuestion(qid, q.kind, mask(q.message), labelled, extra))
+
+        def raw_answers(answers: Mapping[str, Any]) -> dict[str, Any]:
+            raw: dict[str, Any] = {}
+            for qid, answer in answers.items():
+                if qid not in back:
+                    continue
+                name, ids = back[qid]
+                raw[name] = _raw_answer(answer, ids)
+            return raw
+
+        return mask(message) if message is not None else None, masked, raw_answers
 
     async def ask(self, call: GateCall) -> Any:
         return (await self.ask_outcome(call)).value
 
     async def ask_outcome(self, call: GateCall) -> AskOutcome:
-        message, questions = self._masked_form(self._redactor.mask(call.question), call.options)
+        message, questions, raw_answers = self._masked_form(
+            self._redactor.mask(call.question), call.options
+        )
         # The validation form is built from the raw options; only what is shown is masked.
         key = ""
         reason: str | None = None
@@ -234,7 +297,7 @@ class MainChatGates:
                 answered_by = outcome.answered_by
                 if not outcome.accepted:
                     return AskOutcome(None, answered_by)
-                value, reason = gate_answer(call.options, outcome.answers)
+                value, reason = gate_answer(call.options, raw_answers(outcome.answers))
                 if reason is None:
                     return AskOutcome(value, answered_by)
         except asyncio.CancelledError:

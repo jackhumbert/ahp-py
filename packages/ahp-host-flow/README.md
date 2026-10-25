@@ -393,6 +393,11 @@ canvas('https://example.com/run', {title: 'Live view'})
 const {approved, reason, answeredBy} = await approve('Drop?', {x: {detail: true}})
 ```
 
+An `ask()` form is masked before it is published, ids included: a choice, an enum value
+or a flat schema's property name that the mask changes is published under its masked
+text (`[redacted]`, made unique with a ` (k)` suffix), and the answer naming that id
+reaches the script as the real value. Ids the mask leaves alone are published as typed.
+
 `approve(..., {x: {detail: true}})` resolves to `{approved, reason, answeredBy}`: `reason` is
 the explanation given with a denial (masked) and `answeredBy` the answering principal, each
 `null` when unknown. A plain `approve()` still returns a bool, as under Claude Code, which
