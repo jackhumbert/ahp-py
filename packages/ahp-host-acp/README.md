@@ -368,6 +368,7 @@ matrix is checked against. Run it as `ahp-acp-openai` or
 | `AHP_OPENAI_TIMEOUT` | Seconds to wait on the endpoint (300) |
 | `AHP_OPENAI_MAX_STEPS` | Model calls per turn before it stops (25) |
 | `AHP_OPENAI_SYSTEM` | Replaces the default system prompt |
+| `AHP_OPENAI_CONTEXT_WINDOW` | The model's context window in tokens, reported as `usage_update.size` (unset: 0, not known) |
 
 ```toml
 command = ["ahp-acp-openai"]
@@ -380,8 +381,8 @@ AHP_OPENAI_MODEL = "qwen3"
 
 It streams text and reasoning (`reasoning_content` or `reasoning`), offers the
 client-tool relay's tools to the model as OpenAI tools (so `StructuredOutput`
-works), cancels a turn by dropping the request, reports token usage at the end
-of a turn, and has one built-in tool, `write_file`, which goes through
+works), cancels a turn by dropping the request, reports each model call's prompt as a
+`usage_update` (the context gauge) and the turn's token usage at its end, and has one built-in tool, `write_file`, which goes through
 `fs/write_text_file` when `[policy] host_tools` offers it. It asks
 `session/request_permission` before every tool call, so the host's policy always
 runs.

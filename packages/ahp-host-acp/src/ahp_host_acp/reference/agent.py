@@ -92,6 +92,8 @@ class ReferenceConfig:
     timeout: float = DEFAULT_TIMEOUT
     max_steps: int = DEFAULT_MAX_STEPS
     system_prompt: str = SYSTEM_PROMPT
+    #: The model's context window in tokens, reported as `usage_update.size`; 0: not known.
+    context_window: int = 0
 
 
 def from_env(environ: Mapping[str, str]) -> ReferenceConfig:
@@ -127,6 +129,15 @@ def from_env(environ: Mapping[str, str]) -> ReferenceConfig:
             max_steps = 0
         if max_steps < 1:
             raise ConfigError("AHP_OPENAI_MAX_STEPS must be a whole number, 1 or more")
+    context_window = 0
+    raw_window = environ.get("AHP_OPENAI_CONTEXT_WINDOW")
+    if raw_window:
+        try:
+            context_window = int(raw_window)
+        except ValueError:
+            context_window = 0
+        if context_window < 1:
+            raise ConfigError("AHP_OPENAI_CONTEXT_WINDOW must be a whole number, 1 or more")
     return ReferenceConfig(
         base_url=base_url,
         model=model,
@@ -134,6 +145,7 @@ def from_env(environ: Mapping[str, str]) -> ReferenceConfig:
         timeout=timeout,
         max_steps=max_steps,
         system_prompt=environ.get("AHP_OPENAI_SYSTEM") or SYSTEM_PROMPT,
+        context_window=context_window,
     )
 
 
@@ -593,6 +605,15 @@ class Agent:
                 counted = True
                 for key in totals:
                     totals[key] += done.usage[key]
+                # After each round, as ACP's context gauge: this call's prompt, whole.
+                self._update(
+                    session.id,
+                    {
+                        "sessionUpdate": "usage_update",
+                        "used": done.usage["prompt"],
+                        "size": self._config.context_window,
+                    },
+                )
             reply: dict[str, Any] = {"role": "assistant", "content": done.text or None}
             if done.tool_calls:
                 reply["tool_calls"] = [

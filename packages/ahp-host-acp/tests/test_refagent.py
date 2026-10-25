@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import dataclasses
 import io
 import json
 import os
@@ -149,6 +150,36 @@ async def test_refagent_text_reasoning_usage(tmp_path: Path) -> None:
         assert str(tmp_path) in request["messages"][0]["content"]
         assert request["messages"][-1] == {"role": "user", "content": "go"}
         assert [t["function"]["name"] for t in request["tools"]] == ["write_file"]
+
+
+@pytest.mark.parametrize(("window", "size"), [("8192", 8192), (None, 0)])
+async def test_refagent_reports_the_context_after_each_round(
+    tmp_path: Path, window: str | None, size: int
+) -> None:
+    first = {"prompt_tokens": 40, "completion_tokens": 3, "total_tokens": 43}
+    second = {"prompt_tokens": 60, "completion_tokens": 2, "total_tokens": 62}
+    replies = [
+        dataclasses.replace(
+            call("write_file", {"path": "notes.txt", "content": "hello"}), usage=first
+        ),
+        say("done", usage=second),
+    ]
+    extra_env = {"AHP_OPENAI_CONTEXT_WINDOW": window} if window else None
+    with StubServer(replies) as stub:
+        async with _agent(stub, extra_env=extra_env) as run:
+            sid = await _session(run, tmp_path)
+            await _prompt(run, sid)
+    usages = [u for u in run.updates if isinstance(u, ahp_acp.UsageUpdate)]
+    # Each model call's prompt, as it was sent: the host reads the last as the gauge.
+    assert [(u.used, u.size) for u in usages] == [(40, size), (60, size)]
+
+
+def test_refagent_context_window_must_be_a_count() -> None:
+    env = {"AHP_OPENAI_BASE_URL": "http://localhost:1/v1", "AHP_OPENAI_MODEL": "m"}
+    assert from_env({**env, "AHP_OPENAI_CONTEXT_WINDOW": "4096"}).context_window == 4096
+    for bad in ("0", "-1", "lots"):
+        with pytest.raises(ValueError, match="AHP_OPENAI_CONTEXT_WINDOW"):
+            from_env({**env, "AHP_OPENAI_CONTEXT_WINDOW": bad})
 
 
 async def test_refagent_cancel_mid_stream(tmp_path: Path) -> None:
