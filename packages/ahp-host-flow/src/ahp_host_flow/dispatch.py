@@ -641,6 +641,81 @@ class StepDispatcher(ABC):
             call_id, result, success=success, past_tense_message=message
         )
 
+    async def _finish(
+        self,
+        call_id: str,
+        link_item: Mapping[str, Any],
+        *,
+        usage: Mapping[str, int],
+        value: Any,
+        raw_schema: Any,
+        skipped: bool = False,
+        timed_out: str | None = None,
+        error: str | None = None,
+        kind: ErrorKind = "failed",
+        transient: bool = False,
+        cost_usd: float | None = None,
+    ) -> AgentResult:
+        """End a call: complete its tool call and return its result, or raise its failure.
+
+        The tail every dispatcher shares, in this order: *skipped* (the tool call ends
+        `skipped` and the cancellation is raised), *timed_out* (the idle-timeout message), then
+        *error*, each ending the tool call in error and raising `FlowAgentError`. Otherwise a
+        null *value* ends `null`, a *value* the call's schema rejects ends in error yet is still
+        returned (the engine re-validates identically), and anything else ends `ok`.
+        """
+        link = {"content": [link_item]}
+        in_tok, out_tok = usage["input_tokens"], usage["output_tokens"]
+        if skipped:
+            finished = flow.step_finished(
+                status="skipped", result=None, input_tokens=in_tok, output_tokens=out_tok
+            )
+            await self._complete(
+                call_id, link, success=False, message="agent() skipped", finished=finished
+            )
+            raise asyncio.CancelledError
+        failure = timed_out if timed_out is not None else error
+        if failure is not None:
+            finished = flow.step_finished(
+                status="error",
+                result=None,
+                error=failure,
+                input_tokens=in_tok,
+                output_tokens=out_tok,
+            )
+            await self._complete(
+                call_id, link, success=False, message="agent() failed", finished=finished
+            )
+            if timed_out is not None:
+                raise FlowAgentError(timed_out, kind="timeout", transient=True)
+            raise FlowAgentError(failure, kind=kind, transient=transient)
+        result = AgentResult(value, usage=usage, cost_usd=cost_usd)
+        if value is None:
+            finished = flow.step_finished(
+                status="null", result=None, input_tokens=in_tok, output_tokens=out_tok
+            )
+        elif isinstance(raw_schema, Mapping) and (bad := schema_error(raw_schema, value)):
+            # The engine re-validates identically, so this is what agent() returns.
+            finished = flow.step_finished(
+                status="error",
+                result=None,
+                error=bad,
+                input_tokens=in_tok,
+                output_tokens=out_tok,
+            )
+            await self._complete(
+                call_id, link, success=False, message="agent() failed", finished=finished
+            )
+            return result
+        else:
+            finished = flow.step_finished(
+                status="ok", result=value, input_tokens=in_tok, output_tokens=out_tok
+            )
+        await self._complete(
+            call_id, link, success=True, message="agent() returned", finished=finished
+        )
+        return result
+
     @abstractmethod
     async def _run_call(
         self, call: AgentCall, name: str, title: str, call_id: str
@@ -1430,67 +1505,24 @@ class ProviderDispatcher(StepDispatcher):
                 with contextlib.suppress(Exception):
                     await inner.aclose()
 
-        link = {"content": [link_item]}
-        in_tok, out_tok = usage["input_tokens"], usage["output_tokens"]
-        if state.skipped:
-            finished = flow.step_finished(
-                status="skipped", result=None, input_tokens=in_tok, output_tokens=out_tok
-            )
-            await self._complete(
-                call_id, link, success=False, message="agent() skipped", finished=finished
-            )
-            raise asyncio.CancelledError
-        if state.timed_out:
-            idle = f"provider {name!r}: no activity for {spec.idle_timeout:g}s (idle_timeout); "
-            idle += "stopped the turn"
-            finished = flow.step_finished(
-                status="error",
-                result=None,
-                error=idle,
-                input_tokens=in_tok,
-                output_tokens=out_tok,
-            )
-            await self._complete(
-                call_id, link, success=False, message="agent() failed", finished=finished
-            )
-            raise FlowAgentError(idle, kind="timeout", transient=True)
-        if state.error is not None:
-            finished = flow.step_finished(
-                status="error",
-                result=None,
-                error=state.error,
-                input_tokens=in_tok,
-                output_tokens=out_tok,
-            )
-            await self._complete(
-                call_id, link, success=False, message="agent() failed", finished=finished
-            )
-            raise FlowAgentError(state.error, kind=state.kind, transient=state.transient)
-        if value is None:
-            finished = flow.step_finished(
-                status="null", result=None, input_tokens=in_tok, output_tokens=out_tok
-            )
-        elif isinstance(raw_schema, Mapping) and (bad := schema_error(raw_schema, value)):
-            # The engine re-validates identically, so this is what agent() returns.
-            finished = flow.step_finished(
-                status="error",
-                result=None,
-                error=bad,
-                input_tokens=in_tok,
-                output_tokens=out_tok,
-            )
-            await self._complete(
-                call_id, link, success=False, message="agent() failed", finished=finished
-            )
-            return AgentResult(value, usage=usage, cost_usd=state.cost_usd)
-        else:
-            finished = flow.step_finished(
-                status="ok", result=value, input_tokens=in_tok, output_tokens=out_tok
-            )
-        await self._complete(
-            call_id, link, success=True, message="agent() returned", finished=finished
+        return await self._finish(
+            call_id,
+            link_item,
+            usage=usage,
+            value=value,
+            raw_schema=raw_schema,
+            skipped=state.skipped,
+            timed_out=(
+                f"provider {name!r}: no activity for {spec.idle_timeout:g}s (idle_timeout); "
+                "stopped the turn"
+                if state.timed_out
+                else None
+            ),
+            error=state.error,
+            kind=state.kind,
+            transient=state.transient,
+            cost_usd=state.cost_usd,
         )
-        return AgentResult(value, usage=usage, cost_usd=state.cost_usd)
 
 
 class _WorkerOut:
@@ -1691,54 +1723,17 @@ class RemoteWorkerChats(StepDispatcher):
                 await asyncio.wait_for(state.done.wait(), ABORT_GRACE)
             raise
 
-        link = {"content": [link_item]}
-        in_tok, out_tok = usage["input_tokens"], usage["output_tokens"]
-        if state.skipped:
-            finished = flow.step_finished(
-                status="skipped", result=None, input_tokens=in_tok, output_tokens=out_tok
-            )
-            await self._complete(
-                call_id, link, success=False, message="agent() skipped", finished=finished
-            )
-            raise asyncio.CancelledError
-        if state.error is not None:
-            finished = flow.step_finished(
-                status="error",
-                result=None,
-                error=state.error,
-                input_tokens=in_tok,
-                output_tokens=out_tok,
-            )
-            await self._complete(
-                call_id, link, success=False, message="agent() failed", finished=finished
-            )
-            raise FlowAgentError(state.error, kind=state.kind, transient=state.transient)
-        result = AgentResult(value, usage=usage)
-        if value is None:
-            finished = flow.step_finished(
-                status="null", result=None, input_tokens=in_tok, output_tokens=out_tok
-            )
-        elif isinstance(raw_schema, Mapping) and (bad := schema_error(raw_schema, value)):
-            # The engine re-validates identically, so this is what agent() returns.
-            finished = flow.step_finished(
-                status="error",
-                result=None,
-                error=bad,
-                input_tokens=in_tok,
-                output_tokens=out_tok,
-            )
-            await self._complete(
-                call_id, link, success=False, message="agent() failed", finished=finished
-            )
-            return result
-        else:
-            finished = flow.step_finished(
-                status="ok", result=value, input_tokens=in_tok, output_tokens=out_tok
-            )
-        await self._complete(
-            call_id, link, success=True, message="agent() returned", finished=finished
+        return await self._finish(
+            call_id,
+            link_item,
+            usage=usage,
+            value=value,
+            raw_schema=raw_schema,
+            skipped=state.skipped,
+            error=state.error,
+            kind=state.kind,
+            transient=state.transient,
         )
-        return result
 
 
 class RoutingDispatcher:

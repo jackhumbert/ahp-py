@@ -27,7 +27,6 @@ from ahp_host_flow.engine import (
     preamble_text,
     reattach_handle,
     report_dispatch,
-    schema_error,
     stop_cause,
     usage_reporter,
     with_preamble,
@@ -678,68 +677,20 @@ class FleetDispatcher(StepDispatcher):
                     await asyncio.wait_for(stop_node(state.sink), ABORT_GRACE)
             raise
 
-        link = {"content": [link_item]}
-        in_tok, out_tok = usage["input_tokens"], usage["output_tokens"]
-        if state.skipped:
-            finished = flow.step_finished(
-                status="skipped", result=None, input_tokens=in_tok, output_tokens=out_tok
-            )
-            await self._complete(
-                call_id, link, success=False, message="agent() skipped", finished=finished
-            )
-            raise asyncio.CancelledError
-        if state.timed_out:
-            idle = f"provider {name!r}: no activity for {spec.idle_timeout:g}s (idle_timeout); "
-            idle += "stopped the turn"
-            finished = flow.step_finished(
-                status="error",
-                result=None,
-                error=idle,
-                input_tokens=in_tok,
-                output_tokens=out_tok,
-            )
-            await self._complete(
-                call_id, link, success=False, message="agent() failed", finished=finished
-            )
-            raise FlowAgentError(idle, kind="timeout", transient=True)
-        if state.error is not None:
-            finished = flow.step_finished(
-                status="error",
-                result=None,
-                error=state.error,
-                input_tokens=in_tok,
-                output_tokens=out_tok,
-            )
-            await self._complete(
-                call_id, link, success=False, message="agent() failed", finished=finished
-            )
-            raise FlowAgentError(
-                state.error, kind=state.error_kind, transient=state.error_transient
-            )
-        value = self.redactor.mask_value(value)
-        result = AgentResult(value, usage=usage)
-        if value is None:
-            finished = flow.step_finished(
-                status="null", result=None, input_tokens=in_tok, output_tokens=out_tok
-            )
-        elif isinstance(raw_schema, Mapping) and (bad := schema_error(raw_schema, value)):
-            # The engine re-validates identically, so this is what agent() returns.
-            finished = flow.step_finished(
-                status="error",
-                result=None,
-                error=bad,
-                input_tokens=in_tok,
-                output_tokens=out_tok,
-            )
-            await self._complete(
-                call_id, link, success=False, message="agent() failed", finished=finished
-            )
-            return result
-        else:
-            finished = flow.step_finished(
-                status="ok", result=value, input_tokens=in_tok, output_tokens=out_tok
-            )
-        await self._complete(
-            call_id, link, success=True, message="agent() returned", finished=finished
+        return await self._finish(
+            call_id,
+            link_item,
+            usage=usage,
+            value=self.redactor.mask_value(value),
+            raw_schema=raw_schema,
+            skipped=state.skipped,
+            timed_out=(
+                f"provider {name!r}: no activity for {spec.idle_timeout:g}s (idle_timeout); "
+                "stopped the turn"
+                if state.timed_out
+                else None
+            ),
+            error=state.error,
+            kind=state.error_kind,
+            transient=state.error_transient,
         )
-        return result
