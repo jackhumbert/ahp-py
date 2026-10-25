@@ -21,7 +21,8 @@ also checked against `deny_paths` and `ask_paths` as paths.
 Known limits: this is a best effort over shell text, not a sandbox. Paths built
 at run time (variables, `$(...)` output, `cd` earlier in the same command),
 globs the shell expands (`cat .en*`) and anything a program reads on its own are
-not seen; a command with substitution asks instead.
+not seen; a command with substitution, or a program named by a variable, asks
+instead.
 
 Standard library only (`provider/` may import nothing else but the protocol
 package).
@@ -51,6 +52,13 @@ _POWERSHELLS: Final = frozenset({"powershell", "pwsh"})
 _KEYWORDS: Final = frozenset(
     {"if", "then", "do", "else", "elif", "while", "until", "{", "}", "!", "(", ")"}
 )
+#: Keywords that name what they define or run before the body (`function f { ...}`,
+#: `coproc NAME { ... }`): the body follows the word, or the word and the name.
+_NAMING_KEYWORDS: Final = frozenset({"function", "coproc"})
+#: `find` actions that run the words after them as a command.
+_FIND_EXEC: Final = frozenset({"-exec", "-execdir", "-ok", "-okdir"})
+#: Programs whose `-c SCRIPT` (or `--command SCRIPT`) runs the script in a shell.
+_COMMAND_FLAG: Final = frozenset({"su", "script", "flock"})
 _MAX_DEPTH: Final = 3
 #: Readings of one segment before the command counts as unparseable (denied).
 _MAX_READINGS: Final = 64
@@ -124,6 +132,19 @@ _WRAPPERS: Final[Mapping[str, _Wrapper]] = {
     ),
     "stdbuf": _w("-i -o -e --input --output --error"),
     "setsid": _w("", "-c -f -w --ctty --fork --wait"),
+    "ionice": _w("-c -n -p -P -u --class --classdata --pid --pgid --uid", "-t --ignore"),
+    "chroot": _w("--userspec --groups", "--skip-chdir", operands=1),
+    "flock": _w(
+        "-w -E --timeout --conflict-exit-code",
+        "-s -x -e -n -u -o --shared --exclusive --nonblock --nb --unlock --close",
+        operands=1,
+    ),
+    "busybox": _w(),
+    "watch": _w(
+        "-n --interval",
+        "-b -c -C -d -e -E -g -p -q -r -t -w -x --beep --color --no-color --differences"
+        " --errexit --chgexit --equexit --precise --no-title --no-wrap --exec",
+    ),
 }
 WRAPPERS: Final = frozenset(_WRAPPERS)
 
@@ -303,6 +324,8 @@ def _unwrap(words: list[str]) -> _Readings:
         return [words[i:]]
     if words[0] in _KEYWORDS:
         return [words[1:]]
+    if words[0] in _NAMING_KEYWORDS:
+        return [words[1:], words[2:]]
     spec = _WRAPPERS.get(_program(words[0]))
     return _after_options(spec, words[1:]) if spec is not None else []
 
@@ -334,6 +357,29 @@ def _scripts(words: list[str]) -> Iterator[str]:
     elif prog in _SHELLS:
         for i, word in enumerate(rest):
             if word.startswith("-") and not word.startswith("--") and "c" in word[1:]:
+                if i + 1 < len(rest):
+                    yield rest[i + 1]
+                return
+    elif prog == "trap":
+        # `trap [--] 'COMMAND' SIGNAL...`; `-p` and `-l` only print.
+        operands = [w for w in rest if w != "--" and not (w.startswith("-") and len(w) == 2)]
+        if operands:
+            yield operands[0]
+    elif prog == "find" or prog in _FIND_EXEC:
+        # A `;` ends a tokenised segment even when escaped, so a later `-exec` can
+        # open a segment of its own; a `+` ends the command in the batch form.
+        for i, word in enumerate(words):
+            if word in _FIND_EXEC:
+                command = words[i + 1 :]
+                if "+" in command:
+                    command = command[: command.index("+")]
+                if command:
+                    yield shlex.join(command)
+    elif prog in _COMMAND_FLAG:
+        for i, word in enumerate(rest):
+            if word == "--command" or (
+                word.startswith("-") and not word.startswith("--") and "c" in word[1:]
+            ):
                 if i + 1 < len(rest):
                     yield rest[i + 1]
                 return
@@ -431,6 +477,20 @@ def _match_sequence(pats: tuple[tuple[tuple[str, ...], str], ...], seq: list[_Se
         ):
             return True
     return False
+
+
+def _names_program_by_variable(seq: list[_Segment]) -> bool:
+    """Whether a program word expands a variable (`$G push`, `git${IFS}push`).
+
+    The text before the shell expands it is all the policy sees, so what runs
+    is unknown. Words in argument position (`echo $HOME`) and assignments
+    (`FOO=$BAR git status`) are not the program.
+    """
+    return any(
+        "$" in reading[0] and not _ASSIGN.match(reading[0])
+        for readings, _ in seq
+        for reading in readings
+    )
 
 
 def _command_words(sequences: list[list[_Segment]], targets: list[str]) -> list[str]:
@@ -559,6 +619,10 @@ class ToolPolicy:
         except (ValueError, _UnparseableError):
             decisions.append(Decision("deny", "denied by policy: the command could not be parsed"))
             return decisions
+        if any(_names_program_by_variable(seq) for seq in sequences):
+            decisions.append(
+                Decision("ask", "policy asks: the command runs a program named by a variable")
+            )
         for pattern in self.deny_commands:
             pats = _parse_pattern(pattern)
             if pats and any(_match_sequence(pats, seq) for seq in sequences):

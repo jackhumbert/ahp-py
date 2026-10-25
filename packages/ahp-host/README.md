@@ -158,10 +158,12 @@ and their arguments are skipped, and an option the matcher does not know is
 tried both with and without an argument, so `git -C x push`, `git -c a=b push`
 and `git --no-pager push` all match `git push*`. Leading `NAME=value` words,
 wrappers (`env`, `sudo`, `doas`, `command`, `exec`, `nohup`, `time`, `nice`,
-`timeout`, `xargs`, `stdbuf`, `setsid`, with their options) and shell keywords
-and grouping (`if`, `then`, `do`, `while`, `{`, `!`, `( )`) are matched both as
+`timeout`, `xargs`, `stdbuf`, `setsid`, `ionice`, `chroot`, `flock`, `busybox`,
+`watch`, with their options) and shell keywords and grouping (`if`, `then`,
+`do`, `while`, `function`, `coproc`, `{`, `!`, `( )`) are matched both as
 written and stripped. The program compares by basename without `.exe`;
-`bash -c`, `cmd /c`, `eval` and `env -S` scripts and the bodies of `$()`,
+`bash -c`, `su -c`, `script -c`, `flock -c`, `cmd /c`, `eval`, `trap` and
+`env -S` scripts, the commands of `find -exec`/`-execdir`/`-ok`, and the bodies of `$()`,
 backticks and `<()` are parsed again as commands; `;`, `&&`, `|` and newlines
 split a command into segments, so a pattern with `|` matches a pipeline.
 
@@ -175,7 +177,8 @@ matching path. A command's words that are not options (and an option's
 `=value`, and redirection targets) are judged as paths too, resolved against
 `cwd`, so `cat .env`, `cat ~/.ssh/id_rsa` and `cp .env /tmp/x` are denied by
 `**/.env` and `~/.ssh/**`; the roots check does not apply to them. Commands that
-cannot be parsed are denied; commands with `$()`, backticks or `<()` ask.
+cannot be parsed are denied; commands with `$()`, backticks or `<()` ask, and so
+do commands whose program word holds a variable (`$G push`, `git${IFS}push`).
 
 Known limits (best effort over shell text, not a sandbox): paths built at run
 time (variables, `$()` output, an earlier `cd` in the same command), globs the

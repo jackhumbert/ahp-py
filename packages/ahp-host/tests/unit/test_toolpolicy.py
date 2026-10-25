@@ -110,6 +110,71 @@ def test_toolpolicy_command_variants(tmp_path: Path, command: str, pattern: str 
         assert repr(pattern) in (decision.reason or "")
 
 
+@pytest.mark.parametrize(
+    "command",
+    [
+        "function f { git push; }; f",
+        "function f() { git push; }; f",
+        "coproc git push",
+        "coproc NAME { git push; }",
+        "trap 'git push' EXIT",
+        "trap -- 'git push' EXIT",
+        r"find . -exec git push \;",
+        r"find . -type f -execdir git push {} +",
+        r"find . -name x -exec echo {} \; -exec git push \;",
+        "su -c 'git push'",
+        "su me -c 'git push'",
+        "busybox sh -c 'git push'",
+        "busybox git push",
+        "ionice git push",
+        "ionice -c 3 -n 7 git push",
+        "chroot /srv git push",
+        "flock /tmp/x.lock git push",
+        "flock -w 5 /tmp/x.lock git push",
+        "flock /tmp/x.lock -c 'git push'",
+        "script -qc 'git push' /dev/null",
+        "script --command 'git push' /dev/null",
+        "watch -n 5 git push",
+        "watch git push",
+    ],
+)
+def test_toolpolicy_script_carriers_and_wrappers(tmp_path: Path, command: str) -> None:
+    decision = cmd(ToolPolicy(deny_commands=COMMANDS), tmp_path, command)
+    assert decision.action == "deny", command
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "G=git; $G push",
+        "git${IFS}push",
+        "$G push",
+        '"$G" push',
+        "sudo $G push",
+        "FOO=1 $G push",
+        "echo hi && ${CMD}",
+    ],
+)
+def test_toolpolicy_variable_program_asks(tmp_path: Path, command: str) -> None:
+    assert cmd(ToolPolicy(deny_commands=COMMANDS), tmp_path, command).action == "ask", command
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "echo $HOME",
+        "FOO=$BAR git status",
+        "git commit -m $MSG",
+        "find . -exec ls {} +",
+        "flock /tmp/x.lock ls",
+        "trap 'echo bye' EXIT",
+        "su -c 'ls'",
+    ],
+)
+def test_toolpolicy_hardening_leaves_ordinary_commands_alone(tmp_path: Path, command: str) -> None:
+    assert cmd(ToolPolicy(deny_commands=COMMANDS), tmp_path, command).action == "allow", command
+
+
 def test_toolpolicy_unparseable_and_substitution(tmp_path: Path) -> None:
     policy = ToolPolicy(deny_commands=COMMANDS)
     unparsed = cmd(policy, tmp_path, 'git push "x')
