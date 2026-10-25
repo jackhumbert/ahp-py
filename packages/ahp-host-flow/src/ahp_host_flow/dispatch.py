@@ -348,6 +348,41 @@ class _NamedChat:
     session_cost: float = 0.0
 
 
+@dataclass
+class _ResolvedChat:
+    """The worker chat of one in-process call and where it came from."""
+
+    worker: ProviderChat
+    title: str
+    #: The named chat (`opts.x.chat`) the call continues, when it does.
+    existing: _NamedChat | None
+    #: The cut-off call's worker chat, resumed session and (when the session resumes turns) the
+    #: cut-off turn's id.
+    resumed: tuple[ProviderChat, AgentSession, str | None] | None
+
+
+@dataclass
+class _WorkerTurn:
+    """What `ProviderDispatcher._run_turn` needs of a call whose chat and session are ready."""
+
+    call: AgentCall
+    name: str
+    call_id: str
+    provider: AgentProvider
+    spec: ProviderConfig
+    wt: Worktree | None
+    chat_name: str | None
+    folder: Path | None
+    chat: _ResolvedChat
+    message: UserMessage
+    inner: AgentSession
+    #: A named chat's first call: its chat, registered once a turn on it succeeds.
+    fresh: _NamedChat | None
+    link_item: dict[str, Any]
+    started: dict[str, Any]
+    cause: StopCause | None
+
+
 class NamedChats:
     """A run's named worker chats (`opts.x.chat`): the chats, a lock per name, the durable record.
 
@@ -1174,6 +1209,101 @@ class ProviderDispatcher(StepDispatcher):
         # Read here, in the dispatch task: set by the Scheduler's hard cap or the call's timeout
         # before they cancel it.
         cause = stop_cause()
+        chat = await self._resolve_chat(
+            call, name, title, call_id, provider, spec, wt, chat_name, folder, reattach
+        )
+        worker = chat.worker
+        opened.append(worker.resource)
+        # `worker_chat` only for a call whose inner state may get recorded: the engine hands a
+        # continued run the handle of a cut-off call only when it names a place to reattach to.
+        report_dispatch(
+            DispatchHandle(
+                provider=name,
+                chat=worker.resource,
+                worker_chat=(
+                    worker.resource
+                    if self.durable is not None
+                    and chat_name is None
+                    and wt is None
+                    and isinstance(provider, ResumableAgentProvider)
+                    else None
+                ),
+            )
+        )
+
+        raw_schema = opts.get("schema")
+        message, model = self._build_message(call, spec, provider, chat, attachments)
+        started = self._steps[call_id]
+        started["chat"] = worker.resource
+        started["model"] = model
+        link_item = {"type": "subagent", "resource": worker.resource, "title": chat.title}
+        # Clients can open the child chat while it runs.
+        await self.sink.tool_call_output(call_id, [link_item], meta=flow.meta(flow.step(started)))
+        self._watch(call_id, link_item)
+        inner, fresh = await self._open_session(
+            call,
+            name,
+            provider,
+            spec,
+            chat,
+            wt=wt,
+            chat_name=chat_name,
+            folder=folder,
+            model=model,
+        )
+        state, usage, value = await self._run_turn(
+            _WorkerTurn(
+                call=call,
+                name=name,
+                call_id=call_id,
+                provider=provider,
+                spec=spec,
+                wt=wt,
+                chat_name=chat_name,
+                folder=folder,
+                chat=chat,
+                message=message,
+                inner=inner,
+                fresh=fresh,
+                link_item=link_item,
+                started=started,
+                cause=cause,
+            )
+        )
+        return await self._finish(
+            call_id,
+            link_item,
+            usage=usage,
+            value=value,
+            raw_schema=raw_schema,
+            skipped=state.skipped,
+            timed_out=(
+                f"provider {name!r}: no activity for {spec.idle_timeout:g}s (idle_timeout); "
+                "stopped the turn"
+                if state.timed_out
+                else None
+            ),
+            error=state.error,
+            kind=state.kind,
+            transient=state.transient,
+            cost_usd=state.cost_usd,
+        )
+
+    async def _resolve_chat(
+        self,
+        call: AgentCall,
+        name: str,
+        title: str,
+        call_id: str,
+        provider: AgentProvider,
+        spec: ProviderConfig,
+        wt: Worktree | None,
+        chat_name: str | None,
+        folder: Path | None,
+        reattach: DispatchHandle | None,
+    ) -> _ResolvedChat:
+        """The worker chat of *call*: the one a restart cut off, the named chat's, or a new one."""
+        opts = call.opts
         #: The cut-off call's worker chat, resumed session and (when the session resumes turns)
         #: the cut-off turn's id.
         resumed: tuple[ProviderChat, AgentSession, str | None] | None = None
@@ -1225,24 +1355,19 @@ class ProviderDispatcher(StepDispatcher):
                 chat=self.chat,
                 interactivity="full" if spec.interactive else "read-only",
             )
-        opened.append(worker.resource)
-        # `worker_chat` only for a call whose inner state may get recorded: the engine hands a
-        # continued run the handle of a cut-off call only when it names a place to reattach to.
-        report_dispatch(
-            DispatchHandle(
-                provider=name,
-                chat=worker.resource,
-                worker_chat=(
-                    worker.resource
-                    if self.durable is not None
-                    and chat_name is None
-                    and wt is None
-                    and isinstance(provider, ResumableAgentProvider)
-                    else None
-                ),
-            )
-        )
+        return _ResolvedChat(worker, title, existing, resumed)
 
+    def _build_message(
+        self,
+        call: AgentCall,
+        spec: ProviderConfig,
+        provider: AgentProvider,
+        chat: _ResolvedChat,
+        attachments: Sequence[dict[str, Any]],
+    ) -> tuple[UserMessage, str | None]:
+        """The message the inner agent is sent, and the model it asks for."""
+        opts = call.opts
+        existing, worker = chat.existing, chat.worker
         raw_schema = opts.get("schema")
         schema = raw_schema if isinstance(raw_schema, Mapping) else None
         # Only what the inner agent is sent: the worker chat, the journal key and the main
@@ -1264,36 +1389,82 @@ class ProviderDispatcher(StepDispatcher):
         if attachments:
             raw["attachments"] = list(attachments)
         model = model_for(spec, provider, opts, self.run_model)
-        started = self._steps[call_id]
-        started["chat"] = worker.resource
-        started["model"] = model
-        link_item = {"type": "subagent", "resource": worker.resource, "title": title}
-        # Clients can open the child chat while it runs.
-        await self.sink.tool_call_output(call_id, [link_item], meta=flow.meta(flow.step(started)))
-        self._watch(call_id, link_item)
         message = UserMessage(
             text=text,
             raw=raw,
             model=ModelSelection(id=model) if model else None,
             chat_uri=worker.resource,
         )
-        #: A named chat's first call: its chat, registered once a turn on it succeeds.
-        fresh: _NamedChat | None = None
-        if existing is not None:
-            inner = existing.inner
-        elif resumed is not None:
-            inner = resumed[1]
-        else:
-            config = inner_config(spec, self.run_values(), opts)
-            inner = await provider.create_session(
-                self._context_for(
-                    provider, worker, folder=folder, wt=wt, model=model, config=config
-                )
+        return message, model
+
+    async def _open_session(
+        self,
+        call: AgentCall,
+        name: str,
+        provider: AgentProvider,
+        spec: ProviderConfig,
+        chat: _ResolvedChat,
+        *,
+        wt: Worktree | None,
+        chat_name: str | None,
+        folder: Path | None,
+        model: str | None,
+    ) -> tuple[AgentSession, _NamedChat | None]:
+        """The inner session for the turn, and the chat it starts when it is a named chat's first
+        call (None otherwise)."""
+        if chat.existing is not None:
+            return chat.existing.inner, None
+        if chat.resumed is not None:
+            return chat.resumed[1], None
+        config = inner_config(spec, self.run_values(), call.opts)
+        inner = await provider.create_session(
+            self._context_for(
+                provider, chat.worker, folder=folder, wt=wt, model=model, config=config
             )
-            if chat_name is not None:
-                # Not registered to this provider until a turn on it succeeds (in `run`): a
-                # failed first call's fallback makes the chat on another provider instead.
-                fresh = _NamedChat(name, worker, inner, title, config, folder)
+        )
+        fresh: _NamedChat | None = None
+        if chat_name is not None:
+            # Not registered to this provider until a turn on it succeeds (in `run`): a
+            # failed first call's fallback makes the chat on another provider instead.
+            fresh = _NamedChat(name, chat.worker, inner, chat.title, config, folder)
+        return inner, fresh
+
+    def _approver_for(
+        self, call: AgentCall, name: str, wt: Worktree | None, folder: Path | None
+    ) -> Approver | None:
+        """The approval rules and policy for a worker turn; None when there are none."""
+        if not (self.config.approvals.rules or self.config.policy is not None):
+            return None
+        # A worktree lies outside the working directories, and paths outside the roots
+        # are denied.
+        roots = ((wt.path,) if wt else ()) + tuple(self._roots())
+        if wt is not None:
+            cwd = wt.cwd
+        else:
+            cwd = folder if folder is not None else (roots[0] if roots else Path.cwd())
+        return Approver(
+            self.config.approvals.rules,
+            self.config.policy,
+            provider=name,
+            phase=call.phase,
+            principal=self.principal,
+            cwd=cwd,
+            roots=roots,
+            label=f"agent() #{call.ordinal}",
+            on_log=self._note,
+        )
+
+    async def _run_turn(self, turn: _WorkerTurn) -> tuple[_Worker, dict[str, int], Any]:
+        """Run the worker turn on the inner session; its state, usage and value once it is over."""
+        call, name, call_id = turn.call, turn.name, turn.call_id
+        provider, spec, wt = turn.provider, turn.spec, turn.wt
+        chat_name, folder = turn.chat_name, turn.folder
+        worker, inner, message = turn.chat.worker, turn.inner, turn.message
+        existing, fresh = turn.chat.existing, turn.fresh
+        resumed = turn.chat.resumed
+        link_item, started, cause = turn.link_item, turn.started, turn.cause
+        raw_schema = call.opts.get("schema")
+        schema = raw_schema if isinstance(raw_schema, Mapping) else None
         named = existing if existing is not None else fresh
         durable = self.durable
         inner_state: Mapping[str, Any] | None = None
@@ -1310,26 +1481,7 @@ class ProviderDispatcher(StepDispatcher):
                 call_id, [link_item], meta=flow.meta(flow.step(started, awaiting=waiting))
             )
 
-        approver: Approver | None = None
-        if self.config.approvals.rules or self.config.policy is not None:
-            # A worktree lies outside the working directories, and paths outside the roots
-            # are denied.
-            roots = ((wt.path,) if wt else ()) + tuple(self._roots())
-            if wt is not None:
-                cwd = wt.cwd
-            else:
-                cwd = folder if folder is not None else (roots[0] if roots else Path.cwd())
-            approver = Approver(
-                self.config.approvals.rules,
-                self.config.policy,
-                provider=name,
-                phase=call.phase,
-                principal=self.principal,
-                cwd=cwd,
-                roots=roots,
-                label=f"agent() #{call.ordinal}",
-                on_log=self._note,
-            )
+        approver = self._approver_for(call, name, wt, folder)
 
         def idle_expired() -> None:
             state.timed_out = True
@@ -1537,22 +1689,4 @@ class ProviderDispatcher(StepDispatcher):
                 # A named chat's session lives until the run ends, once it is the chat's.
                 with contextlib.suppress(Exception):
                     await inner.aclose()
-
-        return await self._finish(
-            call_id,
-            link_item,
-            usage=usage,
-            value=value,
-            raw_schema=raw_schema,
-            skipped=state.skipped,
-            timed_out=(
-                f"provider {name!r}: no activity for {spec.idle_timeout:g}s (idle_timeout); "
-                "stopped the turn"
-                if state.timed_out
-                else None
-            ),
-            error=state.error,
-            kind=state.kind,
-            transient=state.transient,
-            cost_usd=state.cost_usd,
-        )
+        return state, usage, value
