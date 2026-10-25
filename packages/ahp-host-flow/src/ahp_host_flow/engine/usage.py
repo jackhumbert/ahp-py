@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
-import math
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
 from ahp_protocol.ext.usage import is_request_scoped
+
+from ahp_host_flow.engine.numbers import is_number
+from ahp_host_flow.engine.numbers import whole as _count
 
 
 @dataclass(frozen=True)
@@ -21,16 +23,9 @@ class UsageReading:
     request_scoped: bool
 
 
-def _count(value: Any) -> int:
-    if isinstance(value, int) and not isinstance(value, bool) and value > 0:
-        return value
-    return 0
-
-
 def _money(value: Any) -> float | None:
-    if isinstance(value, bool) or not isinstance(value, int | float):
-        return None
-    return float(value) if math.isfinite(value) and value >= 0 else None
+    """A reported cost: a finite number >= 0 (0 is a real figure here), else None."""
+    return float(value) if is_number(value) and value >= 0 else None
 
 
 def _acp_cost(acp: Any) -> float | None:

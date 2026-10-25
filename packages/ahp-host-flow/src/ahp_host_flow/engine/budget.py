@@ -6,6 +6,9 @@ import math
 from collections.abc import Mapping
 from typing import Any, Final
 
+from ahp_host_flow.engine.numbers import is_number as _is_number
+from ahp_host_flow.engine.numbers import whole as _count
+
 # The AgentResult.usage key the budget sums (plan §3 budget row, §4.2).
 OUTPUT_TOKENS: Final = "output_tokens"
 INPUT_TOKENS: Final = "input_tokens"
@@ -14,14 +17,6 @@ COST_USD: Final = "cost_usd"
 WALL_SECONDS: Final = "wall_seconds"
 # The counters a budget can limit, in the order `refusal` names the first exhausted one.
 COUNTERS: Final = (OUTPUT_TOKENS, INPUT_TOKENS, COST_USD, WALL_SECONDS)
-
-
-def _count(value: Any) -> int:
-    return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else 0
-
-
-def _is_number(value: Any) -> bool:
-    return isinstance(value, int | float) and not isinstance(value, bool) and math.isfinite(value)
 
 
 class Budget:
@@ -83,11 +78,9 @@ class Budget:
 
     def add(self, usage: Mapping[str, Any]) -> int:
         """Add the usage's output tokens; returns the amount added (0 if unusable)."""
-        n = usage.get(OUTPUT_TOKENS, 0)
-        if isinstance(n, int) and not isinstance(n, bool) and n > 0:
-            self._spent += n
-            return n
-        return 0
+        n = _count(usage.get(OUTPUT_TOKENS))
+        self._spent += n
+        return n
 
     def add_result(self, usage: Mapping[str, Any], cost_usd: float | None) -> int:
         """Add one live result's output, input (cache reads too if counted) and cost.

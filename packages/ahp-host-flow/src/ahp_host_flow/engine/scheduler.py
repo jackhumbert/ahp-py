@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import math
 from collections.abc import Callable, Mapping
 from typing import TYPE_CHECKING, Any
 
@@ -40,20 +39,13 @@ from ahp_host_flow.engine.journal import (
     call_key,
     canonical_json,
 )
+from ahp_host_flow.engine.numbers import money as _money
+from ahp_host_flow.engine.numbers import whole as _whole
 from ahp_host_flow.engine.options import RunOptions
 from ahp_host_flow.engine.schema import schema_error
 
 if TYPE_CHECKING:
     from ahp_host_flow.engine.resume import Replay
-
-
-def _whole(value: Any) -> int:
-    return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else 0
-
-
-def _money(value: Any) -> float:
-    ok = isinstance(value, int | float) and not isinstance(value, bool) and math.isfinite(value)
-    return float(value) if ok and value > 0 else 0.0
 
 
 _TOKEN_KEYS = (OUTPUT_TOKENS, INPUT_TOKENS, CACHE_READ_TOKENS)

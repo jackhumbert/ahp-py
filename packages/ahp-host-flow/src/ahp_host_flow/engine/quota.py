@@ -4,14 +4,16 @@ from __future__ import annotations
 
 import json
 import logging
-import math
 import os
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Final
+from typing import Final
+
+from ahp_host_flow.engine.numbers import money as _money
+from ahp_host_flow.engine.numbers import whole as _whole
 
 _log = logging.getLogger(__name__)
 
@@ -44,15 +46,6 @@ class QuotaLimits:
 
 def _utc_today() -> str:
     return datetime.now(UTC).strftime("%Y-%m-%d")
-
-
-def _whole(value: Any) -> int:
-    return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else 0
-
-
-def _money(value: Any) -> float:
-    ok = isinstance(value, int | float) and not isinstance(value, bool) and math.isfinite(value)
-    return float(value) if ok and value > 0 else 0.0
 
 
 class QuotaLedger:
