@@ -287,6 +287,8 @@ class ClientMethods:
                 display_name=method,
                 invocation_message=reason,
                 tool_input=display,
+                # Only an *ask* gets here: no automatic answer may approve it.
+                policy_asked=True,
             )
         )
         verdict = "allowed" if outcome.approved else "declined"

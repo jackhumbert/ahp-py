@@ -467,7 +467,8 @@ writes and commands run by the host. Each request is checked against the
 roots jail first (a path or terminal `cwd` outside the served folders is
 refused, even with `allow_paths_outside_roots`) and then against the policy:
 a denial is a JSON-RPC error whose message is the policy's reason, so the
-agent can show it to its model; an *ask* is put to the user in the turn.
+agent can show it to its model; an *ask* is put to the user in the turn,
+marked `policy_asked` as on the agent's own requests.
 Terminal output is capped at 1 MiB (the agent's `outputByteLimit` may lower
 it). Each terminal command starts in its own process group (POSIX: its own
 session), and `terminal/kill`, `terminal/release` and the session's end kill

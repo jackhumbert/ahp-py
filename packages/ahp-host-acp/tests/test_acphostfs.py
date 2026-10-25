@@ -413,6 +413,9 @@ async def test_acphostfs_terminal_ask(tmp_path: Path) -> None:
         assert created["terminalId"]
         assert len(approved.confirmations) == 1
         assert "'**/ask/*'" in (approved.confirmations[0].invocation_message or "")
+        # The policy asked, so an automatic answerer (a flow's `[approvals]` allow
+        # rule) must not approve it, as on the agent's own permission requests.
+        assert approved.confirmations[0].policy_asked is True
         with pytest.raises(AcpError, match=r"^declined:") as declined:
             await methods.handle("terminal/create", params, RecordingSink(approve=False))
         assert declined.value.code == -32009
