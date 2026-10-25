@@ -12,7 +12,15 @@ import logging
 import math
 import mimetypes
 from abc import ABC, abstractmethod
-from collections.abc import Awaitable, Callable, Iterator, Mapping, MutableMapping, Sequence
+from collections.abc import (
+    Awaitable,
+    Callable,
+    Collection,
+    Iterator,
+    Mapping,
+    MutableMapping,
+    Sequence,
+)
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Final, cast
@@ -353,6 +361,18 @@ class DurableWorkers:
     restored_named: dict[str, dict[str, Any]] = field(default_factory=dict)
     #: The turns the cut-off run left in flight, consumed as they are picked up again.
     restored_inflight: dict[str, dict[str, Any]] = field(default_factory=dict)
+
+    def keep_claimable(self, worker_chats: Collection[str]) -> None:
+        """Drop the restored in-flight records no cut-off call of the continued run names.
+
+        Only a cut-off call's start record hands a worker chat back to the dispatcher, so any
+        other record could never be resumed and would ride along in the resume state for the
+        whole run, and through every restart after it. The rest are consumed as their calls
+        come round again (`ProviderDispatcher._resume_inflight`), or end with the run.
+        """
+        for chat in [c for c in self.restored_inflight if c not in worker_chats]:
+            del self.restored_inflight[chat]
+            self.inflight.pop(chat, None)
 
     def to_json(self) -> dict[str, Any]:
         out: dict[str, Any] = {}
@@ -960,11 +980,13 @@ class ProviderDispatcher(StepDispatcher):
         """
         # Only an in-process handle: a fleet or remote one names a session, never a worker chat.
         chat = handle.worker_chat
-        if self.durable is None or chat is None or handle.provider != name:
+        if self.durable is None or chat is None:
             return None
+        # Consumed whatever happens next: the call is resumed here or dispatched again, and a
+        # record left behind would ride along in the resume state for the rest of the run.
         record = self.durable.restored_inflight.pop(chat, None)
         self.durable.inflight.pop(chat, None)
-        if record is None or record["provider"] != name:
+        if handle.provider != name or record is None or record["provider"] != name:
             return None
         if isinstance(opts.get("schema"), Mapping) or opts.get("isolation") == "worktree":
             return None

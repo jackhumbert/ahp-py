@@ -146,7 +146,9 @@ is the design; milestones M0–M18 there say what exists (all done).
   its `session`; each dispatcher reads only its own field (`fleet.reattach_session`,
   `ProviderDispatcher._resume_inflight`). A worker turn stays in `inflight` only when a host
   shutdown cancelled it: an abort, a skip, the idle watchdog or a stop the run made (`stop_cause`)
-  drops it.
+  drops it. A restored record is consumed when its call comes round, resumed or not, and one no
+  unfinished start of the continued journal names is dropped as the run is continued
+  (`DurableWorkers.keep_claimable`).
 - Continuing a run uses `RunOptions.continue_run`, never the `--resume` prefix
   rule (plan §3 is unchanged).
 - The journal stores the script, its args and child workflow sources masked (`RunOptions.redact`)

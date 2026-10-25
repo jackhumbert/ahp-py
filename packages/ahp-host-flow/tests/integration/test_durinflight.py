@@ -10,6 +10,8 @@ import asyncio
 from pathlib import Path
 from typing import Any
 
+from ahp_host_flow.provider import FlowSession
+from tests import flow_fakes
 from tests.flow_fakes import RESUMED_IN_PLACE, ResumableHoldProvider, reset_fakes
 from tests.flow_hosting import SESSION, boot_flow, final_json, restart_flow, store_for
 from tests.hosting import notifications, start_turn, worker_chats
@@ -181,3 +183,49 @@ async def test_durinflight_a_stop_the_run_made_is_not_kept_in_flight(tmp_path: P
     (run,) = stored.resume_state["runs"]
     assert set(run["inflight"]) == {second}
     assert first not in run["inflight"]
+
+
+REROUTED = (
+    "meta = {'name': 'durroute', 'description': 'd'}\n"
+    "\n"
+    "async def main(args):\n"
+    "    a = await agent('hold one')\n"
+    "    b = await agent('hold two', label='later')\n"
+    "    return [a, b]\n"
+)
+# After the restart the cut-off call routes to another provider, and a later one to a holder.
+TOML_REROUTED = (
+    '[providers.rh]\nload = "tests.flow_fakes:ResumableHoldProvider"\n'
+    '[providers.rh2]\nload = "tests.flow_fakes:ResumableHoldProvider"\n'
+    '[providers.rh2.config]\nprovider_id = "rh2"\n'
+    '[providers.rec]\nload = "tests.flow_fakes:RecordingProvider"\n'
+    '[routing]\ndefault = "rh2"\nrules = [ { provider = "rec", label = "later" } ]\n'
+)
+
+
+async def test_durinflight_a_record_not_resumed_is_dropped(tmp_path: Path) -> None:
+    """The cut-off call routes elsewhere after the restart and is dispatched again: its in-flight
+    record is consumed then, not carried in the resume state for the rest of the run."""
+    node = str(tmp_path / NO_NODE)
+    chat = await _cut_off(tmp_path, node, "durroute", REROUTED, drain=True)
+    ResumableHoldProvider.holding = False
+    fx2 = await restart_flow(tmp_path, node, TOML_REROUTED)
+    try:
+        assert await fx2.wire.until(
+            lambda: any(
+                s.messages for p in flow_fakes.RecordingProvider.instances for s in p.sessions
+            ),
+            timeout=10,
+        )
+        flow = fx2.host._sessions[SESSION].agent_session
+        assert isinstance(flow, FlowSession)
+        (entry,) = flow._runs.values()
+        assert entry.durable is not None
+        assert chat not in entry.durable.inflight
+        assert chat not in entry.durable.restored_inflight
+        (held,) = (s for p in flow_fakes.RecordingProvider.instances for s in p.sessions)
+        held.released.set()
+        turn = await wait_resumed(fx2)
+        assert final_json(turn) == ["mem: hold one", "rec: hold two"]
+    finally:
+        await fx2.shut()

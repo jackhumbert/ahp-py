@@ -765,13 +765,14 @@ class FlowSession:
             await sink.turn_failed(NOTHING_TO_RESUME, "flow.run")
             return
         try:
-            header = load_journal(self.provider.config.state_dir, entry.run_id).header
+            journal = load_journal(self.provider.config.state_dir, entry.run_id)
         except (JournalError, ValueError) as exc:
             # Dropped, not kept: an entry nothing can continue would otherwise
             # ride along in the resume state forever.
             _log.warning("cannot continue run %s, dropping it: %s", entry.run_id, exc)
             await sink.turn_failed(self.provider.redactor.mask(str(exc)), "flow.run")
             return
+        header = journal.header
         node = self._node()
         if node is None and language_of(header.filename) == "js":
             # Kept, and resumable: the run can go on once Node is found.
@@ -779,6 +780,10 @@ class FlowSession:
             await sink.turn_failed(str(NodeNotFoundError()), "flow.node", resumable=True)
             return
         resumed = replace(entry, resumes=entry.resumes + 1)
+        if resumed.durable is not None:
+            resumed.durable.keep_claimable(
+                {s.worker_chat for s in journal.unfinished if s.worker_chat is not None}
+            )
         # Live from here, before the first await: the host persists the resume
         # state at any time (a quick second shutdown, a debounced save), and the
         # entry has just left `_restored` while `on_run_start` has not yet put
