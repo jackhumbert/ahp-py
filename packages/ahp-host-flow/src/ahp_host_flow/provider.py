@@ -63,8 +63,6 @@ from ahp_host_flow.dispatch import (
     DurableWorkers,
     FlowAgentError,
     ProviderDispatcher,
-    RemoteWorkerChats,
-    RoutingDispatcher,
     forward_overlay,
 )
 from ahp_host_flow.engine import (
@@ -96,6 +94,8 @@ from ahp_host_flow.fleet import FleetClients, FleetDispatcher
 from ahp_host_flow.gates import MainChatGates, MainChatVerbs
 from ahp_host_flow.limits import ProviderSlotsRegistry, probe
 from ahp_host_flow.loading import LazyProviders, lazy_verbs, load_launcher, resume_key_hook
+from ahp_host_flow.remotechats import RemoteWorkerChats
+from ahp_host_flow.router import RoutingDispatcher
 from ahp_host_flow.sandbox import (
     NO_ARGS,
     NodeNotFoundError,

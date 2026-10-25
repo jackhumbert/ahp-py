@@ -6,24 +6,22 @@ import asyncio
 import base64
 import contextlib
 import contextvars
-import itertools
+import importlib
 import json
 import logging
 import math
 import mimetypes
 from abc import ABC, abstractmethod
 from collections.abc import (
-    Awaitable,
     Callable,
     Collection,
-    Iterator,
     Mapping,
     MutableMapping,
     Sequence,
 )
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Final, cast
+from typing import TYPE_CHECKING, Any, Final, cast
 
 from ahp_host import TurnSink
 from ahp_host.core.structured import StructuredTurn
@@ -32,11 +30,8 @@ from ahp_host.provider.base import (
     AgentProvider,
     AgentSession,
     AgentSessionContext,
-    ClientToolCall,
     FollowsActiveClients,
     IdentifiesTurn,
-    InputQuestion,
-    InputRequest,
     ModelSelection,
     ProviderChat,
     ReconfiguresChats,
@@ -46,7 +41,6 @@ from ahp_host.provider.base import (
     ResumesTurns,
     ReturnsStructuredOutput,
     SessionPublisher,
-    ToolConfirmation,
     UserMessage,
 )
 from ahp_protocol.ext import flow
@@ -70,20 +64,12 @@ from ahp_host_flow.engine import (
     PROVIDER_LOAD,
     AgentCall,
     AgentResult,
-    Dispatcher,
     DispatchError,
     DispatchHandle,
     ErrorKind,
     Redactor,
-    RemoteAnswer,
-    RemoteConfirmation,
-    RemoteDecision,
-    RemoteOut,
-    RemoteQuestion,
     StopCause,
-    begin_usage_attempt,
     classify,
-    end_usage_attempt,
     preamble_text,
     reattach_handle,
     report_dispatch,
@@ -93,9 +79,7 @@ from ahp_host_flow.engine import (
     with_preamble,
 )
 from ahp_host_flow.engine.dispatcher import _STOP_CAUSE
-from ahp_host_flow.engine.remote import RemoteToolError
-from ahp_host_flow.limits import ProviderSlotsRegistry
-from ahp_host_flow.routing import fallback_chain, route, x_opts
+from ahp_host_flow.routing import route, x_opts
 from ahp_host_flow.worktree import (
     Worktree,
     WorktreeChangesets,
@@ -107,6 +91,25 @@ from ahp_host_flow.worktree import (
 )
 
 _log = logging.getLogger(__name__)
+
+if TYPE_CHECKING:
+    from ahp_host_flow.remotechats import RemoteWorkerChats as RemoteWorkerChats
+    from ahp_host_flow.router import RoutingDispatcher as RoutingDispatcher
+
+#: Names that moved to modules importing this one; `from ahp_host_flow.dispatch import X` still
+#: works, resolved on first use so the two modules never import each other at load.
+_MOVED: Final = {
+    "RemoteWorkerChats": "ahp_host_flow.remotechats",
+    "RoutingDispatcher": "ahp_host_flow.router",
+}
+
+
+def __getattr__(name: str) -> Any:
+    module = _MOVED.get(name)
+    if module is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    return getattr(importlib.import_module(module), name)
+
 
 TITLE_MAX: Final = 60
 # Bounded grace for an inner session that honours `cancel` after the run is aborted.
@@ -1553,411 +1556,3 @@ class ProviderDispatcher(StepDispatcher):
             transient=state.transient,
             cost_usd=state.cost_usd,
         )
-
-
-class _WorkerOut:
-    """A remote call's output, written to its worker chat."""
-
-    def __init__(
-        self,
-        sink: TurnSink,
-        provider: str,
-        chat: str,
-        redactor: Redactor,
-        tools: ClientTools | None = None,
-    ) -> None:
-        self.sink = sink
-        self.provider = provider
-        self.chat = chat
-        self.redactor = redactor
-        self.client_tools = tools
-
-    def tools(self) -> list[dict[str, Any]]:
-        return self.client_tools.definitions() if self.client_tools is not None else []
-
-    async def run_tool(self, name: str, tool_input: Any, tool_call_id: str) -> Mapping[str, Any]:
-        owner = self.client_tools.owner(name) if self.client_tools is not None else None
-        if owner is None:
-            raise RemoteToolError(f"no client of the run offers {name!r}")
-        try:
-            result = await self.sink.run_client_tool(
-                ClientToolCall(
-                    call_id=f"remote-{tool_call_id}",
-                    name=name,
-                    client_id=owner,
-                    tool_input=tool_input,
-                    display_name=name,
-                )
-            )
-        except LookupError as exc:
-            raise RemoteToolError(str(exc)) from exc
-        if not result.accepted:
-            raise RemoteToolError(result.reason or f"the client answered {result.response}")
-        if isinstance(result.value, Mapping):
-            return result.value
-        return {
-            "success": True,
-            "pastTenseMessage": f"Ran {name}",
-            "content": [{"type": "text", "text": json.dumps(result.value)}],
-        }
-
-    async def linked(self, session_uri: str) -> None:
-        await self.sink.text_delta(f"Remote session: {session_uri}\n")
-        report_dispatch(DispatchHandle(provider=self.provider, chat=self.chat, session=session_uri))
-
-    async def text(self, delta: str) -> None:
-        await self.sink.text_delta(self.redactor.mask(delta))
-
-    # No approval rules apply to relayed remote requests: the worker chat's user decides.
-    async def confirm(self, request: RemoteConfirmation) -> RemoteDecision | None:
-        tee = TurnTee(self.sink, redactor=self.redactor)
-        name = request.tool_name or "tool"
-        await tee.tool_call_started(
-            request.tool_call_id,
-            name,
-            request.tool_input,
-            display_name=request.tool_name or None,
-        )
-        outcome = await tee.confirm_tool_call(
-            ToolConfirmation(
-                call_id=request.tool_call_id,
-                name=name,
-                invocation_message=request.invocation_message
-                or f"Run {request.tool_name or 'a tool'} on the remote host",
-                tool_input=request.tool_input,
-                confirmation_title=request.confirmation_title,
-                read_only=request.read_only,
-            )
-        )
-        await tee.tool_call_completed(
-            request.tool_call_id,
-            None,
-            success=outcome.approved,
-            past_tense_message="Approved" if outcome.approved else "Denied",
-        )
-        suggestion: dict[str, Any] | None = None
-        given = outcome.user_suggestion
-        if given is not None:
-            if isinstance(given.raw, Mapping) and given.raw:
-                suggestion = dict(given.raw)
-            elif given.text:
-                suggestion = {"text": given.text}
-        return RemoteDecision(outcome.approved, outcome.reason_message, suggestion)
-
-    async def ask(self, request: RemoteQuestion) -> RemoteAnswer | None:
-        tee = TurnTee(self.sink, redactor=self.redactor)
-        outcome = await tee.request_input(
-            InputRequest(
-                message=request.message,
-                url=request.url,
-                questions=[
-                    InputQuestion(
-                        id=q["id"],
-                        kind=str(q.get("kind", "text")),
-                        message=str(q.get("message", "")),
-                        options=list(q.get("options") or []),
-                        extra={
-                            k: v
-                            for k, v in q.items()
-                            if k not in ("id", "kind", "message", "options")
-                        },
-                    )
-                    for q in request.questions
-                    if isinstance(q.get("id"), str)
-                ],
-            )
-        )
-        return RemoteAnswer(outcome.response, dict(outcome.answers))
-
-
-class RemoteWorkerChats(StepDispatcher):
-    """Shows each remote `agent()` call as a thin worker chat: the remote session and its text."""
-
-    def __init__(self, *, client_tools: ClientTools | None = None, **options: Any) -> None:
-        super().__init__(**options)
-        self.client_tools = client_tools
-        #: The body of each call in flight, by ordinal; `run` hands it to `_run_call`.
-        self._bodies: dict[int, Callable[[RemoteOut, str], Awaitable[AgentResult]]] = {}
-
-    async def run(
-        self,
-        call: AgentCall,
-        provider: str,
-        body: Callable[[RemoteOut, str], Awaitable[AgentResult]],
-    ) -> AgentResult:
-        self._bodies[call.ordinal] = body
-        try:
-            return await self.run_agent(call)
-        finally:
-            self._bodies.pop(call.ordinal, None)
-
-    async def _run_call(self, call: AgentCall, name: str, title: str, call_id: str) -> AgentResult:
-        body = self._bodies[call.ordinal]
-        worker = await self.publisher.open_tool_chat(title, tool_call_id=call_id, chat=self.chat)
-        raw_schema = call.opts.get("schema")
-        started = self._steps[call_id]
-        started["chat"] = worker.resource
-        link_item = {"type": "subagent", "resource": worker.resource, "title": title}
-        # Clients can open the worker chat while it runs.
-        await self.sink.tool_call_output(call_id, [link_item], meta=flow.meta(flow.step(started)))
-        self._watch(call_id, link_item)
-
-        state = _Worker()
-        usage = {"input_tokens": 0, "output_tokens": 0, "cache_read_tokens": 0}
-        value: Any = None
-
-        async def run(sink: TurnSink) -> None:
-            nonlocal value
-            state.started = True
-            state.task = asyncio.current_task()
-
-            try:
-                result = await body(
-                    _WorkerOut(sink, name, worker.resource, self.redactor, self.client_tools), title
-                )
-                for key in usage:
-                    count = result.usage.get(key)
-                    usage[key] = count if isinstance(count, int) else 0
-                await sink.usage(
-                    input_tokens=usage["input_tokens"], output_tokens=usage["output_tokens"]
-                )
-                value = self.redactor.mask_value(result.value)
-            except asyncio.CancelledError:
-                if not state.aborting:
-                    state.skipped = True
-                raise
-            except Exception as exc:
-                state.error = self.redactor.mask(str(exc))
-                if isinstance(exc, DispatchError):
-                    state.kind, state.transient = exc.kind, exc.transient
-                raise
-            finally:
-                state.done.set()
-
-        def turn_ended() -> None:
-            # If `run` never started, the turn was cancelled before its first step: a skip.
-            if not state.started:
-                state.skipped = True
-            state.done.set()
-
-        try:
-            if not await worker.run_turn(call.prompt, run, on_end=turn_ended):
-                raise FlowAgentError("could not start a turn in the worker chat")
-            await state.done.wait()
-        except asyncio.CancelledError:
-            # The run was aborted (a worker skip cancels only the callback).
-            state.aborting = True
-            if state.task is not None and not state.task.done():
-                state.task.cancel()
-            with contextlib.suppress(TimeoutError):
-                await asyncio.wait_for(state.done.wait(), ABORT_GRACE)
-            raise
-
-        return await self._finish(
-            call_id,
-            link_item,
-            usage=usage,
-            value=value,
-            raw_schema=raw_schema,
-            skipped=state.skipped,
-            error=state.error,
-            kind=state.kind,
-            transient=state.transient,
-        )
-
-
-class RoutingDispatcher:
-    """Routes each `agent()` call to the dispatcher for its provider's kind."""
-
-    reports_dispatch: bool = True
-
-    def __init__(
-        self,
-        config: FlowConfig,
-        *,
-        inprocess: Dispatcher,
-        fleet: Dispatcher | None = None,
-        remote: Callable[[str, ProviderConfig], Dispatcher] | None = None,
-        slots: ProviderSlotsRegistry | None = None,
-    ) -> None:
-        self.config = config
-        #: Per-provider concurrency, shared with every other run; held inside this run's own
-        #: Scheduler slot, never instead of it.
-        self._slots = slots
-        self._by_kind: dict[str, Dispatcher | None] = {"inprocess": inprocess, "fleet": fleet}
-        #: Makes the dispatcher of a remote provider, on its first call.
-        self._remote = remote
-        self._remotes: dict[str, Dispatcher] = {}
-        self._run_id: str | None = None
-
-    def _inner(self) -> list[Dispatcher]:
-        return [
-            *(d for d in self._by_kind.values() if d is not None),
-            *self._remotes.values(),
-        ]
-
-    @property
-    def run_id(self) -> str | None:
-        return self._run_id
-
-    @run_id.setter
-    def run_id(self, value: str | None) -> None:
-        self._run_id = value
-        for dispatcher in self._inner():
-            if hasattr(dispatcher, "run_id"):
-                dispatcher.run_id = value
-
-    async def run_agent(self, call: AgentCall) -> AgentResult:
-        chain = fallback_chain(self.config, call)
-        if chain[0] not in self.config.providers:
-            configured = ", ".join(sorted(self.config.providers))
-            raise FlowAgentError(
-                f"provider {chain[0]!r} is not configured (opts.x.provider); "
-                f"configured: {configured}"
-            )
-        in_process_only = named_chat(call.opts) is not None or "attach" in x_opts(call.opts)
-        attempts = itertools.count()
-        failed = chain[0]
-        error: DispatchError | None = None
-        for index, name in enumerate(chain):
-            spec = self.config.providers[name]
-            if index:
-                assert error is not None
-                if in_process_only and spec.kind != "inprocess":
-                    self._note(
-                        f"agent() #{call.ordinal}: fallback to {name} skipped ({name} is a "
-                        f"{spec.kind} provider; opts.x.chat/attach need an in-process one)"
-                    )
-                    continue
-                self._note(
-                    f"agent() #{call.ordinal}: fell back from {failed} to {name} ({error.kind})"
-                )
-            token = _ROUTE_OVERRIDE.set(name if index else None)
-            try:
-                return await self._run_on(name, spec, call, attempts)
-            except DispatchError as exc:
-                if not (exc.kind in _FALLBACK_KINDS or (exc.kind == "failed" and exc.transient)):
-                    raise
-                error, failed = exc, name
-            finally:
-                _ROUTE_OVERRIDE.reset(token)
-        assert error is not None
-        raise error
-
-    def _note(self, line: str) -> None:
-        _log.info("%s", line)
-
-    async def _run_on(
-        self,
-        name: str,
-        spec: ProviderConfig,
-        call: AgentCall,
-        attempts: Iterator[int],
-    ) -> AgentResult:
-        """One provider's turn at *call*, with its `retry_empty` attempts."""
-        kind = spec.kind
-        chat = named_chat(call.opts)
-        if (chat is not None or "attach" in x_opts(call.opts)) and kind != "inprocess":
-            raise FlowAgentError(
-                f"opts.x.{'chat' if chat else 'attach'} needs an in-process provider; "
-                f"{name!r} is a {kind} provider"
-            )
-        dispatcher: Dispatcher | None
-        if kind == "remote" and self._remote is not None:
-            dispatcher = self._remotes.get(name)
-            if dispatcher is None:
-                dispatcher = self._remotes[name] = self._remote(name, spec)
-                if hasattr(dispatcher, "run_id"):
-                    dispatcher.run_id = self._run_id
-        else:
-            dispatcher = self._by_kind.get(kind)
-        if dispatcher is None:
-            raise FlowAgentError(f"provider {name!r}: {kind} dispatch is not available here")
-        if spec.retry_empty <= 0:
-            return await self._attempt(dispatcher, call, name, attempts)
-        return await self._run_retrying(dispatcher, call, name, spec.retry_empty, attempts)
-
-    async def _attempt(
-        self, dispatcher: Dispatcher, call: AgentCall, name: str, attempts: Iterator[int]
-    ) -> AgentResult:
-        """One dispatch inside the provider's concurrency slot; a busy provider halves the limit.
-
-        Each dispatch of a call takes the next attempt number, so its tool call id is its own,
-        and a usage slot of its own, so the Scheduler counts a failed attempt's usage too.
-        """
-        token = _ATTEMPT.set(next(attempts))
-        reporter, usage_token = begin_usage_attempt()
-        try:
-            if self._slots is None:
-                result = await dispatcher.run_agent(call)
-            else:
-                slots = self._slots.for_name(name)
-                async with slots.hold():
-                    try:
-                        result = await dispatcher.run_agent(call)
-                    except DispatchError as exc:
-                        if exc.kind == "rate_limited" or (
-                            exc.kind == "unavailable" and exc.transient
-                        ):
-                            slots.on_busy(self._slots.on_log, exc.kind)
-                        raise
-            # The attempt's result is its settled usage (it replaces what it reported live).
-            settled: dict[str, Any] = dict(result.usage)
-            if result.cost_usd is not None:
-                settled["cost_usd"] = result.cost_usd
-            reporter(settled)
-            return result
-        finally:
-            end_usage_attempt(usage_token)
-            _ATTEMPT.reset(token)
-
-    async def _run_retrying(
-        self,
-        dispatcher: Dispatcher,
-        call: AgentCall,
-        name: str,
-        retries: int,
-        attempts: Iterator[int],
-    ) -> AgentResult:
-        """Dispatches *call* again while its reply is empty, up to *retries* more times.
-
-        The Scheduler sees one result: the last attempt's value, with the usage and cost of every
-        attempt summed (one ordinal, one key, one journal record).
-        """
-        schema = call.opts.get("schema")
-        usage: dict[str, int] = {}
-        cost: float | None = None
-        attempt = 0
-        while True:
-            result = await self._attempt(dispatcher, call, name, attempts)
-            for key, count in result.usage.items():
-                usage[key] = usage.get(key, 0) + count
-            if result.cost_usd is not None:
-                cost = (cost or 0.0) + result.cost_usd
-            empty = (
-                result.value is None
-                if isinstance(schema, Mapping)
-                else isinstance(result.value, str) and result.value.strip() == ""
-            )
-            if not empty:
-                return AgentResult(result.value, usage=usage, cost_usd=cost)
-            if attempt >= retries:
-                raise FlowAgentError(
-                    f"agent() #{call.ordinal}: {name} returned an empty reply {retries + 1} times",
-                    kind="empty",
-                    transient=True,
-                )
-            attempt += 1
-            _log.info(
-                "agent() #%d: empty reply from %s; retrying (%d of %d)",
-                call.ordinal,
-                name,
-                attempt,
-                retries,
-            )
-
-    async def aclose(self) -> None:
-        for dispatcher in self._inner():
-            close = getattr(dispatcher, "aclose", None)
-            if close is not None:
-                await close()
