@@ -85,6 +85,18 @@ def test_cli_run_bad_args_json(tmp_path: Path) -> None:
     assert info.value.code == 2
 
 
+@pytest.mark.parametrize("text", ["NaN", '{"x": Infinity}'])
+def test_cli_run_args_refuse_nan_and_infinity(
+    tmp_path: Path, text: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    script = _write(tmp_path, "return 1")
+    for config in ([], ["--config", str(_flow_toml(tmp_path))]):
+        with pytest.raises(SystemExit) as info:
+            main(["run", str(script), "--args", text, *config])
+        assert info.value.code == 2
+        assert "--args is not valid JSON" in capsys.readouterr().err
+
+
 def test_cli_run_missing_file(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     assert main(["run", str(tmp_path / "absent.js")]) == 2
     assert "no such file" in capsys.readouterr().err

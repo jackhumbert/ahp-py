@@ -12,8 +12,10 @@ from ahp_host_flow.config import SOURCES
 from ahp_host_flow.engine import WORKFLOW_NAME
 from ahp_host_flow.sandbox import NO_ARGS
 
+# The body runs to the last closing fence: a line of the script may start with ``` (a
+# template literal), and what follows the block is JSON, which no line of starts with one.
 _FENCE = re.compile(
-    r"\A\s*```(?:js|javascript)[ \t]*\r?\n(?P<body>.*?)\r?\n```[ \t]*(?P<rest>.*)\Z",
+    r"\A\s*```(?:js|javascript)[ \t]*\r?\n(?P<body>.*)\r?\n```[ \t]*(?P<rest>.*)\Z",
     re.DOTALL,
 )
 
@@ -46,12 +48,21 @@ class StartRun:
     args: object
 
 
+def _no_constant(name: str) -> object:
+    raise ValueError(f"{name} is not JSON")
+
+
+def loads_args(text: str) -> object:
+    """*text* as JSON args; `NaN` and `Infinity`, which Python's json takes, raise ValueError."""
+    return json.loads(text, parse_constant=_no_constant)
+
+
 def _args(rest: str) -> object:
     rest = rest.strip()
     if not rest:
         return NO_ARGS
     try:
-        return json.loads(rest)
+        return loads_args(rest)
     except ValueError as exc:
         raise _BadArgsError(f"Arguments must be JSON: {exc}") from exc
 

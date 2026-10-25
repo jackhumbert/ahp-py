@@ -14,6 +14,7 @@ from typing import Any
 from ahp_host.core.automations import iso
 
 from ahp_host_flow import redaction, shim
+from ahp_host_flow.commands import loads_args
 from ahp_host_flow.config import ConfigError, load_config, make_redactor
 from ahp_host_flow.engine import (
     NO_RESUME_ARGS,
@@ -159,8 +160,8 @@ def _run_with_config(parser: argparse.ArgumentParser, args: argparse.Namespace) 
     script_args: Any = NO_ARGS
     if args.args is not None:
         try:
-            script_args = json.loads(args.args)
-        except json.JSONDecodeError as exc:
+            script_args = loads_args(args.args)
+        except ValueError as exc:
             parser.error(f"--args is not valid JSON: {exc}")
     path = Path(args.path)
     if not path.is_file():
@@ -290,8 +291,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     script_args: Any = NO_ARGS
     if args.args is not None:
         try:
-            script_args = json.loads(args.args)
-        except json.JSONDecodeError as exc:
+            script_args = loads_args(args.args)
+        except ValueError as exc:
             parser.error(f"--args is not valid JSON: {exc}")
 
     # Logs, errors and the journal are masked by the builtin credential shapes (plan §8 M17

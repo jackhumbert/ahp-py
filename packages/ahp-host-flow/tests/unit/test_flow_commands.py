@@ -98,3 +98,17 @@ def test_typedstart_parse_ref() -> None:
     assert parse_ref("bogus:x") == BadRequest("Not a workflow name: 'bogus:x'")
     assert isinstance(parse_ref("a b"), BadRequest)
     assert isinstance(parse_ref(""), BadRequest)
+
+
+def test_inline_script_keeps_a_body_line_starting_with_a_fence() -> None:
+    body = "const md = `\n```\nnot the end\n```\n`\nreturn md"
+    assert parse_message(f"```js\n{body}\n```") == StartRun(None, None, body, NO_ARGS)
+    assert parse_message(f"```js\n{body}\n``` [1]") == StartRun(None, None, body, [1])
+
+
+def test_args_refuse_nan_and_infinity() -> None:
+    for text in ("NaN", "Infinity", "-Infinity", '{"x": NaN}', "[1, Infinity]"):
+        result = parse_message(f"/greet {text}")
+        assert isinstance(result, BadRequest), text
+        assert result.message.startswith("Arguments must be JSON")
+        assert isinstance(parse_message(f"```js\nreturn 1\n``` {text}"), BadRequest)
