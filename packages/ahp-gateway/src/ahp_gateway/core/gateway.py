@@ -262,6 +262,10 @@ class _Node:
     #: The node's own root directory (from its `defaultDirectory`), which
     #: `ahp-file:///<node>` names; None when it advertised none.
     path_root: str | None = None
+    #: Under flat places, whether it serves named roots (asked once, at dial).
+    #: One that does not is listed by its bare id, so its files keep the nested
+    #: spelling both ways rather than gaining a `<node>: <segment>` one out.
+    places: bool = False
     pump: asyncio.Task[None] | None = None
     subscribed: set[str] = field(default_factory=set)
     #: The node's `AutomationState`, when it advertised `automations`.
@@ -520,11 +524,21 @@ class _SurfaceConnection:
             }
         return aliased if isinstance(aliased, Mapping) else params
 
-    def _qualify(self, value: Any, node_id: str, root: str | None) -> Any:
-        """Node -> surface, except that the passthrough node's `file:` URIs stay as they are."""
+    def _qualify(
+        self, value: Any, node_id: str, root: str | None, *, places: bool | None = None
+    ) -> Any:
+        """Node -> surface, except that the passthrough node's `file:` URIs stay as they are.
+
+        Flat only for a node that serves named roots (`places`, read off the
+        node unless given): one without is listed as its bare id and browsed
+        as `ahp-file:///<node>/...`, which is the spelling it must get back.
+        """
         if node_id == self.passthrough_node:
             return value
-        return qualify_file_uris(value, node_id, root, flat=self.flat_places)
+        if places is None:
+            node = self.nodes.get(node_id)
+            places = node is not None and node.places
+        return qualify_file_uris(value, node_id, root, flat=self.flat_places and places)
 
     def _unqualify(self, value: Any, node_id: str) -> Any:
         """Surface -> node, for what the surface sends to `node_id`.
@@ -552,7 +566,7 @@ class _SurfaceConnection:
                 node = self.nodes.get(node_id)
                 if node is None:
                     continue
-                roots = await self._node_roots(node) if self.flat_places else []
+                roots = await self._node_roots(node.link) if self.flat_places else []
                 names = [f"{node_id}{PLACE_SEPARATOR}{root}" for root in roots] or [node_id]
                 entries.extend({"name": name, "type": "directory"} for name in names)
             return {"entries": entries}
@@ -560,16 +574,18 @@ class _SurfaceConnection:
             return {"uri": VIRTUAL_ROOT, "type": "directory"}
         raise AhpError(-32009, "the list of nodes is read-only")
 
-    async def _node_roots(self, node: _Node) -> list[str]:
+    async def _node_roots(self, link: NodeLink) -> list[str]:
         """The named roots a node serves: the directories in its top-level listing.
 
         Empty when it has none to show (its top is itself the served directory,
-        or it lists nothing), which is how the caller falls back to the bare id.
+        or it lists nothing, or does not answer in time), which is how the
+        caller falls back to the bare id.
         """
         try:
-            listed = await node.link.request("resourceList", {"uri": "file:///"})
-        except (AhpError, OSError) as exc:
-            _log.info("node %s lists no roots: %r", node.link.node_id, exc)
+            async with asyncio.timeout(self.gateway.connect_timeout):
+                listed = await link.request("resourceList", {"uri": "file:///"})
+        except (AhpError, OSError, TimeoutError) as exc:
+            _log.info("node %s lists no roots: %r", link.node_id, exc)
             return []
         entries = listed.get("entries") if isinstance(listed, Mapping) else None
         return [
@@ -837,11 +853,13 @@ class _SurfaceConnection:
         sequence = LinkSequence(self.clock, node_seq if isinstance(node_seq, int) else 0)
         root: dict[str, Any] = {}
         path_root = root_of(handshake.get("defaultDirectory"))
+        # Asked before anything from the node is qualified: it decides the spelling.
+        places = bool(await self._node_roots(link)) if self.flat_places else False
         automations: dict[str, Any] | None = None
         for snapshot in handshake.get("snapshots") or []:
             if not isinstance(snapshot, Mapping):
                 continue
-            state = self._qualify(snapshot.get("state"), record.node_id, path_root)
+            state = self._qualify(snapshot.get("state"), record.node_id, path_root, places=places)
             if snapshot.get("resource") == ROOT_URI:
                 root = state if isinstance(state, dict) else {}
             elif (
@@ -865,6 +883,7 @@ class _SurfaceConnection:
             sequence=sequence,
             root=root,
             path_root=path_root,
+            places=places,
             automations=automations,
             telemetry=node_signals(handshake),
         )

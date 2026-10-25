@@ -29,6 +29,7 @@ from ahp_gateway.core.uris import (
 )
 from ahp_gateway.registry import NodeRecord, Principal
 from tests.fleet import DEV, Fleet, everyone_is_a_dev
+from tests.links import RecordingLink, connection
 
 
 class _Roots:
@@ -232,6 +233,68 @@ def test_uri_mapping_both_ways() -> None:
     )
     # Off: the colon form is not a place.
     assert from_client_alias("file:///node-a: proj/x", {"node-a"}) == "file:///node-a: proj/x"
+
+
+@pytest.mark.parametrize("root", [None, "srv/work"])
+def test_a_node_without_named_roots_has_one_spelling_both_ways(root: str | None) -> None:
+    """Listed as its bare id, so its files are the nested `ahp-file:///<node>/...`, out too."""
+    conn = connection(RecordingLink("n"))
+    conn.flat_places = True
+    conn.nodes["n"].path_root = root
+    local = f"file:///{root}/a.py" if root else "file:///a.py"
+    assert conn._unqualify("ahp-file:///n/a.py", "n") == local
+    assert conn._qualify(local, "n", root) == "ahp-file:///n/a.py"
+    # A node that does serve named roots keeps the flat spelling.
+    conn.nodes["n"].places = True
+    assert conn._qualify("file:///proj/a.py", "n", root) == "ahp-file:///n:%20proj/a.py"
+
+
+class _Files:
+    """A node whose top holds files, not named roots: `file:///<name>`."""
+
+    def __init__(self, files: dict[str, str]) -> None:
+        self.files = files
+
+    def _name(self, uri: str) -> str:
+        return uri.removeprefix("file:///").strip("/")
+
+    async def resolve(self, uri: str, *, follow_symlinks: bool = True) -> ResourceInfo:
+        name = self._name(uri)
+        if not name:
+            return ResourceInfo(uri, "directory")
+        if name in self.files:
+            return ResourceInfo(uri, "file")
+        raise AhpError(-32008, f"No such resource: {uri}")
+
+    async def read(self, uri: str) -> ResourceContent:
+        if self._name(uri) in self.files:
+            return ResourceContent(self.files[self._name(uri)].encode())
+        raise AhpError(-32008, f"No such resource: {uri}")
+
+    async def list_dir(self, uri: str) -> Sequence[DirectoryEntry]:
+        if not self._name(uri):
+            return [DirectoryEntry(name, "file") for name in self.files]
+        raise AhpError(-32008, f"No such resource: {uri}")
+
+
+async def test_a_node_without_named_roots_resolves_back_to_the_spelling_asked() -> None:
+    fleet = Fleet(
+        {"node-a": _host(_Roots({"proj": {}})), "node-c": _host(_Files({"a.txt": "hello"}))},
+        [NodeRecord("node-a", "mem://a", DEV), NodeRecord("node-c", "mem://c", DEV)],
+        everyone_is_a_dev,
+        flat_places=True,
+    )
+    try:
+        raw = await _connect(fleet)
+        top = await raw.request("resourceList", {"uri": "ahp-file:///"})
+        assert sorted(e["name"] for e in top["entries"]) == ["node-a: proj", "node-c"]
+        listed = await raw.request("resourceList", {"uri": "ahp-file:///node-c"})
+        assert [e["name"] for e in listed["entries"]] == ["a.txt"]
+        resolved = await raw.request("resourceResolve", {"uri": "ahp-file:///node-c/a.txt"})
+        assert resolved["uri"] == "ahp-file:///node-c/a.txt"
+        await raw.shutdown()
+    finally:
+        await fleet.aclose()
 
 
 def test_a_place_on_another_node_is_refused() -> None:

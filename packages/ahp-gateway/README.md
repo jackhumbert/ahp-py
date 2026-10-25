@@ -53,7 +53,9 @@ nested layout (`ahp-file:///<node>/<root>/...`) picking node `node-a` then root
 fold the node into that segment: `file:///<root>/<rest>` on node `node-a` is
 `ahp-file:///node-a: proj/<rest>`, and the top of the tree lists one
 `node-a: proj` entry per root each node serves (read from the node's own
-top-level listing). A node with no named roots stays a bare `ahp-file:///<node>`.
+top-level listing). A node with no named roots stays a bare `ahp-file:///<node>`,
+and its files keep the nested `ahp-file:///<node>/<rest>` spelling both ways
+(whether it serves named roots is read once, when the node is dialed).
 Inbound, a first segment without `": "` keeps its nested meaning, so older URIs
 still route. Node ids may not contain `": "`; the gateway refuses to admit one.
 
