@@ -76,6 +76,20 @@ def test_flowlimits_config_rejects(limits: dict[str, Any], message: str) -> None
         parse(limits)
 
 
+@pytest.mark.parametrize("value", [float("nan"), float("inf")])
+@pytest.mark.parametrize("key", ["wall_budget", "timeout", "heartbeat"])
+def test_flowlimits_seconds_must_be_finite(key: str, value: float) -> None:
+    with pytest.raises(ConfigError, match=f"limits.{key} must be a positive number of seconds"):
+        parse({key: value})
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf")])
+@pytest.mark.parametrize("key", ["call_timeout", "idle_timeout"])
+def test_flowlimits_provider_seconds_must_be_finite(key: str, value: float) -> None:
+    with pytest.raises(ConfigError, match=f"providers.claude.{key} must be a positive number"):
+        parse(providers={"claude": {"load": "m:C", key: value}})
+
+
 def test_flowlimits_call_timeout_all_kinds() -> None:
     config = parse(
         providers={

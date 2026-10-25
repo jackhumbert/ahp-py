@@ -246,7 +246,12 @@ def _seconds(table: Mapping[str, Any], key: str, where: str) -> float | None:
     value = table.get(key)
     if value is None:
         return None
-    if isinstance(value, bool) or not isinstance(value, int | float) or value <= 0:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int | float)
+        or not math.isfinite(value)
+        or value <= 0
+    ):
         raise ConfigError(f"{where}.{key} must be a positive number of seconds")
     return float(value)
 
