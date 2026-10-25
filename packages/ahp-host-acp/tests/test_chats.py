@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from ahp_acp import parse_update
 from ahp_host import AhpError, Host, LoopbackSingleUserPolicy
 from ahp_host.provider.base import (
     CancelsChats,
@@ -222,9 +223,9 @@ async def test_a_closed_chats_late_updates_are_dropped(tmp_path: Path, log: Path
         opening.sink = sink
         session._opening = opening
         update = {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "x"}}
-        await session._on_notification("session/update", {"sessionId": second, "update": update})
+        await session._on_update(parse_update({"sessionId": second, "update": update}))
         assert sink.events == []
-        await session._on_notification("session/update", {"sessionId": "new-id", "update": update})
+        await session._on_update(parse_update({"sessionId": "new-id", "update": update}))
         assert sink.events == [("text", "x")]
         session._opening = None
     finally:

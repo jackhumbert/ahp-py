@@ -329,12 +329,17 @@ class AcpClient:
         params = {"sessionId": session_id, "prompt": [dict(b) for b in blocks]}
         return await self._call("session/prompt", params, meta, extra, timeout)
 
-    async def cancel(self, session_id: str, *, meta: Mapping[str, Any] | None = None) -> None:
-        """Cancel a turn. Permission requests still waiting on `on_permission` are
-        answered `cancelled` first, as the protocol requires, then the
-        `session/cancel` notification is sent."""
+    def settle_permissions(self, session_id: str) -> None:
+        """Answer every permission request of `session_id` still waiting on
+        `on_permission` as `cancelled`, as a cancel requires."""
         for future in list(self._permissions.get(session_id, ())):
             future.cancel()
+
+    async def cancel(self, session_id: str, *, meta: Mapping[str, Any] | None = None) -> None:
+        """Cancel a turn. Permission requests still waiting on `on_permission` are
+        answered `cancelled` first (`settle_permissions`), as the protocol
+        requires, then the `session/cancel` notification is sent."""
+        self.settle_permissions(session_id)
         params: dict[str, Any] = {"sessionId": session_id}
         if meta is not None:
             params["_meta"] = dict(meta)

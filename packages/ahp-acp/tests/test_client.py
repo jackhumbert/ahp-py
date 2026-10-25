@@ -311,6 +311,29 @@ async def test_cancel_settles_a_pending_permission_as_cancelled(make_client: Mak
     assert result["replies"]["p1"] == {"outcome": {"outcome": "cancelled"}}
 
 
+async def test_settle_permissions_answers_cancelled_without_a_cancel_notification(
+    make_client: MakeClient,
+) -> None:
+    started = asyncio.Event()
+
+    async def on_permission(params: dict[str, Any]) -> dict[str, Any]:
+        started.set()
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")
+
+    script = {
+        "before": {"session/prompt": _permission_steps()},
+        "responses": {"session/prompt": {"stopReason": "end_turn", "$replies": True}},
+    }
+    async with make_client(script, on_permission=on_permission) as client:
+        await client.initialize()
+        turn = asyncio.create_task(client.prompt("s1", [TEXT]))
+        await asyncio.wait_for(started.wait(), 5)
+        client.settle_permissions("s1")
+        result = await asyncio.wait_for(turn, 5)
+    assert result["replies"]["p1"] == {"outcome": {"outcome": "cancelled"}}
+
+
 async def test_cancel_leaves_other_sessions_permissions_alone(make_client: MakeClient) -> None:
     release = asyncio.Event()
     started = asyncio.Event()

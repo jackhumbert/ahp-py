@@ -70,6 +70,7 @@ from pathlib import Path
 from typing import Any, Final, Protocol
 
 from ahp_acp import (
+    AcpClient,
     AcpConnection,
     AcpError,
     AgentExitedError,
@@ -81,8 +82,8 @@ from ahp_acp import (
     MethodNotFoundError,
     PlanUpdate,
     SessionInfoUpdate,
+    SessionUpdate,
     UsageUpdate,
-    parse_update,
 )
 from ahp_acp import ToolCall as AcpToolCall
 from ahp_acp import ToolCallUpdate as AcpToolCallUpdate
@@ -102,7 +103,6 @@ from ahp_host.provider.base import (
     ForkedFrom,
     ModelInfo,
     ToolConfirmation,
-    ToolConfirmationOutcome,
     TurnSink,
     UserMessage,
 )
@@ -278,9 +278,6 @@ class _Chat:
         self.context_size: int | None = None
         self.cost: Mapping[str, Any] | None = None
         self.inflight: asyncio.Task[Any] | None = None
-        #: Permission questions put to the user and not yet answered; a cancel
-        #: settles each as ACP's `cancelled` outcome (see `AcpSession._cancel`).
-        self.asking: set[asyncio.Task[ToolConfirmationOutcome]] = set()
         #: The agent's slash commands, once this session reports them.
         self.commands: tuple[slash.Command, ...] | None = None
         self.plan: tuple[plans.Entry, ...] | None = None
@@ -365,6 +362,9 @@ class AcpSession:
         self._saved_chats: dict[str, Mapping[str, Any]] = {
             uri: state for uri, state in (chats or {}).items() if isinstance(state, Mapping)
         }
+        #: The client of the latest agent process, kept (closed) after it is
+        #: dropped for the capabilities it reported; `_conn` is its live connection.
+        self._agent: AcpClient | None = None
         self._conn: AcpConnection | None = None
         #: Counts agent processes: a chat whose `generation` differs has no
         #: session open in the current one.
@@ -377,7 +377,6 @@ class AcpSession:
         #: The ACP session ids of closed chats: their late updates are dropped,
         #: never taken for `_opening`'s.
         self._retired: set[str] = set()
-        self._capabilities: Mapping[str, Any] = {}
         self._catalogue = catalogue if catalogue is not None else Catalogue()
         self._on_agent_changed = on_agent_changed or _nothing
         creator = (
@@ -489,36 +488,45 @@ class AcpSession:
             await self._bridge.start()
             spec = self._spec
             env = dict(spec.env) if spec.env_allow is None else child_env(spec.env_allow, spec.env)
-            conn = await self._connect(
-                launch_argv(spec, cwd),
-                cwd=cwd,
-                env=env,
-                inherit_env=spec.env_allow is None,
-                on_notification=self._on_notification,
-                on_request=self._on_request,
-            )
-            try:
-                init = await conn.request(
-                    "initialize",
-                    {
-                        "protocolVersion": PROTOCOL_VERSION,
-                        # Client filesystem and terminal only when the spec serves
-                        # them (`client_methods`, behind the jail and the policy);
-                        # otherwise the agent works with its own tools.
-                        "clientCapabilities": {
-                            "fs": {
-                                "readTextFile": spec.client_methods,
-                                "writeTextFile": spec.client_methods,
-                            },
-                            "terminal": spec.client_methods,
-                        },
-                        "clientInfo": {"name": "ahp-host-acp", "version": _version()},
-                    },
+
+            async def connect(
+                on_notification: NotificationHandler, on_request: RequestHandler
+            ) -> AcpConnection:
+                return await self._connect(
+                    launch_argv(spec, cwd),
+                    cwd=cwd,
+                    env=env,
+                    inherit_env=spec.env_allow is None,
+                    on_notification=on_notification,
+                    on_request=on_request,
                 )
+
+            agent = AcpClient(
+                connection_factory=connect,
+                client_info={"name": "ahp-host-acp", "version": _version()},
+                # Client filesystem and terminal only when the spec serves
+                # them (`client_methods`, behind the jail and the policy);
+                # otherwise the agent works with its own tools.
+                client_capabilities={
+                    "fs": {
+                        "readTextFile": spec.client_methods,
+                        "writeTextFile": spec.client_methods,
+                    },
+                    "terminal": spec.client_methods,
+                },
+                on_update=self._on_update,
+                on_permission=self._request_permission,
+                on_request=self._on_request,
+                protocol_version=PROTOCOL_VERSION,
+            )
+            await agent.connect()
+            try:
+                await agent.initialize()
             except BaseException:
-                await conn.aclose()
+                await agent.aclose()
                 raise
-            self._capabilities = _mapping(_mapping(init).get("agentCapabilities"))
+            conn = agent.connection
+            self._agent = agent
             self._generation += 1
             self._conn = conn
         if self._catalogue.remember_capabilities(self._capabilities):
@@ -544,9 +552,13 @@ class AcpSession:
         await self._publish_config(chat)
         return conn
 
+    @property
+    def _capabilities(self) -> Mapping[str, Any]:
+        """What the latest agent process reported at `initialize`."""
+        return self._agent.agent_capabilities if self._agent is not None else {}
+
     def _session_capability(self, name: str) -> bool:
-        session = _mapping(self._capabilities.get("sessionCapabilities"))
-        return isinstance(session.get(name), Mapping)
+        return self._agent is not None and self._agent.supports(name)
 
     def _mcp_servers(self) -> list[dict[str, Any]]:
         servers = (server.to_acp(self._capabilities) for server in self._spec.mcp_servers)
@@ -600,7 +612,7 @@ class AcpSession:
         try:
             if self._session_capability("resume"):
                 result = await conn.request("session/resume", params)
-            elif self._capabilities.get("loadSession"):
+            elif self._session_capability("load"):
                 # `session/load` replays the conversation as updates; the
                 # client already shows it, so the replay is not published.
                 chat.quiet = True
@@ -643,11 +655,13 @@ class AcpSession:
             return
         self._conn = None
         await self._methods.aclose()
-        if conn is not None:
-            try:
+        try:
+            if self._agent is not None:
+                await self._agent.aclose()
+            else:
                 await conn.aclose()
-            except Exception:  # a dying agent must not fail session disposal
-                log.exception("closing the ACP agent failed")
+        except Exception:  # a dying agent must not fail session disposal
+            log.exception("closing the ACP agent failed")
 
     async def aclose(self) -> None:
         await self._drop_connection(self._conn)
@@ -699,16 +713,19 @@ class AcpSession:
 
     async def _cancel(self, chat: _Chat) -> None:
         # ACP: on cancel the client answers every pending permission request
-        # with `cancelled`. Settle them first, so the agent sees that before it
-        # winds the turn down, and the user's open question is withdrawn.
-        for asking in list(chat.asking):
-            asking.cancel()
-        conn = self._live(chat)
-        if conn is not None:
-            try:
-                await conn.notify("session/cancel", {"sessionId": chat.acp_session_id})
-            except AcpError:
-                log.debug("session/cancel did not reach the agent", exc_info=True)
+        # with `cancelled`. `AcpClient.cancel` settles them first, so the agent
+        # sees that before it winds the turn down, and the user's open question
+        # is withdrawn.
+        agent, session_id = self._agent, chat.acp_session_id
+        if agent is None or session_id is None:
+            return
+        if self._live(chat) is None:
+            agent.settle_permissions(session_id)
+            return
+        try:
+            await agent.cancel(session_id)
+        except AcpError:
+            log.debug("session/cancel did not reach the agent", exc_info=True)
 
     async def cancel(self, reason: str | None = None) -> None:
         """Every chat's turn: the whole session is being stopped."""
@@ -841,7 +858,7 @@ class AcpSession:
             if not self._session_capability("fork"):
                 raise AhpError(PERMISSION_DENIED, "this agent cannot fork a session")
             if into is None and not (
-                self._session_capability("resume") or self._capabilities.get("loadSession")
+                self._session_capability("resume") or self._session_capability("load")
             ):
                 raise AhpError(PERMISSION_DENIED, "this agent cannot reopen a forked session")
             base = self._base(into)
@@ -1058,11 +1075,7 @@ class AcpSession:
                 return self._opening
         return None
 
-    async def _on_notification(self, method: str, params: Any) -> None:
-        if method != "session/update":
-            log.debug("ignoring ACP notification %s", method)
-            return
-        event = parse_update(params)
+    async def _on_update(self, event: SessionUpdate) -> None:
         chat = self._chat_of(event.session_id)
         if chat is None:
             return
@@ -1258,8 +1271,6 @@ class AcpSession:
             log.exception("publishing the session's changes failed")
 
     async def _on_request(self, method: str, params: Any) -> Any:
-        if method == "session/request_permission":
-            return await self._request_permission(_mapping(params))
         if self._spec.client_methods and method in client_methods.METHODS:
             chat = self._chat_of(_mapping(params).get("sessionId"))
             return await self._methods.handle(
@@ -1329,8 +1340,8 @@ class AcpSession:
             return answer
         self._note_diffs(chat, call)
         await self._announce(chat, call, sink)
-        asking = asyncio.ensure_future(
-            sink.confirm_tool_call(
+        try:
+            outcome = await sink.confirm_tool_call(
                 ToolConfirmation(
                     call_id=call_id,
                     name=call.name,
@@ -1349,14 +1360,8 @@ class AcpSession:
                     policy_asked=ask_anyway,
                 )
             )
-        )
-        chat.asking.add(asking)
-        try:
-            outcome = await asking
         except asyncio.CancelledError:
             return permissions.CANCELLED  # cancelled, or the turn ended while the prompt was open
-        finally:
-            chat.asking.discard(asking)
         if self._spec.decline_feedback and not outcome.approved:
             declined_why = outcome.reason_message
             suggestion = getattr(outcome.user_suggestion, "text", None)

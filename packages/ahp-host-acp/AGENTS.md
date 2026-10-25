@@ -5,8 +5,9 @@ server's AGENTS.md requires ("Adding a provider adapter"). It is the ACP
 *client*: it spawns an ACP agent per session and speaks JSON-RPC over stdio.
 
 - The ACP transport and `session/update` parsing are the `ahp-acp` package
-  (`AcpConnection`, `parse_update`); `jsonrpc.py` only re-exports its old names
-  and is deprecated, so import from `ahp_acp`. Notifications are handled in
+  (`AcpConnection`, `parse_update`); `AcpSession` talks to its agent through an
+  `AcpClient` (initialize, capability checks, settling permissions on cancel);
+  `jsonrpc.py` only re-exports its old names and is deprecated, so import from `ahp_acp`. Notifications are handled in
   order before the next line is read; requests from the agent run on their own
   tasks. Keep both, and see `ahp-acp`'s AGENTS.md before changing either.
 - `provider.py` translates ACP `session/update`s into the host's neutral
@@ -80,8 +81,8 @@ server's AGENTS.md requires ("Adding a provider adapter"). It is the ACP
 - `client_methods.py` serves fs/* and terminal/* only when `[policy] host_tools` is
   set; the roots jail is checked before the policy and is never relaxed; a denial's
   reason is the JSON-RPC error message. Each terminal runs in its own process
-  group and kill/release kill the group (mirroring `ahp_acp.connection`, whose
-  helpers are private); import `AcpError` from `ahp_acp`, not `jsonrpc`.
+  group and kill/release kill the group (`ahp_acp.kill_tree`); import `AcpError` from `ahp_acp`, not
+  `jsonrpc`.
 - `launcher` and `env_allow` live in `AGENT_OPTIONS`, config `_KEYS` and
   `AgentSpec`; keep the three in step. The agent command after a launcher is
   never resolved on the host (only the launcher's program is).
