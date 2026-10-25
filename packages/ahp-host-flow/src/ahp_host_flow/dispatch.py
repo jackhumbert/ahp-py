@@ -798,6 +798,43 @@ class ProviderDispatcher(StepDispatcher):
                 with contextlib.suppress(Exception):
                     await forward_overlay(inner, chat, {APPROVAL_KEY: mode})
 
+    def _context_for(
+        self,
+        provider: AgentProvider,
+        worker: ProviderChat,
+        *,
+        folder: Path | None,
+        model: str | None,
+        config: Mapping[str, Any],
+        wt: Worktree | None = None,
+        resume_state: Mapping[str, Any] | None = None,
+    ) -> AgentSessionContext:
+        """The context of the inner session of *worker*: created, or resumed from *resume_state*.
+
+        It works in the worktree when there is one, else in *folder* (`opts.x.cwd`), else in the
+        run's working directories, and sees the first client's tools.
+        """
+        directories = (
+            (wt.cwd.as_uri(),)
+            if wt
+            else ((folder.as_uri(),) if folder is not None else self.working_directories)
+        )
+        client_id, client_tools = (
+            self.client_tools.first() if self.client_tools is not None else (None, ())
+        )
+        return AgentSessionContext(
+            session_uri=self.session_uri,
+            chat_uri=worker.resource,
+            provider_id=provider.agent.provider,
+            working_directories=directories,
+            model=model,
+            config=config,
+            active_client_id=client_id,
+            client_tools=client_tools,
+            publisher=ScopedPublisher(self.publisher, worker.resource),
+            resume_state=resume_state,
+        )
+
     def _roots(self) -> list[Path]:
         return [p for w in self.working_directories if (p := catalog.directory_of(w)) is not None]
 
@@ -1012,22 +1049,13 @@ class ProviderDispatcher(StepDispatcher):
             return None
         folder = Path(record["folder"]) if record["folder"] else None
         try:
-            client_id, client_tools = (
-                self.client_tools.first() if self.client_tools is not None else (None, ())
-            )
             inner = await provider.resume_session(
-                AgentSessionContext(
-                    session_uri=self.session_uri,
-                    chat_uri=worker.resource,
-                    provider_id=provider.agent.provider,
-                    working_directories=(
-                        (folder.as_uri(),) if folder is not None else self.working_directories
-                    ),
+                self._context_for(
+                    provider,
+                    worker,
+                    folder=folder,
                     model=model_for(spec, provider, opts, self.run_model),
                     config=record["config"],
-                    active_client_id=client_id,
-                    client_tools=client_tools,
-                    publisher=ScopedPublisher(self.publisher, worker.resource),
                     resume_state=record["innerState"],
                 )
             )
@@ -1075,22 +1103,13 @@ class ProviderDispatcher(StepDispatcher):
             return None
         label = f"agent() #{call.ordinal}"
         try:
-            client_id, client_tools = (
-                self.client_tools.first() if self.client_tools is not None else (None, ())
-            )
             inner = await provider.resume_session(
-                AgentSessionContext(
-                    session_uri=self.session_uri,
-                    chat_uri=old.resource,
-                    provider_id=provider.agent.provider,
-                    working_directories=(
-                        (folder.as_uri(),) if folder is not None else self.working_directories
-                    ),
+                self._context_for(
+                    provider,
+                    old,
+                    folder=folder,
                     model=model_for(spec, provider, opts, self.run_model),
                     config=inner_config(spec, self.run_values(), opts),
-                    active_client_id=client_id,
-                    client_tools=client_tools,
-                    publisher=ScopedPublisher(self.publisher, old.resource),
                     resume_state=record["innerState"],
                 )
             )
@@ -1236,25 +1255,9 @@ class ProviderDispatcher(StepDispatcher):
             inner = resumed[1]
         else:
             config = inner_config(spec, self.run_values(), opts)
-            directories = (
-                (wt.cwd.as_uri(),)
-                if wt
-                else ((folder.as_uri(),) if folder is not None else self.working_directories)
-            )
-            client_id, client_tools = (
-                self.client_tools.first() if self.client_tools is not None else (None, ())
-            )
             inner = await provider.create_session(
-                AgentSessionContext(
-                    session_uri=self.session_uri,
-                    chat_uri=worker.resource,
-                    provider_id=provider.agent.provider,
-                    working_directories=directories,
-                    model=model,
-                    config=config,
-                    active_client_id=client_id,
-                    client_tools=client_tools,
-                    publisher=ScopedPublisher(self.publisher, worker.resource),
+                self._context_for(
+                    provider, worker, folder=folder, wt=wt, model=model, config=config
                 )
             )
             if chat_name is not None:
