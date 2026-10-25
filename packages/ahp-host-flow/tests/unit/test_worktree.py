@@ -14,6 +14,7 @@ from ahp_host_flow.worktree import (
     WorktreeError,
     apply_to_repo,
     commit_onto_repo,
+    commit_worktree,
     create_worktree,
     discard_worktree,
     release_worktree,
@@ -305,3 +306,33 @@ async def test_worktree_non_utf8_names(tmp_path: Path) -> None:
     await commit_onto_repo(wt, message="agent")
     assert (ws / NON_UTF8).read_bytes() == b"latin"
     assert "caf" in git(ws, "show", "--name-only", "--format=", "HEAD")
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX hook scripts")
+@pytest.mark.parametrize("onto_repo", [False, True])
+async def test_worktree_commits_run_no_hooks(tmp_path: Path, onto_repo: bool) -> None:
+    """The repo's hooks live in a tracked directory, which the agent can rewrite in its
+    worktree: Commit must not run them (nor any other hook)."""
+    ws = tmp_path / "ws"
+    init_repo(ws)
+    identity(ws)
+    hooks = ws / ".githooks"
+    hooks.mkdir()
+    (hooks / "pre-commit").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    (hooks / "pre-commit").chmod(0o755)
+    git(ws, "add", "-A")
+    git(ws, "commit", "-q", "-m", "hooks")
+    git(ws, "config", "core.hooksPath", ".githooks")
+    wt = await create_worktree(ws, tmp_path / "wt")
+    marker = tmp_path / "ran"
+    for name in ("pre-commit", "commit-msg", "post-commit"):
+        hook = wt.path / ".githooks" / name
+        hook.write_text(f"#!/bin/sh\necho {name} >> '{marker}'\n", encoding="utf-8")
+        hook.chmod(0o755)
+    (wt.path / "new.txt").write_text("x", encoding="utf-8")
+
+    if onto_repo:
+        await commit_onto_repo(wt, message="agent")
+    else:
+        await commit_worktree(wt, branch="flow/hooks", message="agent")
+    assert not marker.exists(), marker.read_text(encoding="utf-8")

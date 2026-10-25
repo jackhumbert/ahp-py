@@ -203,6 +203,10 @@ is the design; milestones M0–M18 there say what exists (all done).
 - Worker chat interactivity follows `ProviderConfig.interactive`: `full` when
   set, else read-only. Steering is forwarded only if the inner session
   `SteersTurns`, otherwise rejected with a reason.
+- Every git call in `worktree.py` goes through `_git_bytes`, which adds `--literal-pathspecs`
+  (an agent's file may be named `*.txt`) and `-c core.hooksPath=/dev/null` (`NO_HOOKS`): the
+  agent writes the worktree, so a repository whose `core.hooksPath` is a tracked directory
+  would run the agent's hooks on Commit or Apply. Never call git around it.
 - The changeset operation ids are `APPLY_OPERATION`, `COMMIT_OPERATION` and
   `DISCARD_OPERATION` (`worktree.py`); keep them stable, clients and `FlowProvider.changeset_operations`
   share them.

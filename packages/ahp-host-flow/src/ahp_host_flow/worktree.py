@@ -34,6 +34,8 @@ WORKTREES_DIR: Final = "worktrees"
 APPLY_OPERATION: Final = "ahp-host-flow.worktree.apply"
 COMMIT_OPERATION: Final = "ahp-host-flow.worktree.commit"
 DISCARD_OPERATION: Final = "ahp-host-flow.worktree.discard"
+#: Every git call this module makes runs with no hooks (a directory that never holds one).
+NO_HOOKS: Final = "core.hooksPath=/dev/null"
 # Discard reasons queued per chat for its next call.
 NOTES_KEEP: Final = 20
 # Seconds a discard waits for its notification turn, so the chat is free for the next call.
@@ -60,11 +62,17 @@ def worktree_path(state_dir: Path, run_id: str, ordinal: int, *, attempt: int = 
 
 
 async def _git_bytes(*args: str, cwd: Path, stdin: bytes | None = None) -> tuple[int, bytes, str]:
-    """Run git; every path it is given is literal (an agent's file may be named `*.txt`)."""
+    """Run git; every path it is given is literal (an agent's file may be named `*.txt`).
+
+    No hook runs: a repository whose `core.hooksPath` is a tracked directory takes its hooks
+    from the checkout, which in a worktree is the agent's (and Apply puts it in the user's).
+    """
     try:
         proc = await asyncio.create_subprocess_exec(
             "git",
             "--literal-pathspecs",
+            "-c",
+            NO_HOOKS,
             *args,
             cwd=cwd,
             stdin=DEVNULL if stdin is None else PIPE,

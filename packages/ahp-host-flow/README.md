@@ -927,8 +927,13 @@ them to the working tree and commits just those paths there, leaving other stage
 alone. `params` come from the invoking client (`Session.invoke_operation(params=)`):
 `message` is the commit message (default: the call's label, else the prompt's first line
 cut at 72 characters, else `flow: run <runId> step <ordinal>`, masked by the run's redactor)
-and `apply` a bool. A rename or a delete is committed whole either way. Author and hooks are
-git's own config; nothing is ever pushed. `[changesets]` sets `branch` (a template; `{runId}`
+and `apply` a bool. A rename or a delete is committed whole either way. The author is git's
+own config. No git hook runs for the host's git calls (they run with
+`core.hooksPath=/dev/null`): a repository whose hooks live in a tracked directory would
+otherwise run the agent's edited copies. If `git commit` fails after `apply = true` put the
+changes in the working tree, they are taken out again and the changeset stays, so Commit can
+be pressed again. Operations on one changeset run one at a time, and the second of two
+pressed together finds it resolved. Nothing is ever pushed. `[changesets]` sets `branch` (a template; `{runId}`
 and `{ordinal}` are replaced; it must hold at least one of them, and the name it gives must
 pass `git check-ref-format --branch`, both checked when flow.toml loads) and `trailer` (add a `Flow-Principal:` line naming who pressed
 Commit, when the policy knows them; CR, LF and other control characters are removed from
