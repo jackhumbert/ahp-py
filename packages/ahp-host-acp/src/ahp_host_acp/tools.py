@@ -90,6 +90,22 @@ class ToolCall:
         if self.kind == "other":
             self.kind = _guess_kind(self.raw_input)
 
+    def as_update(self) -> dict[str, Any]:
+        """The call as merged so far, shaped as a `tool_call` update, with the kind
+        guessed when the agent sent none: what the policy and the relay check judge,
+        so a sparse permission request is judged on everything the agent said."""
+        update: dict[str, Any] = {
+            "toolCallId": self.call_id,
+            "title": self.title,
+            "kind": self.kind,
+            "status": self.status,
+            "locations": list(self.locations),
+            "content": list(self.content),
+        }
+        if self.raw_input is not None:
+            update["rawInput"] = self.raw_input
+        return update
+
     @property
     def finished(self) -> bool:
         return self.status in ("completed", "failed")

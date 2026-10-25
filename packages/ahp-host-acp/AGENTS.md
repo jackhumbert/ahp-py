@@ -65,7 +65,9 @@ server's AGENTS.md requires ("Adding a provider adapter"). It is the ACP
   key in `config.SERVER_ONLY_KEYS`, which `from_config` ignores in the file and
   refuses as a keyword (like any unknown option).
 - **Security decision:** `ToolPolicy` is checked in `_request_permission` before
-  the relayed shortcut and before `confirm_tool_call`; a deny answers the reject
+  the relayed shortcut and before `confirm_tool_call`, and both judge the call
+  merged so far (`ToolCall.as_update`, the guessed kind included), never the
+  request alone, which may carry only the call's id; a deny answers the reject
   option without a prompt and shows the reason on the call (`ToolCall.notice`); `permissions.POLICY_KINDS` is pinned by a test
   (`tests/test_acppolicy.py`).
 - Decline reasons go to the agent as a text block on its next prompt in that

@@ -34,6 +34,8 @@ The prompt text picks the behaviour:
                    the relay; reply ``{"chose": id}``
 - ``permission J``  J is a toolCall object (the rest of the first line): ask permission for
                    it with all of PERMISSION_OPTIONS; reply ``chose <optionId>``
+- ``permissionafter [S, A]``  send the `tool_call` S, then ask permission for the
+                   toolCall A (often only S's id); reply ``chose <optionId>``
 - ``caps``         reply the ``clientCapabilities`` the client sent at initialize, as JSON
 - ``clients J``    J is a JSON array of ``{method, params}``: send each to the client as a
                    request (with this session's id; a string ``"$terminal"`` in params
@@ -451,6 +453,15 @@ def prompt(session_id: str, words: str) -> dict[str, Any]:
         state["histories"].setdefault(session_id, []).append(words)
         store()
     cwd = Path(state["cwd"] or ".")
+    if words.startswith("permissionafter "):
+        shown, asked = json.loads(words.split("\n", 1)[0][len("permissionafter ") :])
+        update(session_id, {"sessionUpdate": "tool_call", **shown})
+        reply = ask(
+            "session/request_permission",
+            {"sessionId": session_id, "toolCall": asked, "options": PERMISSION_OPTIONS},
+        )
+        text(session_id, f"chose {chosen(reply)}")
+        return {"stopReason": "end_turn"}
     if words.startswith("permission "):
         asked = json.loads(words.split("\n", 1)[0][len("permission ") :])
         update(session_id, {"sessionUpdate": "tool_call", **asked})

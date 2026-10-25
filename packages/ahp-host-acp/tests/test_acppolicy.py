@@ -177,3 +177,75 @@ async def test_acppolicy_ask_suppresses_relayed_allow(tmp_path: Path, approve: b
         said = "".join(str(e[1]) for e in sink.events if e[0] == "text")
         assert json.loads(said) == {"chose": "no"}
         assert sink.client_calls == []
+
+
+async def _ask_after(
+    session: AcpSession, shown: dict[str, Any], asked: dict[str, Any], sink: RecordingSink
+) -> str:
+    line = "permissionafter " + json.dumps([shown, asked])
+    await session.send_user_message(UserMessage(text=line), sink)
+    return "".join(str(e[1]) for e in sink.events if e[0] == "text")
+
+
+async def test_acppolicy_kindless_shell_call_is_judged_as_a_command(tmp_path: Path) -> None:
+    # No kind: the call's input is a shell call's, so it is one (`tools._guess_kind`).
+    session, sink = await _session(tmp_path), RecordingSink()
+    call = {"toolCallId": "k1", "title": "Shell", "rawInput": {"command": "git push origin"}}
+    try:
+        assert await _ask(session, call, sink) == "chose no"
+    finally:
+        await session.aclose()
+    assert sink.confirmations == []
+
+
+async def test_acppolicy_sparse_request_is_judged_on_the_full_call(tmp_path: Path) -> None:
+    session, sink = await _session(tmp_path), RecordingSink()
+    shown = {
+        "toolCallId": "s1",
+        "title": "git push",
+        "kind": "execute",
+        "status": "pending",
+        "rawInput": {"command": "git push origin"},
+    }
+    try:
+        assert await _ask_after(session, shown, {"toolCallId": "s1"}, sink) == "chose no"
+    finally:
+        await session.aclose()
+    assert sink.confirmations == []
+
+
+async def test_acppolicy_env_in_locations_is_denied(tmp_path: Path) -> None:
+    session, sink = await _session(tmp_path), RecordingSink()
+    shown = {
+        "toolCallId": "e1",
+        "title": "Write .env",
+        "kind": "edit",
+        "status": "pending",
+        "locations": [{"path": str(tmp_path / ".env")}],
+    }
+    try:
+        asked = {"toolCallId": "e1", "title": "Write .env"}
+        assert await _ask_after(session, shown, asked, sink) == "chose no"
+    finally:
+        await session.aclose()
+    assert sink.confirmations == []
+
+
+async def test_acppolicy_relayed_shortcut_sees_the_full_call(tmp_path: Path) -> None:
+    # A local shell call announced in full, then asked about under a relayed
+    # tool's title alone: the shortcut must not let it through unasked.
+    session = await _session(tmp_path, None, active_client_id="c1", client_tools=(PING,))
+    sink = RecordingSink(approve=False)
+    shown = {
+        "toolCallId": "r1",
+        "title": "ahp_client_ping",
+        "kind": "execute",
+        "status": "pending",
+        "rawInput": {"command": "rm -rf build"},
+    }
+    try:
+        asked = {"toolCallId": "r1", "title": "ahp_client_ping"}
+        assert await _ask_after(session, shown, asked, sink) == "chose no"
+    finally:
+        await session.aclose()
+    assert len(sink.confirmations) == 1

@@ -433,7 +433,10 @@ policy: `deny_commands`, `deny_paths`, `ask_paths`, `allow_paths_outside_roots`,
 `check`) is applied to each `session/request_permission` before anything else,
 the relayed-tool shortcut included. A denied call is answered with the agent's
 reject option, picked without a prompt; a call the policy marks *ask* is always
-put to the user. ACP's answer has no reason field, so the agent first sees only
+put to the user. Both the policy and the relayed-tool check judge the call as
+the agent has described it so far (its `tool_call` and updates merged with the
+request), not the request alone, and a call with no `kind` gets the one its
+input shows (a `command` is a shell call). ACP's answer has no reason field, so the agent first sees only
 a rejection; the user sees the reason, under the call's name and in its result.
 With `decline_feedback = true` (the default; a top-level key, also an `acp`
 agent option) the reasons of declined calls (the policy's, or what the user

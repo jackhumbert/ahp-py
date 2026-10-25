@@ -1274,11 +1274,17 @@ class AcpSession:
         if not isinstance(call_id, str) or not call_id:
             return permissions.CANCELLED
         offered = permissions.acp_options(params.get("options"))
+        # Judged on the call as merged so far, not on the request alone: an
+        # agent may ask with only the id of a call it announced in full, and a
+        # call with no kind gets the one its input shows (`ToolCall.merge`).
+        call = chat.calls.setdefault(call_id, ToolCall(call_id))
+        call.merge(update)
+        judged = call.as_update()
         ask_anyway = False
         if self._spec.policy is not None:
             decision = self._spec.policy.decide(
                 permissions.tool_request(
-                    update,
+                    judged,
                     cwd=self.directory or self._roots.primary,
                     roots=tuple(self._roots.paths),
                 )
@@ -1286,8 +1292,6 @@ class AcpSession:
             if decision.action == "deny":
                 reason = decision.reason or "denied by policy"
                 log.info("tool call %s denied by policy: %s", call_id, reason)
-                call = chat.calls.setdefault(call_id, ToolCall(call_id))
-                call.merge(update)
                 # The user sees why: under the call's name now, and in its
                 # result when it ends (the agent's failure, or the turn's end).
                 call.notice = reason
@@ -1301,15 +1305,15 @@ class AcpSession:
             ask_anyway = decision.action == "ask"
         if (
             not ask_anyway
-            and self._is_relayed(chat, update)
+            and self._is_relayed(chat, judged)
             and (answer := permissions.relayed_answer(offered))
         ):
             # A client's (or the host's) own tool: its owner decides, and
             # `run_client_tool` shows the call. See `permissions.relayed_answer`.
+            if call_id not in chat.announced:
+                chat.calls.pop(call_id, None)
             chat.relayed.add(call_id)
             return answer
-        call = chat.calls.setdefault(call_id, ToolCall(call_id))
-        call.merge(update)
         self._note_diffs(chat, call)
         await self._announce(chat, call, sink)
         asking = asyncio.ensure_future(
