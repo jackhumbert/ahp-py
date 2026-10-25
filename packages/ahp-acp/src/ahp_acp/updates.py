@@ -17,6 +17,7 @@ someone decides which it is.
 
 from __future__ import annotations
 
+import math
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any, Final
@@ -163,6 +164,16 @@ def _str(raw: Mapping[str, Any], key: str) -> str | None:
     return value if isinstance(value, str) else None
 
 
+def _count(raw: Mapping[str, Any], key: str) -> int:
+    """A required token count: a whole number, 0 or more (a whole float is taken)."""
+    value = _req(raw, key)
+    if isinstance(value, float) and math.isfinite(value) and value.is_integer():
+        value = int(value)
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+        raise ValueError(f"{key!r} is not a whole number of tokens: {value!r}")
+    return value
+
+
 def _list(value: Any) -> list[Any]:
     return value if isinstance(value, list) else []
 
@@ -262,8 +273,8 @@ def _usage(sid: str, raw: dict[str, Any], meta: dict[str, Any] | None) -> Sessio
         session_id=sid,
         raw=raw,
         meta=meta,
-        used=int(_req(raw, "used")),
-        size=int(_req(raw, "size")),
+        used=_count(raw, "used"),
+        size=_count(raw, "size"),
         cost=cost if isinstance(cost, dict) else None,
     )
 
@@ -356,6 +367,6 @@ def parse_update(params: Any) -> SessionUpdate:
         return parser(sid, update, meta)
     except _MissingError as exc:
         problem = str(exc)
-    except (TypeError, ValueError) as exc:
+    except (TypeError, ValueError, OverflowError) as exc:
         problem = f"malformed field: {exc}"
     return UnknownUpdate(session_id=sid, raw=update, meta=meta, kind=kind_name, problem=problem)

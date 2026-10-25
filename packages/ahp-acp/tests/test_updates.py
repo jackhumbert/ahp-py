@@ -151,6 +151,32 @@ def test_parsing_never_raises(params: Any) -> None:
     assert isinstance(parse_update(params), SessionUpdate)
 
 
+@pytest.mark.parametrize(
+    "fields",
+    [
+        {"used": json.loads("1e400"), "size": 1},  # inf: int() overflows
+        {"used": float("nan"), "size": 1},
+        {"used": 1, "size": True},
+        {"used": 1.5, "size": 1},
+        {"used": "12", "size": 1},
+        {"used": -1, "size": 1},
+    ],
+)
+def test_usage_counts_must_be_whole_numbers(fields: dict[str, Any]) -> None:
+    parsed = parse_update({"sessionId": "s", "update": {"sessionUpdate": "usage_update", **fields}})
+    assert isinstance(parsed, UnknownUpdate)
+    assert parsed.kind == "usage_update"
+    assert parsed.problem is not None
+
+
+def test_usage_counts_take_a_whole_float() -> None:
+    update = {"sessionUpdate": "usage_update", "used": 12.0, "size": 100}
+    parsed = parse_update({"sessionId": "s", "update": update})
+    assert isinstance(parsed, UsageUpdate)
+    assert (parsed.used, parsed.size) == (12, 100)
+    assert isinstance(parsed.used, int)
+
+
 def _kinds(schema_file: str) -> set[str]:
     schema = json.loads((SCHEMA_DIR / schema_file).read_text())
     kinds: set[str] = set()
