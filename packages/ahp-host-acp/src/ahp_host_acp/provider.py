@@ -374,6 +374,9 @@ class AcpSession:
         #: known yet can only belong to `_opening`.
         self._open_lock = asyncio.Lock()
         self._opening: _Chat | None = None
+        #: The ACP session ids of closed chats: their late updates are dropped,
+        #: never taken for `_opening`'s.
+        self._retired: set[str] = set()
         self._capabilities: Mapping[str, Any] = {}
         self._catalogue = catalogue if catalogue is not None else Catalogue()
         self._on_agent_changed = on_agent_changed or _nothing
@@ -906,6 +909,8 @@ class AcpSession:
         if chat is None or chat is self._default:
             return
         del self._chats[chat_uri]
+        if chat.acp_session_id is not None:
+            self._retired.add(chat.acp_session_id)
         conn = self._live(chat)
         if conn is None:
             return
@@ -1047,8 +1052,9 @@ class AcpSession:
                 if chat.acp_session_id == session_id:
                     return chat
             # One session is opened at a time: an update for a session this
-            # process has just created, before its id is known, is that one's.
-            if self._opening is not None:
+            # process has just created, before its id is known, is that one's;
+            # a closed chat's is no one's.
+            if self._opening is not None and session_id not in self._retired:
                 return self._opening
         return None
 

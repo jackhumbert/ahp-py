@@ -208,6 +208,29 @@ async def test_a_dead_agent_is_dropped_only_by_the_chat_that_used_it(
     assert len(_logged(log, "initialize")) == 2
 
 
+async def test_a_closed_chats_late_updates_are_dropped(tmp_path: Path, log: Path) -> None:
+    session = await _provider(tmp_path, log).create_session(context(tmp_path))
+    try:
+        await session.chat_opened(_chat())
+        second = (await _whoami(session, SECOND))["session"]
+        await session.chat_closed(SECOND)
+        # While another chat's session is being opened, an update for an id the
+        # agent has not named yet is that one's -- but not the closed chat's,
+        # whose agent session may still be winding a turn down.
+        opening = session._chat_for("ahp-chat:/3")
+        sink = RecordingSink()
+        opening.sink = sink
+        session._opening = opening
+        update = {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "x"}}
+        await session._on_notification("session/update", {"sessionId": second, "update": update})
+        assert sink.events == []
+        await session._on_notification("session/update", {"sessionId": "new-id", "update": update})
+        assert sink.events == [("text", "x")]
+        session._opening = None
+    finally:
+        await session.aclose()
+
+
 @pytest.mark.parametrize("close", [True, False])
 async def test_a_closed_chat_closes_its_session(tmp_path: Path, log: Path, close: bool) -> None:
     flags = ("CLOSE",) if close else ()
