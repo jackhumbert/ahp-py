@@ -209,6 +209,38 @@ async def test_a_dead_agent_is_dropped_only_by_the_chat_that_used_it(
     assert len(_logged(log, "initialize")) == 2
 
 
+@pytest.mark.parametrize("started", [True, False])
+async def test_aclose_closes_the_client_methods_once(
+    tmp_path: Path, log: Path, started: bool
+) -> None:
+    session = await _provider(tmp_path, log).create_session(context(tmp_path))
+    closed = 0
+    close = session._methods.aclose
+
+    async def counting() -> None:
+        nonlocal closed
+        closed += 1
+        await close()
+
+    session._methods.aclose = counting  # type: ignore[method-assign]
+    if started:
+        await _say(session, "hello")
+    await session.aclose()
+    assert closed == 1
+
+
+async def test_a_closed_chats_relay_token_is_revoked(tmp_path: Path, log: Path) -> None:
+    session = await _provider(tmp_path, log).create_session(context(tmp_path))
+    try:
+        await session.chat_opened(_chat())
+        await _say(session, "hello", SECOND)
+        token = session._bridge.token_for(SECOND)
+        await session.chat_closed(SECOND)
+        assert session._bridge.token_for(SECOND) != token  # forgotten: a new one is made
+    finally:
+        await session.aclose()
+
+
 async def test_a_closed_chats_late_updates_are_dropped(tmp_path: Path, log: Path) -> None:
     session = await _provider(tmp_path, log).create_session(context(tmp_path))
     try:

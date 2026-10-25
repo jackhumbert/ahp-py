@@ -664,8 +664,10 @@ class AcpSession:
             log.exception("closing the ACP agent failed")
 
     async def aclose(self) -> None:
-        await self._drop_connection(self._conn)
-        await self._methods.aclose()
+        conn = self._conn
+        await self._drop_connection(conn)
+        if conn is None:  # otherwise the drop closed them
+            await self._methods.aclose()
         await self._bridge.aclose()
 
     # -- client tools ------------------------------------------------------------
@@ -926,6 +928,7 @@ class AcpSession:
         if chat is None or chat is self._default:
             return
         del self._chats[chat_uri]
+        self._bridge.revoke(chat_uri)
         if chat.acp_session_id is not None:
             self._retired.add(chat.acp_session_id)
         conn = self._live(chat)

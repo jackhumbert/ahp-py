@@ -302,6 +302,13 @@ class ToolBridge:
             self._tokens[key] = secrets.token_urlsafe(32)
         return self._tokens[key]
 
+    def revoke(self, key: str) -> None:
+        """Forget *key*'s token and close its relays: the chat is gone, and a
+        relay the agent still holds for it must not keep reaching the tools."""
+        self._tokens.pop(key, None)
+        for connection in list(self._connections.pop(key, ())):
+            connection.close()
+
     def server(self, key: str) -> McpServer:
         """The MCP server entry that gives an agent this key's tools."""
         base = self._relay_command or (sys.executable, "-m", RELAY_MODULE)

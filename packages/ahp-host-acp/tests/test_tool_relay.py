@@ -161,6 +161,29 @@ def test_tool_relay_tokens_are_per_key() -> None:
     assert len(one) >= 32
 
 
+async def test_tool_relay_revoke_forgets_the_token_and_closes_the_relay(
+    harness: Harness,
+) -> None:
+    process = await harness.spawn()
+    relay = Relay(process)
+    try:
+        await relay.ask(_request(1, "ping"))  # authenticated
+        old = harness.bridge.token_for("chat-1")
+        harness.bridge.revoke("chat-1")
+        # The relay it had is closed, so it exits ...
+        await asyncio.wait_for(process.wait(), 10)
+        # ... and the old token no longer opens a new one.
+        refused = await harness.spawn(**{TOKEN_ENV: old})
+        _, stderr = await asyncio.wait_for(refused.communicate(), 10)
+        assert refused.returncode == 1
+        assert b"refused" in stderr
+    finally:
+        if process.returncode is None:
+            process.kill()
+            await asyncio.wait_for(process.wait(), 10)
+    assert harness.bridge.token_for("chat-1") != old
+
+
 async def _unused(key: str, tool: RelayTool, arguments: dict[str, Any]) -> dict[str, Any]:
     raise AssertionError("not called")
 
