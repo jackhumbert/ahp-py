@@ -8,7 +8,9 @@ again instead of starting another, unless the session is gone.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from pathlib import Path
+from typing import Any
 
 from ahp_client import Client
 
@@ -125,6 +127,69 @@ async def test_fleet_reattach_after_a_crash_on_the_clients_resume(tmp_path: Path
         turn = await wait_resumed(fx)
         assert final_json(turn) == {"a": "done one", "b": "alpha: two"}
         assert [strip_preamble(s["prompt"]) for s in fleet.starts] == ["hold one", "two"]
+    finally:
+        await client.aclose()
+        await fx.shut()
+
+
+class _ProbeFails(FakeFleet):
+    """Once `failing` is set, a reattach probe (`wait_for_sessions` with a 1 s slice) errors."""
+
+    failing = False
+
+    async def wait(self, args: Mapping[str, Any]) -> dict[str, Any]:
+        if self.failing and args.get("timeout") == 1.0:
+            raise KeyError("the gateway could not ask the node")
+        return await super().wait(args)
+
+
+async def test_fleet_reattach_a_failed_probe_stops_the_old_session_first(tmp_path: Path) -> None:
+    """A probe that errors says nothing about the old session: it is stopped, not left running
+    beside the new one."""
+    fleet = _ProbeFails()
+    uri = await _cut_off(tmp_path, fleet, forget=False)
+    fleet.failing = True
+    fx, client = await _continued(tmp_path, fleet)
+    try:
+        assert await fx.wire.until(lambda: len(fleet.sessions) == 2, timeout=5.0)
+        assert fleet.stopped == [uri]
+        fleet.release(list(fleet.sessions)[1], "done one")
+        turn = await wait_turn(fx.wire, fx.chat, "t1")
+        assert final_json(turn) == {"a": "done one", "b": "alpha: two"}
+        assert [strip_preamble(s["prompt"]) for s in fleet.starts] == [
+            "hold one",
+            "hold one",
+            "two",
+        ]
+        notes = notifications(turn)
+        assert any(f"could not probe node session {uri}" in note for note in notes), notes
+    finally:
+        await client.aclose()
+        await fx.shut()
+
+
+class _ProbeAndStopFail(_ProbeFails):
+    def stop(self, args: Mapping[str, Any]) -> dict[str, Any]:
+        if self.failing:
+            raise KeyError("the gateway could not reach the node")
+        return super().stop(args)
+
+
+async def test_fleet_reattach_an_unprobeable_unstoppable_session_fails_the_call(
+    tmp_path: Path,
+) -> None:
+    """Neither probed nor stopped, the old session may still run: the call fails as
+    `unavailable` rather than start a second session beside it."""
+    fleet = _ProbeAndStopFail()
+    await _cut_off(tmp_path, fleet, forget=False)
+    fleet.failing = True
+    fx, client = await _continued(tmp_path, fleet)
+    try:
+        turn = await wait_turn(fx.wire, fx.chat, "t1")
+        assert final_json(turn) == {"a": None, "b": "alpha: two"}
+        assert [strip_preamble(s["prompt"]) for s in fleet.starts] == ["hold one", "two"]
+        notes = notifications(turn)
+        assert any("could not be probed or stopped" in note for note in notes), notes
     finally:
         await client.aclose()
         await fx.shut()

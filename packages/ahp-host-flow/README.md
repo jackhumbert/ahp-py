@@ -336,7 +336,9 @@ node session is **reattached**, waiting on that session again
 while the flow host restarted (the host stopping never stops a node session;
 only an abort does). A log line says so (`agent() #N: reattached to node
 session ...`). If the session is gone, the call is dispatched again, with a log
-line. A restored session lists no active clients (no connection outlives a
+line. If asking about it fails, the old session is stopped before the call is
+dispatched again, and when even the stop cannot be sent the call fails as
+`unavailable` rather than start a second session beside one that may still run. A restored session lists no active clients (no connection outlives a
 restart), so a continued run waits for the gateway to rejoin and offer its
 tools, up to `FlowProvider(fleet_client_wait=...)` (default 10 s), before its
 first fleet call fails.

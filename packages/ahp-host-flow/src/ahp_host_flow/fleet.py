@@ -484,14 +484,30 @@ class FleetDispatcher(StepDispatcher):
                         rows = probe.get("sessions")
                         row = rows[0] if isinstance(rows, list) and rows else None
                         gone = isinstance(row, Mapping) and row.get("status") == "gone"
-                    except FlowAgentError:
-                        gone = True
-                    if gone:
+                    except FlowAgentError as exc:
+                        # Says nothing about the old session, which may still be running: stop
+                        # it before starting another, so the call never runs twice at once.
                         self._note(
-                            f"agent() #{call.ordinal}: node session {old} is gone; "
-                            "dispatching it again"
+                            f"agent() #{call.ordinal}: could not probe node session {old} "
+                            f"({exc}); stopping it and dispatching again"
                         )
+                        try:
+                            await call_tool("stop-old", "stop_session", {"session": old})
+                        except FlowAgentError as stop_exc:
+                            raise FlowAgentError(
+                                f"node session {old} could not be probed or stopped ({stop_exc}); "
+                                "not starting another beside it",
+                                kind="unavailable",
+                                transient=True,
+                            ) from None
+                        gone = True
                     else:
+                        if gone:
+                            self._note(
+                                f"agent() #{call.ordinal}: node session {old} is gone; "
+                                "dispatching it again"
+                            )
+                    if not gone:
                         self._note(f"agent() #{call.ordinal}: reattached to node session {old}")
                         session = old
                         report_dispatch(
