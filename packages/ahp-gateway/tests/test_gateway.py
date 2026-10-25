@@ -373,7 +373,20 @@ async def test_client_files_passthrough_leaves_an_unknown_node_to_provider_routi
         await fleet.aclose()
 
 
-@pytest.mark.parametrize("folder", ["file:///typo/srv/repo", "file:///", "file:///typo"])
+@pytest.mark.parametrize(
+    "folder",
+    [
+        "file:///typo/srv/repo",
+        "file:///",
+        "file:///typo",
+        # A URI scheme is case-insensitive.
+        "FILE:///",
+        "File:///typo/srv/repo",
+        # The other scheme a host serves its own files under (ahp-host's roots).
+        "vscode-agent-host:///",
+        "VSCode-Agent-Host:///typo/srv/repo",
+    ],
+)
 async def test_client_files_refuse_refuses_a_folder_naming_no_node(folder: str) -> None:
     fleet = _two_echo_nodes(client_files="refuse")
     try:
@@ -408,6 +421,29 @@ async def test_client_files_refuse_still_routes_a_connected_node() -> None:
                 item["workingDirectories"][0] for item in (await node_b.sessions())["items"]
             )
         assert folders == ["file:///srv/other", "file:///srv/repo"]
+    finally:
+        await fleet.aclose()
+
+
+@pytest.mark.parametrize("method", ["resolveSessionConfig", "sessionConfigCompletions"])
+async def test_client_files_refuse_covers_session_config_on_a_one_node_fleet(method: str) -> None:
+    """One node routes every request to itself, so the check runs before routing."""
+    fleet = Fleet(
+        {"node-a": echo_host("echo")},
+        [NodeRecord("node-a", "mem://a", DEV)],
+        everyone_is_a_dev,
+        client_files="refuse",
+    )
+    try:
+        raw = AhpClient(fleet.surface_transport())
+        await raw.connect()
+        await raw.initialize(client_id="c1")
+        with pytest.raises(RpcError, match="is available to this connection") as refused:
+            await raw.request(
+                method, {"provider": "echo", "workingDirectories": ["file:///typo/srv/repo"]}
+            )
+        assert refused.value.code == -32602
+        await raw.shutdown()
     finally:
         await fleet.aclose()
 

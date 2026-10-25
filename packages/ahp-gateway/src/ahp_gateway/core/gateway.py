@@ -138,6 +138,10 @@ _MERGED: Final = frozenset({ROOT_URI, AUTOMATIONS_URI})
 _FILE_KEYS: Final = ("uri", "root", "cwd", "workingDirectory", "channel", "resource")
 #: The subset of those that is a folder for a new session (`client_files="refuse"`).
 _FOLDER_KEYS: Final = ("uri", "root", "cwd", "workingDirectory")
+#: Schemes a host serves its own files under (ahp-host's `node/roots.py`), so a
+#: folder in one is a path on whichever node takes it. Compared lowercased: a
+#: URI scheme is case-insensitive.
+_CLIENT_FILE_SCHEMES: Final = frozenset({"file", "vscode-agent-host"})
 #: Asked before a session exists, often before its folder is chosen.
 _SESSION_CONFIG_METHODS: Final = frozenset({"resolveSessionConfig", "sessionConfigCompletions"})
 #: Read-only, so a content ref whose node is unknown can be asked of each.
@@ -461,11 +465,14 @@ class _SurfaceConnection:
             return await self._authenticate(params)
         if method in _CONTENT_READS and _is_content_ref(params.get("uri")):
             return await self._read_content(method, params)
+        if method in _SESSION_CONFIG_METHODS:
+            # Before routing: a lone node would otherwise take the question
+            # about a folder that names no node.
+            self._refuse_client_files(params)
         node_id = self._route(params)
         if node_id is None and method in _SESSION_CONFIG_METHODS:
             # Asked before a folder is chosen: the default node answers, and
             # the client asks again once the folder names one.
-            self._refuse_client_files(params)
             node_id = self._default_node(params.get("provider"))
         if node_id is None and method == "listAutomationTriggerDefinitions":
             # The same question for an automation's template.
@@ -1329,9 +1336,11 @@ class _SurfaceConnection:
         if isinstance(directories, list):
             candidates.extend(directories)
         for value in candidates:
-            if isinstance(value, str) and value.startswith("file:"):
-                rest = value[len("file:") :].lstrip("/")
-                name = unquote(rest.partition("/")[0])
+            if not isinstance(value, str):
+                continue
+            scheme, colon, rest = value.partition(":")
+            if colon and scheme.lower() in _CLIENT_FILE_SCHEMES:
+                name = unquote(rest.lstrip("/").partition("/")[0])
                 raise invalid_params(f"no node {name!r} is available to this connection")
 
     def _node_named_by_files(self, params: Mapping[str, Any]) -> str | None:

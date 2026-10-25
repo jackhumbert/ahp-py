@@ -177,11 +177,13 @@ A request routes by, in order:
 new session: a folder still a `file:` URI after the alias above names no
 connected node (a mistyped or unconnected node id, or bare `file:///`), and
 passthrough would let step 3 pick a node that opens the session at its own
-default root. With `"refuse"` the request is answered InvalidParams "no node
+default root. A `vscode-agent-host:` folder counts as `file:` (it is the other
+scheme a host serves its own files under), and either scheme matches in any
+case. With `"refuse"` the request is answered InvalidParams "no node
 'X' is available to this connection", as for an `ahp-file` URI naming an
-unknown node. It covers `createSession`, the session-config fallback to the
-default node, and an automation's session template; resource reads already
-refuse when several nodes could answer.
+unknown node. It covers `createSession`, the session-config commands (checked
+before routing, so a one-node fleet refuses too), and an automation's session
+template; resource reads already refuse when several nodes could answer.
 
 A changeset's channel is learned from the variable-free `uriTemplate` a
 session or chat advertises it by; one with a variable is expanded by the client

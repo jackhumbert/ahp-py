@@ -38,8 +38,11 @@ By default a new session whose folder is a `file:` URI naming no connected node
 path and routed by provider, so it opens at the default root of the first node
 offering the agent. `Gateway(client_files="refuse")` answers InvalidParams
 "no node 'typo' is available to this connection" instead, the same refusal as
-for an `ahp-file` URI naming an unknown node. A folder naming a connected node
-(`file:///<node>/...` or `ahp-file:///<node>/...`) routes as before.
+for an `ahp-file` URI naming an unknown node. A `vscode-agent-host:` folder is
+treated as `file:`, and both schemes match in any case (`FILE:///`). The
+session-config commands are checked too, before routing, so even a one-node
+fleet refuses. A folder naming a connected node (`file:///<node>/...` or
+`ahp-file:///<node>/...`) routes as before.
 
 ## Flat places
 
