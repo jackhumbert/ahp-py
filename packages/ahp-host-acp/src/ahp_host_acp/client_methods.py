@@ -61,6 +61,10 @@ INVALID: Final = -32602
 #: Bytes of output kept when the agent gives no `outputByteLimit`, and the most
 #: it may ask for: a host-side bound.
 OUTPUT_LIMIT: Final = 1024 * 1024
+#: Seconds a reaped terminal's reader gets to read what is left to EOF, and its
+#: process to be waited for, before either is given up on (a child that left the
+#: terminal's group can hold the output pipe open for as long as it runs).
+REAP_GRACE: Final = 1.0
 _KINDS: Final = {"fs/read_text_file": "read", "fs/write_text_file": "write"}
 
 
@@ -192,7 +196,9 @@ class ClientMethods:
         if method == "terminal/wait_for_exit":
             await terminal.process.wait()
             if terminal.reader is not None:
-                await terminal.reader
+                # Not `await reader`: a release or the session's end may cancel
+                # the reader meanwhile, and the agent's wait is answered anyway.
+                await asyncio.wait({terminal.reader})
             return terminal.status()
         if method == "terminal/kill":
             await terminal.kill()
@@ -387,12 +393,17 @@ class ClientMethods:
 
     @staticmethod
     async def _reap(terminal: _Terminal) -> None:
+        """After a kill: let the reader reach EOF (a waiting `terminal/wait_for_exit`
+        then has all the output), but not for longer than `REAP_GRACE`."""
+        reader = terminal.reader
+        if reader is not None:
+            await asyncio.wait({reader}, timeout=REAP_GRACE)
+            if not reader.done():
+                reader.cancel()
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await reader
         with contextlib.suppress(Exception):
-            await terminal.process.wait()
-        if terminal.reader is not None:
-            terminal.reader.cancel()
-            with contextlib.suppress(asyncio.CancelledError, Exception):
-                await terminal.reader
+            await asyncio.wait_for(terminal.process.wait(), REAP_GRACE)
 
 
 def _is_int(value: Any) -> TypeGuard[int]:

@@ -17,7 +17,7 @@ from ahp_host.provider.base import UserMessage
 from ahp_host.provider.policy import ToolPolicy
 
 from ahp_host_acp.agent import provider_from_options
-from ahp_host_acp.client_methods import ClientMethods
+from ahp_host_acp.client_methods import OUTPUT_LIMIT, ClientMethods, _Terminal
 from ahp_host_acp.config import ConfigError
 from ahp_host_acp.provider import AcpProvider, AcpSession, AgentSpec
 from ahp_host_acp.roots import Roots
@@ -288,6 +288,83 @@ async def test_acphostfs_terminal_kills_its_grandchildren(tmp_path: Path, method
         assert not _alive(pid)
     finally:
         await methods.aclose()
+
+
+#: A command whose child leaves its process group and keeps the output pipe open
+#: for a while, so a kill of the group does not end the terminal's reader.
+ESCAPED = (
+    "import subprocess, sys, time\n"
+    "subprocess.Popen(\n"
+    "    [sys.executable, '-c', 'import time; time.sleep(4)'], start_new_session=True\n"
+    ")\n"
+    "print('ready', flush=True)\n"
+    "time.sleep(120)\n"
+)
+
+
+async def test_acphostfs_wait_for_exit_answers_through_a_reap(tmp_path: Path) -> None:
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    methods = _methods(ws, policy=None)
+    process = await asyncio.create_subprocess_exec(
+        sys.executable, "-c", "pass", stdout=asyncio.subprocess.PIPE
+    )
+    await process.wait()
+    terminal = _Terminal(process, OUTPUT_LIMIT)
+    terminal.reader = asyncio.create_task(asyncio.sleep(60))  # output still being read
+    methods._terminals["term-x"] = terminal
+    waiting = asyncio.ensure_future(
+        methods.handle("terminal/wait_for_exit", {"terminalId": "term-x"}, None)
+    )
+    await asyncio.sleep(0.05)
+    # A release (or the session's end) reaps the terminal, cancelling its reader:
+    # the agent's wait is still answered, not left without a reply.
+    await ClientMethods._reap(terminal)
+    assert await asyncio.wait_for(waiting, 5) == {"exitCode": 0, "signal": None}
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX sessions")
+async def test_acphostfs_release_is_not_held_by_an_escaped_child(tmp_path: Path) -> None:
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    methods = _methods(ws, policy=None)
+    created = await methods.handle(
+        "terminal/create", {"command": sys.executable, "args": ["-c", ESCAPED]}, None
+    )
+    terminal = {"terminalId": created["terminalId"]}
+    try:
+        for _ in range(200):
+            if "ready" in (await methods.handle("terminal/output", terminal, None))["output"]:
+                break
+            await asyncio.sleep(0.05)
+        waiting = asyncio.ensure_future(methods.handle("terminal/wait_for_exit", terminal, None))
+        await asyncio.sleep(0.1)
+        started = asyncio.get_running_loop().time()
+        await methods.handle("terminal/release", terminal, None)
+        # Released while the escaped child still holds the pipe: the release does
+        # not wait the child out, and the agent's wait is answered.
+        assert asyncio.get_running_loop().time() - started < 3
+        assert await asyncio.wait_for(waiting, 10) == {"exitCode": None, "signal": "SIGKILL"}
+    finally:
+        await methods.aclose()
+
+
+async def test_acphostfs_reap_lets_the_reader_reach_eof(tmp_path: Path) -> None:
+    process = await asyncio.create_subprocess_exec(
+        sys.executable, "-c", "pass", stdout=asyncio.subprocess.PIPE
+    )
+    await process.wait()
+    terminal = _Terminal(process, OUTPUT_LIMIT)
+    # The output still in the pipe when the command exits takes a moment to read.
+    terminal.reader = asyncio.create_task(asyncio.sleep(0.2))
+    await ClientMethods._reap(terminal)
+    assert terminal.reader.done()
+    assert not terminal.reader.cancelled()
+    # A reader that never reaches EOF is cancelled after a short grace.
+    stuck = _Terminal(process, OUTPUT_LIMIT)
+    stuck.reader = asyncio.create_task(asyncio.sleep(60))
+    await asyncio.wait_for(ClientMethods._reap(stuck), 5)
+    assert stuck.reader.cancelled()
 
 
 async def test_acphostfs_terminal_env_allow(
