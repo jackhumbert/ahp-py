@@ -2183,6 +2183,13 @@ class Host:
         #: automation is removed, so a replayed `automation/removed` is still
         #: delivered only to those who could see the automation.
         self._automation_owners: dict[str, str | None] = {}
+        #: Run URI -> the record that owns it, for as long as the run's channel
+        #: lives. Kept past the automation's removal, so a run still in flight
+        #: answers to its owner. Its `principal` is the run's owner.
+        self._run_records: dict[str, AutomationRecord] = {}
+        #: (owner hash, plugin id) of a captured plugin copy -> the record that
+        #: holds it, for the automations still catalogued.
+        self._copy_records: dict[tuple[str, str], AutomationRecord] = {}
         #: Run URI -> the task executing it, while it executes.
         self._run_tasks: dict[str, asyncio.Task[None]] = {}
         #: Runs a client asked to cancel. Read when the run's turn ends, so a
@@ -5614,20 +5621,25 @@ class Host:
         return True
 
     def _record_of_run(self, run_uri: str) -> AutomationRecord | None:
-        return next((r for r in self._automations.values() if r.run(run_uri) is not None), None)
+        return self._run_records.get(run_uri)
 
     def _plugin_copy_owner(self, uri: str) -> AutomationRecord | None:
         parts = split_copy_uri(uri)
         if parts is None:
             return None
-        owner, plugin_id, _ = parts
-        for record in self._automations.values():
-            if (
-                plugin_id in record.captures
-                and copy_root(record.resource, plugin_id).split("/")[1] == owner
-            ):
-                return record
-        return None
+        return self._copy_records.get((parts[0], parts[1]))
+
+    @staticmethod
+    def _copy_key(resource: str, plugin_id: str) -> tuple[str, str]:
+        return copy_root(resource, plugin_id).split("/")[1], plugin_id
+
+    def _index_copies(self, record: AutomationRecord, *, keep: bool = True) -> None:
+        """Make `_copy_records` name *record* for exactly the copies it holds."""
+        for key in [k for k, r in self._copy_records.items() if r is record]:
+            del self._copy_records[key]
+        if keep:
+            for plugin_id in record.captures:
+                self._copy_records[self._copy_key(record.resource, plugin_id)] = record
 
     def _claim_for(self, principal: str | None, *channels: str) -> None:
         """Tell a policy that tracks owners (`claim`) who owns these channels.
@@ -9315,6 +9327,7 @@ class Host:
                 continue
             self._automations[record.resource] = record
             self._automation_owners[record.resource] = record.principal
+            self._index_copies(record)
             self._claim_for(
                 record.principal,
                 record.resource,
@@ -9334,6 +9347,7 @@ class Host:
                 await self.sequencer.register_channel(
                     str(run.get("resource")), copy.deepcopy(run), "automationRun"
                 )
+                self._run_records[str(run.get("resource"))] = record
             if repaired:
                 await self.automations.save(record)
             entries.append(self._automation_entry(record))
@@ -9450,6 +9464,11 @@ class Host:
                 return f"an automation resource must use the {AUTOMATION_SCHEME} scheme"
             if record is not None:
                 return f"{resource} already exists"
+            previous = self._automation_owners.get(resource)
+            if previous is not None and previous != self._principal_of(connection):
+                # A removed automation's URI stays its owner's: reusing it would
+                # re-point the owner's replayed history at someone else.
+                return "rejected by policy"
             return definition_rejection(
                 action.get("definition"), self.providers
             ) or self._template_directories_rejection(connection, resource, action["definition"])
@@ -9559,10 +9578,12 @@ class Host:
             removed = self._automations.pop(resource, None)
             self._run_pages.pop(resource, None)
             if removed is not None:
+                self._index_copies(removed, keep=False)
                 await store.delete(resource)
                 for run in removed.runs:
                     uri = str(run.get("resource"))
                     if uri not in self._run_tasks:
+                        self._run_records.pop(uri, None)
                         await self.sequencer.drop_channel(uri)
         self._schedule_changed.set()
 
@@ -9586,6 +9607,7 @@ class Host:
             elif plugin_id in record.captures and record.captures[plugin_id].matches(entry):
                 kept[plugin_id] = record.captures[plugin_id]
         record.captures = kept
+        self._index_copies(record)
 
     def _copy_customization(
         self, record: AutomationRecord, entry: Mapping[str, Any]
@@ -9637,11 +9659,9 @@ class Host:
         if parts is None:
             return None
         owner, plugin_id, path = parts
-        for record in self._automations.values():
-            copy_ = record.captures.get(plugin_id)
-            if copy_ is not None and copy_root(record.resource, plugin_id).split("/")[1] == owner:
-                return copy_, path
-        return None
+        record = self._copy_records.get((owner, plugin_id))
+        copy_ = record.captures.get(plugin_id) if record is not None else None
+        return (copy_, path) if copy_ is not None else None
 
     def _automation_named(
         self, connection: Connection, params: Mapping[str, Any], verb: str
@@ -9738,8 +9758,10 @@ class Host:
         if request_id is not None:
             record.requests[request_id] = run_uri
         for dropped in self._prune_runs(record):
+            self._run_records.pop(dropped, None)
             await self.sequencer.drop_channel(dropped)
         await self.sequencer.register_channel(run_uri, copy.deepcopy(run), "automationRun")
+        self._run_records[run_uri] = record
         self._claim_for(record.principal, run_uri)
         # "The host persists the run before beginning session side effects."
         await self._save_automation(record)

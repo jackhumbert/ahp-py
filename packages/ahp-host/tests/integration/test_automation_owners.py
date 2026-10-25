@@ -302,6 +302,66 @@ class TestMutation:
         assert run not in json.dumps(resumed["result"].get("snapshots", []))
 
 
+class TestARemovedAutomationKeepsItsOwner:
+    async def test_another_principal_cannot_create_over_a_removed_uri(
+        self, shared: tuple[Host, OwnedSessionPolicy]
+    ) -> None:
+        host, _ = shared
+        alice, bob = await _alice_creates(host)
+        await _dispatch(
+            alice, AUTOMATIONS_URI, {"type": "automation/removed", "resource": AUTOMATION}, seq=2
+        )
+        await _until(lambda: _entries(host) == [])
+        create = {
+            "type": "automation/createRequested",
+            "resource": AUTOMATION,
+            "definition": _definition(),
+        }
+        await _dispatch(bob, AUTOMATIONS_URI, create, seq=1)
+        await bob.collect_until(
+            lambda: _echo_of(bob, "automation/createRequested") is not None, timeout=2
+        )
+        echo = _echo_of(bob, "automation/createRequested")
+        assert echo is not None
+        assert echo["rejectionReason"] == "rejected by policy"
+        assert _entries(host) == []
+        # The owner may have it back.
+        await _dispatch(alice, AUTOMATIONS_URI, create, seq=3)
+        await _until(lambda: any(e["resource"] == AUTOMATION for e in _entries(host)))
+
+    async def test_a_run_in_flight_keeps_its_owner_check_after_removal(self) -> None:
+        policy = OwnedSessionPolicy(principal_from_header(_HEADER))
+        host = Host(EchoProvider(delay=5.0), policy, automations=InMemoryAutomationStore())
+        try:
+            alice, bob = await _alice_creates(host)
+            reply = await alice.request(
+                "runAutomation",
+                {"channel": AUTOMATIONS_URI, "automation": AUTOMATION, "requestId": "r1"},
+            )
+            run = reply["result"]["resource"]
+            await _until(lambda: "primarySession" in host.sequencer.state_of(run))
+            await _dispatch(
+                alice,
+                AUTOMATIONS_URI,
+                {"type": "automation/removed", "resource": AUTOMATION},
+                seq=2,
+            )
+            await _until(lambda: _entries(host) == [])
+            refused = await bob.request("subscribe", {"channel": run})
+            assert refused["error"]["code"] == -32009
+            await _dispatch(
+                bob, run, {"type": "automationRun/cancelRequested", "resource": run}, seq=1
+            )
+            await bob.collect(seconds=0.2)
+            assert host.sequencer.state_of(run)["lifecycle"]["status"] != "cancelled"
+            await _dispatch(
+                alice, run, {"type": "automationRun/cancelRequested", "resource": run}, seq=3
+            )
+            await _until(lambda: host.sequencer.state_of(run)["lifecycle"]["status"] == "cancelled")
+        finally:
+            await host.aclose()
+
+
 class TestRunCancelByOwnerOnly:
     async def test_cancel_is_refused_for_the_other_user_while_the_run_is_live(self) -> None:
         policy = OwnedSessionPolicy(principal_from_header(_HEADER))
