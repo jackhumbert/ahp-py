@@ -175,7 +175,7 @@ is the design; milestones M0–M18 there say what exists (all done).
   replaced `JSON.stringify`), so a runner's own checks are never the authority.
 - A continued run's tool-call ids use the prefix `agent-r<k>`.
 - An open approval pauses the idle watchdog (`TurnTee._waiting`; a fleet row in `waiting`
-  does too); retry attempts (`retry_empty`) keep one ordinal, key and journal record, and
+  does too), and so does a worker's client tool call while the client runs it (`TurnTee._hold`); retry attempts (`retry_empty`) keep one ordinal, key and journal record, and
   attempt k's main-chat tool call id is `agent-<n>-a<k>`.
 - A `.py` workflow from a client is never read or loaded (plan §4.10 trust);
   `python_sources` refuses `client`.

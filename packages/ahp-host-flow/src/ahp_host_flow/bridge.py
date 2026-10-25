@@ -14,6 +14,7 @@ from ahp_host import TurnSink
 from ahp_host.provider.base import (
     BackgroundWork,
     Canvas,
+    ClientToolCall,
     InputOutcome,
     InputRequest,
     OriginTurn,
@@ -23,6 +24,7 @@ from ahp_host.provider.base import (
     SessionPublisher,
     ToolConfirmation,
     ToolConfirmationOutcome,
+    ToolResult,
 )
 
 from ahp_host_flow.engine import Redactor
@@ -327,7 +329,8 @@ class TurnTee:
     confirmation or input request opens and `False` when the last one closes. An *approver*
     answers a confirmation itself when the policy or a rule decides it, on the agent's unmasked
     call and without publishing anything; otherwise the confirmation goes to the sink. Every
-    event forwarded touches the *watchdog*; an open confirmation or input request pauses it.
+    event forwarded touches the *watchdog*; an open confirmation or input request pauses it, and
+    so does a client tool call while the client runs it.
     """
 
     def __init__(
@@ -365,6 +368,8 @@ class TurnTee:
         # Request-scoped readings not yet covered by a turn report: (in, out, cache read).
         self._pending = (0, 0, 0)
         self._open = 0
+        #: What holds the watchdog paused: open prompts and client tool calls in flight.
+        self._held = 0
 
     @property
     def reply(self) -> str:
@@ -560,13 +565,18 @@ class TurnTee:
             self.failure or "", error_type, duration_ms, resumable=resumable
         )
 
+    def _hold(self, delta: int) -> None:
+        """Pause the watchdog while anything waits on someone else; resume when nothing does."""
+        self._held += delta
+        if self.watchdog is not None:
+            if delta > 0 and self._held == 1:
+                self.watchdog.pause()
+            elif delta < 0 and self._held == 0:
+                self.watchdog.resume()
+
     async def _waiting(self, delta: int) -> None:
         self._open += delta
-        if self.watchdog is not None:
-            if delta > 0 and self._open == 1:
-                self.watchdog.pause()
-            elif delta < 0 and self._open == 0:
-                self.watchdog.resume()
+        self._hold(delta)
         if self._on_waiting is not None and self._open == (1 if delta > 0 else 0):
             await self._on_waiting(delta > 0)
 
@@ -650,6 +660,16 @@ class TurnTee:
             return await self.sink.confirm_tool_call(self._masked_confirmation(call))
         finally:
             await self._waiting(-1)
+
+    async def run_client_tool(self, call: ClientToolCall) -> ToolResult:
+        self._touch()
+        await self.flush()
+        # The client runs it in its own time (a build, a search): not the inner agent idling.
+        self._hold(1)
+        try:
+            return await self.sink.run_client_tool(call)
+        finally:
+            self._hold(-1)
 
     def __getattr__(self, name: str) -> Any:
         attr = getattr(self.sink, name)

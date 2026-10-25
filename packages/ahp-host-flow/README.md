@@ -781,7 +781,8 @@ with kind `timeout` (transient). A remote provider defaults to 600 s; in-process
 providers have no watchdog unless it is set. Any text, reasoning (thinking output is the
 heartbeat), tool-call, notification or usage event resets it. An open approval or question pauses
 it, so a slow human never trips it, and it restarts when the answer arrives (a confirmation the
-approval rules answer themselves does not pause it). A fleet call sees no deltas: it reads the
+approval rules answer themselves does not pause it). An in-process worker's client tool call
+pauses it too, while the client runs the tool. A fleet call sees no deltas: it reads the
 node session's row at least twice per `idle_timeout`, and a change of its status or of its
 `activity` (ahp-gateway's fingerprint of the node session's chat, which moves with every delta,
 reasoning or tool call) resets the clock; `waiting` pauses it, and on expiry the node session is
