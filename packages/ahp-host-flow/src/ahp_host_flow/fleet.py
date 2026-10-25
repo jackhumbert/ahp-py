@@ -618,6 +618,11 @@ class FleetDispatcher(StepDispatcher):
                 state.error = self.redactor.mask(str(exc))
                 if isinstance(exc, DispatchError):
                     state.error_kind, state.error_transient = exc.kind, exc.transient
+                if not state.settled:
+                    # Failed after the node session started (a wait or read that errored or
+                    # timed out, a reply without the session): left alone it keeps spending.
+                    with contextlib.suppress(Exception):
+                        await asyncio.wait_for(stop_node(worker_sink), ABORT_GRACE)
                 raise
             finally:
                 if watchdog is not None:
