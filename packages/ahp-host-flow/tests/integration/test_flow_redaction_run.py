@@ -252,3 +252,38 @@ async def test_flow_redaction_every_attempt(tmp_path: Path, node_path: str) -> N
         assert set(report.worker_chats) == set(chats)
     finally:
         await fx.shut()
+
+
+KEEP = "KEEPME-7777"
+NAMED_SCRIPT = """```js
+const a = await agent('say ' + ['PLAIN','LEAK-4242'].join(''), {x: {chat: 'pair'}});
+const b = await agent('say KEEPME-7777', {x: {chat: 'pair'}});
+return 'done'
+```"""
+
+
+async def test_flow_redaction_named_chat_only_its_turn(tmp_path: Path, node_path: str) -> None:
+    """On a named chat only the redacted call's own worker turn is redacted."""
+    fx = await boot_flow(tmp_path, node_path, TOML)
+    try:
+        turn = await run_turn(fx.wire, fx.chat, "t1", NAMED_SCRIPT)
+        assert turn["state"] == "complete"
+        run_id = next(d["runStarted"]["runId"] for d in descriptors(turn) if "runStarted" in d)
+        (chat,) = [str(c["resource"]) for c in worker_chats(fx.host, SESSION)]
+        assert len(state(fx.host, chat)["turns"]) == 2
+        assert SECRET in worker_parts(fx.host, chat)
+        assert KEEP in worker_parts(fx.host, chat)
+
+        await redact_step(
+            fx.host,
+            state_dir=tmp_path / "state",
+            run_id=run_id,
+            ordinal=0,
+            reason="leak",
+            actor=ACTOR,
+        )
+        assert SECRET not in worker_parts(fx.host, chat)
+        assert KEEP in worker_parts(fx.host, chat)
+        assert flow.run_view(state(fx.host, fx.chat)).steps[1].result != "[redacted]"
+    finally:
+        await fx.shut()

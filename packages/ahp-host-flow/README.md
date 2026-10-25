@@ -249,8 +249,9 @@ async with ahp_host_flow.run(dispatcher, RunOptions(budget_total=50_000)) as r:
 - Progress is typed. `_meta["ahp-py/flow"]` carries `runStarted`,
   `phaseStarted`, `phaseFinished` and `runFinished` on the system
   notifications, and `stepStarted`, `awaitingInput` and `stepFinished` on each
-  `agent` tool call (the running call links its worker chat; the result carries
-  the status, the structured result and usage). A stock client shows the same
+  `agent` tool call (the running call links its worker chat; an in-process
+  call's `stepStarted.turnId` names its turn there once it starts; the result
+  carries the status, the structured result and usage). A stock client shows the same
   text without them. `awaitingInput` comes from the session's `inputNeeded`,
   filtered to the worker chat, and the step's `waiting` entries (kind and
   chat of each open request, `RunView.waiting` in the folded view) say what it
@@ -1174,7 +1175,8 @@ of a CLI or library run, with no host involved.
 What is redacted for the call with that ordinal, on every attempt of it (the
 `agent-<n>-a<k>` tool calls and worker chats of `retry_empty` and fallbacks too):
 
-- the worker chat's markdown, reasoning and tool-call parts;
+- the worker chat's markdown, reasoning and tool-call parts (on a named chat,
+  `opts.x.chat`, only the call's own turn: the one `stepStarted.turnId` names);
 - the step's `agent` tool call on the main chat: its result content, its
   structured content and the `stepFinished` result in `_meta['ahp-py/flow']`,
   so `flow_view` shows `[redacted]`;

@@ -1491,6 +1491,8 @@ class ProviderDispatcher(StepDispatcher):
         async def run(sink: TurnSink) -> None:
             nonlocal value
             state.started = True
+            if isinstance(sink, IdentifiesTurn):  # which worker turn is this call's (redaction)
+                started["turnId"] = sink.turn_id
             if durable is not None and inner_state is not None and isinstance(sink, IdentifiesTurn):
                 durable.inflight[worker.resource] = {
                     "provider": name,

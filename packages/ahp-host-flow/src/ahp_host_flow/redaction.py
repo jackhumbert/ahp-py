@@ -81,6 +81,9 @@ class StepLocation:
     turn_id: str
     tool_call_id: str
     worker_chat: str | None
+    #: The call's own turn on the worker chat (`stepStarted.turnId`); None when the step
+    #: does not name one (a run from before it was recorded), and then every turn is its.
+    worker_turn: str | None = None
 
 
 @dataclass(frozen=True)
@@ -169,13 +172,14 @@ def find_steps(host: Host, run_id: str, ordinal: int) -> list[StepLocation]:
                     continue
                 call_id = call.get("toolCallId")
                 if started["ordinal"] == ordinal and isinstance(call_id, str):
-                    worker = started.get("chat")
+                    worker, worker_turn = started.get("chat"), started.get("turnId")
                     found.append(
                         StepLocation(
                             uri,
                             str(turn.get("id")),
                             call_id,
                             worker if isinstance(worker, str) else None,
+                            worker_turn if isinstance(worker_turn, str) else None,
                         )
                     )
     return found
@@ -253,7 +257,11 @@ async def redact_step(
         for worker in workers:
             if host.sequencer.reducer_of(worker) != "chat":
                 continue
+            # A named chat (`opts.x.chat`) holds other calls' turns too: only this call's.
+            own = {loc.worker_turn for loc in locs if loc.worker_chat == worker}
             for turn in _turns_of(host.sequencer.state_of(worker)):
+                if None not in own and turn.get("id") not in own:
+                    continue
                 for part in _parts_of(turn):
                     part_id = part_id_of(part)
                     if marker_of(part) is not None:
