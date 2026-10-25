@@ -519,6 +519,20 @@ class _SurfaceConnection:
             return value
         return qualify_file_uris(value, node_id, root, flat=self.flat_places)
 
+    def _unqualify(self, value: Any, node_id: str) -> Any:
+        """Surface -> node, for what the surface sends to `node_id`.
+
+        On a passthrough connection a plain `file:` URI is the passthrough
+        node's path, so one bound for any other node raises `ForeignUriError`.
+        """
+        return unqualify_file_uris(
+            value,
+            node_id,
+            self._path_root(node_id),
+            flat=self.flat_places,
+            files_of=self.passthrough_node,
+        )
+
     async def _virtual_root(self, method: str) -> Any:
         """`ahp-file:///`: a read-only directory with one entry per node.
 
@@ -1212,9 +1226,7 @@ class _SurfaceConnection:
             node_id = self._node_for_new_session(base)
         self.owners.claim(node_id, {channel})
         try:
-            outgoing = unqualify_file_uris(
-                base, node_id, self._path_root(node_id), flat=self.flat_places
-            )
+            outgoing = self._unqualify(base, node_id)
         except ForeignUriError as exc:
             raise invalid_params(str(exc)) from exc
         assert self.principal is not None, "admission sets the principal"
@@ -1229,9 +1241,7 @@ class _SurfaceConnection:
         node_id = self._node_for_new_session(params)
         self.owners.claim(node_id, {channel})
         try:
-            outgoing = unqualify_file_uris(
-                params, node_id, self._path_root(node_id), flat=self.flat_places
-            )
+            outgoing = self._unqualify(params, node_id)
         except ForeignUriError as exc:
             raise invalid_params(str(exc)) from exc
         assert self.principal is not None, "admission sets the principal"
@@ -1393,7 +1403,7 @@ class _SurfaceConnection:
         if node is None:
             raise AhpError(-32603, f"node {node_id!r} is not connected")
         try:
-            outgoing = unqualify_file_uris(params, node_id, node.path_root, flat=self.flat_places)
+            outgoing = self._unqualify(params, node_id)
         except ForeignUriError as exc:
             raise invalid_params(str(exc)) from exc
         result = self._qualify(
@@ -1493,9 +1503,7 @@ class _SurfaceConnection:
             if target is None:
                 return
             try:
-                outgoing = unqualify_file_uris(
-                    params, node_id, target.path_root, flat=self.flat_places
-                )
+                outgoing = self._unqualify(params, node_id)
             except ForeignUriError as exc:
                 # A session's agent loop runs on one machine and cannot reach
                 # another's disk, so this is refused - but out loud: dropped

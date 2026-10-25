@@ -44,7 +44,9 @@ is narrowed to one file-serving node, none of the above is needed: that node's
 absolute paths, and every `file:` URI the client sends is that node's, so the
 client's `file:///<node>/...` alias is not read there (it is a real path on the
 passthrough node). `ahp-file` URIs still route, and other nodes on the connection
-are reachable only by those explicit `ahp-file` URIs.
+are reachable only by those explicit `ahp-file` URIs: a plain `file:` URI in a
+request or action bound for another node is refused (`files_of`), since it
+names a path on the passthrough node.
 
 The nodes keep speaking plain `file:`; the gateway translates at the edge. Only
 whole string values are rewritten; a path quoted inside prose is left alone,
@@ -276,24 +278,38 @@ def qualify_file_uris(
 
 
 def unqualify_file_uris(
-    value: Any, node_id: str, root: str | None = None, *, flat: bool = False
+    value: Any,
+    node_id: str,
+    root: str | None = None,
+    *,
+    flat: bool = False,
+    files_of: str | None = None,
 ) -> Any:
     """Surface -> node: an `ahp-file` URI on this node becomes its `file:///p`.
 
     One naming a *different* node raises :class:`ForeignUriError`: forwarding it
     would ask this node about a path on another machine, and the node would
     answer about its own file of the same name. A plain `file:` URI is the
-    client's own and passes through untouched.
+    client's own and passes through untouched - unless `files_of` names the
+    node every plain `file:` URI is on (a passthrough connection's): then one
+    bound for any other node is foreign too.
     """
     if isinstance(value, str):
         value = canonical_uri(value)
-        return _unqualify_one(value, node_id, root, flat) if value.startswith(_PREFIX) else value
+        if value.startswith(_PREFIX):
+            return _unqualify_one(value, node_id, root, flat)
+        if files_of is not None and files_of != node_id and value[:5].lower() == "file:":
+            raise ForeignUriError(f"{value} is on node {files_of!r}, not {node_id!r}")
+        return value
     if isinstance(value, Mapping):
         return {
-            key: unqualify_file_uris(item, node_id, root, flat=flat) for key, item in value.items()
+            key: unqualify_file_uris(item, node_id, root, flat=flat, files_of=files_of)
+            for key, item in value.items()
         }
     if isinstance(value, list):
-        return [unqualify_file_uris(item, node_id, root, flat=flat) for item in value]
+        return [
+            unqualify_file_uris(item, node_id, root, flat=flat, files_of=files_of) for item in value
+        ]
     return value
 
 

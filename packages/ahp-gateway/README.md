@@ -71,7 +71,8 @@ node's own, and `client_files="refuse"` does not apply (every `file:` URI is tha
 node's). `ahp-file` URIs still route as before, so an older client URI keeps
 working, and other nodes on the connection are reachable only by explicit `ahp-file`
 URIs (the client's `file:///<node>/...` alias is not read there: a plain `file:` path is
-always the passthrough node's). It is
+always the passthrough node's, so a request or action carrying one that is bound
+for another node is refused: InvalidParams, or the action echoed rejected). It is
 resolved once per connection after authentication; an id the principal is not
 admitted to is ignored. `flat_places` does not affect the passthrough node.
 

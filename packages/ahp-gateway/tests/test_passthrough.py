@@ -15,9 +15,11 @@ from ahp_client import AhpClient
 from ahp_host import Host, LoopbackSingleUserPolicy
 from ahp_host.core.resources import RootedFilesystemResourceProvider
 from ahp_host.provider.echo import EchoProvider
+from ahp_protocol import AhpError
 
 from ahp_gateway.registry import NodeRecord, Principal
 from tests.fleet import DEV, Fleet, everyone_is_a_dev
+from tests.links import RecordingLink, connection, drain
 
 
 def _fleet(root: Path, passthrough: Any) -> Fleet:
@@ -134,3 +136,43 @@ async def test_an_unadmitted_or_absent_node_behaves_as_none(tmp_path: Path, conf
         await raw.shutdown()
     finally:
         await fleet.aclose()
+
+
+async def test_a_plain_file_uri_routed_to_another_node_is_refused() -> None:
+    """On a passthrough connection every `file:` URI is the passthrough node's own path,
+    so one bound for any other node would name the wrong machine's file."""
+    a, b = RecordingLink("node-a"), RecordingLink("node-b")
+    conn = connection(a, b)
+    conn.passthrough_node = "node-a"
+    conn.owners.claim("node-a", {"claude:/s"})
+    conn.owners.claim("node-b", {"other:/s"})
+    with pytest.raises(AhpError) as refused:
+        await conn._dispatch(
+            "createChat",
+            {"channel": "other:/s", "chat": "other:/s/2", "workingDirectory": "file:///srv/x"},
+            [],
+        )
+    assert refused.value.code == -32602
+    assert "node-a" in refused.value.message
+    assert b.requests == []
+
+    conn.subscriptions.update({"claude:/s", "other:/s"})
+    for channel, seq in (("other:/s", 1), ("claude:/s", 2)):
+        conn._handle_notification(
+            {
+                "jsonrpc": "2.0",
+                "method": "dispatchAction",
+                "params": {
+                    "channel": channel,
+                    "clientSeq": seq,
+                    "action": {"type": "session/workingDirectorySet", "directory": "file:///srv/x"},
+                },
+            }
+        )
+    assert b.notified == []
+    [echo] = drain(conn)
+    assert echo["params"]["channel"] == "other:/s"
+    assert "node-a" in echo["params"]["rejectionReason"]
+    # The passthrough node's own still crosses verbatim.
+    [(_, params)] = a.notified
+    assert params["action"]["directory"] == "file:///srv/x"
