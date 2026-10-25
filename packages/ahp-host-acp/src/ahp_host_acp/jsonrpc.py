@@ -7,6 +7,8 @@ instead.
 
 from __future__ import annotations
 
+import warnings
+
 from ahp_acp.connection import (
     EXIT_GRACE,
     LINE_LIMIT,
@@ -22,6 +24,12 @@ from ahp_acp.errors import (
     AcpError,
     AgentExitedError,
     MethodNotFoundError,
+)
+
+warnings.warn(
+    "ahp_host_acp.jsonrpc is deprecated: import from ahp_acp (ahp_acp.connection, ahp_acp.errors)",
+    DeprecationWarning,
+    stacklevel=2,
 )
 
 __all__ = [
