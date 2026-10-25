@@ -290,3 +290,41 @@ async def test_duplicate_ids_are_rejected() -> None:
         assert _entry(host) is None
     finally:
         await host.aclose()
+
+
+async def test_a_dropped_create_does_not_leak_its_capture_into_a_later_update() -> None:
+    host = Host(EchoProvider(), LoopbackSingleUserPolicy(), automations=InMemoryAutomationStore())
+    try:
+        client, _ = await _client(host)
+        # Both pass validation (neither exists yet) and wait on the capture lock;
+        # the first creates the automation, the second is then dropped by the host.
+        for seq, nonce in ((1, "n1"), (2, "n2")):
+            await client.notify(
+                "dispatchAction",
+                {
+                    "channel": AUTOMATIONS_URI,
+                    "clientSeq": seq,
+                    "action": {
+                        "type": "automation/createRequested",
+                        "resource": AUTOMATION,
+                        "definition": _definition(customizations=[_plugin(nonce)]),
+                    },
+                },
+            )
+        await client.serve(seconds=1.0)
+        assert host._automations[AUTOMATION].captures["house"].nonce == "n1"
+
+        # An update that captures nothing must keep the copy the definition names.
+        await _dispatch(
+            client,
+            {
+                "type": "automation/updateRequested",
+                "resource": AUTOMATION,
+                "changes": {"title": "Renamed"},
+            },
+            seq=3,
+        )
+        assert host._automations[AUTOMATION].definition["title"] == "Renamed"
+        assert host._automations[AUTOMATION].captures["house"].nonce == "n1"
+    finally:
+        await host.aclose()

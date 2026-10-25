@@ -2125,9 +2125,9 @@ class Host:
         #: Replaced by the next push, cancelled by a revoke.
         self._token_expiry: dict[str, asyncio.TimerHandle] = {}
         #: Automation plugin captures (1.0.0) run one at a time, and hand their
-        #: copies to `_react_to_automation` through `_pending_copies`.
+        #: copies to `_react_to_automation` as an argument: a copy parked by
+        #: resource would outlive an action the host then drops.
         self._capture_lock = asyncio.Lock()
-        self._pending_copies: dict[str, dict[str, PluginCopy]] = {}
         #: Terminal actions refused from a peer that does not hold the claim.
         #: The default gates what a document names; a multi-trust-domain host
         #: passes `STRICT_CLAIM_GATED_ACTIONS` (see `core/terminals.py`) and
@@ -8012,9 +8012,8 @@ class Host:
                     connection, channel, action, origin, f"capture failed: {exc}"
                 )
                 return
-            self._pending_copies[str(action.get("resource"))] = copies
             await self._publish_dispatched(connection, channel, action, origin)
-            await self._react(channel, action, connection)
+            await self._react(channel, action, connection, copies)
 
     def _validate_client_action(
         self, connection: Connection, channel: str, action: Mapping[str, Any]
@@ -8179,14 +8178,21 @@ class Host:
         return None
 
     async def _react(
-        self, channel: str, action: Mapping[str, Any], connection: Connection | None = None
+        self,
+        channel: str,
+        action: Mapping[str, Any],
+        connection: Connection | None = None,
+        copies: Mapping[str, PluginCopy] | None = None,
     ) -> None:
-        """Side effects a client action triggers on the agent."""
+        """Side effects a client action triggers on the agent.
+
+        *copies* are the plugins captured for an automation action.
+        """
         action_type = action.get("type")
         if isinstance(action_type, str) and action_type.startswith(
             ("automation/", "automationRun/")
         ):
-            await self._react_to_automation(channel, action, connection)
+            await self._react_to_automation(channel, action, connection, copies)
             return
         if action_type == "session/customizationToggled":
             await self._react_to_toggle(channel, action)
@@ -9487,7 +9493,11 @@ class Host:
         return None
 
     async def _react_to_automation(
-        self, channel: str, action: Mapping[str, Any], connection: Connection | None = None
+        self,
+        channel: str,
+        action: Mapping[str, Any],
+        connection: Connection | None = None,
+        copies: Mapping[str, PluginCopy] | None = None,
     ) -> None:
         action_type = action.get("type")
         if action_type == "automationRun/cancelRequested":
@@ -9511,7 +9521,7 @@ class Host:
                 run_count=0 if after_runs(definition) is not None else None,
                 principal=self._principal_of(connection),
             )
-            self._take_copies(created, created.definition)
+            self._take_copies(created, created.definition, copies)
             self._automations[resource] = created
             self._automation_owners[resource] = created.principal
             self._claim_for(created.principal, resource)
@@ -9533,7 +9543,7 @@ class Host:
                 patched.get("enabled") is True and record.definition.get("enabled") is not True
             )
             record.run_count = run_count_after_update(record, patched)
-            self._take_copies(record, patched)
+            self._take_copies(record, patched, copies)
             record.definition = patched
             record.modified_at = iso(now)
             if schedule_moved:
@@ -9556,13 +9566,18 @@ class Host:
                         await self.sequencer.drop_channel(uri)
         self._schedule_changed.set()
 
-    def _take_copies(self, record: AutomationRecord, definition: Mapping[str, Any]) -> None:
+    def _take_copies(
+        self,
+        record: AutomationRecord,
+        definition: Mapping[str, Any],
+        fresh: Mapping[str, PluginCopy] | None,
+    ) -> None:
         """Set the record's copies to exactly the plugins *definition* names.
 
         A fresh capture wins; an unchanged entry keeps its copy; a plugin the
         template no longer names is dropped with its copy.
         """
-        fresh = self._pending_copies.pop(record.resource, {})
+        fresh = fresh or {}
         kept: dict[str, PluginCopy] = {}
         for entry in template_customizations(definition):
             plugin_id = str(entry.get("id"))
