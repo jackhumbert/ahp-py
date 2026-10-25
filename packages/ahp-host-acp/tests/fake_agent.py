@@ -9,6 +9,7 @@ The prompt text picks the behaviour:
 - ``whoami``       reply with the session id, model, cwd, options and how it was opened
 - ``slow``         stream nothing until `session/cancel`, then stop `cancelled`
 - ``crash``        exit mid-turn
+- ``toolcrash``    start an `execute` call, then exit mid-turn
 - ``fs``           ask the client for `fs/read_text_file`, report the error code
 - ``title``        `session_info_update`: a title, a null one, the same title again
 - ``selfmode``     the agent switches its own mode to `code`
@@ -549,6 +550,19 @@ def prompt(session_id: str, words: str) -> dict[str, Any]:
             )
         )
         return {"stopReason": "cancelled"}
+    if words == "toolcrash":
+        update(
+            session_id,
+            {
+                "sessionUpdate": "tool_call",
+                "toolCallId": "doomed",
+                "title": "Run",
+                "kind": "execute",
+                "status": "in_progress",
+                "rawInput": {"command": "true"},
+            },
+        )
+        os._exit(3)
     if words == "crash":
         text(session_id, "about to crash")
         sys.stderr.write("fake agent: crashing on purpose\n")

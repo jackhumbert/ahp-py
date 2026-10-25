@@ -480,7 +480,7 @@ class AcpSession:
             if self._conn is not None and not self._conn.closed:
                 return self._conn
             if self._conn is not None:
-                await self._drop_connection()
+                await self._drop_connection(self._conn)
             cwd = self.working_directory()
             self.directory = cwd
             await self._bridge.start()
@@ -630,8 +630,15 @@ class AcpSession:
         if _reports_options(result):
             chat.verified = True
 
-    async def _drop_connection(self) -> None:
-        conn, self._conn = self._conn, None
+    async def _drop_connection(self, conn: AcpConnection | None) -> None:
+        """Close *conn*, the agent process a caller used, if it is still the current one.
+
+        Another chat may have started the next process since *conn* died; a
+        late clean-up of the old one must not stop that.
+        """
+        if conn is None or conn is not self._conn:
+            return
+        self._conn = None
         await self._methods.aclose()
         if conn is not None:
             try:
@@ -640,7 +647,7 @@ class AcpSession:
                 log.exception("closing the ACP agent failed")
 
     async def aclose(self) -> None:
-        await self._drop_connection()
+        await self._drop_connection(self._conn)
         await self._methods.aclose()
         await self._bridge.aclose()
 
@@ -1367,8 +1374,10 @@ class AcpSession:
             await self._settle(chat)
             if message.model is not None:
                 chat.model = message.model.id
+            used: AcpConnection | None = None
             try:
-                conn = await self._ensure(chat)
+                used = await self._ensure_process()
+                conn = used = await self._ensure(chat)
                 await self._sync_config(conn, chat)
                 await self._apply_model(conn, chat)
             except PermissionError as error:
@@ -1376,7 +1385,7 @@ class AcpSession:
                 return
             except (AcpError, OSError) as error:
                 if isinstance(error, AgentExitedError):
-                    await self._drop_connection()
+                    await self._drop_connection(used)
                 await sink.turn_failed(f"Could not start the agent: {error}", "acp.start")
                 return
             chat.sink = sink
@@ -1503,7 +1512,7 @@ class AcpSession:
         except AgentExitedError as error:
             chat.seed = side or chat.seed  # the agent may never have read it
             await self._close_open_calls(chat, sink)
-            await self._drop_connection()
+            await self._drop_connection(conn)
             chat.turns = None  # whether the agent kept this turn is anyone's guess
             await sink.turn_failed(str(error), error_type="acp.agentExited")
             return

@@ -158,6 +158,56 @@ async def test_cancel_chat_stops_only_that_chats_session(tmp_path: Path, log: Pa
     assert [c["sessionId"] for c in _logged(log, "session/cancel")] == [second["session"]]
 
 
+class _HeldSink(RecordingSink):
+    """Holds a call's completion until released."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.reached = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def tool_call_completed(
+        self,
+        call_id: str,
+        result: Any = None,
+        *,
+        success: bool = True,
+        past_tense_message: str | None = None,
+    ) -> None:
+        self.reached.set()
+        await self.release.wait()
+        await super().tool_call_completed(
+            call_id, result, success=success, past_tense_message=past_tense_message
+        )
+
+
+async def test_a_dead_agent_is_dropped_only_by_the_chat_that_used_it(
+    tmp_path: Path, log: Path
+) -> None:
+    session = await _provider(tmp_path, log).create_session(context(tmp_path))
+    try:
+        await session.chat_opened(_chat())
+        await _say(session, "hello")
+        held = _HeldSink()
+        crashing = asyncio.create_task(_say(session, "toolcrash", sink=held))
+        # The default chat is closing its open call on the dead agent ...
+        await asyncio.wait_for(held.reached.wait(), 10)
+        # ... while the other chat starts the next agent and runs a turn on it.
+        await _say(session, "hello", SECOND)
+        live = session._conn
+        held.release.set()
+        await asyncio.wait_for(crashing, 10)
+        # The crashed turn's clean-up must not stop the agent the other chat started.
+        assert live is not None
+        assert session._conn is live
+        assert not live.closed
+        await _say(session, "hello", SECOND)
+    finally:
+        await session.aclose()
+    assert [e[2] for e in held.events if e[0] == "failed"] == ["acp.agentExited"]
+    assert len(_logged(log, "initialize")) == 2
+
+
 @pytest.mark.parametrize("close", [True, False])
 async def test_a_closed_chat_closes_its_session(tmp_path: Path, log: Path, close: bool) -> None:
     flags = ("CLOSE",) if close else ()
