@@ -715,14 +715,6 @@ class _SurfaceConnection:
         if self.passthrough_node is not None and self.passthrough_node not in self.records:
             _log.debug("passthrough node %r is not admitted; ignored", self.passthrough_node)
             self.passthrough_node = None
-        if self.flat_places:
-            for node_id in self.records:
-                if PLACE_SEPARATOR in node_id:
-                    raise AhpError(
-                        -32603,
-                        f"node id {node_id!r} contains {PLACE_SEPARATOR!r}, "
-                        "which flat_places reserves",
-                    )
         opened = await asyncio.gather(*(self._open(r) for r in self.records.values()))
         for node in opened:
             if node is not None:
@@ -1350,11 +1342,7 @@ class _SurfaceConnection:
         """
         if self.gateway.client_files != "refuse" or self.passthrough_node is not None:
             return
-        candidates: list[Any] = [params.get(key) for key in _FOLDER_KEYS]
-        directories = params.get("workingDirectories")
-        if isinstance(directories, list):
-            candidates.extend(directories)
-        for value in candidates:
+        for value in _file_candidates(params, _FOLDER_KEYS):
             if not isinstance(value, str):
                 continue
             scheme, colon, rest = value.partition(":")
@@ -1369,13 +1357,12 @@ class _SurfaceConnection:
         (`CreateSessionParams`, and the `resolveSessionConfig` a client sends
         ahead of it); the single-URI keys cover the resource family.
         """
-        candidates: list[Any] = [params.get(key) for key in _FILE_KEYS]
-        directories = params.get("workingDirectories")
-        if isinstance(directories, list):
-            candidates.extend(directories)
         authorities = {
             authority
-            for authority in (node_of(value, flat=self.flat_places) for value in candidates)
+            for authority in (
+                node_of(value, flat=self.flat_places)
+                for value in _file_candidates(params, _FILE_KEYS)
+            )
             if authority
         }
         if not authorities:
@@ -1394,11 +1381,10 @@ class _SurfaceConnection:
         node_id = self.passthrough_node
         if node_id is None or node_id not in self.nodes:
             return None
-        candidates: list[Any] = [params.get(key) for key in _FOLDER_KEYS]
-        directories = params.get("workingDirectories")
-        if isinstance(directories, list):
-            candidates.extend(directories)
-        if any(isinstance(v, str) and v.startswith("file:") for v in candidates):
+        if any(
+            isinstance(v, str) and v.startswith("file:")
+            for v in _file_candidates(params, _FOLDER_KEYS)
+        ):
             return node_id
         return None
 
@@ -1852,6 +1838,16 @@ class _SurfaceConnection:
             )
         else:
             future.set_result(message.get("result"))
+
+
+def _file_candidates(params: Mapping[str, Any], keys: Sequence[str]) -> list[Any]:
+    """The values that may be a file URI picking a request's node: each of *keys*,
+    then every `workingDirectories` entry (where a session's folders travel)."""
+    candidates: list[Any] = [params.get(key) for key in keys]
+    directories = params.get("workingDirectories")
+    if isinstance(directories, list):
+        candidates.extend(directories)
+    return candidates
 
 
 def _named_channels(params: Mapping[str, Any]) -> list[str]:

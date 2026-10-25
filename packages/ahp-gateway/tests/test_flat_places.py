@@ -7,7 +7,7 @@ live in that segment. Nodes here serve named roots from a small in-memory tree.
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import Any, ClassVar
+from typing import Any
 
 import pytest
 from ahp_client import AhpClient
@@ -20,14 +20,13 @@ from ahp_host.core.resources import (
 from ahp_host.provider.echo import EchoProvider
 from ahp_protocol.errors import AhpError
 
-from ahp_gateway.core import Gateway
 from ahp_gateway.core.uris import (
     from_client_alias,
     node_of,
     qualify_file_uris,
     unqualify_file_uris,
 )
-from ahp_gateway.registry import NodeRecord, Principal
+from ahp_gateway.registry import NodeRecord
 from tests.fleet import DEV, Fleet, everyone_is_a_dev
 from tests.links import RecordingLink, connection
 
@@ -306,25 +305,7 @@ def test_a_place_on_another_node_is_refused() -> None:
         unqualify_file_uris("ahp-file:///node-a: proj/../../x", "node-a", flat=True)
 
 
-async def test_a_node_id_containing_the_separator_is_refused() -> None:
-    class _Odd:
-        node_id = "node-a: x"
-        url = "mem://odd"
-        groups = DEV
-        metadata: ClassVar[dict[str, Any]] = {}
-
-    class _Directory:
-        def nodes_for(self, principal: Principal) -> list[NodeRecord]:
-            return [_Odd()]  # type: ignore[list-item]
-
-    fleet = _fleet(flat_places=True)
-    fleet.gateway = Gateway(_Directory(), fleet.connector, everyone_is_a_dev, flat_places=True)
-    try:
-        raw = AhpClient(fleet.surface_transport())
-        await raw.connect()
-        with pytest.raises(Exception, match="flat_places"):
-            await raw.initialize(client_id="picker")
-    finally:
-        await fleet.aclose()
+def test_a_node_id_containing_the_separator_is_refused() -> None:
+    # A node id is lowercase DNS labels, so no record can carry the separator.
     with pytest.raises(ValueError, match="node-a: x"):
         NodeRecord("node-a: x", "mem://x", DEV)

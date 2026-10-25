@@ -57,7 +57,7 @@ top-level listing). A node with no named roots stays a bare `ahp-file:///<node>`
 and its files keep the nested `ahp-file:///<node>/<rest>` spelling both ways
 (whether it serves named roots is read once, when the node is dialed).
 Inbound, a first segment without `": "` keeps its nested meaning, so older URIs
-still route. Node ids may not contain `": "`; the gateway refuses to admit one.
+still route. Node ids never contain `": "`: a `NodeRecord` id is lowercase DNS labels.
 
 `flat_places` may also be a callable taking the authenticated `Principal` and
 returning a bool. It is resolved once per connection, right after authentication,
