@@ -832,6 +832,9 @@ def load_config(path: Path) -> FlowConfig:
         text = path.read_text(encoding="utf-8-sig")
     except FileNotFoundError:
         raise ConfigError(f"no config file at {path}") from None
+    except (OSError, UnicodeDecodeError) as exc:
+        reason = exc.strerror if isinstance(exc, OSError) and exc.strerror else exc
+        raise ConfigError(f"cannot read {path}: {reason}") from exc
     try:
         data = tomllib.loads(text)
     except tomllib.TOMLDecodeError as exc:

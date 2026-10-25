@@ -267,6 +267,17 @@ def test_missing_file(tmp_path: Path) -> None:
         load_config(tmp_path / "nope.toml")
 
 
+def test_unreadable_config_is_a_config_error(tmp_path: Path) -> None:
+    directory = tmp_path / "flow.toml"
+    directory.mkdir()
+    with pytest.raises(ConfigError, match=r"cannot read .*flow\.toml"):
+        load_config(directory)
+    latin = tmp_path / "latin.toml"
+    latin.write_bytes(b'state_dir = "caf\xe9"\n')
+    with pytest.raises(ConfigError, match=r"cannot read .*latin\.toml"):
+        load_config(latin)
+
+
 def test_bad_toml(tmp_path: Path) -> None:
     path = tmp_path / "flow.toml"
     path.write_text("providers = [", encoding="utf-8")
