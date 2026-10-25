@@ -822,7 +822,9 @@ ACP, fleet and remote providers report when a turn ends, so the bound is one tur
 latency. Claude's per-request reports count a request's uncached input plus its cache
 creation as input and its cache reads apart, as its turn report does, so the live and the
 settled counters agree. ACP's cost (`acpUsage.cost`) is the ACP session's running total: each
-call counts what it added, which matters for a named chat reusing one session. An ACP turn that
+call counts what it added, which matters for a named chat reusing one session. An ACP turn's
+`inputTokens` is its latest model call (the context meter), so the budget charges the turn's
+sums from `_meta.turnTokenTotals` instead, every model round counted. An ACP turn that
 reports no `inputTokens` shows its context size instead, marked as a gauge
 (`acpUsage.inputGauge`), and counts no input tokens: `input_budget` and the token quotas see
 only ACP agents that report per-turn input.
