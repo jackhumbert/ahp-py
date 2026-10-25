@@ -345,6 +345,59 @@ class _NamedChat:
     session_cost: float = 0.0
 
 
+class NamedChats:
+    """A run's named worker chats (`opts.x.chat`): the chats, a lock per name, the durable record.
+
+    A chat is held here only once a turn on it succeeded, and its inner session lives until the
+    run ends (`aclose`).
+    """
+
+    def __init__(self) -> None:
+        self._chats: dict[str, _NamedChat] = {}
+        self._locks: dict[str, asyncio.Lock] = {}
+
+    def get(self, name: str) -> _NamedChat | None:
+        return self._chats.get(name)
+
+    def put(self, name: str, chat: _NamedChat) -> None:
+        self._chats[name] = chat
+
+    def holds(self, name: str, chat: _NamedChat | None) -> bool:
+        """Whether *chat* is the chat held under *name*."""
+        return self._chats.get(name) is chat
+
+    def lock(self, name: str) -> asyncio.Lock:
+        """The lock that serializes the calls to *name*: a session runs one turn at a time."""
+        return self._locks.setdefault(name, asyncio.Lock())
+
+    async def record(
+        self, durable: DurableWorkers, name: str, chat: _NamedChat, provider: AgentProvider
+    ) -> None:
+        """Keep *chat* in *durable*, with the inner session's resume state."""
+        inner_state: Mapping[str, Any] | None = None
+        if isinstance(provider, ResumableAgentProvider):
+            try:
+                inner_state = await provider.resume_state_of(chat.inner)
+            except Exception:
+                inner_state = None
+        durable.named[name] = {
+            "provider": chat.provider,
+            "workerChat": chat.worker.resource,
+            "title": chat.title,
+            "config": dict(chat.config),
+            "folder": str(chat.folder) if chat.folder is not None else None,
+            "innerState": dict(inner_state) if inner_state is not None else None,
+        }
+
+    async def aclose(self) -> None:
+        """Close the chats' sessions."""
+        for chat in self._chats.values():
+            with contextlib.suppress(Exception):
+                await chat.inner.aclose()
+        self._chats.clear()
+        self._locks.clear()
+
+
 @dataclass
 class DurableWorkers:
     """What a run keeps of its worker chats so a restarted host can pick them up again.
@@ -783,9 +836,8 @@ class ProviderDispatcher(StepDispatcher):
         self.worker_providers: MutableMapping[str, str] = (
             worker_providers if worker_providers is not None else {}
         )
-        #: Named worker chats (`opts.x.chat`) of this run and a lock per name.
-        self._named: dict[str, _NamedChat] = {}
-        self._named_locks: dict[str, asyncio.Lock] = {}
+        #: Named worker chats (`opts.x.chat`) of this run.
+        self._named = NamedChats()
         #: This run's worker chats whose inner session is in `workers` (a turn is running).
         self._live: set[str] = set()
 
@@ -840,11 +892,7 @@ class ProviderDispatcher(StepDispatcher):
 
     async def aclose(self) -> None:
         """Close the named chats' sessions; they live until the run ends."""
-        for named in self._named.values():
-            with contextlib.suppress(Exception):
-                await named.inner.aclose()
-        self._named.clear()
-        self._named_locks.clear()
+        await self._named.aclose()
 
     async def _run_call(self, call: AgentCall, name: str, title: str, call_id: str) -> AgentResult:
         try:
@@ -916,7 +964,7 @@ class ProviderDispatcher(StepDispatcher):
                     reattach=reattach,
                 )
             # Calls to one name are serialized: a session runs one turn at a time.
-            async with self._named_locks.setdefault(chat_name, asyncio.Lock()):
+            async with self._named.lock(chat_name):
                 return await self._run_worker(
                     call,
                     name,
@@ -992,27 +1040,6 @@ class ProviderDispatcher(StepDispatcher):
         except (WorktreeError, OSError) as exc:
             self._note(f"agent() #{call.ordinal}: could not remove worktree {wt.path}: {exc}")
 
-    async def _record_named(
-        self, chat_name: str, named: _NamedChat, inner: AgentSession, provider: AgentProvider
-    ) -> None:
-        """Keep *named* in the durable state, with the inner session's resume state."""
-        if self.durable is None:
-            return
-        inner_state: Mapping[str, Any] | None = None
-        if isinstance(provider, ResumableAgentProvider):
-            try:
-                inner_state = await provider.resume_state_of(inner)
-            except Exception:
-                inner_state = None
-        self.durable.named[chat_name] = {
-            "provider": named.provider,
-            "workerChat": named.worker.resource,
-            "title": named.title,
-            "config": dict(named.config),
-            "folder": str(named.folder) if named.folder is not None else None,
-            "innerState": dict(inner_state) if inner_state is not None else None,
-        }
-
     async def _rebuild_named(
         self,
         call: AgentCall,
@@ -1063,7 +1090,7 @@ class ProviderDispatcher(StepDispatcher):
             self._note(f"{label} could not resume its session ({exc}); recreating it")
             return None
         rebuilt = _NamedChat(name, worker, inner, record["title"], dict(record["config"]), folder)
-        self._named[chat_name] = rebuilt
+        self._named.put(chat_name, rebuilt)
         self._note(f"{label} resumed its session on provider {name!r} after the restart")
         return rebuilt
 
@@ -1359,7 +1386,7 @@ class ProviderDispatcher(StepDispatcher):
                         tee.error_type or "", resumable=tee.resumable, message=tee.failure or ""
                     )
                 elif fresh is not None and chat_name is not None:
-                    self._named[chat_name] = fresh
+                    self._named.put(chat_name, fresh)
             except asyncio.CancelledError:
                 if state.timed_out:
                     with contextlib.suppress(Exception):
@@ -1406,9 +1433,9 @@ class ProviderDispatcher(StepDispatcher):
                     named is not None
                     and chat_name is not None
                     and self.durable is not None
-                    and self._named.get(chat_name) is named
+                    and self._named.holds(chat_name, named)
                 ):
-                    await self._record_named(chat_name, named, inner, provider)
+                    await self._named.record(self.durable, chat_name, named, provider)
                 state.done.set()
 
         def turn_ended() -> None:
@@ -1503,7 +1530,7 @@ class ProviderDispatcher(StepDispatcher):
             if state.skipped and not state.started:
                 with contextlib.suppress(Exception):
                     await inner.cancel("skipped")
-            if chat_name is None or self._named.get(chat_name) is not named:
+            if chat_name is None or not self._named.holds(chat_name, named):
                 # A named chat's session lives until the run ends, once it is the chat's.
                 with contextlib.suppress(Exception):
                     await inner.aclose()
