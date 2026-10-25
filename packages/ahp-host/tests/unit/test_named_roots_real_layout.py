@@ -132,3 +132,23 @@ async def test_the_tree_layout_is_unchanged(tree: tuple[Path, Path, Path]) -> No
     assert (await provider.read("file:///proj/src/a.txt")).data == b"hello"
     assert not provider.serves(base.as_uri())
     assert provider.roots.spine_children(base.as_uri()) is None
+
+
+@pytest.mark.skipif(not Path("/tmp").is_dir(), reason="needs a real top-level /tmp")
+async def test_a_real_path_outside_every_root_does_not_resolve_as_a_tree_spelling(
+    tmp_path: Path,
+) -> None:
+    base = tmp_path.resolve() / "x"
+    srvdata = base / "srvdata"
+    proj = base / "home" / "dev" / "proj"
+    (srvdata).mkdir(parents=True)
+    proj.mkdir(parents=True)
+    (srvdata / "other").write_text("served")
+    provider = NamedRootsResourceProvider(Roots.named({"tmp": srvdata, "proj": proj}, "real"))
+    # `/tmp` is a real directory here: this is that path, not the root named `tmp`.
+    assert provider.roots.real_path("file:///tmp/other") is None
+    assert not provider.serves("file:///tmp/other")
+    with pytest.raises(errors.AhpError):
+        await provider.read("file:///tmp/other")
+    # The root itself is still reachable at its real URI.
+    assert (await provider.read((srvdata / "other").as_uri())).data == b"served"

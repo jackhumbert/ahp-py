@@ -20,8 +20,9 @@ spine directory lists only the children that are roots or lead to one, and the
 listing is synthesized from the roots, never read from the disk. It is a
 listing and nothing more: reading, writing or watching a spine path is refused
 like any path outside the roots. Tree spellings (`file:///<name>/<rel>`) still
-resolve to the named root, unless the URI is itself inside a real root or on
-the spine: the real path wins.
+resolve to the named root, unless the URI is itself inside a real root, on the
+spine, or under a top-level folder the machine really has (`file:///tmp/x` is
+`/tmp/x`, not a root named `tmp`): the real path wins.
 """
 
 from __future__ import annotations
@@ -168,7 +169,7 @@ class Roots:
 
         Tree layout: `file:///<name>/<rel>`. Real layout: the real path inside
         a root first, then (a real path wins) the tree spelling, unless the URI
-        is on the spine.
+        is on the spine or under a top-level folder the machine really has.
         """
         parsed = urlparse(uri)
         if parsed.scheme not in ("file", "vscode-agent-host"):
@@ -181,6 +182,11 @@ class Roots:
                         rel = "" if path == root else path.relative_to(root).as_posix()
                         return index, rel
             if self._spine_node(uri) is not None:
+                return None
+            if path is not None and path.parts[1:2] and Path(path.anchor, path.parts[1]).exists():
+                # A real top-level folder (`/tmp`) is that path, not the root a
+                # tree spelling would call `tmp`. Only a first segment the
+                # machine has no such folder for is read as a tree spelling.
                 return None
         segments = [unquote(s) for s in parsed.path.split("/") if s]
         if not segments or segments[0] not in self.names:
