@@ -355,7 +355,9 @@ async def _create(fleet: Fleet, directories: list[str]) -> int:
         )
         return 0
     except RpcError as exc:
-        return exc.code if "is available to this connection" in exc.message else -1
+        if exc.code is None or "is available to this connection" not in exc.message:
+            return -1
+        return exc.code
     finally:
         await raw.shutdown()
 
