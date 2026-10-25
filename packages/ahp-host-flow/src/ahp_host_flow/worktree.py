@@ -10,12 +10,13 @@ publishes them as a changeset on the worker chat (plan §4.4).
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import dataclasses
 import logging
 import os
 from asyncio.subprocess import DEVNULL, PIPE
 from collections import deque
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Final
@@ -246,7 +247,25 @@ async def commit_onto_repo(wt: Worktree, *, message: str) -> str:
         "commit", "-q", "-F", "-", "--", *paths, cwd=wt.repo, stdin=message.encode("utf-8")
     )
     if code != 0:
-        raise WorktreeError(f"git commit failed: {err.strip()}")
+        # Take the patch back out of the index and the working tree (`apply --index` needed
+        # both clean for these paths, so nothing of the user's is touched).
+        undo, _, undo_err = await _git_bytes(
+            "apply",
+            "--index",
+            "--reverse",
+            "--binary",
+            "--whitespace=nowarn",
+            "-",
+            cwd=wt.repo,
+            stdin=patch,
+        )
+        if undo != 0:
+            raise WorktreeError(
+                f"git commit failed: {err.strip()}; undoing the apply failed too "
+                f"({undo_err.strip()}), so the changes are applied to {wt.repo} and its index, "
+                "uncommitted"
+            )
+        raise WorktreeError(f"git commit failed: {err.strip()} (the working tree is unchanged)")
     code, head, err = await _git("rev-parse", "HEAD", cwd=wt.repo)
     if code != 0:
         raise WorktreeError(f"git rev-parse failed: {err.strip()}")
@@ -254,6 +273,10 @@ async def commit_onto_repo(wt: Worktree, *, message: str) -> str:
 
 
 async def discard_worktree(wt: Worktree) -> None:
+    if not wt.path.exists():
+        # Deleted by hand: only git's record of it can be left, and prune drops that.
+        await _git("worktree", "prune", cwd=wt.repo)
+        return
     code, _, err = await _git("worktree", "remove", "--force", str(wt.path), cwd=wt.repo)
     if code != 0:
         raise WorktreeError(f"git worktree remove failed: {err.strip()}")
@@ -324,6 +347,8 @@ class WorktreeChangesets:
         #: (`FlowProvider.changeset_operations` sets this); before that a changeset has none.
         self.operations_registered = False
         self._kept: dict[str, KeptWorktree] = {}
+        #: One lock per changeset, so two operations pressed together run one after the other.
+        self._locks: dict[str, asyncio.Lock] = {}
 
     async def publish(
         self,
@@ -482,45 +507,60 @@ class WorktreeChangesets:
             restored += 1
         return restored
 
-    def _lookup(self, uri: str) -> KeptWorktree:
-        kept = self._kept.get(uri)
-        if kept is None:
-            raise RuntimeError(
-                "no worktree is kept for this changeset (already resolved, or the host restarted)"
-            )
-        return kept
+    @contextlib.asynccontextmanager
+    async def _taken(self, uri: str) -> AsyncIterator[KeptWorktree]:
+        """The kept worktree of *uri*, taken out under its lock before any side effect.
+
+        A second operation on the same changeset finds it gone. If the block fails, the
+        worktree is kept again, so the operation can be retried (or the changeset discarded).
+        """
+        async with self._locks.setdefault(uri, asyncio.Lock()):
+            kept = self._kept.pop(uri, None)
+            if kept is None:
+                raise RuntimeError(
+                    "no worktree is kept for this changeset "
+                    "(already resolved, or the host restarted)"
+                )
+            try:
+                yield kept
+            except BaseException:
+                self._kept.setdefault(uri, kept)
+                raise
+        if uri not in self._kept:
+            self._locks.pop(uri, None)
 
     async def apply(self, uri: str) -> None:
-        kept = self._lookup(uri)
-        await apply_to_repo(kept.worktree, await worktree_patch(kept.worktree))
-        await self._resolve(uri, kept, "Applied to the working tree")
+        async with self._taken(uri) as kept:
+            await apply_to_repo(kept.worktree, await worktree_patch(kept.worktree))
+        await self._resolve(kept, "Applied to the working tree")
 
     async def commit(
         self, uri: str, *, params: Mapping[str, Any], principal: str | None
     ) -> dict[str, str]:
         """Commit the kept worktree on a new branch, or onto the working tree (`apply`)."""
-        kept = self._lookup(uri)
-        message = params.get("message")
-        if message is not None and not isinstance(message, str):
-            raise WorktreeError("params.message must be a string")
-        message = (message or "").strip() or self.default_message(kept)
-        onto_repo = params.get("apply", False)
-        if not isinstance(onto_repo, bool):
-            raise WorktreeError("params.apply must be a boolean")
-        signer = _trailer_value(principal) if principal else ""
-        if self.trailer and signer:
-            # A principal comes from a header or a token; a newline in it would forge trailers.
-            message += f"\n\nFlow-Principal: {signer}"
-        if onto_repo:
-            sha = await commit_onto_repo(kept.worktree, message=message)
-            text = f"Committed {sha[:12]} on the working tree"
-        else:
-            branch = self.branch.replace("{runId}", kept.run_id or "run").replace(
-                "{ordinal}", str(kept.ordinal)
-            )
-            sha = await commit_worktree(kept.worktree, branch=branch, message=message)
-            text = f"Committed {sha[:12]} on branch {branch}"
-        await self._resolve(uri, kept, text)
+        async with self._taken(uri) as kept:
+            message = params.get("message")
+            if message is not None and not isinstance(message, str):
+                raise WorktreeError("params.message must be a string")
+            message = (message or "").strip() or self.default_message(kept)
+            onto_repo = params.get("apply", False)
+            if not isinstance(onto_repo, bool):
+                raise WorktreeError("params.apply must be a boolean")
+            signer = _trailer_value(principal) if principal else ""
+            if self.trailer and signer:
+                # A principal comes from a header or a token; a newline in it would forge
+                # trailers.
+                message += f"\n\nFlow-Principal: {signer}"
+            if onto_repo:
+                sha = await commit_onto_repo(kept.worktree, message=message)
+                text = f"Committed {sha[:12]} on the working tree"
+            else:
+                branch = self.branch.replace("{runId}", kept.run_id or "run").replace(
+                    "{ordinal}", str(kept.ordinal)
+                )
+                sha = await commit_worktree(kept.worktree, branch=branch, message=message)
+                text = f"Committed {sha[:12]} on branch {branch}"
+        await self._resolve(kept, text)
         return {"message": text}
 
     def default_message(self, kept: KeptWorktree) -> str:
@@ -530,13 +570,13 @@ class WorktreeChangesets:
         return self._mask(f"flow: run {kept.run_id or 'run'} step {kept.ordinal}")
 
     async def discard(self, uri: str, *, reason: str | None = None) -> None:
-        kept = self._lookup(uri)
-        if not reason:
-            await self._resolve(uri, kept, "Discarded")
-            return
-        masked = self._mask(reason)
-        _log.info("agent() #%s: changeset discarded: %s", kept.ordinal, masked)
-        await self._resolve(uri, kept, f"Discarded: {masked}")
+        async with self._taken(uri) as kept:
+            if not reason:
+                await self._resolve(kept, "Discarded")
+                return
+            masked = self._mask(reason)
+            _log.info("agent() #%s: changeset discarded: %s", kept.ordinal, masked)
+            await self._resolve(kept, f"Discarded: {masked}")
         self._notes.setdefault(kept.chat, deque(maxlen=NOTES_KEEP)).append(
             f"[discarded: {kept.title}] {masked}"
         )
@@ -566,8 +606,7 @@ class WorktreeChangesets:
         except Exception as exc:
             _log.warning("agent() #%s: discard notification failed: %s", kept.ordinal, exc)
 
-    async def _resolve(self, uri: str, kept: KeptWorktree, text: str) -> None:
+    async def _resolve(self, kept: KeptWorktree, text: str) -> None:
         await discard_worktree(kept.worktree)
-        self._kept.pop(uri, None)
         resolved = dataclasses.replace(kept.changeset, operations=(), description=text)
         await kept.publisher.changes_published(resolved, [], chat=kept.chat)

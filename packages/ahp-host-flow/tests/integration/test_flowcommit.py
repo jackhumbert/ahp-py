@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import shutil
+import subprocess
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any, cast
@@ -18,6 +20,7 @@ from ahp_host_flow.worktree import (
     COMMIT_OPERATION,
     DISCARD_OPERATION,
     WorktreeChangesets,
+    WorktreeError,
     commit_subject,
     create_worktree,
     worktree_path,
@@ -395,3 +398,63 @@ async def test_flowcommit_trailer_principal_cannot_forge_lines(tmp_path: Path) -
     assert not any(c in lines[-1] for c in "\r\x07\x1b")
     trailers = git(ws, "log", "-1", "--format=%(trailers:only,unfold)", "flow/r1-3")
     assert [t.split(":", 1)[0] for t in trailers.splitlines() if t] == ["Flow-Principal"]
+
+
+async def test_flowcommit_concurrent_operations_run_once(tmp_path: Path) -> None:
+    """Apply and Commit pressed together: one of them runs, the other finds it resolved."""
+    ws = moved_and_deleted_repo(tmp_path)
+    changesets = WorktreeChangesets()
+    uri = await kept_with_move_and_delete(ws, tmp_path, changesets, run_id="r1")
+    results = await asyncio.gather(
+        changesets.apply(uri),
+        changesets.commit(uri, params={}, principal=None),
+        return_exceptions=True,
+    )
+    failed = [r for r in results if isinstance(r, BaseException)]
+    assert len(failed) == 1, results
+    assert "no worktree is kept" in str(failed[0])
+    applied = (ws / "moved.txt").exists()
+    branched = bool(git(ws, "branch", "--list", "flow/r1-3").strip())
+    assert applied != branched
+
+
+@pytest.mark.parametrize("pruned", [False, True])
+async def test_flowcommit_discard_after_worktree_deleted(tmp_path: Path, pruned: bool) -> None:
+    ws = moved_and_deleted_repo(tmp_path)
+    changesets = WorktreeChangesets()
+    uri = await kept_with_move_and_delete(ws, tmp_path, changesets)
+    shutil.rmtree(tmp_path / "wt")
+    if pruned:  # the user also tidied git's own record of it
+        git(ws, "worktree", "prune")
+    await changesets.discard(uri)
+    assert "wt" not in git(ws, "worktree", "list")
+    with pytest.raises(RuntimeError, match="no worktree is kept"):
+        await changesets.discard(uri)
+
+
+async def test_flowcommit_commit_failure_leaves_the_index_alone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ws = moved_and_deleted_repo(tmp_path)
+    changesets = WorktreeChangesets()
+    uri = await kept_with_move_and_delete(ws, tmp_path, changesets)
+    # No identity anywhere: `git commit` fails after the patch is applied to the index.
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(tmp_path / "no-such-config"))
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+    git(ws, "config", "--unset", "user.name")
+    git(ws, "config", "--unset", "user.email")
+    git(ws, "config", "user.useConfigOnly", "true")
+    with pytest.raises(WorktreeError, match="git commit failed"):
+        await changesets.commit(uri, params={"apply": True}, principal=None)
+    assert (
+        subprocess.run(
+            ["git", "status", "--porcelain"], cwd=ws, capture_output=True, text=True, check=True
+        ).stdout
+        == ""
+    )
+    assert (ws / "move.txt").exists()
+    # Still kept: fixing the identity and pressing Commit again works.
+    git(ws, "config", "user.name", "flow-test")
+    git(ws, "config", "user.email", "flow-test@example.com")
+    await changesets.commit(uri, params={"apply": True}, principal=None)
+    assert tree(ws, "HEAD") == {"README.md", "moved.txt"}
