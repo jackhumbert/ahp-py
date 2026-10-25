@@ -1131,6 +1131,8 @@ class ProviderDispatcher(StepDispatcher):
             model=ModelSelection(id=model) if model else None,
             chat_uri=worker.resource,
         )
+        #: A named chat's first call: its chat, registered once a turn on it succeeds.
+        fresh: _NamedChat | None = None
         if existing is not None:
             inner = existing.inner
         elif resumed is not None:
@@ -1159,8 +1161,10 @@ class ProviderDispatcher(StepDispatcher):
                 )
             )
             if chat_name is not None:
-                self._named[chat_name] = _NamedChat(name, worker, inner, title, config, folder)
-        named = self._named.get(chat_name) if chat_name else None
+                # Not registered to this provider until a turn on it succeeds (in `run`): a
+                # failed first call's fallback makes the chat on another provider instead.
+                fresh = _NamedChat(name, worker, inner, title, config, folder)
+        named = existing if existing is not None else fresh
         durable = self.durable
         inner_state: Mapping[str, Any] | None = None
         resume_turn_id = resumed[2] if resumed is not None else None
@@ -1253,6 +1257,8 @@ class ProviderDispatcher(StepDispatcher):
                     state.kind, state.transient = classify(
                         tee.error_type or "", resumable=tee.resumable, message=tee.failure or ""
                     )
+                elif fresh is not None and chat_name is not None:
+                    self._named[chat_name] = fresh
             except asyncio.CancelledError:
                 if state.timed_out:
                     with contextlib.suppress(Exception):
@@ -1295,7 +1301,12 @@ class ProviderDispatcher(StepDispatcher):
                 if tee.cost_usd is not None:
                     final["cost_usd"] = tee.cost_usd
                 reporter(final)
-                if named is not None and chat_name is not None and self.durable is not None:
+                if (
+                    named is not None
+                    and chat_name is not None
+                    and self.durable is not None
+                    and self._named.get(chat_name) is named
+                ):
                     await self._record_named(chat_name, named, inner, provider)
                 state.done.set()
 
@@ -1391,7 +1402,8 @@ class ProviderDispatcher(StepDispatcher):
             if state.skipped and not state.started:
                 with contextlib.suppress(Exception):
                     await inner.cancel("skipped")
-            if chat_name is None:
+            if chat_name is None or self._named.get(chat_name) is not named:
+                # A named chat's session lives until the run ends, once it is the chat's.
                 with contextlib.suppress(Exception):
                     await inner.aclose()
 

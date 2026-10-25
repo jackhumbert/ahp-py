@@ -295,7 +295,8 @@ name fails the call: `null` plus a `log()` line that lists the configured names.
 
 `agent(prompt, {x: {chat: 'name'}})` runs the call as a follow-up turn in the
 named worker chat and its inner session, created by the first call that names
-it. Calls that name one chat are serialized, so each sees the earlier turns.
+it. The chat is kept only once a turn on it succeeds: a first call that fails
+leaves no chat behind, so its fallback provider (or the next call) makes it. Calls that name one chat are serialized, so each sees the earlier turns.
 The chat closes when the run ends. It works for in-process providers only: a
 fleet or remote provider, and `isolation: 'worktree'`, fail the call. The inner
 session is created by the first call, so the chat keeps that call's `effort`:

@@ -119,3 +119,18 @@ async def test_fallchain_named_chat_skips_remote(
     assert not any("fell back" in m for m in messages)
     journal = load_journal(tmp_path / "state", run.name)
     assert [(a.status, a.kind) for a in journal.agents] == [("error", "unavailable")]
+
+
+async def test_fallchain_named_chat_first_call_falls_back(tmp_path: Path) -> None:
+    # A named chat belongs to a provider only once a turn on it succeeded: the failed first
+    # attempt on the primary must not pin the chat there, or the backup's attempt is refused.
+    value, _, run = await _run(
+        tmp_path, TOML, f"{FAIL!r}, x={{'chat': 'c'}}", "'again', x={'chat': 'c'}"
+    )
+    assert value == ["ok", None]
+    journal = load_journal(tmp_path / "state", run.name)
+    assert [s.provider for s in journal.started if s.ordinal == 0] == ["backup"]
+    # The chat now lives on the backup: a later call routed to the primary is told so.
+    assert [(a.ordinal, a.status) for a in journal.agents] == [(0, "ok"), (1, "error")]
+    (second,) = (a for a in journal.agents if a.ordinal == 1)
+    assert "runs on provider 'backup'" in str(second.error)
