@@ -69,6 +69,16 @@ def resolve_command(command: Sequence[str]) -> list[str]:
     return [program, *command[1:]]
 
 
+def _passwd(user: str | int) -> Any:
+    """*user*'s passwd entry (POSIX), or None when it has none."""
+    import pwd
+
+    try:
+        return pwd.getpwuid(user) if isinstance(user, int) else pwd.getpwnam(user)
+    except KeyError:
+        return None
+
+
 class AcpConnection:
     """One JSON-RPC peer over a pair of streams, usually a spawned agent's stdio.
 
@@ -140,10 +150,19 @@ class AcpConnection:
         shutdown can signal its whole group, grandchildren included. `user`,
         `group`, `umask` and `extra_groups` are POSIX-only and passed to the
         subprocess call. Setting `user` drops supplementary groups unless
-        `extra_groups` names the ones to keep.
+        `extra_groups` names the ones to keep, runs as the user's primary group
+        unless `group` names another (a uid with no passwd entry needs `group`),
+        and sets `HOME`, `USER` and `LOGNAME` to the user's, beneath `env`.
+
+        With `user`, `inherit_env=True` (the default) still passes this
+        process's other variables on to the agent: that is the caller's choice,
+        as it is without `user`. Pass `inherit_env=False` (and only what the
+        agent needs in `env`) so nothing of this process's reaches the other
+        user.
         """
         resolved = resolve_command(argv)
         kwargs: dict[str, Any] = {}
+        identity: dict[str, str] = {}
         grouped = False
         if sys.platform == "win32":
             # No console window per agent when the client runs from a Scheduled Task.
@@ -155,13 +174,26 @@ class AcpConnection:
             if user is not None:
                 kwargs["user"] = user
                 kwargs["extra_groups"] = []
+                entry = _passwd(user)
+                if entry is not None:
+                    identity = {
+                        "HOME": entry.pw_dir,
+                        "USER": entry.pw_name,
+                        "LOGNAME": entry.pw_name,
+                    }
+                if group is None:
+                    if entry is None:
+                        raise ValueError(f"user {user!r} has no passwd entry: give its group")
+                    # Not this process's group, which the child would keep otherwise.
+                    group = entry.pw_gid
             if extra_groups is not None:
                 kwargs["extra_groups"] = list(extra_groups)
             if group is not None:
                 kwargs["group"] = group
             if umask is not None:
                 kwargs["umask"] = umask
-        child_env = {**os.environ, **(env or {})} if inherit_env else dict(env or {})
+        base = {**os.environ, **identity} if inherit_env else identity
+        child_env = {**base, **(env or {})}
         process = await asyncio.create_subprocess_exec(
             *resolved,
             cwd=None if cwd is None else str(Path(cwd)),

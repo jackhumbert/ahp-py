@@ -42,6 +42,10 @@ asyncio.run(main())
   in its own process group (shutdown is close stdin, SIGTERM the group, SIGKILL
   the group, each after a grace period), as another `user`/`group`/`umask`
   (POSIX), and with an over-long line either closing the connection or skipped.
+  Another `user` runs in its own primary group unless `group` says otherwise,
+  with `HOME`, `USER` and `LOGNAME` set to its own; the rest of this process's
+  environment still goes along unless `inherit_env=False`, which is the
+  caller's choice.
 - **`AcpClient`**: `initialize`, the session methods (`new_session`,
   `load_session`, `resume_session`, `fork_session`, `close_session`,
   `list_sessions`, `set_mode`, `set_config_option`, `prompt`, `cancel`) and

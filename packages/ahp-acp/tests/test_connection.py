@@ -326,6 +326,69 @@ async def test_user_drops_supplementary_groups_by_default(monkeypatch: pytest.Mo
     assert kwargs["extra_groups"] == []
 
 
+def _fake_passwd(monkeypatch: pytest.MonkeyPatch) -> None:
+    import pwd
+
+    entry = pwd.struct_passwd(("me", "x", 4141, 4242, "", "/Users/me", "/bin/sh"))
+
+    def by_name(name: str) -> pwd.struct_passwd:
+        if name != "me":
+            raise KeyError(name)
+        return entry
+
+    def by_uid(uid: int) -> pwd.struct_passwd:
+        if uid != 4141:
+            raise KeyError(uid)
+        return entry
+
+    monkeypatch.setattr(pwd, "getpwnam", by_name)
+    monkeypatch.setattr(pwd, "getpwuid", by_uid)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="user and groups are POSIX-only")
+@pytest.mark.parametrize("user", ["me", 4141])
+@pytest.mark.parametrize("inherit_env", [True, False])
+async def test_user_gets_its_primary_group_and_identity(
+    monkeypatch: pytest.MonkeyPatch, user: str | int, inherit_env: bool
+) -> None:
+    _fake_passwd(monkeypatch)
+    monkeypatch.setenv("HOME", "/home/caller")
+    kwargs = await _spawn_kwargs(
+        monkeypatch, user=user, inherit_env=inherit_env, env={"EXTRA": "1"}
+    )
+    assert kwargs["user"] == user
+    assert kwargs["group"] == 4242
+    env = kwargs["env"]
+    assert (env["HOME"], env["USER"], env["LOGNAME"], env["EXTRA"]) == (
+        "/Users/me",
+        "me",
+        "me",
+        "1",
+    )
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="user and groups are POSIX-only")
+async def test_user_identity_yields_to_explicit_env_and_group(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _fake_passwd(monkeypatch)
+    kwargs = await _spawn_kwargs(monkeypatch, user="me", group=7, env={"HOME": "/srv/agent"})
+    assert kwargs["group"] == 7
+    assert kwargs["env"]["HOME"] == "/srv/agent"
+    assert kwargs["env"]["USER"] == "me"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="user and groups are POSIX-only")
+async def test_user_without_a_passwd_entry_needs_a_group(monkeypatch: pytest.MonkeyPatch) -> None:
+    _fake_passwd(monkeypatch)
+    with pytest.raises(ValueError, match="group"):
+        await spawn({}, user=9999)
+    kwargs = await _spawn_kwargs(monkeypatch, user=9999, group=9999)
+    assert (kwargs["user"], kwargs["group"]) == (9999, 9999)
+    # No entry to take an identity from: the environment is left as it was.
+    assert kwargs["env"].get("LOGNAME") == os.environ.get("LOGNAME")
+
+
 @pytest.mark.skipif(sys.platform == "win32", reason="user and groups are POSIX-only")
 async def test_extra_groups_keeps_the_named_groups(monkeypatch: pytest.MonkeyPatch) -> None:
     kwargs = await _spawn_kwargs(monkeypatch, user="nobody", extra_groups=(100, "staff"))
