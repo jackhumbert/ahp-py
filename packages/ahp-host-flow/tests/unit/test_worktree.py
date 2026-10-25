@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -11,6 +13,7 @@ import pytest
 from ahp_host_flow.worktree import (
     WorktreeError,
     apply_to_repo,
+    commit_onto_repo,
     create_worktree,
     discard_worktree,
     release_worktree,
@@ -237,3 +240,68 @@ async def test_worktree_revert_restores_exact_original_bytes(
 
     assert (ws / "bin.dat").read_bytes() == BINARY
     assert (ws / "text.txt").read_bytes() == git_bytes(ws, "show", "HEAD:text.txt")
+
+
+def identity(repo: Path) -> None:
+    git(repo, "config", "user.name", "flow-test")
+    git(repo, "config", "user.email", "flow-test@example.com")
+
+
+def committed(repo: Path) -> list[str]:
+    return git(repo, "show", "--name-only", "--format=", "HEAD").split()
+
+
+async def test_worktree_commit_paths_are_literal(tmp_path: Path) -> None:
+    """An agent's file named `*.txt` is not a pathspec: the user's notes.txt stays out."""
+    ws = tmp_path / "ws"
+    init_repo(ws)
+    identity(ws)
+    (ws / "notes.txt").write_text("v1", encoding="utf-8")
+    git(ws, "add", "notes.txt")
+    git(ws, "commit", "-q", "-m", "notes")
+    wt = await create_worktree(ws, tmp_path / "wt")
+    (wt.path / "*.txt").write_text("star", encoding="utf-8")
+    (ws / "notes.txt").write_text("the user's own edit", encoding="utf-8")
+
+    assert [c.uri.rsplit("/", 1)[-1] for c in await worktree_changes(wt)] == ["%2A.txt"]
+    await commit_onto_repo(wt, message="agent")
+
+    assert committed(ws) == ["*.txt"]
+    assert "notes.txt" in git(ws, "status", "--porcelain")
+
+
+async def test_worktree_leading_dash_names(tmp_path: Path) -> None:
+    ws = tmp_path / "ws"
+    init_repo(ws)
+    identity(ws)
+    wt = await create_worktree(ws, tmp_path / "wt")
+    (wt.path / "-n").write_text("dash", encoding="utf-8")
+    (wt.path / "--all").write_text("dashes", encoding="utf-8")
+
+    changes = await worktree_changes(wt)
+    assert sorted(c.after or b"" for c in changes) == [b"dash", b"dashes"]
+    await commit_onto_repo(wt, message="agent")
+    assert sorted(committed(ws)) == ["--all", "-n"]
+
+
+NON_UTF8 = os.fsdecode(b"caf\xe9.txt")
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="needs a filesystem taking any bytes")
+async def test_worktree_non_utf8_names(tmp_path: Path) -> None:
+    ws = tmp_path / "ws"
+    init_repo(ws)
+    identity(ws)
+    wt = await create_worktree(ws, tmp_path / "wt")
+    (wt.path / NON_UTF8).write_bytes(b"latin")
+
+    (change,) = await worktree_changes(wt)
+    assert change.uri == (wt.repo / NON_UTF8).as_uri()
+    assert (change.before, change.after) == (None, b"latin")
+    await apply_to_repo(wt, await worktree_patch(wt))
+    assert (ws / NON_UTF8).read_bytes() == b"latin"
+    (ws / NON_UTF8).unlink()
+
+    await commit_onto_repo(wt, message="agent")
+    assert (ws / NON_UTF8).read_bytes() == b"latin"
+    assert "caf" in git(ws, "show", "--name-only", "--format=", "HEAD")

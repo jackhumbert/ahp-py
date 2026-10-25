@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import logging
+import os
 from asyncio.subprocess import DEVNULL, PIPE
 from collections import deque
 from collections.abc import Callable, Mapping, Sequence
@@ -55,9 +56,11 @@ def worktree_path(state_dir: Path, run_id: str, ordinal: int) -> Path:
 
 
 async def _git_bytes(*args: str, cwd: Path, stdin: bytes | None = None) -> tuple[int, bytes, str]:
+    """Run git; every path it is given is literal (an agent's file may be named `*.txt`)."""
     try:
         proc = await asyncio.create_subprocess_exec(
             "git",
+            "--literal-pathspecs",
             *args,
             cwd=cwd,
             stdin=DEVNULL if stdin is None else PIPE,
@@ -143,8 +146,10 @@ async def worktree_changes(wt: Worktree) -> list[FileChange]:
     if code != 0:
         raise WorktreeError(f"git diff failed: {err.strip()}")
     # With -z flag, output is null-byte separated: status\0path\0status\0path\0...
+    # A path is decoded as the filesystem does (`os.fsdecode`), so a name that is not UTF-8
+    # comes back to git as the same bytes.
     fields = out.rstrip(b"\0").split(b"\0")
-    fields_decoded = [f.decode("utf-8", errors="replace") for f in fields]
+    fields_decoded = [os.fsdecode(f) for f in fields]
     pairs = {fields_decoded[i + 1]: fields_decoded[i] for i in range(0, len(fields_decoded) - 1, 2)}
     changes: list[FileChange] = []
     for path in sorted(pairs):
@@ -225,7 +230,7 @@ async def commit_onto_repo(wt: Worktree, *, message: str) -> str:
     )
     if code != 0:
         raise WorktreeError(f"git diff failed: {err.strip()}")
-    paths = [p.decode("utf-8", errors="replace") for p in out.split(b"\0") if p]
+    paths = [os.fsdecode(p) for p in out.split(b"\0") if p]
     if not paths:
         raise WorktreeError("nothing to commit")
     patch = await worktree_patch(wt)
