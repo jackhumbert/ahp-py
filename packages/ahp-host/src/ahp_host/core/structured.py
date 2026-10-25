@@ -94,6 +94,10 @@ NO_TOOL_FALLBACK_NOTICE: Final = (
     "reply instead."
 )
 
+#: The bare-JSON fallback of :func:`last_json_block` looks at this many trailing
+#: characters of the reply.
+_BARE_SCAN_LIMIT: Final = 64 * 1024
+_OBJECT_START: Final = re.compile(r'\{\s*["}]')
 _FENCE: Final = re.compile(r"```[^\n`]*\n(.*?)```", re.DOTALL)
 
 
@@ -192,14 +196,31 @@ def last_json_block(text: str) -> tuple[bool, Any]:
             return True, json.loads(body)
         except ValueError:
             continue
+    # Only the tail: a reply's answer comes last, and a bound keeps the scan cheap.
+    text = text[-_BARE_SCAN_LIMIT:]
     decoder = json.JSONDecoder()
     found, last, i = False, None, 0
     while i < len(text):
-        if text[i] in "{[":
+        if text[i] == "{" and not _OBJECT_START.match(text, i):
+            # Cheaper than a failed decode, which builds an error that counts
+            # lines back to the start of the text.
+            i += 1
+        elif text[i] in "{[":
             try:
                 last, i = decoder.raw_decode(text, i)
-            except ValueError:
-                i += 1
+            except json.JSONDecodeError as exc:
+                # Resume where the attempt gave up, not one character on: each
+                # `[` of ``[1,[1,[1,`` would otherwise decode to the end again
+                # and fail, quadratic in the reply. A value inside the failed span
+                # is lost; the attempt that swallowed it was malformed.
+                i = max(i + 1, exc.pos)
+                continue
+            except RecursionError:
+                # Too deep to decode: skip the run of openers, keeping its last.
+                j = i
+                while j < len(text) and text[j] in "{[":
+                    j += 1
+                i = max(i + 1, j - 1)
                 continue
             found = True
         else:

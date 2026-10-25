@@ -79,6 +79,30 @@ def test_prose() -> None:
     assert last_json_block("plain prose") == (False, None)
 
 
+def test_a_failed_attempt_does_not_hide_a_later_value() -> None:
+    assert last_json_block('[ not json ] and {"a": 1, oops} then {"b": 2}') == (True, {"b": 2})
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["[1," * 20000, "{" * 100000, "[" * 100000, '{"a": [' * 20000],
+    ids=["open-arrays", "braces", "deep", "nested-objects"],
+)
+def test_unclosed_brackets_take_linear_time(text: str) -> None:
+    # Each `[` used to start a decode that ran to the end of the text and
+    # failed, one character apart: quadratic in the reply.
+    import time
+
+    began = time.perf_counter()
+    assert last_json_block(text) == (False, None)
+    assert time.perf_counter() - began < 1.0
+
+
+def test_a_value_at_the_end_of_a_long_reply_is_found() -> None:
+    text = "[1," * 50000 + ' and finally {"answer": 42}'
+    assert last_json_block(text) == (True, {"answer": 42})
+
+
 def test_capability_protocol_and_message_defaults() -> None:
     class Offers:
         def offers_host_tools(self) -> bool:
