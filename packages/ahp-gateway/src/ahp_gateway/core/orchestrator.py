@@ -1225,12 +1225,20 @@ class Orchestrator:
         return {"session": child.uri, "stopped": True}
 
     def flow_child_owner(self, channel: str) -> Principal | None:
-        """Whose run started a session, when *channel* is one a flow run started or its chat."""
+        """Whose run started a session, when *channel* is one a flow run started or any chat of it.
+
+        The default chat is recorded with the child; any other chat (one opened
+        later, by the run's principal or the agent) is found in the session's
+        state in the owner's mirror, as `flow_owner` finds a flow session's.
+        """
         for adopted in self._adopted.values():
             if adopted.kind != "flow":
                 continue
             for child in adopted.children.values():
                 if channel in (child.uri, child.chat):
+                    return adopted.principal
+                client = self._clients.get((adopted.principal.subject, child.node))
+                if client is not None and channel in _chats_of(client.mirror.state(child.uri)):
                     return adopted.principal
         return None
 
@@ -1246,13 +1254,14 @@ class Orchestrator:
             if channel == adopted.uri:
                 return adopted.principal
             client = self._clients.get((adopted.principal.subject, adopted.node))
-            state = client.mirror.state(adopted.uri) if client is not None else None
-            if not isinstance(state, Mapping):
-                continue
-            chats = {c.get("resource") for c in state.get("chats") or [] if isinstance(c, Mapping)}
-            if channel == state.get("defaultChat") or channel in chats:
+            if client is not None and channel in _chats_of(client.mirror.state(adopted.uri)):
                 return adopted.principal
         return None
+
+    def run_owner(self, channel: str) -> Principal | None:
+        """Whose flow run *channel* belongs to: its flow session, a session it started, or
+        a chat of either. None for every other channel."""
+        return self.flow_owner(channel) or self.flow_child_owner(channel)
 
     # ─── what it started ─────────────────────────────────────────────────
 
@@ -1331,6 +1340,21 @@ class Orchestrator:
 
 
 # ─── helpers ─────────────────────────────────────────────────────────────
+
+
+def _chats_of(session: Any) -> set[str]:
+    """Every chat a mirrored `SessionState` names: its default chat and its catalogue."""
+    if not isinstance(session, Mapping):
+        return set()
+    chats = {
+        c["resource"]
+        for c in session.get("chats") or []
+        if isinstance(c, Mapping) and isinstance(c.get("resource"), str)
+    }
+    default = session.get("defaultChat")
+    if isinstance(default, str):
+        chats.add(default)
+    return chats
 
 
 def _arguments(tool_input: Any) -> dict[str, Any]:

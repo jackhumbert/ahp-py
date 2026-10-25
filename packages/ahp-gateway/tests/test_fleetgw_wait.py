@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from ahp_client import TurnCompleted, TurnFailed
+from ahp_client import TurnCompleted
 
 from ahp_gateway.core.orchestrator import _Spawned
 from tests.fleet import Fleet
@@ -147,11 +147,9 @@ async def test_fleetgw_wait_another_user_cannot_prompt_the_flow_session(tmp_path
     try:
         await start_flow(fleet, "flow:/r1", "surface-1")
         async with fleet.surface("surface-2") as other:
-            session = await other.open_session("flow:/r1")
-            chat = await session.chat()
-            refused = await chat.prompt("hi")
-        assert isinstance(refused, TurnFailed)
-        assert "another user" in refused.reason
+            # Not even opened: a flow session is its principal's to read, too.
+            with pytest.raises(Exception, match="another user's flow run"):
+                await other.open_session("flow:/r1")
 
         async with fleet.surface("surface-1") as owner:
             session = await owner.open_session("flow:/r1")

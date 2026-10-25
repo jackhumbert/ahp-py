@@ -417,11 +417,16 @@ validated structured result, usage, status, error) and `stop_session`.
   it, and every session its tools start is started as that principal, over the
   orchestrator's own (principal, node) links, only on nodes the registry admits
   them to. A run can only wait on, read or stop the sessions it started. The
-  gateway refuses, from any other principal, a `chat/turnStarted` on the flow
-  session, and any subscribe or dispatch on a session a flow run started or its
-  chat (`flow_child_owner`): those are listed in the flat session list like
-  any other, but readable and drivable only by the run's principal
-  (`ahp-host-flow` plan §9, "Fleet identity").
+  flow session, every session its run started, and every chat of either
+  (`Orchestrator.run_owner`, which finds a chat other than the default in the
+  owner's mirror) are listed in the flat session list like any other, but
+  readable and drivable only by the run's principal (`ahp-host-flow` plan §9,
+  "Fleet identity"). One check, `_check_run_access`, refuses any other
+  principal on every path: a subscribe (`initialize.initialSubscriptions` and
+  `reconnect.subscriptions` included, where the channel is simply absent from
+  the snapshots), any request naming such a channel (its routing keys, and
+  `fork.session`, `source.chat`, `destination.session`), and any client action
+  dispatched on one, which is echoed back rejected.
 - **Config.** `child_config` is the base. `permissionMode` may be asked
   stricter only (`plan` < `default` < `acceptEdits` < `auto` <
   `bypassPermissions`; a looser one fails the call, and with no

@@ -144,6 +144,10 @@ _SESSION_CONFIG_METHODS: Final = frozenset({"resolveSessionConfig", "sessionConf
 _CONTENT_READS: Final = frozenset({"resourceRead", "resourceResolve"})
 #: `NotFound`: what a node answers for content it does not hold.
 _NOT_FOUND: Final = -32008
+#: Commands that only read the channels they name; the rest drive them.
+_READS: Final = frozenset(
+    {"fetchTurns", "fetchAutomationRuns", "resourceList", "resourceRead", "resourceResolve"}
+)
 
 
 @dataclass(frozen=True)
@@ -445,6 +449,8 @@ class _SurfaceConnection:
             params = {**params, "provider": orchestrator.config.provider}
         if method == "subscribe":
             return await self._subscribe(params, after)
+        for channel in _named_channels(params):
+            self._check_run_access(channel, write=method not in _READS)
         if method == "listSessions":
             return await self._list_sessions(params)
         if method == "createSession":
@@ -996,8 +1002,6 @@ class _SurfaceConnection:
         if channel.startswith(TELEMETRY_SCHEME):
             await self._subscribe_telemetry(channel, options)
             return {}
-        if self._not_this_runs(channel):
-            raise AhpError(_REFUSED, "this session belongs to another user's flow run")
         snapshot = await self._subscribe_channel(channel, after, options)
         return {"snapshot": snapshot} if snapshot is not None else {}
 
@@ -1061,6 +1065,8 @@ class _SurfaceConnection:
         after: list[dict[str, Any]],
         options: Mapping[str, Any] | None = None,
     ) -> dict[str, Any] | None:
+        # Here, so `initialize` and `reconnect` subscribe through the same check.
+        self._check_run_access(channel, write=False)
         node_id = self._route({"channel": channel})
         # The buffer opens BEFORE any node is asked - including by the probe
         # below, whose subscription to the owner IS the real one. Opened any
@@ -1469,6 +1475,11 @@ class _SurfaceConnection:
                 # The merged root has no config to change (see core.root), and
                 # no single node owns the others.
                 return
+            try:
+                self._check_run_access(channel, write=True)
+            except AhpError as exc:
+                self._reject(params, exc.message)
+                return
             if channel == AUTOMATIONS_URI:
                 node_id = self._node_for_automation_action(params)
                 if node_id is None:
@@ -1491,23 +1502,6 @@ class _SurfaceConnection:
                 # silently, the surface's optimistic prediction stays applied.
                 _log.debug("dispatchAction naming another node's file rejected: %s", exc)
                 self._reject(params, str(exc))
-                return
-            action = params.get("action")
-            orchestrator = self.gateway.orchestrator
-            if (
-                orchestrator is not None
-                and isinstance(action, Mapping)
-                and action.get("type") == "chat/turnStarted"
-                and isinstance(channel, str)
-            ):
-                owner = orchestrator.flow_owner(channel)
-                if owner is not None and (
-                    self.principal is None or owner.subject != self.principal.subject
-                ):
-                    self._reject(params, "this flow session runs as another user")
-                    return
-            if isinstance(channel, str) and self._not_this_runs(channel):
-                self._reject(params, "this session belongs to another user's flow run")
                 return
             target.link.notify("dispatchAction", outgoing)
         # Unknown notifications are ignored, per the additive-change guarantee.
@@ -1643,23 +1637,33 @@ class _SurfaceConnection:
         if isinstance(reduced, dict):
             node.automations = reduced
 
-    def _not_this_runs(self, channel: str) -> bool:
-        """Whether *channel* is a session a flow run started as someone other than this surface.
+    def _check_run_access(self, channel: Any, *, write: bool) -> None:
+        """Refuse *channel* when it belongs to another principal's flow run.
 
-        A flow run's calls are started as the principal who started the run, and
-        the engine reads their results back as its `agent()` returns. Another
-        principal reading one would see that user's work, and driving one
-        (prompting, cancelling, answering its approvals) would steer what their
-        run gets back (plan §9 of ahp-host-flow: one principal's run never drives
-        another's sessions, nor another principal a run's). Listed like every
-        session, but neither readable nor drivable by anyone else.
+        The one choke point for run isolation: every subscribe (`initialize`'s
+        and `reconnect`'s included), every request naming a channel and every
+        client action passes through here. A flow session runs as the principal
+        who started it, its calls are started as that principal, and the engine
+        reads their results back as its `agent()` returns. Another principal
+        reading any of them would see that user's work, and driving one
+        (prompting, queueing, resuming, cancelling, answering its approvals,
+        disposing it) would steer what their run gets back (plan §9 of
+        ahp-host-flow: one principal's run never drives another's sessions, nor
+        another principal a run's). So the flow session, every session its run
+        started and every chat of either are listed like any session but are
+        the run's principal's alone: *write* says which the caller wants, and
+        both are refused alike.
         """
         orchestrator = self.gateway.orchestrator
-        if orchestrator is None:
-            return False
-        owner = orchestrator.flow_child_owner(channel)
-        return owner is not None and (
-            self.principal is None or owner.subject != self.principal.subject
+        if orchestrator is None or not isinstance(channel, str):
+            return
+        owner = orchestrator.run_owner(channel)
+        principal = self.principal
+        if owner is None or (principal is not None and owner.subject == principal.subject):
+            return
+        verb = "driven" if write else "read"
+        raise AhpError(
+            _REFUSED, f"this session belongs to another user's flow run and cannot be {verb} here"
         )
 
     def _reject(self, dispatch: Mapping[str, Any], reason: str) -> None:
@@ -1812,6 +1816,17 @@ class _SurfaceConnection:
             )
         else:
             future.set_result(message.get("result"))
+
+
+def _named_channels(params: Mapping[str, Any]) -> list[str]:
+    """Every channel a request names: its routing keys, and the session or chat it
+    reads from or moves into (`fork.session`, `source.chat`, `destination.session`)."""
+    named = [params.get(key) for key in _CHANNEL_KEYS]
+    for key, inner in (("fork", "session"), ("source", "chat"), ("destination", "session")):
+        nested = params.get(key)
+        if isinstance(nested, Mapping):
+            named.append(nested.get(inner))
+    return [value for value in named if isinstance(value, str)]
 
 
 def _is_content_ref(uri: Any) -> bool:
