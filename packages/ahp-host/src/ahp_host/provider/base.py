@@ -1067,6 +1067,13 @@ class AuthChallenge:
     reason: str = "unauthorized"
     required_scopes: Sequence[str] = ()
     oauth_client: Mapping[str, Any] | None = None
+    #: The MCP server (`McpServerCustomization.id`) the paused tool call belongs
+    #: to -- what `ToolCallAuthRequiredState.contributor.customizationId` says
+    #: on the wire. Not part of the challenge's own wire form. A client may
+    #: answer with `authenticate.target` naming it, and the host then wakes this
+    #: call from that push alone; a challenge that names no server is woken only
+    #: by an untargeted push.
+    customization_id: str | None = None
 
     def to_wire(self) -> dict[str, Any]:
         wire: dict[str, Any] = {"reason": self.reason, "resource": dict(self.resource)}

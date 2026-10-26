@@ -686,6 +686,41 @@ def _mcp_server_state(state: Any, customization_id: Any) -> Mapping[str, Any] | 
     return server if isinstance(server, Mapping) else None
 
 
+def _authenticate_target(raw: Any) -> tuple[str, str]:
+    """`(session, customizationId)` of an `AuthenticateParams.target`, or `InvalidParams`.
+
+    The only kind there is is `mcpServer`; `AuthenticateTargetKind` is
+    `@nonexhaustive`, so a kind we do not know arrives from a newer client and
+    is refused. Nothing else is safe: we cannot tell which consumer it names, so
+    we cannot honour it, and falling back to an untargeted push would apply the
+    token more widely than the client asked -- the leak the field exists to
+    prevent.
+    """
+    if not isinstance(raw, Mapping):
+        raise errors.invalid_params("target must be an object")
+    kind = raw.get("kind")
+    if not isinstance(kind, str):
+        raise errors.invalid_params("target.kind is required and must be a string")
+    if kind != "mcpServer":
+        raise errors.invalid_params(f"unsupported authenticate target kind {kind!r}")
+    session = raw.get("session")
+    customization_id = raw.get("customizationId")
+    if not isinstance(session, str) or not isinstance(customization_id, str):
+        raise errors.invalid_params("target.session and target.customizationId are required")
+    return session, customization_id
+
+
+def _target_detail(raw: Any) -> dict[str, Any]:
+    """What an audit record says about a target: its session and server, if it names them."""
+    if not isinstance(raw, Mapping):
+        return {}
+    session = raw.get("session")
+    customization_id = raw.get("customizationId")
+    if not isinstance(session, str) or not isinstance(customization_id, str):
+        return {}
+    return {"target": {"session": session, "customizationId": customization_id}}
+
+
 def _enablement_rejection(enablement: Any) -> str | None:
     """Why a `session/customizationToggled` decision list is unusable, if it is.
 
@@ -2121,9 +2156,12 @@ class Host:
         #: the spec keys acceptance on having-been-advertised, not on the
         #: challenge still being open.
         self._dynamic_resources: set[str] = set()
-        #: One timer per resource whose token carried `expiresIn` (1.0.0).
-        #: Replaced by the next push, cancelled by a revoke.
-        self._token_expiry: dict[str, asyncio.TimerHandle] = {}
+        #: One timer per grant whose token carried `expiresIn` (1.0.0), keyed
+        #: like the grant: `(resource, session, customizationId)`, the last two
+        #: `None` for an agent-level one, so a targeted timer can neither
+        #: replace nor cancel the agent-level grant's. Replaced by the next
+        #: push of the same key, cancelled by a revoke of it.
+        self._token_expiry: dict[tuple[str, str | None, str | None], asyncio.TimerHandle] = {}
         #: Automation plugin captures (1.0.0) run one at a time, and hand their
         #: copies to `_react_to_automation` as an argument: a copy parked by
         #: resource would outlive an action the host then drops.
@@ -4479,12 +4517,47 @@ class Host:
         if not isinstance(resource, str) or not isinstance(token, str):
             raise errors.invalid_params("resource and token are required")
 
+        # `target` (c5628cd4): the one MCP server this token is for. PRESENT is
+        # what matters -- an explicit `null` is not an absent key (invariant 18),
+        # and a target we cannot read must never degrade into an untargeted
+        # push, which is the very leak the field exists to prevent.
+        target: tuple[str, str] | None = None
+        target_detail: dict[str, Any] = {}
+        if "target" in params:
+            target_detail = _target_detail(params["target"])
+            try:
+                target = _authenticate_target(params["target"])
+            except errors.AhpError as refusal:
+                self._audit(
+                    "auth.refused",
+                    connection,
+                    allowed=False,
+                    reason=refusal.message,
+                    detail={"resource": resource, **target_detail},
+                )
+                raise
+
         known = {r.resource for r in self._protected_resources()}
         if resource not in known and resource not in self._dynamic_resources:
             raise errors.invalid_params(f"{resource!r} is not a protected resource of this agent")
         if not self.policy.may_push_token(connection.info, resource):
             self._audit("auth.refused", connection, allowed=False, detail={"resource": resource})
             raise errors.AhpError(-32009, f"Not permitted to authenticate {resource}")
+
+        if target is not None:
+            try:
+                self._check_authenticate_target(connection, target, resource, revoking=token == "")
+            except errors.AhpError as refusal:
+                self._audit(
+                    "auth.refused",
+                    connection,
+                    allowed=False,
+                    reason=refusal.message,
+                    detail={"resource": resource, **target_detail},
+                )
+                raise
+        session_uri, customization_id = target if target is not None else (None, None)
+        grant_key = (resource, session_uri, customization_id)
 
         expires_in = params.get("expiresIn")
         if expires_in is not None and (
@@ -4494,12 +4567,14 @@ class Host:
             # negative lifetime is a token the client already knows is dead.
             raise errors.invalid_params("expiresIn must be a positive integer")
 
-        self._cancel_token_expiry(resource)
+        self._cancel_token_expiry(grant_key)
         if token == "":
             # "An empty `token` revokes authentication for the resource." Not a
             # credential, so nothing it could resolve: parked calls stay parked.
-            self.tokens.revoke(resource)
-            self._audit("auth.revoked", connection, detail={"resource": resource})
+            # With a target, only that server's grant: the agent-level one (and
+            # every other server's) is not what this client was talking about.
+            self.tokens.revoke(resource, session=session_uri, customization_id=customization_id)
+            self._audit("auth.revoked", connection, detail={"resource": resource, **target_detail})
             return {}
 
         raw_scopes = params.get("scopes")
@@ -4507,41 +4582,57 @@ class Host:
             [s for s in raw_scopes if isinstance(s, str)] if isinstance(raw_scopes, list) else None
         )
         grant = self.tokens.push(
-            resource, token, scopes=scopes, client_id=connection.client_id, expires_in=expires_in
+            resource,
+            token,
+            scopes=scopes,
+            client_id=connection.client_id,
+            expires_in=expires_in,
+            session=session_uri,
+            customization_id=customization_id,
         )
         if expires_in is not None:
-            self._token_expiry[resource] = asyncio.get_running_loop().call_later(
-                expires_in, lambda: self._spawn(self._expire_token(resource, grant))
+            self._token_expiry[grant_key] = asyncio.get_running_loop().call_later(
+                expires_in, lambda: self._spawn(self._expire_token(grant_key, grant))
             )
-        await self._resolve_auth_challenges(resource, scopes)
-        # The resource, never the token. `AuditEvent` carries identifiers only,
-        # and a credential in an audit record is a credential on disk.
-        self._audit("auth.accepted", connection, detail={"resource": resource})
+        await self._resolve_auth_challenges(resource, scopes, target=target)
+        # The resource -- and for a targeted push the session and server it was
+        # for -- never the token. `AuditEvent` carries identifiers only, and a
+        # credential in an audit record is a credential on disk.
+        self._audit("auth.accepted", connection, detail={"resource": resource, **target_detail})
         # `AuthenticateResult` is `{}` on the wire. The reference's internal type
         # says `{authenticated: boolean}`; the wire handler returns `{}`, and the
         # spec agrees with the wire.
         return {}
 
-    def _cancel_token_expiry(self, resource: str) -> None:
-        timer = self._token_expiry.pop(resource, None)
+    def _cancel_token_expiry(self, key: tuple[str, str | None, str | None]) -> None:
+        timer = self._token_expiry.pop(key, None)
         if timer is not None:
             timer.cancel()
 
-    async def _expire_token(self, resource: str, grant: TokenGrant) -> None:
+    async def _expire_token(
+        self, key: tuple[str, str | None, str | None], grant: TokenGrant
+    ) -> None:
         """A pushed token reached its `expiresIn`: drop it and say so.
 
         Only if the grant is still the one this timer was armed for -- a
         refresh pushed in the meantime replaced it and cancelled the timer, but
-        a timer that already fired must not revoke the new token.
+        a timer that already fired must not revoke the new token. *key* is the
+        grant's own, so a targeted grant's timer drops that grant and nothing
+        else.
         """
-        self._token_expiry.pop(resource, None)
+        self._token_expiry.pop(key, None)
         if not self.tokens.revoke_grant(grant):
             return
+        resource, session, _customization_id = key
         # "When `reason` is `expired`, the client MUST acquire a new credential
         # or renew the existing credential" -- the reason is what stops a
-        # client blindly replaying the token it just pushed.
+        # client blindly replaying the token it just pushed. A targeted grant
+        # concerns one session, so it is said there rather than to every client
+        # of the host (`AuthRequiredParams.channel` may name any channel).
         with contextlib.suppress(Exception):
-            await self.notify_auth_required(resource, reason="expired")
+            await self.notify_auth_required(
+                resource, reason="expired", channel=ROOT_URI if session is None else session
+            )
 
     def _advertise_resource(self, resource: str) -> None:
         """Record a protected resource advertised through a live challenge.
@@ -4553,8 +4644,79 @@ class Host:
         """
         self._dynamic_resources.add(resource)
 
+    def _check_authenticate_target(
+        self,
+        connection: Connection,
+        target: tuple[str, str],
+        resource: str,
+        *,
+        revoking: bool,
+    ) -> None:
+        """Refuse a `target` that does not name an MCP server this peer may feed.
+
+        Every refusal is `InvalidParams`: "The host MUST reject an unknown
+        session or customization, or a customization that is not an MCP server".
+        A session the connection may not see gets the **same** answer, message
+        included, as one that does not exist -- a different one would let a
+        peer probe which sessions other principals have.
+
+        *resource* must be what the server itself asked for: "`resource` MUST
+        still equal that server's advertised `McpAuthRequirement.resource.resource`".
+        That is its `authRequired` state, or a tool call of it paused on an
+        auth challenge. A server that is not asking for anything has advertised
+        nothing, and a token for it is refused rather than parked in the store
+        for a challenge that may never come. A **revoke** skips only that last
+        test: it hands nothing over, and the server has usually moved on to
+        `ready` by the time its token is withdrawn.
+        """
+        session_uri, customization_id = target
+        if session_uri not in self._sessions or not self._may_observe(connection, session_uri):
+            raise errors.invalid_params(f"{session_uri!r} is not a session of this host")
+        state = self.sequencer.state_of(session_uri)
+        if _mcp_server_entry(state, customization_id) is None:
+            raise errors.invalid_params(
+                f"{customization_id!r} is not an MCP server of {session_uri!r}"
+            )
+        if revoking:
+            return
+        if resource not in self._mcp_server_resources(session_uri, customization_id):
+            raise errors.invalid_params(
+                f"{customization_id!r} did not advertise {resource!r} as the resource it needs"
+            )
+
+    def _mcp_server_resources(self, session_uri: str, customization_id: str) -> set[str]:
+        """The protected resources this MCP server is asking for right now.
+
+        Read from what the host published, not remembered: the server's
+        `authRequired` state (`McpServerAuthRequiredState.resource`), and the
+        challenge of any of its tool calls that is parked
+        (`ToolCallAuthRequiredState.auth.resource`) -- the two ways a server's
+        requirement reaches a client.
+        """
+        found: set[str] = set()
+        server = _mcp_server_state(self.sequencer.state_of(session_uri), customization_id)
+        if server is not None and server.get("kind") == "authRequired":
+            metadata = server.get("resource")
+            identifier = metadata.get("resource") if isinstance(metadata, Mapping) else None
+            if isinstance(identifier, str):
+                found.add(identifier)
+        for request_id in self.pending.ids_of_kind("auth"):
+            request = self.pending.get(request_id)
+            if (
+                request is not None
+                and request.session == session_uri
+                and request.customization_id == customization_id
+                and request.resource is not None
+            ):
+                found.add(request.resource)
+        return found
+
     async def _resolve_auth_challenges(
-        self, resource: str, scopes: Sequence[str] | None = None
+        self,
+        resource: str,
+        scopes: Sequence[str] | None = None,
+        *,
+        target: tuple[str, str] | None = None,
     ) -> None:
         """Wake every tool call that was paused waiting for THIS credential.
 
@@ -4570,10 +4732,26 @@ class Host:
         any push resumed a call blocked on resource B with a token for resource
         A -- across sessions, since the registry is host-global -- and the
         unsatisfied call just failed upstream again and re-challenged.
+
+        A push with a *target* (`authenticate.target`) is narrower still: it
+        wakes only the parks of that one MCP server in that session, never a
+        sibling server's, never another session's, and never a park that named
+        no server. An untargeted push wakes every matching park, as it always
+        did, those included.
+
+        The server's own session-level `inputNeeded` entry (`mcp:<id>`) is left
+        alone on both paths: it follows the server's state, and the provider
+        clears it by publishing the server out of `authRequired`
+        (`mcp_server_changed`). Only the woken park's own entry is withdrawn.
         """
         for request_id in list(self.pending.ids_of_kind("auth")):
             request = self.pending.get(request_id)
             if request is None:
+                continue
+            if target is not None and (
+                request.customization_id is None
+                or (request.session, request.customization_id) != target
+            ):
                 continue
             # A park that named no resource stays answerable by any push -- the
             # same anywhere-answerable default a channel-less park gets.
@@ -4601,9 +4779,16 @@ class Host:
             raise auth_required(outstanding)
 
     async def notify_auth_required(
-        self, resource: str | ProtectedResource, *, reason: AuthRequiredReason = "required"
+        self,
+        resource: str | ProtectedResource,
+        *,
+        reason: AuthRequiredReason = "required",
+        channel: str = ROOT_URI,
     ) -> None:
         """Tell subscribers a credential is needed, or has expired.
+
+        *channel* is the root channel unless the credential belongs to one
+        session (a targeted grant, `authenticate.target`).
 
         Ephemeral and explicitly not replayed, so `-32007` on the next command
         is the complete fallback -- a client that missed this still finds out.
@@ -4619,7 +4804,9 @@ class Host:
                 ProtectedResource(resource),
             )
         await self.sequencer.notify(
-            ROOT_URI, AUTH_REQUIRED_METHOD, auth_required_params(resource, reason=reason)
+            channel,
+            AUTH_REQUIRED_METHOD,
+            auth_required_params(resource, channel=channel, reason=reason),
         )
 
     # ─── telemetry ───────────────────────────────────────────────────────

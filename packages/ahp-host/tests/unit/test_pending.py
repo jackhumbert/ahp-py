@@ -22,6 +22,18 @@ def anyio_backend() -> str:
     return "asyncio"
 
 
+async def test_an_auth_park_records_its_session_and_mcp_server() -> None:
+    """What `authenticate.target` matches on: the pair, not either alone."""
+    pending = PendingRequests()
+    named = pending.open(
+        "turn-1", "auth", session="echo:/a", customization_id="srv", resource="https://r"
+    )
+    bare = pending.open("turn-1", "auth", session="echo:/a")
+    assert (named.session, named.customization_id) == ("echo:/a", "srv")
+    assert (bare.session, bare.customization_id) == ("echo:/a", None)
+    assert pending.open("turn-1", "input").session is None
+
+
 async def test_resolving_hands_the_outcome_to_the_waiter() -> None:
     pending = PendingRequests()
     request = pending.open("turn-1", "input")

@@ -74,6 +74,14 @@ class PendingRequest:
     #: anywhere-answerable default a channel-less park gets.
     resource: str | None = None
     required_scopes: tuple[str, ...] = ()
+    #: The session an `"auth"` park belongs to and the MCP server
+    #: (`McpServerCustomization.id`) whose tool call it paused, when the call
+    #: has one (`ToolCallAuthRequiredState.contributor.customizationId`). A
+    #: push that names a target (`authenticate.target`) wakes only the parks
+    #: whose pair it is, so a park with no customization is woken by untargeted
+    #: pushes alone. ``None`` for both on a park that cannot say.
+    session: str | None = None
+    customization_id: str | None = None
     #: The turn whose scope holds this request. Persisted with the session
     #: (`StoredSession.input_requests`), so the next process can say which
     #: turn's request a restart withdrew.
@@ -121,6 +129,8 @@ class PendingRequests:
         owner: str | None = None,
         resource: str | None = None,
         required_scopes: Sequence[str] = (),
+        session: str | None = None,
+        customization_id: str | None = None,
         turn_id: str | None = None,
     ) -> PendingRequest:
         """Park a new request and return it, un-awaited.
@@ -134,7 +144,8 @@ class PendingRequests:
 
         *resource* and *required_scopes* are what an `"auth"` park is waiting
         for, so `authenticate` can wake only the calls its token can actually
-        unblock.
+        unblock. *session* and *customization_id* name the MCP server the call
+        is waiting on, so a targeted push can wake exactly that server's parks.
 
         *channel* is where the request was asked, and it is what makes
         :meth:`is_open` and :meth:`id_for_key` answerable. Ids are minted
@@ -155,6 +166,8 @@ class PendingRequests:
             owner=owner,
             resource=resource,
             required_scopes=tuple(required_scopes),
+            session=session,
+            customization_id=customization_id,
             turn_id=turn_id,
         )
         self._by_id[request_id] = request

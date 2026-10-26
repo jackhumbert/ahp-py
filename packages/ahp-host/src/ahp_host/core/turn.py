@@ -999,6 +999,11 @@ class ActionTurnSink:
             # Before the publish, so no client can see a challenge whose
             # resource the host would still refuse a token for.
             self._advertise_resource(resource_id)
+        # Which MCP server the call waits on, for `authenticate.target`. Only
+        # the provider can say: this sink starts a call with no `mcp`
+        # contributor (`tool_call_started` takes none), so there is nothing in
+        # the call's state to read it back from.
+        customization_id = challenge.customization_id
         parked = self._pending.open(
             turn_scope(self._channel, self._turn_id),
             "auth",
@@ -1006,6 +1011,10 @@ class ActionTurnSink:
             channel=self._channel,
             resource=resource_id,
             required_scopes=challenge.required_scopes,
+            # A park that names no server is never matched by a target, so the
+            # session alone wakes nothing.
+            session=self._session_uri,
+            customization_id=customization_id,
             turn_id=self._turn_id,
         )
         await self._sequencer.publish(

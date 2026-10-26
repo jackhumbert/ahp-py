@@ -755,6 +755,41 @@ content by construction**. Both are absent by default.
 One host runs **one provider**. `RootState.agents` is plural and this publishes
 one entry, deliberately: see [`docs/roadmap.md`](https://github.com/jackhumbert/ahp-py/blob/main/packages/ahp-host/docs/roadmap.md) §4a.
 
+### Tokens pushed with `authenticate`
+
+`authenticate` hands the host a bearer token for a service the **agent** (or one
+of its MCP servers) talks to; it never admits the connection. The host stores it
+in `Host.tokens`, a `TokenStore`, and wakes any tool call parked on a matching
+challenge. `Policy.may_push_token` gates who may push which resource.
+
+A client answering one MCP server's challenge may add a **`target`**,
+`{"kind": "mcpServer", "session": <uri>, "customizationId": <id>}`. The host then
+applies the token to that server in that session only:
+
+- It is refused with `InvalidParams` (-32602) when the `kind` is not
+  `mcpServer`, when the session is unknown **or one the connection may not see**
+  (the same answer for both), when the customization is not an MCP server of
+  that session, or when `resource` is not what that server is asking for (its
+  `authRequired` state, or a parked tool call of it). An empty `token` with a
+  `target` revokes only that server's grant, and skips the last check.
+- `TokenStore` keeps targeted grants apart, keyed
+  `(resource, session, customizationId)`. **`tokens.get(resource)` never returns
+  one**; it is the agent-level lookup, as before, and `satisfies`, `resources`
+  and `unsatisfied` stay agent-level too. An embedder handing a token to the MCP
+  server it runs asks
+  `tokens.get_for(resource, session=..., customization_id=...)`: that server's
+  own grant, else the agent-level one, never another server's.
+  `tokens.targets()` lists the live targeted keys (never the tokens).
+- A targeted push wakes only the parked `request_authentication` calls of that
+  server (`AuthChallenge(customization_id=...)`). A call that names no server is woken by untargeted pushes alone.
+  Expiry (`expiresIn`), revoke and replacement work per key: a targeted push
+  never replaces, cancels or revokes the agent-level grant, and the reverse.
+  A targeted expiry is announced with `auth/required` on the **session**
+  channel rather than the root.
+- Without a `target` nothing changes. The audit detail of `auth.accepted`,
+  `auth.revoked` and `auth.refused` carries the target's `session` and
+  `customizationId`, never the token.
+
 ## ⚠️ Security: read this before exposing a host
 
 **AHP defines no security model, and says so.** Connection admission is

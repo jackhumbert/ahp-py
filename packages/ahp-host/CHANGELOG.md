@@ -18,6 +18,19 @@ versions each release speaks.
   targeted grant, else the agent-level one. `push`/`revoke` take `session=` and
   `customization_id=`, `revoke_grant` works per key, and `targets()` lists the live keys.
   `TokenGrant` gains `session`, `customization_id` and `targeted`.
+- `authenticate` honours `target` (`{kind: "mcpServer", session, customizationId}`). A
+  present `target` that is not a well-formed `mcpServer` one, names a session the host does
+  not have or the connection may not see (the same answer), names a customization that is
+  not an MCP server of it, or carries a `resource` other than the one that server is asking
+  for (its `authRequired` state or a parked tool call of it) is refused with `InvalidParams`.
+  An empty `token` with a `target` revokes only that grant.
+- A targeted push wakes only the parked `auth` requests of that server
+  (`PendingRequest.session`, `PendingRequest.customization_id`; new
+  `AuthChallenge.customization_id` names the server). A park with no server is woken by
+  untargeted pushes alone. Expiry timers are per grant, and a targeted expiry is announced
+  with `auth/required` on the session channel (`Host.notify_auth_required(channel=)`).
+- The `auth.accepted`, `auth.revoked` and `auth.refused` audit detail carries the target's
+  `session` and `customizationId`, never the token.
 
 ### Fixed — review fixes (security)
 
