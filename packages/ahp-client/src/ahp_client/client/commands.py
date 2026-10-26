@@ -380,12 +380,26 @@ class CommandsMixin:
     # ── auth ─────────────────────────────────────────────────────────────────
 
     async def authenticate(
-        self, *, resource: str, token: str, scopes: Sequence[str] | None = None
+        self,
+        *,
+        resource: str,
+        token: str,
+        scopes: Sequence[str] | None = None,
+        target: Mapping[str, Any] | None = None,
     ) -> JsonObject:
         """Push a token for an upstream service the agent talks to.
 
         **Not a login.** It never gates the AHP connection itself; connection
         admission is explicitly outside the wire protocol.
+
+        *target* names the one consumer the token is for -- today
+        ``{"kind": "mcpServer", "session": <uri>, "customizationId": <id>}``.
+        Answer a specific MCP server's challenge with it: a host that honours it
+        applies the token to that server in that session only, where an
+        untargeted token may satisfy every matching challenge. Leave it out for
+        a provider-level resource. It is sent only when given, and unchanged --
+        the kind enum is non-exhaustive, so the host, not this client, decides
+        what it can serve; an older host ignores the field.
         """
         return await self._root(
             "authenticate",
@@ -393,6 +407,7 @@ class CommandsMixin:
                 "resource": resource,
                 "token": token,
                 "scopes": list(scopes) if scopes is not None else None,
+                "target": dict(target) if target is not None else None,
             },
         )
 

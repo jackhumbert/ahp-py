@@ -6,6 +6,14 @@ Every release states the protocol versions it speaks.
 
 ## [Unreleased]
 
+### Added — `authenticate{target}` (upstream `c5628cd4`)
+
+- `AhpClient.authenticate(..., target=)` and `InputResponder.authenticate(..., target=)` take
+  an optional `{"kind": "mcpServer", "session", "customizationId"}` so a token answers one MCP
+  server's challenge in one session only. Sent only when given, and forwarded unchanged (an
+  unknown `kind` is the host's call). Also updates the corpus counts in `AGENTS.md` for the
+  re-pin: 335 reducer fixtures, 97 round-trips.
+
 ### Changed — review fixes
 
 - `TurnStream.structured` reads the result through

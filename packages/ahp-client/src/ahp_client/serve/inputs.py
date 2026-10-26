@@ -245,19 +245,30 @@ class InputResponder:
         )
 
     async def authenticate(
-        self, entry: Mapping[str, Any], *, token: str, scopes: Sequence[str] = ()
+        self,
+        entry: Mapping[str, Any],
+        *,
+        token: str,
+        scopes: Sequence[str] = (),
+        target: Mapping[str, Any] | None = None,
     ) -> None:
         """The one input that is **not** a chat action.
 
         ``kind == "toolAuthentication"`` is resolved by pushing a token for the
         resource the tool call names, through the `authenticate` command --
         dispatching a chat action here would leave the agent blocked.
+
+        Pass *target* (``{"kind": "mcpServer", "session": ..., "customizationId":
+        ...}``) when the challenge came from one MCP server, so the host applies
+        the token to that server alone. It is not derived from *entry*: a chat
+        URI is opaque, and the session that owns the server is the caller's to
+        name.
         """
         tool_call = entry.get("toolCall")
         auth = tool_call.get("auth") if isinstance(tool_call, Mapping) else None
         resource = auth.get("resource") if isinstance(auth, Mapping) else None
         await self._client.authenticate(
-            resource=str(resource or ""), token=token, scopes=list(scopes)
+            resource=str(resource or ""), token=token, scopes=list(scopes), target=target
         )
 
     def _questions_for(self, entry: Mapping[str, Any]) -> list[JsonObject]:
