@@ -362,7 +362,8 @@ async def test_another_user_cannot_see_or_run_an_automation_through_the_gateway(
         except Exception as error:
             refused = error
         assert refused is not None
-        assert "-32009" in str(refused)
+        # The host answers another principal's automation exactly as a missing one.
+        assert "-32008" in str(refused)
         assert host._automations[resource].runs == []
 
         again, _ = await alice.subscribe(AUTOMATIONS_URI)
