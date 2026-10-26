@@ -40,6 +40,7 @@ from .test_mcp_and_stepup import (
 pytestmark = pytest.mark.anyio
 
 SRV = "srv"
+_RESOURCE_ID = str(_RESOURCE["resource"])
 INVALID_PARAMS = -32602
 
 
@@ -163,7 +164,7 @@ async def _push(
     client: FakeClient,
     *,
     target: Any = None,
-    resource: str = _RESOURCE["resource"],
+    resource: str = _RESOURCE_ID,
     token: str = "fresh-token",
     **extra: Any,
 ) -> dict[str, Any]:

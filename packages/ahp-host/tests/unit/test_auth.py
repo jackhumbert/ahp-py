@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import traceback
+from typing import Any
 
 import pytest
 from ahp_protocol.types import AHP_ERROR_CODES, ROOT_CHANNEL
@@ -427,8 +428,8 @@ class TestExpiry:
         assert grant.token.reveal() == "new"
 
 
-_A = {"session": "echo:/a", "customization_id": "srv"}
-_B = {"session": "echo:/b", "customization_id": "srv"}
+_A: dict[str, Any] = {"session": "echo:/a", "customization_id": "srv"}
+_B: dict[str, Any] = {"session": "echo:/b", "customization_id": "srv"}
 
 
 class TestTargetedGrants:
