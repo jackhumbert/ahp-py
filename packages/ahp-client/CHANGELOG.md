@@ -6,6 +6,11 @@ Every release states the protocol versions it speaks.
 
 ## [Unreleased]
 
+### Changed — review fixes
+
+- `TurnStream.structured` reads the result through
+  `ahp_protocol.ext.structured.structured_result` (no behaviour change).
+
 ## [0.1.0] - unreleased
 
 ### Fixed — cancellation on Python 3.11

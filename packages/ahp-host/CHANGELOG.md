@@ -10,6 +10,44 @@ versions each release speaks.
 
 ## [Unreleased]
 
+### Fixed — review fixes (security)
+
+- Automation working directories are checked with `may_grant_working_directory` at save
+  and, through the new optional `may_grant_working_directory_for(principal, ...)` policy hook
+  (implemented by `OwnedSessionPolicy`), at run time. A principal policy without the hook
+  fails closed.
+- Automation origin echoes and replays go to their sender by identity, not by `clientId`.
+- A connection whose policy `principal_of` names no principal may not create or manage
+  owned automations.
+- A run session's interrupted turn is not resumed after a restart; it stays failed, like
+  its run.
+- `ToolPolicy.deny_commands` asks when a program word holds a variable, and unwraps
+  `function`/`coproc`, `trap`, `find -exec`, `su`/`script`/`flock -c`, and the `ionice`,
+  `chroot`, `flock`, `busybox` and `watch` wrappers.
+- A plugin capture for an automation action the host drops no longer leaks into the next
+  update of that automation.
+- A removed automation's URI stays its owner's for the life of the process, and a run in
+  flight keeps its owner check after the automation is removed.
+- In the `real` roots layout, a path under a real top-level folder (`file:///tmp/x`) is no
+  longer read as a tree spelling of a root named `tmp`.
+
+### Fixed — review fixes
+
+- A run cancel that lands during start-up is honoured.
+- `last_json_block` scans only the last 64 KiB of a reply and skips past a failed decode, so
+  an unclosed-bracket reply no longer takes quadratic time.
+
+### Changed — review fixes
+
+- Another principal's automation is indistinguishable from a missing one: update, remove,
+  create, `runAutomation` and `fetchAutomationRuns` answer NotFound (`-32008` /
+  `no automation <uri>`) instead of `-32009` / `rejected by policy` / `already exists`.
+- Run and plugin-copy lookups are maps instead of scans.
+
+### Added — review fixes
+
+- `ahp_host.node.roots.layout_of`, shared by the node and agent configs.
+
 ### Added
 
 - **`InitializeResult._meta["vscode.autonomousAutomations"]: true`** whenever automations are

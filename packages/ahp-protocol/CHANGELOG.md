@@ -8,6 +8,11 @@ the spec revision it targets.
 
 ## [Unreleased]
 
+### Added — review fixes
+
+- `ahp_protocol.ext.structured.structured_result(turn, schema)`: the one reader for a
+  structured turn's result, shared by `ahp-client` and `ahp-gateway`.
+
 ### Added
 
 - **`ahp_protocol.ext.client_meta.AUTONOMOUS_AUTOMATIONS_META_KEY`** (`"vscode.autonomousAutomations"`),

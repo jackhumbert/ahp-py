@@ -37,10 +37,12 @@ is the design; milestones M0–M18 there say what exists (all done).
 - Dispatch is split by provider kind (`ProviderConfig.kind`: `inprocess`,
   `fleet`, `remote`). `dispatch.StepDispatcher` is the shared base (the main
   chat's `agent` tool call and its typed progress); `ProviderDispatcher`
-  (in-process worker chats) and `RemoteWorkerChats` (the thin worker chat of a
-  remote call) live in `dispatch`, `FleetDispatcher` and `FleetClients` in
-  `fleet` (fleet calls through a gateway's fleet tools, called from the main
-  turn's `run_client_tool`), and `RoutingDispatcher` picks one per call.
+  (in-process worker chats) lives in `dispatch`, `RemoteWorkerChats` (the thin
+  worker chat of a remote call) in `remotechats`, `FleetDispatcher` and
+  `FleetClients` in `fleet` (fleet calls through a gateway's fleet tools, called
+  from the main turn's `run_client_tool`), and `RoutingDispatcher`, in `router`,
+  picks one per call. `dispatch` re-exports `RemoteWorkerChats` and
+  `RoutingDispatcher`, so old imports keep working.
   `engine/remote.py` holds `ClientDispatcher`, which dials another host with
   `ahp_client` (so it is engine code: no `ahp_host`). `agent` is the `flow`
   agent type for `ahp-node` (the `ahp_host.agents` entry point).

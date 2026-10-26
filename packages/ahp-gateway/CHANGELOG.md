@@ -6,6 +6,32 @@ Every release states the protocol versions it speaks.
 
 ## [Unreleased]
 
+### Fixed — review fixes (security)
+
+- Flow-run isolation is checked on every path to a run's channels: `subscribe`,
+  `initialize.initialSubscriptions`, `reconnect.subscriptions`, every routed request
+  (`disposeSession`, `fetchTurns`, `createChat`, ...) and every client action
+  (`chat/pendingMessageSet`, `chat/turnResume`, ...), not only `subscribe` and
+  `chat/turnStarted`. Any chat of a child is covered, and a flow session and its chats are
+  readable only by their owner.
+- Node admission is asked on every orchestrator link use, so a principal who loses a group
+  is refused on its next flow.
+- On a `passthrough_node` connection, a `file:` URI bound for another node is refused
+  instead of being read as that node's path.
+- `client_files = "refuse"` matches the scheme case-insensitively, covers
+  `vscode-agent-host:` too, and applies to the session-config methods before routing.
+
+### Fixed — review fixes
+
+- Flat places gives a node without named roots one URI spelling both ways.
+- An unreachable flow child's node is redialled with a backoff (5 s doubling to 60 s), not
+  on every poll.
+- A flow child running a client tool reports `working`, not `waiting`.
+
+### Changed — review fixes
+
+- Listing `ahp-file:///` asks every node for its roots at once.
+
 ### Added
 
 - **`_meta["vscode.autonomousAutomations"]: true`** in the handshake when every node that hosts

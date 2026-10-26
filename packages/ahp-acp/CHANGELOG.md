@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+### Fixed — review fixes
+
+- stderr keeps draining past a line longer than the stream limit; one long line used to stop
+  the drain and stall the agent.
+- `spawn(user=...)` runs the child in the user's primary group unless `group` names another,
+  and sets `HOME`, `USER` and `LOGNAME` for that user.
+- `parse_update` never raises on a `usage_update`'s counts.
+
+### Added — review fixes
+
+- `kill_tree` and `signal_group` (process-group helpers), and
+  `AcpClient.settle_permissions`.
+
 ## [0.1.0] - unreleased
 
 ### Added — release preparation (M18)

@@ -145,8 +145,9 @@ class AcpConnection:
     ) -> AcpConnection:
         """Start the agent.
 
-        `inherit_env=False` gives the child exactly `env` and nothing from this
-        process. `new_process_group` (POSIX) puts the agent in its own session so
+        `inherit_env=False` gives the child `env` and nothing from this process
+        (plus the identity variables below when `user` is set).
+        `new_process_group` (POSIX) puts the agent in its own session so
         shutdown can signal its whole group, grandchildren included. `user`,
         `group`, `umask` and `extra_groups` are POSIX-only and passed to the
         subprocess call. Setting `user` drops supplementary groups unless

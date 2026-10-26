@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Fixed — review fixes
+
+- `usage_per_message` can be set in the config file and is honoured by the standalone
+  server; `from_config(roots=...)` applies the file's `roots_layout`.
+
+### Changed — review fixes
+
+- The roots layout is read with `ahp_host.node.roots.layout_of`.
+
 ### Added
 
 - `--roots-layout {tree,real}` and the `roots_layout` config key: serve named roots at

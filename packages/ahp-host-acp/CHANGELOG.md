@@ -2,6 +2,38 @@
 
 ## [Unreleased]
 
+### Fixed — review fixes (security)
+
+- A permission request is judged, by the tool policy and by the relayed-tool shortcut, on
+  the merged tool call, so a kind-less or partial request no longer slips past
+  `deny_commands`/`deny_paths`.
+- A host tool the policy asks about is marked `policy_asked`, so a flow `[approvals]` rule
+  cannot approve it.
+- A closed chat's tool-relay token is revoked and its open relays closed.
+
+### Fixed — review fixes
+
+- The top-level cached count pairs with the turn's input and never exceeds it;
+  `_meta.turnTokenTotals` keeps its shape and the agent's summed cache reads.
+- A failing chat drops only the agent connection it used.
+- `terminal/wait_for_exit` always answers, even through a release; reaping waits briefly for
+  the output to drain.
+- A closed chat's late updates are dropped instead of being given to a chat being opened.
+
+### Added — review fixes
+
+- The reference agent reports its context after each round (`usage_update`), sized by
+  `AHP_OPENAI_CONTEXT_WINDOW`.
+
+### Changed — review fixes
+
+- `AcpSession` is built on `ahp_acp.AcpClient`. A cancel that lands before a permission
+  prompt is up now answers that request `cancelled`.
+
+### Deprecated — review fixes
+
+- `ahp_host_acp.jsonrpc` emits a `DeprecationWarning`.
+
 ### Fixed — usage meter
 
 - `UsageInfo.inputTokens` is now the most recent model call (the turn's last `usage_update.used`),

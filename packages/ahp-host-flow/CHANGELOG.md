@@ -2,14 +2,55 @@
 
 ## [Unreleased]
 
-## [0.1.0] - unreleased
-
-### Fixed — sandbox realm escape through a replaced `JSON.stringify`
+### Fixed — review fixes (security)
 
 - The JS runner's host hooks (`hostCall`, `hostNotify`, `hostStart`) parse the script's
-  JSON without letting a host-realm `SyntaxError` reach the script, so a script that
-  replaces `JSON.stringify` before `log()`, `phase()`, `canvas()`, a gate or `workflow()`
-  no longer reaches the host `Function` and `process`.
+  JSON without letting a host-realm `SyntaxError` reach the script. Before, a script that
+  replaced `JSON.stringify` before `log()`, `phase()`, `canvas()`, a gate or `workflow()`
+  could reach the host `Function` and `process`.
+- The Node and Python script runners start with an allowlisted environment (PATH, locale,
+  TZ, temp dir, and the variables Windows needs), so a script cannot read the host's API
+  keys or tokens. `HOME`, `LD_LIBRARY_PATH` and version-manager variables are no longer
+  passed; a `node` that only starts through such a shim needs `AHP_FLOW_NODE` set to the real
+  binary.
+- A script error's stack keeps only the script's own frames, without host install paths.
+- Host-initiated git uses literal pathspecs (an agent's `*.txt` file no longer commits the
+  user's own edits) and runs no hooks. Non-UTF-8 file names are kept.
+- `ask()` choice ids, enum values and property names are masked like labels.
+- `redact_step` redacts every attempt of a retried or fallen-back call, and on a named chat
+  only that call's own turn.
+- Workers reach only the client tools they were offered, and never the client that offers
+  the fleet tools.
+- Approvals changes reach named chats and a run's live workers.
+
+### Fixed — review fixes
+
+- An `agent()` call cancelled from outside still charges the tokens it reported to the
+  budget and quota.
+- An ACP turn charges its summed usage from `_meta.turnTokenTotals`, not only its latest
+  model call.
+- A fleet call that fails after starting stops its node session. A failed reattach probe no
+  longer starts a second node session.
+- A named chat stays usable after one of its calls times out, and a failed first call no
+  longer pins it to its provider.
+- A worker's client tool call pauses the idle watchdog.
+- A worker whose setup fails after its session exists is cleaned up.
+- Restored in-flight records that a continued run cannot resume are dropped.
+- Each attempt of a worktree call gets its own worktree.
+- Changeset operations run once under concurrency and recover from partial failures.
+- `nan`/`inf` seconds, an unreadable `flow.toml`, and a `changesets.branch` without
+  `{runId}`/`{ordinal}` are config errors.
+- One failing redaction request no longer blocks the spool.
+- An inline script ends at its last fence, and `NaN`/`Infinity` args are refused.
+- `library.run` releases the journal when its setup fails.
+
+### Changed — review fixes
+
+- `dispatch.py` is split: `RoutingDispatcher` lives in `router`, `RemoteWorkerChats` in
+  `remotechats` (both re-exported from `dispatch`).
+- One shared number check for the engine's usage counters and for `flow.toml`.
+
+## [0.1.0] - unreleased
 
 ### Fixed — cancellation on Python 3.11
 
