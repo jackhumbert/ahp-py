@@ -8,6 +8,10 @@
   the drain and stall the agent.
 - `spawn(user=...)` runs the child in the user's primary group unless `group` names another,
   and sets `HOME`, `USER` and `LOGNAME` for that user.
+- `spawn(user=...)` no longer hands this process's environment to the other user by default:
+  the child gets `PATH`, the locale (`LANG`, `LANGUAGE`, `LC_*`, `TZ`), its own identity and
+  `env`. `inherit_env` now defaults to `None` (inherit unless `user` is set); pass
+  `inherit_env=True` to pass everything on.
 - `parse_update` never raises on a `usage_update`'s counts.
 
 ### Added — review fixes

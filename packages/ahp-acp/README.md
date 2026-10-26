@@ -43,9 +43,10 @@ asyncio.run(main())
   the group, each after a grace period), as another `user`/`group`/`umask`
   (POSIX), and with an over-long line either closing the connection or skipped.
   Another `user` runs in its own primary group unless `group` says otherwise,
-  with `HOME`, `USER` and `LOGNAME` set to its own; the rest of this process's
-  environment still goes along unless `inherit_env=False`, which is the
-  caller's choice.
+  with `HOME`, `USER` and `LOGNAME` set to its own. The rest of this process's
+  environment does not go along by default: it gets `PATH` and the locale
+  (`LANG`, `LANGUAGE`, `LC_*`, `TZ`), so no token or key of this process's
+  reaches the other user; `inherit_env=True` passes everything on.
 - **`AcpClient`**: `initialize`, the session methods (`new_session`,
   `load_session`, `resume_session`, `fork_session`, `close_session`,
   `list_sessions`, `set_mode`, `set_config_option`, `prompt`, `cancel`) and

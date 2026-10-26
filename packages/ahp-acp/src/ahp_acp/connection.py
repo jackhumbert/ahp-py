@@ -69,6 +69,15 @@ def resolve_command(command: Sequence[str]) -> list[str]:
     return [program, *command[1:]]
 
 
+def _portable_env() -> dict[str, str]:
+    """What another user's agent needs from this process: PATH and the locale."""
+    return {
+        name: value
+        for name, value in os.environ.items()
+        if name in ("PATH", "LANG", "LANGUAGE", "TZ") or name.startswith("LC_")
+    }
+
+
 def _passwd(user: str | int) -> Any:
     """*user*'s passwd entry (POSIX), or None when it has none."""
     import pwd
@@ -130,7 +139,7 @@ class AcpConnection:
         *,
         cwd: str | os.PathLike[str] | None = None,
         env: Mapping[str, str] | None = None,
-        inherit_env: bool = True,
+        inherit_env: bool | None = None,
         new_process_group: bool = True,
         user: str | int | None = None,
         group: str | int | None = None,
@@ -145,8 +154,9 @@ class AcpConnection:
     ) -> AcpConnection:
         """Start the agent.
 
-        `inherit_env=False` gives the child `env` and nothing from this process
-        (plus the identity variables below when `user` is set).
+        By default the child gets this process's environment merged with `env`;
+        `inherit_env=False` gives it `env` and nothing from this process (plus
+        the identity variables below when `user` is set).
         `new_process_group` (POSIX) puts the agent in its own session so
         shutdown can signal its whole group, grandchildren included. `user`,
         `group`, `umask` and `extra_groups` are POSIX-only and passed to the
@@ -155,12 +165,14 @@ class AcpConnection:
         unless `group` names another (a uid with no passwd entry needs `group`),
         and sets `HOME`, `USER` and `LOGNAME` to the user's, beneath `env`.
 
-        With `user`, `inherit_env=True` (the default) still passes this
-        process's other variables on to the agent: that is the caller's choice,
-        as it is without `user`. Pass `inherit_env=False` (and only what the
-        agent needs in `env`) so nothing of this process's reaches the other
-        user.
+        With `user`, the default does not inherit: the agent gets `PATH` and the
+        locale (`LANG`, `LANGUAGE`, `LC_*`, `TZ`) from this process, its own
+        identity, and `env`, so none of this process's tokens or keys reach the
+        other user. Pass `inherit_env=True` to hand it everything anyway.
         """
+        explicit_exact = inherit_env is False
+        if inherit_env is None:
+            inherit_env = user is None
         resolved = resolve_command(argv)
         kwargs: dict[str, Any] = {}
         identity: dict[str, str] = {}
@@ -193,7 +205,12 @@ class AcpConnection:
                 kwargs["group"] = group
             if umask is not None:
                 kwargs["umask"] = umask
-        base = {**os.environ, **identity} if inherit_env else identity
+        if inherit_env:
+            base = {**os.environ, **identity}
+        elif user is not None and not explicit_exact:
+            base = {**_portable_env(), **identity}
+        else:
+            base = identity
         child_env = {**base, **(env or {})}
         process = await asyncio.create_subprocess_exec(
             *resolved,

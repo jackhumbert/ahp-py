@@ -370,6 +370,25 @@ async def test_user_gets_its_primary_group_and_identity(
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="user and groups are POSIX-only")
+async def test_user_does_not_inherit_this_process_environment_by_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Another user gets its identity, PATH and the locale, not this process's
+    # secrets; inherit_env=True passes everything on, as without `user`.
+    _fake_passwd(monkeypatch)
+    monkeypatch.setenv("AHP_ACP_TEST_SECRET", "s3cret")
+    monkeypatch.setenv("LC_ALL", "C.UTF-8")
+    kwargs = await _spawn_kwargs(monkeypatch, user="me", env={"EXTRA": "1"})
+    env = kwargs["env"]
+    assert "AHP_ACP_TEST_SECRET" not in env
+    assert (env["HOME"], env["USER"], env["EXTRA"]) == ("/Users/me", "me", "1")
+    assert env["PATH"] == os.environ["PATH"]
+    assert env["LC_ALL"] == "C.UTF-8"
+    inherited = await _spawn_kwargs(monkeypatch, user="me", inherit_env=True)
+    assert inherited["env"]["AHP_ACP_TEST_SECRET"] == "s3cret"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="user and groups are POSIX-only")
 async def test_user_identity_yields_to_explicit_env_and_group(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -387,8 +406,9 @@ async def test_user_without_a_passwd_entry_needs_a_group(monkeypatch: pytest.Mon
         await spawn({}, user=9999)
     kwargs = await _spawn_kwargs(monkeypatch, user=9999, group=9999)
     assert (kwargs["user"], kwargs["group"]) == (9999, 9999)
-    # No entry to take an identity from: the environment is left as it was.
-    assert kwargs["env"].get("LOGNAME") == os.environ.get("LOGNAME")
+    # No entry to take an identity from, and this process's own is not handed on.
+    assert "LOGNAME" not in kwargs["env"]
+    assert kwargs["env"]["PATH"] == os.environ["PATH"]
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="user and groups are POSIX-only")
