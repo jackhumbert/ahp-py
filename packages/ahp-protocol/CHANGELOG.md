@@ -17,6 +17,15 @@ the spec revision it targets.
   round-trips and the 124-case JS-semantics oracle (regenerated, unchanged) all
   pass. See `UPSTREAM.md`.
 
+### Added — `authenticate.target` and changeset nonces (upstream `c5628cd4`)
+
+- **`AuthenticateParams`, `AuthenticateTarget` and `McpServerAuthenticateTarget`**:
+  `TypedDict` views and runtime `Spec`s. `target`, when present, must be an object
+  with a string `kind`; `mcpServer` also requires string `session` and
+  `customizationId`. An unknown `kind` validates as Unknown (the kind enum is
+  `@nonexhaustive`) and relays verbatim; refusing it is the host's decision.
+- **`ChangesetOperationTarget`** (both variants) accepts an optional string `nonce`.
+
 ### Added — review fixes
 
 - `ahp_protocol.ext.structured.structured_result(turn, schema)`: the one reader for a

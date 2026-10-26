@@ -37,8 +37,11 @@ __all__ = [
     "URI",
     "ActionEnvelope",
     "ActionOrigin",
+    "AuthenticateParams",
+    "AuthenticateTarget",
     "Implementation",
     "InitializeResult",
+    "McpServerAuthenticateTarget",
     "SessionStatus",
     "SessionSummary",
     "Snapshot",
@@ -147,6 +150,30 @@ class InitializeResult(TypedDict):
     terminalCommandPrefix: NotRequired[str]
     telemetry: NotRequired[dict[str, Any]]
     tcpConnections: NotRequired[dict[str, Any]]
+
+
+class McpServerAuthenticateTarget(TypedDict):
+    """An MCP server named by host-published session and customization state."""
+
+    kind: str  # "mcpServer"
+    session: URI
+    customizationId: str
+
+
+#: ``AuthenticateTargetKind`` is ``@nonexhaustive``: a value of this alias can
+#: carry a ``kind`` this package has never seen, which must survive verbatim.
+AuthenticateTarget = McpServerAuthenticateTarget | dict[str, Any]
+
+
+class AuthenticateParams(TypedDict):
+    channel: URI
+    resource: str
+    token: str
+    expiresIn: NotRequired[int]
+    scopes: NotRequired[list[str]]
+    #: When present the host MUST apply the token only to that MCP server in that
+    #: session (upstream `c5628cd4`).
+    target: NotRequired[AuthenticateTarget]
 
 
 # ─── Specs ───────────────────────────────────────────────────────────────────
@@ -263,12 +290,46 @@ _CHANGESET_OPERATION_TARGET = UnionSpec(
     key="kind",
     common=(Field("kind", True, is_string),),
     variants={
-        "resource": ObjectSpec("Target.resource", (Field("resource", True, is_string),)),
+        "resource": ObjectSpec(
+            "Target.resource",
+            (Field("resource", True, is_string), Field("nonce", False, is_string)),
+        ),
         "range": ObjectSpec(
             "Target.range",
-            (Field("resource", True, is_string), Field("range", True, ref("Range"))),
+            (
+                Field("resource", True, is_string),
+                Field("range", True, ref("Range")),
+                Field("nonce", False, is_string),
+            ),
         ),
     },
+)
+
+#: The consumer of an authentication token, keyed by `kind`. Unknown kinds
+#: validate as Unknown (`AuthenticateTargetKind` is `@nonexhaustive`); the host,
+#: not this layer, refuses a consumer it cannot serve.
+_AUTHENTICATE_TARGET = UnionSpec(
+    "AuthenticateTarget",
+    key="kind",
+    common=(Field("kind", True, is_string),),
+    variants={
+        "mcpServer": ObjectSpec(
+            "AuthenticateTarget.mcpServer",
+            (Field("session", True, is_string), Field("customizationId", True, is_string)),
+        ),
+    },
+)
+
+_AUTHENTICATE_PARAMS = ObjectSpec(
+    "AuthenticateParams",
+    (
+        Field("channel", True, is_string),
+        Field("resource", True, is_string),
+        Field("token", True, is_string),
+        Field("expiresIn", False, is_int),
+        Field("scopes", False, array_of(is_string)),
+        Field("target", False, ref("AuthenticateTarget")),
+    ),
 )
 
 _CHAT_INPUT_QUESTION = UnionSpec(
@@ -572,6 +633,8 @@ SPECS: Final[dict[str, Spec]] = {
     for spec in (
         _ACTION_ENVELOPE,
         _ACTION_ORIGIN,
+        _AUTHENTICATE_PARAMS,
+        _AUTHENTICATE_TARGET,
         _CHANGESET_OPERATION_TARGET,
         _CHANNEL_CREDIT_PARAMS,
         _CHANNEL_FRAME_PARAMS,
