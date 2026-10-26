@@ -425,3 +425,103 @@ class TestExpiry:
         grant = store.get(RESOURCE)
         assert grant is not None
         assert grant.token.reveal() == "new"
+
+
+_A = {"session": "echo:/a", "customization_id": "srv"}
+_B = {"session": "echo:/b", "customization_id": "srv"}
+
+
+class TestTargetedGrants:
+    """`authenticate.target` (c5628cd4): a token for ONE MCP server in ONE session.
+
+    "The host MUST apply the token only to that MCP server in that session,
+    never to sibling servers, other sessions, or agent-level resources, even if
+    they share the resource and scopes." The store is where that is enforceable
+    for good: `get(resource)` is the agent-level read every existing caller
+    makes, so it must be structurally unable to return a targeted grant.
+    """
+
+    def test_get_never_returns_a_targeted_grant(self) -> None:
+        store = TokenStore()
+        store.push(RESOURCE, "targeted", **_A)
+        assert store.get(RESOURCE) is None
+        assert not store.satisfies(RESOURCE)
+        assert store.resources() == (), "agent-level views are untargeted only"
+        needed = ProtectedResource(RESOURCE)
+        assert store.unsatisfied([needed]) == [needed]
+
+    def test_get_for_prefers_the_targeted_grant_then_falls_back_to_the_untargeted_one(self) -> None:
+        store = TokenStore()
+        assert store.get_for(RESOURCE, **_A) is None
+        store.push(RESOURCE, "agent-level")
+        fallback = store.get_for(RESOURCE, **_A)
+        assert fallback is not None
+        assert fallback.token.reveal() == "agent-level"
+        store.push(RESOURCE, "targeted", **_A)
+        own = store.get_for(RESOURCE, **_A)
+        assert own is not None
+        assert own.token.reveal() == "targeted"
+        assert own.session == _A["session"]
+        assert own.customization_id == "srv"
+        other = store.get_for(RESOURCE, **_B)
+        assert other is not None
+        assert other.token.reveal() == "agent-level", "a sibling never sees A's grant"
+
+    def test_another_session_or_server_has_no_grant_without_an_untargeted_one(self) -> None:
+        store = TokenStore()
+        store.push(RESOURCE, "targeted", **_A)
+        assert store.get_for(RESOURCE, **_B) is None
+        assert store.get_for(RESOURCE, session=_A["session"], customization_id="other") is None
+
+    def test_targeted_and_untargeted_pushes_neither_replace_nor_revoke_each_other(self) -> None:
+        store = TokenStore()
+        agent = store.push(RESOURCE, "agent-level")
+        store.push(RESOURCE, "targeted", **_A)
+        assert store.get(RESOURCE) is agent
+
+        assert store.revoke(RESOURCE, **_A) is True
+        assert store.get(RESOURCE) is agent, "a targeted revoke leaves the untargeted grant"
+        assert store.revoke(RESOURCE, **_A) is False
+
+        targeted = store.push(RESOURCE, "targeted again", **_A)
+        assert store.revoke(RESOURCE) is True
+        assert store.get(RESOURCE) is None
+        assert store.get_for(RESOURCE, **_A) is targeted, "and the reverse"
+
+    def test_revoke_grant_works_per_key(self) -> None:
+        store = TokenStore()
+        agent = store.push(RESOURCE, "agent-level")
+        targeted = store.push(RESOURCE, "targeted", **_A)
+        assert store.revoke_grant(targeted) is True
+        assert store.revoke_grant(targeted) is False
+        assert store.get(RESOURCE) is agent
+        replaced = store.push(RESOURCE, "targeted", **_A)
+        assert store.revoke_grant(targeted) is False, "a refreshed grant survives its old timer"
+        assert store.get_for(RESOURCE, **_A) is replaced
+
+    def test_an_expired_targeted_grant_is_dropped_without_touching_the_untargeted_one(self) -> None:
+        now = [0.0]
+        store = TokenStore(clock=lambda: now[0])
+        agent = store.push(RESOURCE, "agent-level")
+        store.push(RESOURCE, "targeted", expires_in=10, **_A)
+        now[0] = 11.0
+        assert store.get_for(RESOURCE, **_A) is agent
+        assert store.get(RESOURCE) is agent
+
+    def test_a_targeted_grant_reprs_without_its_token(self) -> None:
+        grant = TokenStore().push(RESOURCE, SECRET, **_A)
+        assert SECRET not in repr(grant)
+
+    def test_targets_lists_keys_never_tokens(self) -> None:
+        store = TokenStore()
+        store.push(RESOURCE, SECRET)
+        store.push(RESOURCE, SECRET, **_A)
+        assert store.targets() == ((RESOURCE, "echo:/a", "srv"),)
+        assert SECRET not in repr(store.targets())
+
+    def test_a_half_specified_target_is_refused(self) -> None:
+        store = TokenStore()
+        with pytest.raises(ValueError, match="AND a customization_id"):
+            store.push(RESOURCE, SECRET, session="echo:/a")
+        with pytest.raises(ValueError, match="AND a customization_id"):
+            store.get_for(RESOURCE, session="echo:/a", customization_id=None)  # type: ignore[arg-type]

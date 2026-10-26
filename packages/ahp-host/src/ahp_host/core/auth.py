@@ -87,6 +87,31 @@ second push replaces the first, which is what a refresh means, and one live
 credential per resource is a smaller thing to have to keep secret. The composite
 key only earns its complexity under 0.6.0 step-up auth, which this host does not
 implement.
+
+## Targeted grants (`authenticate.target`)
+
+A client answering one MCP server's challenge may name that server:
+``target = {kind: "mcpServer", session, customizationId}``. "The host MUST apply
+the token only to that MCP server in that session, never to sibling servers,
+other sessions, or agent-level resources, even if they share the resource and
+scopes." So the store keeps two namespaces, and an embedder reading it needs to
+know which one it is asking:
+
+* **Agent-level** -- :meth:`TokenStore.get` ``(resource)``, keyed by the
+  resource alone. Exactly as before, and it **never returns a targeted grant**.
+  What a provider reads for a resource the agent itself uses.
+* **Targeted** -- :meth:`TokenStore.get_for` ``(resource, session=...,
+  customization_id=...)``, keyed ``(resource, session, customizationId)``. Its
+  own targeted grant first, else the agent-level one, never another server's.
+  What an embedder reads when handing a token to the MCP server it runs.
+
+``push`` takes ``session=`` and ``customization_id=`` (both or neither);
+``revoke(resource, session=, customization_id=)`` and ``revoke_grant`` act on
+one key, and the host keeps one expiry timer per key, so a targeted push, revoke
+or expiry never touches the agent-level grant and the reverse. ``unsatisfied``,
+``satisfies`` and ``resources`` stay agent-level: a token held for one server
+does not satisfy what the agent needs. :meth:`TokenStore.targets` lists the live
+targeted keys, never the tokens.
 """
 
 from __future__ import annotations
@@ -242,6 +267,27 @@ class TokenGrant:
     #: When the token dies, on the store's monotonic clock; ``None`` when the
     #: client sent no `expiresIn` (unknown, not "never").
     expires_at: float | None = None
+    #: Set together or not at all: the one MCP server (`customization_id`) of
+    #: one session this grant is for (`authenticate.target`). ``None`` is an
+    #: agent-level grant. A targeted grant is never what :meth:`TokenStore.get`
+    #: returns.
+    session: str | None = None
+    customization_id: str | None = None
+
+    @property
+    def targeted(self) -> bool:
+        return self.session is not None
+
+
+#: `(resource, session, customizationId)`, the last two ``None`` for an
+#: agent-level grant. Not a public type: callers name a grant by arguments.
+_GrantKey = tuple[str, str | None, str | None]
+
+
+def _grant_key(resource: str, session: str | None, customization_id: str | None) -> _GrantKey:
+    if (session is None) != (customization_id is None):
+        raise ValueError("a grant target is a session AND a customization_id, or neither")
+    return (resource, session, customization_id)
 
 
 def scopes_satisfied(
@@ -275,6 +321,21 @@ class TokenStore:
     Host-global and deliberately not partitioned by connection; the pushing
     `clientId` is recorded, not keyed on. See the module docstring for why, and
     for what that costs a multi-tenant host.
+
+    **Agent-level and targeted grants are separate namespaces**
+    (`authenticate.target`). An untargeted push is stored under the resource
+    alone; a targeted one under ``(resource, session, customizationId)``.
+
+    * :meth:`get`, :meth:`satisfies`, :meth:`resources`, :meth:`unsatisfied`
+      and :meth:`revoke` without a target see **only** agent-level grants, so
+      every pre-existing caller keeps its meaning and none can be handed a token
+      that was meant for one MCP server.
+    * :meth:`get_for` is the lookup for a consumer: its own targeted grant
+      first, else the agent-level one. The fall-back is what "the token may
+      satisfy every matching pending challenge" means for a server nobody
+      targeted; it is never the other way round.
+    * Push, revoke, revoke-by-grant and expiry act on one key, so a targeted
+      push neither replaces nor cancels the agent-level grant, and vice versa.
     """
 
     def __init__(
@@ -283,7 +344,7 @@ class TokenStore:
         unscoped_satisfies_any: bool = True,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
-        self._grants: dict[str, TokenGrant] = {}
+        self._grants: dict[_GrantKey, TokenGrant] = {}
         #: Whether a grant with no declared scopes satisfies a scope request.
         self.unscoped_satisfies_any = unscoped_satisfies_any
         self._clock = clock
@@ -296,67 +357,114 @@ class TokenStore:
         scopes: Iterable[str] | None = None,
         client_id: str | None = None,
         expires_in: float | None = None,
+        session: str | None = None,
+        customization_id: str | None = None,
     ) -> TokenGrant:
         """Record the token a client pushed for *resource*, replacing any prior one.
 
         Named for what the client is doing -- the spec's own verb -- rather than
         `authenticate`, because nothing is authenticated by storing it.
         *expires_in* is seconds from now, as `AuthenticateParams.expiresIn`.
+
+        *session* and *customization_id* together scope the grant to one MCP
+        server (`authenticate.target`); it replaces only a grant with the same
+        target.
         """
+        key = _grant_key(resource, session, customization_id)
         grant = TokenGrant(
             resource=resource,
             token=BearerToken(token),
             scopes=None if scopes is None else tuple(scopes),
             client_id=client_id,
             expires_at=None if expires_in is None else self._clock() + expires_in,
+            session=session,
+            customization_id=customization_id,
         )
-        self._grants[resource] = grant
+        self._grants[key] = grant
         return grant
 
     def get(self, resource: str) -> TokenGrant | None:
-        """The live grant for *resource*, or ``None`` if there is none.
+        """The live **agent-level** grant for *resource*, or ``None`` if there is none.
+
+        Never a targeted one: this is the read for a consumer that is the agent
+        itself, and a token pushed for one MCP server is not its to use. See
+        :meth:`get_for`.
 
         An expired grant is dropped here rather than returned: a caller that
         forgot to check `expires_at` must not be able to use it.
         """
-        grant = self._grants.get(resource)
+        return self._live((resource, None, None))
+
+    def get_for(self, resource: str, *, session: str, customization_id: str) -> TokenGrant | None:
+        """The grant the MCP server *customization_id* of *session* should use.
+
+        Its own targeted grant when there is one, else the agent-level grant for
+        *resource*, else ``None``. Another server's targeted grant is never
+        returned, whatever it shares with this one.
+        """
+        key = _grant_key(resource, session, customization_id)
+        own = self._live(key)
+        return own if own is not None else self.get(resource)
+
+    def _live(self, key: _GrantKey) -> TokenGrant | None:
+        grant = self._grants.get(key)
         if grant is not None and self.is_expired(grant):
-            del self._grants[resource]
+            del self._grants[key]
             return None
         return grant
 
     def is_expired(self, grant: TokenGrant) -> bool:
         return grant.expires_at is not None and self._clock() >= grant.expires_at
 
-    def revoke(self, resource: str) -> bool:
-        """Forget the grant for *resource*. ``True`` if there was one.
+    def revoke(
+        self,
+        resource: str,
+        *,
+        session: str | None = None,
+        customization_id: str | None = None,
+    ) -> bool:
+        """Forget one grant for *resource*. ``True`` if there was one.
+
+        Without a target, the agent-level grant; with one, only that target's.
 
         The pairing for an `auth/required` notification with `reason="expired"`:
         drop the dead token first, so nothing can hand it to a provider between
         noticing and telling the client.
         """
-        return self._grants.pop(resource, None) is not None
+        key = _grant_key(resource, session, customization_id)
+        return self._grants.pop(key, None) is not None
 
     def revoke_grant(self, grant: TokenGrant) -> bool:
-        """Forget *grant* only if it is still the stored one for its resource.
+        """Forget *grant* only if it is still the stored one for its key.
 
         For an expiry timer: a refresh that replaced the grant must survive the
-        old grant's timer firing late.
+        old grant's timer firing late. The key includes the target, so a
+        targeted grant's timer can never remove the agent-level grant.
         """
-        if self._grants.get(grant.resource) is not grant:
+        key = _grant_key(grant.resource, grant.session, grant.customization_id)
+        if self._grants.get(key) is not grant:
             return False
-        del self._grants[grant.resource]
+        del self._grants[key]
         return True
 
     def clear(self) -> None:
         self._grants.clear()
 
     def resources(self) -> tuple[str, ...]:
-        """Every resource currently holding a live grant. Never the tokens."""
-        return tuple(r for r in list(self._grants) if self.get(r) is not None)
+        """Every resource currently holding a live agent-level grant. Never the tokens."""
+        return tuple(k[0] for k in list(self._grants) if k[1] is None and self._live(k) is not None)
+
+    def targets(self) -> tuple[tuple[str, str, str], ...]:
+        """``(resource, session, customization_id)`` of every live targeted grant."""
+        found: list[tuple[str, str, str]] = []
+        for key in list(self._grants):
+            resource, session, customization_id = key
+            if session is not None and customization_id is not None and self._live(key):
+                found.append((resource, session, customization_id))
+        return tuple(found)
 
     def satisfies(self, resource: str, required_scopes: Iterable[str] = ()) -> bool:
-        """Whether a stored grant for *resource* covers *required_scopes*."""
+        """Whether a stored agent-level grant for *resource* covers *required_scopes*."""
         grant = self.get(resource)
         if grant is None:
             return False
@@ -368,6 +476,9 @@ class TokenStore:
 
     def unsatisfied(self, resources: Iterable[ProtectedResource]) -> list[ProtectedResource]:
         """Which of *resources* still need a token -- the input to :func:`auth_required`.
+
+        Agent-level, so only agent-level grants count: a token held for one MCP
+        server does not satisfy what the agent itself needs.
 
         A resource with ``required=False`` is never listed: the agent works
         without it, so failing a command over it would be inventing a

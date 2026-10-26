@@ -10,6 +10,15 @@ versions each release speaks.
 
 ## [Unreleased]
 
+### Added — `authenticate.target` (upstream `c5628cd4`)
+
+- `TokenStore` keeps targeted grants, keyed `(resource, session, customizationId)`, apart
+  from agent-level ones. `get(resource)`, `satisfies`, `resources` and `unsatisfied` never
+  see a targeted grant; `get_for(resource, session=, customization_id=)` returns the
+  targeted grant, else the agent-level one. `push`/`revoke` take `session=` and
+  `customization_id=`, `revoke_grant` works per key, and `targets()` lists the live keys.
+  `TokenGrant` gains `session`, `customization_id` and `targeted`.
+
 ### Fixed — review fixes (security)
 
 - Automation working directories are checked with `may_grant_working_directory` at save
