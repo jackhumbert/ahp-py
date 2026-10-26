@@ -522,25 +522,27 @@ class WorktreeChangesets:
         A second operation on the same changeset finds it gone. If the block fails, the
         worktree is kept again, so the operation can be retried (or the changeset discarded).
         """
-        async with self._locks.setdefault(uri, asyncio.Lock()):
-            kept = self._kept.pop(uri, None)
-            if kept is None:
-                raise RuntimeError(
-                    "no worktree is kept for this changeset "
-                    "(already resolved, or the host restarted)"
-                )
-            try:
-                yield kept
-            except BaseException:
-                self._kept.setdefault(uri, kept)
-                raise
-        if uri not in self._kept:
-            self._locks.pop(uri, None)
+        try:
+            async with self._locks.setdefault(uri, asyncio.Lock()):
+                kept = self._kept.pop(uri, None)
+                if kept is None:
+                    raise RuntimeError(
+                        "no worktree is kept for this changeset "
+                        "(already resolved, or the host restarted)"
+                    )
+                try:
+                    yield kept
+                except BaseException:
+                    self._kept.setdefault(uri, kept)
+                    raise
+        finally:
+            if uri not in self._kept:
+                self._locks.pop(uri, None)
 
     async def apply(self, uri: str) -> None:
         async with self._taken(uri) as kept:
             await apply_to_repo(kept.worktree, await worktree_patch(kept.worktree))
-        await self._resolve(kept, "Applied to the working tree")
+        await self._resolve(kept, "Applied to the working tree", done=True)
 
     async def commit(
         self, uri: str, *, params: Mapping[str, Any], principal: str | None
@@ -568,7 +570,7 @@ class WorktreeChangesets:
                 )
                 sha = await commit_worktree(kept.worktree, branch=branch, message=message)
                 text = f"Committed {sha[:12]} on branch {branch}"
-        await self._resolve(kept, text)
+        await self._resolve(kept, text, done=True)
         return {"message": text}
 
     def default_message(self, kept: KeptWorktree) -> str:
@@ -614,7 +616,25 @@ class WorktreeChangesets:
         except Exception as exc:
             _log.warning("agent() #%s: discard notification failed: %s", kept.ordinal, exc)
 
-    async def _resolve(self, kept: KeptWorktree, text: str) -> None:
-        await discard_worktree(kept.worktree)
+    async def _resolve(self, kept: KeptWorktree, text: str, *, done: bool = False) -> None:
+        """Remove the worktree and publish the changeset resolved as *text*.
+
+        `done`: the operation's side effect (an apply, a commit) has happened,
+        so the changeset is resolved even if the worktree cannot be removed -
+        offering Apply again would apply it twice - and the leftover is logged.
+        Otherwise (a discard) a failed removal raises, and the caller keeps the
+        worktree for a retry.
+        """
+        try:
+            await discard_worktree(kept.worktree)
+        except WorktreeError as exc:
+            if not done:
+                raise
+            _log.warning(
+                "agent() #%s: %s; the worktree at %s is left behind",
+                kept.ordinal,
+                exc,
+                kept.worktree.path,
+            )
         resolved = dataclasses.replace(kept.changeset, operations=(), description=text)
         await kept.publisher.changes_published(resolved, [], chat=kept.chat)

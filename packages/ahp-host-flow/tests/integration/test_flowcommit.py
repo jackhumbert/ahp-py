@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import shutil
 import subprocess
 from collections.abc import Iterator
@@ -14,6 +15,7 @@ from ahp_host.provider import OperationContext
 from ahp_protocol.ext.operation import OPERATION_META_KEY
 
 from ahp_host_flow import FlowProvider
+from ahp_host_flow import worktree as worktree_module
 from ahp_host_flow.provider import FlowSession
 from ahp_host_flow.worktree import (
     APPLY_OPERATION,
@@ -416,6 +418,59 @@ async def test_flowcommit_concurrent_operations_run_once(tmp_path: Path) -> None
     applied = (ws / "moved.txt").exists()
     branched = bool(git(ws, "branch", "--list", "flow/r1-3").strip())
     assert applied != branched
+
+
+async def _cleanup_fails(wt: Any) -> None:
+    raise WorktreeError("git worktree remove failed: busy")
+
+
+@pytest.mark.parametrize("operation", ["apply", "commit"])
+async def test_flowcommit_a_failed_cleanup_after_the_side_effect_still_resolves(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    operation: str,
+) -> None:
+    # The repo already has the change: the changeset is resolved (Apply is not
+    # offered twice) and the worktree left behind is logged, not lost silently.
+    ws = moved_and_deleted_repo(tmp_path)
+    changesets = WorktreeChangesets()
+    uri = await kept_with_move_and_delete(ws, tmp_path, changesets, run_id="r1")
+    publisher = changesets._kept[uri].publisher
+    monkeypatch.setattr(worktree_module, "discard_worktree", _cleanup_fails)
+    with caplog.at_level(logging.WARNING, logger="ahp_host_flow.worktree"):
+        if operation == "apply":
+            await changesets.apply(uri)
+        else:
+            await changesets.commit(uri, params={}, principal=None)
+    assert cast(Any, publisher).n == 2
+    assert str(tmp_path / "wt") in caplog.text
+    with pytest.raises(RuntimeError, match="no worktree is kept"):
+        await changesets.apply(uri)
+    assert changesets._locks == {}
+
+
+async def test_flowcommit_a_failed_discard_keeps_the_worktree_for_a_retry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ws = moved_and_deleted_repo(tmp_path)
+    changesets = WorktreeChangesets()
+    uri = await kept_with_move_and_delete(ws, tmp_path, changesets)
+    monkeypatch.setattr(worktree_module, "discard_worktree", _cleanup_fails)
+    with pytest.raises(WorktreeError, match="busy"):
+        await changesets.discard(uri)
+    assert uri in changesets._kept
+    monkeypatch.undo()
+    await changesets.discard(uri)
+    assert changesets._kept == {}
+    assert changesets._locks == {}
+
+
+async def test_flowcommit_an_unknown_changeset_leaves_no_lock() -> None:
+    changesets = WorktreeChangesets()
+    with pytest.raises(RuntimeError, match="no worktree is kept"):
+        await changesets.apply("changeset:/nothing")
+    assert changesets._locks == {}
 
 
 @pytest.mark.parametrize("pruned", [False, True])
