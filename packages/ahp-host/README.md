@@ -532,7 +532,9 @@ A folder picker can walk down from `/` through the directories on the way to a r
 those list only the children that are roots or lead to one, and they are a listing and
 nothing else (no read, write or watch). Anything else is refused as before, and the
 old `file:///<name>/...` spelling still works unless the URI is itself a real path
-inside a root or on the way to one.
+inside a root or on the way to one, or the machine has a real top-level folder of
+that name (`/tmp` for a root named `tmp`). That last check is made once at start-up
+and logged as a warning.
 
 **`ahp-node` keeps itself running.** `ahp-node supervise` restarts the node,
 and the config's `tunnel` command, whenever they exit; `ahp-node install`

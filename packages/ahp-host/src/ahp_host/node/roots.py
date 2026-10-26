@@ -21,12 +21,15 @@ listing is synthesized from the roots, never read from the disk. It is a
 listing and nothing more: reading, writing or watching a spine path is refused
 like any path outside the roots. Tree spellings (`file:///<name>/<rel>`) still
 resolve to the named root, unless the URI is itself inside a real root, on the
-spine, or under a top-level folder the machine really has (`file:///tmp/x` is
-`/tmp/x`, not a root named `tmp`): the real path wins.
+spine, or names a root that is also a real top-level folder (`file:///tmp/x` is
+`/tmp/x`, not a root named `tmp`): the real path wins. Which names those are is
+decided once, when the roots are built (logged as a warning), so a URI resolves
+the same way for the life of the process and resolving one never reads the disk.
 """
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 from collections.abc import Mapping, Sequence
@@ -44,6 +47,8 @@ from ahp_host.core.resources import (
     RootedFilesystemResourceProvider,
 )
 from ahp_host.node.paths import directory_of
+
+log = logging.getLogger(__name__)
 
 #: A root's name becomes a path segment every client shows; keep it plain.
 _NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
@@ -66,6 +71,14 @@ def is_valid_root_name(name: str) -> bool:
     return _NAME.fullmatch(name) is not None and name not in (".", "..")
 
 
+def _is_top_level_folder(anchor: str, name: str) -> bool:
+    """Whether the machine has a real top-level folder `<anchor><name>`."""
+    try:
+        return Path(anchor, name).is_dir()
+    except OSError:
+        return False
+
+
 def _inside(path: Path, root: Path) -> bool:
     return path == root or root in path.parents
 
@@ -78,6 +91,10 @@ class Roots:
     names: tuple[str, ...] = ()
     #: "tree": named roots under a virtual tree. "real": at their real URIs.
     layout: str = "tree"
+    #: Real layout: root names that are also a real top-level folder, so their
+    #: tree spelling is not read (`file:///tmp/x` is `/tmp/x`). Decided once,
+    #: when the roots are built.
+    shadowed: frozenset[str] = frozenset()
 
     @classmethod
     def single(cls, root: Path) -> Roots:
@@ -93,7 +110,22 @@ class Roots:
             if not is_valid_root_name(name):
                 raise ValueError(f"root name {name!r}: use letters, digits, '.', '-', '_'")
         paths = tuple(Path(path).expanduser().resolve() for path in roots.values())
-        return cls(paths, tuple(roots), layout)
+        shadowed: frozenset[str] = frozenset()
+        if layout == "real":
+            anchors = {path.anchor for path in paths}
+            shadowed = frozenset(
+                name
+                for name in roots
+                if any(_is_top_level_folder(anchor, name) for anchor in anchors)
+            )
+            for name in sorted(shadowed):
+                log.warning(
+                    "root %r: the machine has a top-level folder of that name, so"
+                    " file:///%s/... is that folder, not this root",
+                    name,
+                    name,
+                )
+        return cls(paths, tuple(roots), layout, shadowed)
 
     @property
     def is_named(self) -> bool:
@@ -180,7 +212,7 @@ class Roots:
 
         Tree layout: `file:///<name>/<rel>`. Real layout: the real path inside
         a root first, then (a real path wins) the tree spelling, unless the URI
-        is on the spine or under a top-level folder the machine really has.
+        is on the spine or its name is `shadowed` by a real top-level folder.
         """
         parsed = urlparse(uri)
         if parsed.scheme not in ("file", "vscode-agent-host"):
@@ -194,13 +226,12 @@ class Roots:
                         return index, rel
             if self._spine_node(uri) is not None:
                 return None
-            if path is not None and path.parts[1:2] and Path(path.anchor, path.parts[1]).exists():
-                # A real top-level folder (`/tmp`) is that path, not the root a
-                # tree spelling would call `tmp`. Only a first segment the
-                # machine has no such folder for is read as a tree spelling.
-                return None
         segments = [unquote(s) for s in parsed.path.split("/") if s]
         if not segments or segments[0] not in self.names:
+            return None
+        if segments[0] in self.shadowed:
+            # A real top-level folder (`/tmp`) is that path, not the root a
+            # tree spelling would call `tmp`.
             return None
         if ".." in segments:
             return None

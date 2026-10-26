@@ -28,8 +28,10 @@ versions each release speaks.
   update of that automation.
 - A removed automation's URI stays its owner's for the life of the process, and a run in
   flight keeps its owner check after the automation is removed.
-- In the `real` roots layout, a path under a real top-level folder (`file:///tmp/x`) is no
-  longer read as a tree spelling of a root named `tmp`.
+- In the `real` roots layout, a root named like a real top-level folder (`tmp`) loses its
+  legacy tree spelling, so `file:///tmp/x` is `/tmp/x`, not that root. Which names those are
+  is decided once when the roots are built (and logged), so resolution never reads the disk
+  and does not change while the host runs.
 
 ### Fixed — review fixes
 

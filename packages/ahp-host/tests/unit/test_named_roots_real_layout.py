@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 from ahp_protocol import errors
 
+from ahp_host.node import roots as roots_module
 from ahp_host.node.roots import NamedRootsResourceProvider, Roots
 
 pytestmark = pytest.mark.anyio
@@ -103,8 +104,12 @@ async def test_reading_inside_a_root_works(tree: tuple[Path, Path, Path]) -> Non
     assert provider.serves(data.as_uri())
 
 
-async def test_the_old_tree_spelling_still_resolves(tree: tuple[Path, Path, Path]) -> None:
+async def test_the_old_tree_spelling_still_resolves(
+    tree: tuple[Path, Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
     _, proj, data = tree
+    # As on a machine with no top-level `/proj` or `/data`.
+    monkeypatch.setattr(roots_module, "_is_top_level_folder", lambda anchor, name: False)
     provider = _provider(proj, data)
     assert (await provider.read("file:///proj/src/a.txt")).data == b"hello"
     assert provider.serves("file:///data")
@@ -152,6 +157,27 @@ async def test_a_real_path_outside_every_root_does_not_resolve_as_a_tree_spellin
         await provider.read("file:///tmp/other")
     # The root itself is still reachable at its real URI.
     assert (await provider.read((srvdata / "other").as_uri())).data == b"served"
+
+
+def test_which_names_keep_the_tree_spelling_is_decided_once(
+    tree: tuple[Path, Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A root named like a real top-level folder loses its tree spelling, decided
+    # when the roots are built: the same URI resolves the same way all along,
+    # whatever is created on the machine later, and no URI costs a stat.
+    _, proj, data = tree
+    monkeypatch.setattr(roots_module, "_is_top_level_folder", lambda anchor, name: name == "data")
+    roots = Roots.named({"proj": proj, "data": data}, "real")
+    assert roots.real_path("file:///proj/src/a.txt") == proj / "src" / "a.txt"
+    assert roots.real_path("file:///data") is None
+
+    def no_stat(anchor: str, name: str) -> bool:
+        raise AssertionError("resolution must not look at the disk")
+
+    monkeypatch.setattr(roots_module, "_is_top_level_folder", no_stat)
+    assert roots.real_path("file:///proj/src/a.txt") == proj / "src" / "a.txt"
+    assert roots.real_path("file:///data") is None
+    assert Roots.named({"proj": proj}, "tree").real_path("file:///proj") == proj
 
 
 def test_layout_of_prefers_the_flag_then_the_file_then_tree() -> None:
