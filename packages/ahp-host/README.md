@@ -573,7 +573,8 @@ What happens to each kind of work:
   start; its turn is not resumed, since no run would be attached to it. Nor is a
   later turn in a session a run created: that session was made with the run's
   `RunCredentials`, which a restored session does not have. Such a turn is left
-  failed and resumable, for a client to resume.
+  failed and resumable, for a client to resume, and messages queued in that
+  session stay queued until a client's next turn there.
 - **A scheduled automation** is paused during the drain: nothing new is started,
   and no cursor moves, so a run that came due is still due after the restart.
 

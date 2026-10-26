@@ -2301,7 +2301,8 @@ class Host:
         but does not start them (`_drain_queue` holds), so they were waiting
         for exactly this: a process that will run them. The normal queue path
         starts one only when the chat is idle, so a chat that was just resumed
-        waits for its turn to end like any other.
+        waits for its turn to end like any other. A session an automation run
+        created is left alone on both counts (`_started_by_automation`).
         """
         if stored.interrupted_by_restart:
             # `session.interrupted` is empty on a fresh session, so this
@@ -2312,6 +2313,10 @@ class Host:
             for chat in stored.interrupted_by_restart:
                 if chat in session.chat_uris and not self._started_by_automation(session):
                     await self._resume_interrupted_turn(session, chat)
+        if self._started_by_automation(session):
+            # Its queued messages would run without the run's credentials too:
+            # they wait for a client, whose next turn drains them as usual.
+            return
         for chat in sorted(session.chat_uris):
             await self._drain_queue(session, chat)
 

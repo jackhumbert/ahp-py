@@ -733,3 +733,93 @@ class TestAutomationRunsAreNotResumedByTheirTurn:
             assert turn["responseParts"][-1]["resumable"] is True
         finally:
             await second.aclose()
+
+    async def test_a_message_queued_in_a_run_session_is_not_started_on_restore(
+        self, tmp_path: Path
+    ) -> None:
+        # Restore starts what a drain left queued, but a run session's turns
+        # would run without the run's credentials: its queue waits for someone
+        # with a connection, like its interrupted turn.
+        def build(provider: Gated) -> Host:
+            return Host(
+                provider,
+                LoopbackSingleUserPolicy(),
+                store=FileSessionStore(tmp_path / "sessions", debounce=0.05),
+                sequence_file=tmp_path / "seq",
+                automations=FileAutomationStore(tmp_path / "automations"),
+            )
+
+        automation = "ahp-automation:/nightly"
+        provider = Resuming()
+        provider.gate.set()
+        host = build(provider)
+        try:
+            client = await _client(host)
+            await client.notify(
+                "dispatchAction",
+                {
+                    "channel": AUTOMATIONS_URI,
+                    "clientSeq": 1,
+                    "action": {
+                        "type": "automation/createRequested",
+                        "resource": automation,
+                        "definition": {
+                            "title": "Nightly",
+                            "message": {"text": "go", "origin": {"kind": "automation"}},
+                            "session": {"provider": "echo"},
+                            "enabled": True,
+                            "triggers": [],
+                        },
+                    },
+                },
+            )
+            for _ in range(250):
+                if automation in host._automations:
+                    break
+                await asyncio.sleep(0.02)
+            run = (
+                await client.request(
+                    "runAutomation",
+                    {"channel": AUTOMATIONS_URI, "automation": automation, "requestId": "r"},
+                )
+            )["result"]["resource"]
+            for _ in range(250):
+                lifecycle = (host.sequencer.state_of(run) or {}).get("lifecycle") or {}
+                if lifecycle.get("status") == "completed":
+                    break
+                await asyncio.sleep(0.02)
+            session = host.sequencer.state_of(run)["primarySession"]
+            chat = host.sequencer.state_of(session)["defaultChat"]
+            await client.request("subscribe", {"channel": chat})
+            provider.gate.clear()
+            await _say(client, chat, "and then?", "t2", seq=2)
+            await _running(host, chat)
+            await client.notify(
+                "dispatchAction",
+                {
+                    "channel": chat,
+                    "clientSeq": 3,
+                    "action": {
+                        "type": "chat/pendingMessageSet",
+                        "kind": "queued",
+                        "id": "q1",
+                        "message": {"text": "queued", "origin": {"kind": "user"}},
+                    },
+                },
+            )
+            await client.collect(seconds=0.2)
+            assert await host.drain(0.2) == [chat]
+        finally:
+            await host.aclose()
+
+        after = Resuming()
+        after.gate.set()
+        second = build(after)
+        try:
+            await second.restore()
+            await asyncio.sleep(0.3)
+            assert after.started == [], "a run session's queued message ran with no credentials"
+            state = second.sequencer.state_of(chat) or {}
+            assert [e["id"] for e in state["queuedMessages"]] == ["q1"]
+        finally:
+            await second.aclose()
