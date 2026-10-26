@@ -26,6 +26,7 @@ from ahp_host.provider.base import (
 )
 
 from ahp_host_acp import permissions
+from ahp_host_acp import provider as provider_module
 from ahp_host_acp.provider import AcpProvider, AcpSession, AgentSpec
 
 from .fakes import FAKE_AGENT, RecordingSink, context
@@ -260,6 +261,28 @@ async def test_a_closed_chats_late_updates_are_dropped(tmp_path: Path, log: Path
         await session._on_update(parse_update({"sessionId": "new-id", "update": update}))
         assert sink.events == [("text", "x")]
         session._opening = None
+    finally:
+        await session.aclose()
+
+
+async def test_retired_session_ids_are_bounded_and_end_with_their_agent(
+    tmp_path: Path, log: Path
+) -> None:
+    # A retired id only means something to the agent process that made it: a
+    # new process may hand the same id to the chat being opened.
+    session = await _provider(tmp_path, log).create_session(context(tmp_path))
+    try:
+        await session.chat_opened(_chat())
+        await _whoami(session, SECOND)
+        await session.chat_closed(SECOND)
+        assert session._retired
+        await session._drop_connection(session._conn)
+        assert not session._retired
+        for n in range(provider_module.RETIRED_LIMIT + 10):
+            session._retire(f"old-{n}")
+        assert len(session._retired) == provider_module.RETIRED_LIMIT
+        assert "old-0" not in session._retired
+        assert f"old-{provider_module.RETIRED_LIMIT + 9}" in session._retired
     finally:
         await session.aclose()
 

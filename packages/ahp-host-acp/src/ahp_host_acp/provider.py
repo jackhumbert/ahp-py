@@ -131,6 +131,8 @@ DEFAULT_DESCRIPTION: Final = "An Agent Client Protocol agent, running on this ma
 #: The file, in a host's (or a node agent's) state directory, that keeps what
 #: the agent reported about itself: see :mod:`ahp_host_acp.catalogue`.
 CATALOGUE_FILE: Final = "agent.json"
+#: Closed chats' ACP session ids kept to drop their late updates, per agent process.
+RETIRED_LIMIT: Final = 1024
 _PROVIDER_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}")
 #: How long a new turn waits for a stopped turn's prompt to wind down, so the
 #: old turn's trailing updates never land in the new one.
@@ -375,8 +377,9 @@ class AcpSession:
         self._open_lock = asyncio.Lock()
         self._opening: _Chat | None = None
         #: The ACP session ids of closed chats: their late updates are dropped,
-        #: never taken for `_opening`'s.
-        self._retired: set[str] = set()
+        #: never taken for `_opening`'s. An ordered set, oldest first, at most
+        #: `RETIRED_LIMIT`, and only for the agent process that made the ids.
+        self._retired: dict[str, None] = {}
         self._catalogue = catalogue if catalogue is not None else Catalogue()
         self._on_agent_changed = on_agent_changed or _nothing
         creator = (
@@ -654,6 +657,8 @@ class AcpSession:
         if conn is None or conn is not self._conn:
             return
         self._conn = None
+        # The next process names its own sessions, and may reuse these ids.
+        self._retired.clear()
         await self._methods.aclose()
         try:
             if self._agent is not None:
@@ -930,7 +935,7 @@ class AcpSession:
         del self._chats[chat_uri]
         self._bridge.revoke(chat_uri)
         if chat.acp_session_id is not None:
-            self._retired.add(chat.acp_session_id)
+            self._retire(chat.acp_session_id)
         conn = self._live(chat)
         if conn is None:
             return
@@ -1065,6 +1070,12 @@ class AcpSession:
                 log.warning("could not reconfigure ACP session %s: %s", chat.acp_session_id, exc)
 
     # -- agent -> client -------------------------------------------------------
+
+    def _retire(self, session_id: str) -> None:
+        """Drop *session_id*'s late updates; forget the oldest past `RETIRED_LIMIT`."""
+        self._retired[session_id] = None
+        while len(self._retired) > RETIRED_LIMIT:
+            del self._retired[next(iter(self._retired))]
 
     def _chat_of(self, session_id: Any) -> _Chat | None:
         if isinstance(session_id, str):
