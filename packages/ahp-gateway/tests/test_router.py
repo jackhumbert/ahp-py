@@ -216,9 +216,11 @@ class AnsweringLink(ScriptedLink):
         super().__init__(node_id)
         self.accepts = accepts
         self.asked: list[str] = []
+        self.params: list[Mapping[str, Any]] = []
 
     async def request(self, method: str, params: Mapping[str, Any]) -> Any:
         self.asked.append(method)
+        self.params.append(params)
         if params.get("resource") != self.accepts:
             raise AhpError(-32602, f"{self.node_id} does not protect {params.get('resource')}")
         return {}
@@ -259,3 +261,95 @@ async def test_a_token_every_node_refuses_is_refused() -> None:
     params = {"channel": "ahp-root://", "resource": "nobody", "token": "t"}
     with pytest.raises(AhpError, match="does not protect"):
         await conn._dispatch("authenticate", params, [])
+
+
+def targeted(session: Any, kind: str = "mcpServer") -> dict[str, Any]:
+    target: dict[str, Any] = {"kind": kind, "customizationId": "mcp-1"}
+    if session is not None:
+        target["session"] = session
+    return {"channel": "ahp-root://", "resource": "mcp:server", "token": "t", "target": target}
+
+
+async def test_a_targeted_token_goes_only_to_the_node_that_owns_the_session() -> None:
+    # Both nodes would take the resource; the target names one session, and a
+    # token for one session's server must not be offered to the other node.
+    conn = connection()
+    one, two = AnsweringLink("a", accepts="mcp:server"), AnsweringLink("b", accepts="mcp:server")
+    attach(conn, one, {"copilot:/s1"}).root = protecting("mcp:server")
+    attach(conn, two, {"copilot:/s2"}).root = protecting("mcp:server")
+    params = targeted("copilot:/s2")
+    assert await conn._dispatch("authenticate", params, []) == {}
+    assert one.asked == [], "a targeted token must never be broadcast"
+    assert two.asked == ["authenticate"]
+    assert two.params == [params], "the target reaches the node unchanged"
+
+
+async def test_a_targeted_token_for_a_session_no_node_owns_is_refused_unsent() -> None:
+    conn = connection()
+    one, two = AnsweringLink("a", accepts="mcp:server"), AnsweringLink("b", accepts="mcp:server")
+    attach(conn, one, {"copilot:/s1"})
+    attach(conn, two, set())
+    with pytest.raises(AhpError) as refused:
+        await conn._dispatch("authenticate", targeted("copilot:/nobody"), [])
+    assert refused.value.code == -32602
+    assert [one.asked, two.asked] == [[], []]
+
+
+async def test_a_targeted_token_for_a_session_whose_node_is_gone_is_refused_unsent() -> None:
+    conn = connection()
+    other = AnsweringLink("b", accepts="mcp:server")
+    attach(conn, other, set())
+    conn.owners.claim("departed", {"copilot:/s1"})
+    with pytest.raises(AhpError) as refused:
+        await conn._dispatch("authenticate", targeted("copilot:/s1"), [])
+    assert refused.value.code == -32602
+    assert other.asked == []
+
+
+@pytest.mark.parametrize("session", [None, 7, ""])
+async def test_a_target_of_an_unknown_kind_naming_no_session_is_refused_unsent(
+    session: Any,
+) -> None:
+    conn = connection()
+    one, two = AnsweringLink("a", accepts="mcp:server"), AnsweringLink("b", accepts="mcp:server")
+    attach(conn, one, set())
+    attach(conn, two, set())
+    params = targeted(session, kind="somethingNew")
+    with pytest.raises(AhpError) as refused:
+        await conn._dispatch("authenticate", params, [])
+    assert refused.value.code == -32602
+    assert [one.asked, two.asked] == [[], []]
+
+
+@pytest.mark.parametrize("target", ["copilot:/s1", ["copilot:/s1"], 1])
+async def test_a_target_that_is_not_an_object_is_refused_unsent(target: Any) -> None:
+    conn = connection()
+    one = AnsweringLink("a", accepts="mcp:server")
+    attach(conn, one, {"copilot:/s1"})
+    with pytest.raises(AhpError) as refused:
+        await conn._dispatch("authenticate", {**targeted("copilot:/s1"), "target": target}, [])
+    assert refused.value.code == -32602
+    assert one.asked == []
+
+
+async def test_a_target_of_another_kind_naming_a_session_goes_to_that_sessions_node() -> None:
+    # The node decides what to make of a kind the gateway does not know.
+    conn = connection()
+    one, two = AnsweringLink("a", accepts="mcp:server"), AnsweringLink("b", accepts="mcp:server")
+    attach(conn, one, {"copilot:/s1"})
+    attach(conn, two, {"copilot:/s2"})
+    params = targeted("copilot:/s1", kind="somethingNew")
+    assert await conn._dispatch("authenticate", params, []) == {}
+    assert one.asked == ["authenticate"]
+    assert two.asked == []
+
+
+async def test_an_untargeted_token_still_goes_to_every_advertising_node() -> None:
+    conn = connection()
+    one, two = AnsweringLink("a", accepts="mcp:server"), AnsweringLink("b", accepts="mcp:server")
+    attach(conn, one, {"copilot:/s1"}).root = protecting("mcp:server")
+    attach(conn, two, {"copilot:/s2"}).root = protecting("mcp:server")
+    params = {"channel": "ahp-root://", "resource": "mcp:server", "token": "t"}
+    assert await conn._dispatch("authenticate", params, []) == {}
+    assert one.asked == ["authenticate"]
+    assert two.asked == ["authenticate"]

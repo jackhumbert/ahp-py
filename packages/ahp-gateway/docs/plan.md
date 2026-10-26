@@ -334,6 +334,14 @@ every connected node, since the one that raised it takes the token and the rest
 refuse it. It succeeds if any node accepts, and fails with the first refusal if
 none does.
 
+A token carrying a **`target`** (one MCP server in one session) is the exception:
+it goes only to the node that owns `target.session`, with the target unchanged,
+and is never broadcast. It is a write into that session, so the flow-run check
+applies (another principal's run is refused). A target naming no owned or
+connected session, or no session at all (an unknown `kind`, say), is refused
+`InvalidParams` without calling any node; a `kind` the gateway does not know
+that does name a session goes to that session's node, which decides.
+
 **Not yet:**
 
 - The other root-level commands when more than one node could answer them and

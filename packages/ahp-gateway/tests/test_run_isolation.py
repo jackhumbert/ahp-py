@@ -191,6 +191,42 @@ async def test_requests_naming_a_runs_channel_are_the_owners_only(
     assert on_alpha.state_of(names["session"]) is None
 
 
+async def test_a_token_targeted_at_a_runs_session_is_the_owners_only(
+    run: tuple[Fleet, dict[str, str]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A targeted `authenticate` writes into its session, so it is a write there."""
+    fleet, names = run
+    reached: list[str] = []
+    original = AhpNodeLink.request
+
+    async def recording(self: AhpNodeLink, method: str, params: Mapping[str, Any]) -> Any:
+        if method == "authenticate":
+            reached.append(self.node_id)
+        return await original(self, method, params)
+
+    monkeypatch.setattr(AhpNodeLink, "request", recording)
+    params = {
+        "channel": "ahp-root://",
+        "resource": "https://example.com/mcp",
+        "token": "t",
+        "target": {"kind": "mcpServer", "session": names["session"], "customizationId": "mcp-1"},
+    }
+    other = await _raw(fleet, OTHER)
+    await _learn(other, names)
+    with pytest.raises(RpcError, match="another user's flow run"):
+        await other.request("authenticate", params)
+    await other.shutdown()
+    assert reached == []
+
+    # The run's own principal is let through to the node, which decides.
+    owner = await _raw(fleet, OWNER)
+    await _learn(owner, names)
+    with contextlib.suppress(RpcError):
+        await owner.request("authenticate", params)
+    await owner.shutdown()
+    assert reached == ["alpha"]
+
+
 async def test_client_actions_on_a_runs_channel_are_the_owners_only(
     run: tuple[Fleet, dict[str, str]], monkeypatch: pytest.MonkeyPatch
 ) -> None:

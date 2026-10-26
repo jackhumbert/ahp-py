@@ -1302,8 +1302,15 @@ class _SurfaceConnection:
         an MCP server or a tool call), to every connected node, since the one
         that raised it will take the token and the rest refuse it. It succeeds
         if any node accepts, and fails with the first refusal if none does.
+
+        A token carrying a `target` is the exception: it is for one consumer in
+        one session, so it goes to the node that owns that session and nowhere
+        else. Offering it to the rest would hand a credential scoped to one MCP
+        server to machines that have no such server, defeating the scoping.
         """
         resource = params.get("resource")
+        if "target" in params:
+            return await self._call(self._target_node(params["target"]), "authenticate", params)
         targets = [
             node_id
             for node_id, node in self.nodes.items()
@@ -1328,6 +1335,26 @@ class _SurfaceConnection:
         first = outcomes[0]
         assert isinstance(first, BaseException)
         raise first
+
+    def _target_node(self, target: Any) -> str:
+        """The node a targeted `authenticate` is for: the one owning its session.
+
+        The session is a write target, so another principal's flow run is
+        refused here exactly as for any request naming it. A target that names
+        no session (a `kind` the gateway does not know, say) cannot be routed
+        and is refused rather than broadcast; what a `kind` means beyond that
+        is the node's to decide.
+        """
+        session = target.get("session") if isinstance(target, Mapping) else None
+        if not isinstance(session, str) or not session:
+            raise invalid_params("authenticate target must name a session")
+        self._check_run_access(session, write=True)
+        owner = self.owners.owner_of(session)
+        if owner is None:
+            raise invalid_params(f"no node has the session {session} named by the target")
+        if owner not in self.nodes:
+            raise invalid_params(f"node {owner!r} for the session {session} is not connected")
+        return owner
 
     def _nodes_offering(self, provider: str) -> list[str]:
         return [

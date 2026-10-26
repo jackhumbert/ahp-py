@@ -6,6 +6,16 @@ Every release states the protocol versions it speaks.
 
 ## [Unreleased]
 
+### Added — `authenticate.target`
+
+- A targeted `authenticate` (`target`: one MCP server in one session) is routed only to the
+  node that owns `target.session`, with the target unchanged, instead of being offered to
+  every node: a token scoped to one server never reaches machines that have no such server.
+  A target naming an unowned or disconnected session, or no session (including an unknown
+  `kind`), is refused with `InvalidParams` before any node is called. It is a write into its
+  session, so another principal's flow run is refused as for any other write there.
+  Untargeted pushes are unchanged.
+
 ### Fixed — review fixes (security)
 
 - Flow-run isolation is checked on every path to a run's channels: `subscribe`,
