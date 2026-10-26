@@ -18,7 +18,8 @@
 - A failing chat drops only the agent connection it used.
 - `terminal/wait_for_exit` always answers, even through a release; reaping waits briefly for
   the output to drain.
-- A closed chat's late updates are dropped instead of being given to a chat being opened.
+- A closed chat's late updates are dropped instead of being given to a chat being opened. The
+  ids are kept per agent process, at most `RETIRED_LIMIT`.
 
 ### Added — review fixes
 

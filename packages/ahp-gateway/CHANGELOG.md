@@ -27,6 +27,7 @@ Every release states the protocol versions it speaks.
 - An unreachable flow child's node is redialled with a backoff (5 s doubling to 60 s), not
   on every poll.
 - A flow child running a client tool reports `working`, not `waiting`.
+- Any local-file spelling (`FILE:`, `vscode-agent-host:`) routes to the passthrough node.
 
 ### Changed — review fixes
 

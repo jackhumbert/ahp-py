@@ -36,6 +36,11 @@ versions each release speaks.
 ### Fixed — review fixes
 
 - A run cancel that lands during start-up is honoured.
+- A principal policy is asked about an automation's folders for its creator
+  (`may_grant_working_directory_for`), so `OwnedSessionPolicy(allow_resources=True)` no longer
+  refuses the creator's own folders at create.
+- Messages queued in an automation run's session are not started on restore; they wait for a
+  client, like the session's interrupted turn.
 - `last_json_block` scans only the last 64 KiB of a reply and skips past a failed decode, so
   an unclosed-bracket reply no longer takes quadratic time.
 

@@ -37,7 +37,11 @@
 - A worker whose setup fails after its session exists is cleaned up.
 - Restored in-flight records that a continued run cannot resume are dropped.
 - Each attempt of a worktree call gets its own worktree.
-- Changeset operations run once under concurrency and recover from partial failures.
+- Changeset operations run once under concurrency and recover from partial failures. An
+  applied or committed changeset is resolved even if its worktree cannot be removed (the
+  leftover is logged).
+- A worker whose approver cannot be built, or whose resumed session's setup fails, closes
+  that session.
 - `nan`/`inf` seconds, an unreadable `flow.toml`, and a `changesets.branch` without
   `{runId}`/`{ordinal}` are config errors.
 - One failing redaction request no longer blocks the spool.
