@@ -18,8 +18,8 @@ suite, so a dependency bump that moves the spec under it fails loudly.
 |---|---|
 | Upstream | [`microsoft/agent-host-protocol`](https://github.com/microsoft/agent-host-protocol) (MIT) |
 | Spec ref | `main` — ahead of any release; upstream's tree declares `1.1.0`, unreleased |
-| Spec commit | `1ef0642965efaa7ef98caff287bca923fbc80ec6` |
-| Conformance corpus vendored from | `main` @ `1ef06429` → `types/test-cases/` |
+| Spec commit | `c5628cd4b09f76cf143ebe655e872c0fb3f1b8d8` |
+| Conformance corpus vendored from | `main` @ `c5628cd4` → `types/test-cases/` |
 | `UPSTREAM_PROTOCOL_VERSION` | `1.1.0` — upstream's development version at that commit |
 | `UPSTREAM_SUPPORTED_PROTOCOL_VERSIONS` | `1.0.0, 0.9.0` — what *upstream* declares |
 | `DEFAULT_SUPPORTED_VERSIONS` | `1.0.0, 0.9.0, 0.8.0, 0.7.0, 0.6.0` — what a peer built on this pin can honestly speak |
@@ -53,12 +53,31 @@ earlier one sits in the client's pending list for good.
 must still resolve to the pinned commit; a branch moves, so the commit only has
 to be on it. Either way the archive is cut from the **commit**. When
 `spec/v1.1.0` is tagged, re-pin to it and diff every `reducer.ts` between
-`1ef06429` and the tag — upstream may change 1.1.0 again before releasing it.
+`c5628cd4` and the tag — upstream may change 1.1.0 again before releasing it.
 
 For the record, as of **2026-10-17**: `spec/v1.0.0` (2026-10-02) is still the
 newest spec tag, and the pinned commit is upstream `main`'s head, 42 commits
 past it. Upstream's `CHANGELOG.md` has only an empty `[1.1.0] — Unreleased`
 heading; the change notes live in `docs/.changes/*.json` until release.
+
+The `main` @ `1ef06429` → `main` @ `c5628cd4` absorb (2026-10-25). **No
+`reducer.ts` changed** (diffed by hand, as step 6 requires), and all 124
+JS-semantics cases regenerate byte-identically against the new reducers. Three
+additive, optional wire fields, and eleven new fixtures (reducers 308–315,
+round-trips 076–078) that pass unchanged:
+
+- **`authenticate` — `target`** (security). `AuthenticateParams.target` is
+  `{kind: "mcpServer", session, customizationId}` (`AuthenticateTargetKind` is
+  `@nonexhaustive`). When present, the host MUST apply the token to that one MCP
+  server in that session only, `resource` must still equal the server's
+  advertised one, and an unknown session, unknown customization or a
+  customization that is not an MCP server is `InvalidParams`. Without `target`
+  nothing changes. Wire only here; the enforcement belongs to the host.
+- **changesets — nonces.** `ChangesetFile.nonce` and
+  `ChangesetOperationTarget.nonce` (both the resource and range variants); when
+  both are present a mismatch must fail with `Conflict`. No host here publishes
+  nonces, so that rule cannot trigger yet.
+- **changesets — `ChangesetFile.isEditing`**, advisory only.
 
 The `spec/v1.0.0` → `main` @ `1ef06429` absorb, reducer by reducer (every
 `reducer.ts` diff read by hand). **Only `chat` changed, and not additively** —
@@ -139,8 +158,8 @@ mapped into the wheel at `ahp_protocol/conformance/_upstream/` by hatch's
 
 | Vendored | Source | Why not fetched at runtime |
 |---|---|---|
-| `types/test-cases/reducers/**` (327 fixtures) | git repository only | not published as a release asset |
-| `types/test-cases/round-trips/**` (94 fixtures) | git repository only | same |
+| `types/test-cases/reducers/**` (335 fixtures) | git repository only | not published as a release asset |
+| `types/test-cases/round-trips/**` (97 fixtures) | git repository only | same |
 | `types/test-cases/version-negotiation.json` (22 cases) | git repository only | same |
 | `schema/*.schema.json` (5 files) | release asset **or** git repository | asset exists, but must match the pinned commit |
 | `ts/` — `registry.ts`, `action-origin.generated.ts`, `actions.ts`, `errors.ts`, `session-state.ts` | git repository only | the codegen inputs for `_generated.py` |

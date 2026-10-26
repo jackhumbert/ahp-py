@@ -2,7 +2,7 @@
 
 `reduced_equal` normalises `null` away on both sides -- it has to, because the
 upstream fixtures write an absent optional as JSON `null`. That makes the
-327-fixture corpus **structurally incapable** of catching the single most
+335-fixture corpus **structurally incapable** of catching the single most
 common porting defect in this project: confusing JavaScript's `undefined` with
 its `null`.
 

@@ -8,6 +8,15 @@ the spec revision it targets.
 
 ## [Unreleased]
 
+### Changed — the spec pin moves to upstream `main` @ `c5628cd4`
+
+- Re-pinned from `1ef06429` to `c5628cd4` (still `1.1.0`, unreleased;
+  `UPSTREAM_PROTOCOL_VERSION` is unchanged). Three additive, optional fields
+  (`AuthenticateParams.target`, changeset `nonce`, `ChangesetFile.isEditing`);
+  no `reducer.ts` changed. 335 reducer fixtures (changeset 17 → 25), 97
+  round-trips and the 124-case JS-semantics oracle (regenerated, unchanged) all
+  pass. See `UPSTREAM.md`.
+
 ### Added — review fixes
 
 - `ahp_protocol.ext.structured.structured_result(turn, schema)`: the one reader for a

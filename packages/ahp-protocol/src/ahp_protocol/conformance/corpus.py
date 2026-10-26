@@ -127,7 +127,7 @@ def _require(raw: dict[str, Any], path: Path, *keys: str) -> None:
 
 
 def reducer_fixtures() -> Iterator[ReducerFixture]:
-    """The 327-fixture reducer corpus, validated structurally as it loads.
+    """The 335-fixture reducer corpus, validated structurally as it loads.
 
     A malformed upstream fixture must fail loudly rather than be silently
     skipped -- a skipped fixture looks identical to a passing one in a summary.
@@ -151,7 +151,7 @@ def reducer_fixtures() -> Iterator[ReducerFixture]:
 
 
 def round_trip_fixtures() -> Iterator[RoundTripFixture]:
-    """The 94-fixture wire round-trip corpus."""
+    """The 97-fixture wire round-trip corpus."""
     directory = CORPUS_ROOT / "test-cases" / "round-trips"
     for path in sorted(directory.glob("*.json")):
         raw = json.loads(path.read_text(encoding="utf-8"))

@@ -46,8 +46,8 @@ exceptions below; M9 (release) is not.** The suite (count it from
 `pytest --collect-only`, never from prose — a number here went stale twice),
 `mypy --strict`, `ruff`, `ruff format` and three import-linter contracts
 green. A full turn runs against the sibling Python host. The shared layer
-([`ahp-protocol`][protocol]) is green on 327 reducer fixtures,
-94 round-trips and the JS-semantics oracle.
+([`ahp-protocol`][protocol]) is green on 335 reducer fixtures,
+97 round-trips and the JS-semantics oracle.
 
 The two exceptions, so nobody re-discovers them: **`MultiHostStateMirror`
 (§6.3) was never built** — `hosts/` supervises one host per runtime, and an
@@ -112,7 +112,7 @@ code they justify.
 - **10** server→client requests, **15** server→client notifications, **9**
   outside a window (`client.events.WINDOWED_METHODS` names the other six)
 - **107** action types, **48** client-dispatchable
-- **327** reducer fixtures, **94** round-trips
+- **335** reducer fixtures, **97** round-trips
 
 Every design proposal that fed this plan wrote 28 or ~30 commands. Only a
 *generated* parity matrix catches that, which is why `docs/parity.md` is

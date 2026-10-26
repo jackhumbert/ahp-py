@@ -138,11 +138,11 @@ def classify(uri: str) -> ChannelKind:
 #: ``canvasId`` is the one key every ``CanvasState`` (1.0.0) must carry and no
 #: other state has; a chat holds only ``canvases`` references.
 #:
-#: Verified against all 327 upstream reducer fixtures by
+#: Verified against all 335 upstream reducer fixtures by
 #: ``tests/conformance/test_state_shapes.py``: every one of them classifies to
 #: the reducer the fixture itself declares, with no unclassifiable case --
-#: root 7, session 92, chat 168, terminal 19, changeset 17, resourceWatch 2,
-#: annotations 10, automation 7, automationRun 2, canvas 3. That is 327
+#: root 7, session 92, chat 168, terminal 19, changeset 25, resourceWatch 2,
+#: annotations 10, automation 7, automationRun 2, canvas 3. That is 335
 #: correctness cases from data neither peer wrote.
 _SHAPE_ORDER: Final[tuple[tuple[str, str], ...]] = (
     ("agents", "root"),
