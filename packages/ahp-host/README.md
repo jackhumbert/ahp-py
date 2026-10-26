@@ -415,8 +415,9 @@ before this loads as ownerless). The catalogue `ahp-automations://` is then
 filtered per subscriber — snapshot, replay and live actions — to that principal's
 own automations, and so are the run channels. Updating, removing, running,
 `fetchAutomationRuns` and cancelling a run are refused for anyone else, and
-creating over another principal's URI (also after its automation was removed) is
-refused: a dispatched action echoes `rejectionReason: "no automation <uri>"`, the
+creating over another principal's URI (also after its automation was removed, for
+as long as the host runs: a removed automation's owner is not persisted, so after a
+restart its URI is free again) is refused: a dispatched action echoes `rejectionReason: "no automation <uri>"`, the
 words for an automation that does not exist, to its sender only (the sender by
 principal: a peer asserting another's `clientId` is not sent their echoes, live
 or on replay), a method answers `-32008`. A run, and the session it starts, belong to the
