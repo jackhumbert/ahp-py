@@ -851,6 +851,29 @@ class TestWorkingDirectories:
         assert "rejected by policy" in echo["rejectionReason"]
         assert _entries(host) == []
 
+    async def test_a_policy_that_grants_folders_accepts_the_creators_own_at_create(
+        self,
+    ) -> None:
+        # The new automation's URI is nobody's yet, so the connection question
+        # (`may_see_channel` on it) said no; the owner-to-be is asked instead.
+        policy = OwnedSessionPolicy(principal_from_header(_HEADER), allow_resources=True)
+        host = Host(EchoProvider(), policy, automations=InMemoryAutomationStore())
+        try:
+            alice, _ = await _user(host, "alice", "a1")
+            await _dispatch(
+                alice,
+                AUTOMATIONS_URI,
+                {
+                    "type": "automation/createRequested",
+                    "resource": AUTOMATION,
+                    "definition": _with_folder("file:///Users/alice/proj"),
+                },
+            )
+            await _until(lambda: any(e["resource"] == AUTOMATION for e in _entries(host)))
+            assert "rejectionReason" not in (_echo_of(alice, "automation/createRequested") or {})
+        finally:
+            await host.aclose()
+
     async def test_another_users_folder_is_refused_at_create_and_update(self) -> None:
         host = Host(EchoProvider(), _HomeFolders(), automations=InMemoryAutomationStore())
         try:

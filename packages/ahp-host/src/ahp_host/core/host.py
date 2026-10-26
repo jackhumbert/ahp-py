@@ -9508,11 +9508,29 @@ class Host:
         the host grant it on their behalf. Only a template the action supplies
         is asked about: an update that leaves `session` alone grants nothing
         new, and the run asks again anyway (`_may_grant_for`).
+
+        A policy that tells people apart is asked for the connection's principal
+        (`may_grant_working_directory_for`), the automation's owner-to-be: the
+        connection question asks about *resource*, which a create has not
+        claimed yet, so an ownership policy would refuse even the owner's own
+        folders. Without that hook the connection question stands.
         """
         session = definition.get("session")
         directories = session.get("workingDirectories") if isinstance(session, Mapping) else None
+        principal = self._principal_of(connection)
+        by_owner = self._names_principals() and callable(
+            getattr(self.policy, "may_grant_working_directory_for", None)
+        )
         for directory in directories if isinstance(directories, list) else ():
-            if not self.policy.may_grant_working_directory(connection.info, resource, directory):
+            if by_owner:
+                granted = principal is not None and self._may_grant_for(
+                    principal, resource, directory
+                )
+            else:
+                granted = self.policy.may_grant_working_directory(
+                    connection.info, resource, directory
+                )
+            if not granted:
                 return f"working directory {directory} rejected by policy"
         return None
 
