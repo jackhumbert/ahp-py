@@ -34,6 +34,9 @@ from ahp_host.provider.echo import EchoProvider
 from ahp_host_flow.catalog import directory_of
 from tests.preamble import stripped
 
+#: How long a cancelled `hold-slow` turn takes to wind down.
+SLOW_STOP = 0.25
+
 
 @dataclass
 class RecordingSession:
@@ -55,7 +58,14 @@ class RecordingSession:
         self.messages.append(message)
         if message.text.startswith("wait-overlay"):
             await self.overlay_seen.wait()
-        if message.text.startswith("hold"):
+        if message.text.startswith("hold-slow"):
+            # Cancelled, it takes a while to wind down, as an agent finishing a step does.
+            try:
+                await self.released.wait()
+            except asyncio.CancelledError:
+                await asyncio.sleep(SLOW_STOP)
+                raise
+        elif message.text.startswith("hold"):
             await self.released.wait()
         overlay = self.overlays[-1][1] if self.overlays else {}
         suffix = f" overlay={json.dumps(overlay, sort_keys=True)}" if overlay else ""

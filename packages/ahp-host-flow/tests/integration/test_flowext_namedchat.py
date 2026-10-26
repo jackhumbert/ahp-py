@@ -219,25 +219,41 @@ TIMEOUT_PY = (
     "meta = {{'name': 'late', 'description': 'd'}}\n"
     "\n"
     "async def main(args):\n"
-    "{first}"
-    "    a = await agent('hold-1', x={{'chat': 's', 'timeout': 0.3}})\n"
+    "    await agent('one', x={{'chat': 's'}})\n"
+    "    a = await agent('{hold}', x={{'chat': 's'{timeout}}})\n"
     "    b = await agent('two', x={{'chat': 's'}})\n"
     "    return [a, b]\n"
 )
+TOML_IDLE = TOML.replace(
+    'load = "tests.flow_fakes:RecordingProvider"\n',
+    'load = "tests.flow_fakes:RecordingProvider"\nidle_timeout = 0.3\n',
+)
 
 
-@pytest.mark.parametrize("first", ["", "    await agent('one', x={'chat': 's'})\n"])
+@pytest.mark.parametrize(
+    ("hold", "timeout", "toml"),
+    [
+        # The call timeout; the turn ignores the cancel until its task is cancelled.
+        ("hold-1", ", 'timeout': 0.3", TOML),
+        # ... and then takes a while to end: the next call waits for it, bounded.
+        ("hold-slow", ", 'timeout': 0.3", TOML),
+        # The provider's idle watchdog, not the call's own timeout, ends the call.
+        ("hold-1", "", TOML_IDLE),
+    ],
+    ids=["call-timeout", "slow-to-stop", "idle-watchdog"],
+)
 async def test_flowext_namedchat_usable_after_a_timed_out_call(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, first: str
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, hold: str, timeout: str, toml: str
 ) -> None:
-    # The timed-out turn's inner session ignores the cancel: the call ends only once the
-    # grace runs out and its turn task is cancelled, and the next call on the chat must wait
-    # for that turn to end rather than find it still running.
+    # The chat already has a call (the first registers it), and the timed-out one's inner
+    # session ignores the cancel: the call ends once the grace runs out and its turn task
+    # is cancelled. The next call on the chat must wait for that turn to end rather than
+    # find it still running.
     monkeypatch.setattr(dispatch, "ABORT_GRACE", 0.5)
     user = tmp_path / "user"
     user.mkdir(parents=True, exist_ok=True)
-    (user / "late.py").write_text(TIMEOUT_PY.format(first=first), encoding="utf-8")
-    fx = await boot_flow(tmp_path, str(tmp_path / "no-node"), TOML)
+    (user / "late.py").write_text(TIMEOUT_PY.format(hold=hold, timeout=timeout), encoding="utf-8")
+    fx = await boot_flow(tmp_path, str(tmp_path / "no-node"), toml)
     try:
         turn = await run_turn(fx.wire, fx.chat, "t1", "/late")
         assert final_json(turn) == [None, "rec: two"], notifications(turn)
