@@ -125,7 +125,8 @@ Such a header is evidence only if the socket is reachable solely through
 that proxy - the embedder's guarantee to make, as with `ahp_host`.
 """
 
-#: `-32009`, the code the sibling host uses for a policy refusal.
+#: `-32009`, the code the sibling host uses for a policy refusal (an automation the caller
+#: may not manage it answers as missing, `-32008`, instead).
 _REFUSED: Final = -32009
 
 #: Params whose value is a channel some node owns, in routing precedence.

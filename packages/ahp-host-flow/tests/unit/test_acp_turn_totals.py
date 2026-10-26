@@ -14,11 +14,13 @@ from ahp_host_flow.engine.usage import read_usage
 def _acp_rounds_report() -> dict[str, Any]:
     # Exactly what ahp-host-acp's `_report_usage` sends for a three-round turn whose
     # usage_updates said used 100, 200, 300 and whose ACP turn usage summed the rounds
-    # (its `test_usage_reports_the_latest_call_and_the_turn_sum_apart`).
+    # (its `test_usage_reports_the_latest_call_and_the_turn_sum_apart`). The top-level
+    # cached count is None there (a usage_update set the context): the turn's cache reads
+    # are only in `turnTokenTotals`.
     return {
         "input_tokens": 300,
         "output_tokens": 40,
-        "cache_read_tokens": 7,
+        "cache_read_tokens": None,
         "model": "a",
         "meta": {
             "acpUsage": {"used": 300, "size": 200000, "cost": {"amount": 0.5, "currency": "USD"}},
