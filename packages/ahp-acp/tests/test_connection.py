@@ -461,3 +461,18 @@ def _running(pid: int) -> bool:
         return Path(f"/proc/{pid}/stat").read_text().split(")")[-1].split()[0] != "Z"
     except OSError:
         return True
+
+
+async def test_stderr_is_read_with_the_spawn_line_limit() -> None:
+    # stderr is read by line with the same limit as stdout, so a 100 KB line
+    # (well under LINE_LIMIT, over asyncio's 64 KiB default) arrives whole.
+    lines: list[str] = []
+    steps = [{"big_stderr": 100_000}]
+    conn = await spawn(
+        {"responses": {"go": {"ok": True}}, "before": {"go": steps}}, on_stderr=lines.append
+    )
+    try:
+        assert await conn.request("go", timeout=10) == {"ok": True}
+        await eventually(lambda: any(len(line.rstrip()) == 100_000 for line in lines))
+    finally:
+        await conn.aclose()
