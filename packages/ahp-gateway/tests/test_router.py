@@ -321,7 +321,9 @@ async def test_a_target_of_an_unknown_kind_naming_no_session_is_refused_unsent(
     assert [one.asked, two.asked] == [[], []]
 
 
-@pytest.mark.parametrize("target", ["copilot:/s1", ["copilot:/s1"], 1])
+# None included: an explicit `target: null` is a present target, refused like the rest
+# rather than broadcast as if no target were meant.
+@pytest.mark.parametrize("target", ["copilot:/s1", ["copilot:/s1"], 1, None])
 async def test_a_target_that_is_not_an_object_is_refused_unsent(target: Any) -> None:
     conn = connection()
     one = AnsweringLink("a", accepts="mcp:server")

@@ -22,10 +22,10 @@ be able to arrive as a patch upgrade.
 |---|---|
 | Upstream | [`microsoft/agent-host-protocol`](https://github.com/microsoft/agent-host-protocol) (MIT) |
 | Spec ref | `main` — ahead of the `spec/v1.1.0` tag, which does not exist yet |
-| Spec commit | `1ef0642965efaa7ef98caff287bca923fbc80ec6` |
+| Spec commit | `c5628cd4b09f76cf143ebe655e872c0fb3f1b8d8` |
 | Working revision read during research | `bd27d354b39c1b2090fbcc6db392d406b743280c` (2026-07-31) |
 | **Protocol version negotiated on the wire** | **`1.0.0`** (we offer `1.0.0, 0.9.0, 0.8.0, 0.7.0, 0.6.0`); a `1.1.0` offer is accepted under `^1.0.0` |
-| Conformance corpus | with the dependency, vendored there from `main` @ `1ef06429` → `types/test-cases/` |
+| Conformance corpus | with the dependency, vendored there from `main` @ `c5628cd4` → `types/test-cases/` |
 | Reference client for interop tests | `@microsoft/agent-host-protocol@1.0.0` (npm, published 2026-10-02) |
 
 ### The interop client matches the wire version

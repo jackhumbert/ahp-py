@@ -55,8 +55,8 @@ to be on it. Either way the archive is cut from the **commit**. When
 `spec/v1.1.0` is tagged, re-pin to it and diff every `reducer.ts` between
 `c5628cd4` and the tag — upstream may change 1.1.0 again before releasing it.
 
-For the record, as of **2026-10-17**: `spec/v1.0.0` (2026-10-02) is still the
-newest spec tag, and the pinned commit is upstream `main`'s head, 42 commits
+For the record, as of **2026-10-25**: `spec/v1.0.0` (2026-10-02) is still the
+newest spec tag, and the pinned commit is upstream `main`'s head, 56 commits
 past it. Upstream's `CHANGELOG.md` has only an empty `[1.1.0] — Unreleased`
 heading; the change notes live in `docs/.changes/*.json` until release.
 

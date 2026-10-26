@@ -447,6 +447,24 @@ class TestExpiry:
         assert host.tokens.get(resource) is not None
         assert len(host._token_expiry) == 1
 
+    async def test_each_expiry_is_announced_on_its_own_channel(self, world: Any) -> None:
+        # A targeted grant is for one server in one session: its `auth/required`
+        # goes to that session's channel. The agent-level one stays on the root.
+        host, provider, _policy, _sink, client = world
+        await _parked(host, provider, client, "echo:/a")
+        await _push(client, token="agent-level", expiresIn=1)
+        await _push(client, target=_target("echo:/a"), token="targeted", expiresIn=1)
+
+        def expired() -> list[str]:
+            return [
+                n["params"].get("channel")
+                for n in client.notifications
+                if n.get("method") == "auth/required" and n["params"].get("reason") == "expired"
+            ]
+
+        await client.collect_until(lambda: len(expired()) >= 2, timeout=5.0)
+        assert sorted(expired()) == sorted([ROOT_URI, "echo:/a"])
+
     async def test_a_targeted_push_does_not_cancel_the_untargeted_timer(self, world: Any) -> None:
         host, provider, _policy, _sink, client = world
         await _parked(host, provider, client, "echo:/a")

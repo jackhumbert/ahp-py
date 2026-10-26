@@ -70,7 +70,11 @@ def test_an_unknown_target_kind_validates_and_survives_verbatim() -> None:
 
 
 def test_an_explicit_null_target_is_treated_as_absent() -> None:
-    """Same rule as every other optional field (`ObjectSpec`)."""
+    """Same rule as every other optional field (`ObjectSpec`).
+
+    The shape check only. ahp-host and ahp-gateway refuse a present `target: null`
+    on their own: what they would do with a token they cannot scope is broadcast it.
+    """
     assert _problems("AuthenticateParams", _params(target=None)) == []
 
 

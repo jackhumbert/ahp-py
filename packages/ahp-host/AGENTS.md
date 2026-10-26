@@ -51,8 +51,8 @@ specification owned by Microsoft. We implement it; we do not design it.
 
 Current state: **feature-complete for `0.1.0`; not yet published.** What was
 scoped as v0.2 landed before the first release, so it ships in `0.1.0` too.
-All **327** reducer fixtures and
-all 94 round-trip fixtures pass, the v0.1 command set is implemented, and the
+All **335** reducer fixtures and
+all 97 round-trip fixtures pass, the v0.1 command set is implemented, and the
 real published Microsoft TypeScript client drives a full turn against the host
 over WebSocket in CI. v0.1's build order is
 `docs/plan.md` §11; everything after it is scoped in
