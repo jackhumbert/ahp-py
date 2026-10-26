@@ -44,7 +44,7 @@ import random
 import uuid
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Any, Final, Literal
+from typing import Any, Final, Literal, TypeGuard
 from urllib.parse import unquote
 
 from ahp_host import ConnectionInfo
@@ -1349,10 +1349,8 @@ class _SurfaceConnection:
         if self.gateway.client_files != "refuse" or self.passthrough_node is not None:
             return
         for value in _file_candidates(params, _FOLDER_KEYS):
-            if not isinstance(value, str):
-                continue
-            scheme, colon, rest = value.partition(":")
-            if colon and scheme.lower() in _CLIENT_FILE_SCHEMES:
+            if _is_client_file(value):
+                rest = value.partition(":")[2]
                 name = unquote(rest.lstrip("/").partition("/")[0])
                 raise invalid_params(f"no node {name!r} is available to this connection")
 
@@ -1387,10 +1385,7 @@ class _SurfaceConnection:
         node_id = self.passthrough_node
         if node_id is None or node_id not in self.nodes:
             return None
-        if any(
-            isinstance(v, str) and v.startswith("file:")
-            for v in _file_candidates(params, _FOLDER_KEYS)
-        ):
+        if any(_is_client_file(v) for v in _file_candidates(params, _FOLDER_KEYS)):
             return node_id
         return None
 
@@ -1844,6 +1839,14 @@ class _SurfaceConnection:
             )
         else:
             future.set_result(message.get("result"))
+
+
+def _is_client_file(value: Any) -> TypeGuard[str]:
+    """Whether *value* is a plain local-file URI, in any spelling a host accepts."""
+    if not isinstance(value, str):
+        return False
+    scheme, colon, _ = value.partition(":")
+    return bool(colon) and scheme.lower() in _CLIENT_FILE_SCHEMES
 
 
 def _file_candidates(params: Mapping[str, Any], keys: Sequence[str]) -> list[Any]:

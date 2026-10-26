@@ -176,3 +176,19 @@ async def test_a_plain_file_uri_routed_to_another_node_is_refused() -> None:
     # The passthrough node's own still crosses verbatim.
     [(_, params)] = a.notified
     assert params["action"]["directory"] == "file:///srv/x"
+
+
+@pytest.mark.parametrize(
+    "folder", ["file:///home/me/x", "FILE:///home/me/x", "vscode-agent-host:///x"]
+)
+def test_any_local_file_spelling_names_the_passthrough_node(folder: str) -> None:
+    # The same spellings `client_files = "refuse"` treats as a local file.
+    from types import SimpleNamespace
+
+    from ahp_gateway.core.gateway import _SurfaceConnection
+
+    surface = SimpleNamespace(passthrough_node="node-a", nodes={"node-a": object()})
+    named = _SurfaceConnection._passthrough_named(surface, {"cwd": folder})  # type: ignore[arg-type]
+    assert named == "node-a"
+    other = _SurfaceConnection._passthrough_named(surface, {"cwd": "ahp-file:///node-b/x"})  # type: ignore[arg-type]
+    assert other is None
