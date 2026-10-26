@@ -311,7 +311,7 @@ class TurnlessHoldSession:
         pass
 
     async def aclose(self) -> None:
-        pass
+        ResumableHoldProvider.sessions_closed += 1
 
 
 #: What `ResumableHoldSession.resume_turn` answers, so a test tells a turn resumed in place from
@@ -340,6 +340,7 @@ class ResumableHoldProvider:
     holding: ClassVar[bool] = True
     sessions_created: ClassVar[int] = 0
     sessions_resumed: ClassVar[int] = 0
+    sessions_closed: ClassVar[int] = 0
     turn_resumes: ClassVar[list[tuple[str, str]]] = []
     resumes_turns: ClassVar[bool] = True
     records_state: ClassVar[bool] = True
@@ -1034,6 +1035,7 @@ def reset_fakes() -> None:
     ResumableHoldProvider.holding = True
     ResumableHoldProvider.sessions_created = 0
     ResumableHoldProvider.sessions_resumed = 0
+    ResumableHoldProvider.sessions_closed = 0
     ResumableHoldProvider.turn_resumes.clear()
     ResumableHoldProvider.resumes_turns = True
     ResumableHoldProvider.records_state = True

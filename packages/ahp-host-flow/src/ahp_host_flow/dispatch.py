@@ -1235,25 +1235,34 @@ class ProviderDispatcher(StepDispatcher):
         )
 
         raw_schema = opts.get("schema")
-        message, model = self._build_message(call, spec, provider, chat, attachments)
-        started = self._steps[call_id]
-        started["chat"] = worker.resource
-        started["model"] = model
-        link_item = {"type": "subagent", "resource": worker.resource, "title": chat.title}
-        # Clients can open the child chat while it runs.
-        await self.sink.tool_call_output(call_id, [link_item], meta=flow.meta(flow.step(started)))
-        self._watch(call_id, link_item)
-        inner, fresh = await self._open_session(
-            call,
-            name,
-            provider,
-            spec,
-            chat,
-            wt=wt,
-            chat_name=chat_name,
-            folder=folder,
-            model=model,
-        )
+        try:
+            message, model = self._build_message(call, spec, provider, chat, attachments)
+            started = self._steps[call_id]
+            started["chat"] = worker.resource
+            started["model"] = model
+            link_item = {"type": "subagent", "resource": worker.resource, "title": chat.title}
+            # Clients can open the child chat while it runs.
+            await self.sink.tool_call_output(
+                call_id, [link_item], meta=flow.meta(flow.step(started))
+            )
+            self._watch(call_id, link_item)
+            inner, fresh = await self._open_session(
+                call,
+                name,
+                provider,
+                spec,
+                chat,
+                wt=wt,
+                chat_name=chat_name,
+                folder=folder,
+                model=model,
+            )
+        except BaseException:
+            # A resumed session already exists, and `_run_turn`, which closes it, never ran.
+            if chat.resumed is not None:
+                with contextlib.suppress(Exception):
+                    await chat.resumed[1].aclose()
+            raise
         state, usage, value = await self._run_turn(
             _WorkerTurn(
                 call=call,
@@ -1484,7 +1493,8 @@ class ProviderDispatcher(StepDispatcher):
                 call_id, [link_item], meta=flow.meta(flow.step(started, awaiting=waiting))
             )
 
-        approver = self._approver_for(call, name, wt, folder)
+        # Built inside the clean-up `try` below: the inner session already exists.
+        approver: Approver | None = None
 
         def idle_expired() -> None:
             state.timed_out = True
@@ -1613,6 +1623,7 @@ class ProviderDispatcher(StepDispatcher):
         launched = False
         # From here every way out closes what the setup registered, the inner session too.
         try:
+            approver = self._approver_for(call, name, wt, folder)
             self.worker_providers[worker.resource] = name
             # An unnamed, schema-less call keeps its session's state while the turn runs, so a
             # restart can resume the turn in place (`ResumesTurns`) rather than send it again.

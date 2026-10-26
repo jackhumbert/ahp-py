@@ -10,6 +10,8 @@ import asyncio
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from ahp_host_flow.provider import FlowSession
 from tests import flow_fakes
 from tests.flow_fakes import RESUMED_IN_PLACE, ResumableHoldProvider, reset_fakes
@@ -227,5 +229,29 @@ async def test_durinflight_a_record_not_resumed_is_dropped(tmp_path: Path) -> No
         held.released.set()
         turn = await wait_resumed(fx2)
         assert final_json(turn) == ["mem: hold one", "rec: hold two"]
+    finally:
+        await fx2.shut()
+
+
+async def test_durinflight_a_failure_after_resuming_closes_the_resumed_session(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The cut-off call's session is resumed, then its setup fails: that session is closed."""
+    from ahp_host_flow.dispatch import ProviderDispatcher
+
+    node = str(tmp_path / NO_NODE)
+    await _cut_off(tmp_path, node, "durinflight", PLAIN, drain=True)
+    closed_before = ResumableHoldProvider.sessions_closed  # the first host's, at shutdown
+
+    def broken(self: Any, *args: Any) -> None:
+        raise RuntimeError("no message for you")
+
+    monkeypatch.setattr(ProviderDispatcher, "_build_message", broken)
+    ResumableHoldProvider.holding = False
+    fx2 = await restart_flow(tmp_path, node, TOML)
+    try:
+        await wait_resumed(fx2)
+        assert ResumableHoldProvider.sessions_resumed == 1
+        assert ResumableHoldProvider.sessions_closed == closed_before + 1
     finally:
         await fx2.shut()

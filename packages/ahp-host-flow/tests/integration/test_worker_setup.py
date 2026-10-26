@@ -102,3 +102,31 @@ async def test_worker_setup_a_cancel_during_setup_closes_the_inner_session(
         assert await fx.wire.until(lambda: _clean(fx))
     finally:
         await fx.shut()
+
+
+async def test_worker_setup_a_failing_approver_closes_the_inner_session(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The turn's approval rules are built after the session is made; a failure there
+    # (a working directory that is gone, say) must not leave the session open.
+    from ahp_host_flow.dispatch import ProviderDispatcher
+
+    def broken(self: Any, *args: Any) -> None:
+        raise FileNotFoundError("the working directory is gone")
+
+    monkeypatch.setattr(ProviderDispatcher, "_approver_for", broken)
+    user = tmp_path / "user"
+    user.mkdir(parents=True, exist_ok=True)
+    (user / "one.py").write_text(WORKFLOW, encoding="utf-8")
+    fx = await boot_flow(tmp_path, str(tmp_path / "no-node"), TOML)
+    try:
+        await start_turn(fx.wire, fx.chat, "t1", "/one")
+        assert await fx.wire.until(lambda: bool(GatedProvider.instances))
+        GatedProvider.instances[0].release.set()
+        turn = await wait_turn(fx.wire, fx.chat, "t1")
+        assert final_json(turn) is None
+        (session,) = GatedProvider.instances[0].sessions
+        assert session.closed
+        assert _clean(fx)
+    finally:
+        await fx.shut()
