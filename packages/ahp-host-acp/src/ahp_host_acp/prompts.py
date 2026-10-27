@@ -13,7 +13,9 @@ never a failed turn:
   agent could not open); otherwise a `resource_link` to its real path, which
   the agent can open itself. A URI that is neither a served file nor web
   address means nothing to an agent and is left out. A text selection is
-  said in a text block after it.
+  said in a text block after it. An image file (by content type or extension)
+  becomes an `image` block when the agent takes images and it is at most
+  `MAX_IMAGE`.
 - **`embeddedResource`** (inline base64): an `image` or `audio` block for one
   of those, when the agent takes it; otherwise an embedded `resource` (text
   if it decodes, else a blob) when it takes embedded context.
@@ -45,6 +47,18 @@ log = logging.getLogger(__name__)
 
 #: Larger files are linked, not embedded.
 MAX_EMBED: Final = 1024 * 1024
+
+#: Bytes of one inlined image.
+MAX_IMAGE: Final = 8 * 1024 * 1024
+
+#: File extensions that say what a file is when its content type does not.
+IMAGE_TYPES: Final = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".gif": "image/gif",
+    ".webp": "image/webp",
+}
 
 
 def text(value: str) -> dict[str, Any]:
@@ -150,6 +164,20 @@ class PromptBuilder:
         link: dict[str, Any] = {"type": "resource_link", "uri": real.as_uri(), "name": label}
         if mime:
             link["mimeType"] = mime
+        image_mime = (
+            mime if (mime or "").startswith("image/") else IMAGE_TYPES.get(real.suffix.lower())
+        )
+        if self._image and image_mime and real.is_file():
+            try:
+                if real.stat().st_size <= MAX_IMAGE:
+                    return {
+                        "type": "image",
+                        "data": base64.b64encode(real.read_bytes()).decode("ascii"),
+                        "mimeType": image_mime,
+                        "uri": real.as_uri(),
+                    }
+            except OSError:
+                pass  # unreadable: the link, as for any other file
         if not self.embedded or not real.is_file():
             return link
         try:

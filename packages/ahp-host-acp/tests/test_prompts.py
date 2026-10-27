@@ -10,6 +10,7 @@ from typing import Any
 import pytest
 from ahp_host.provider.base import AgentSessionContext, AttachedChat, ForkedFrom, UserMessage
 
+from ahp_host_acp import prompts
 from ahp_host_acp.prompts import MAX_EMBED, PromptBuilder
 from ahp_host_acp.provider import AcpProvider, AcpSession, AgentSpec
 from ahp_host_acp.roots import Roots
@@ -108,6 +109,102 @@ def test_with_capabilities_content_is_embedded(tmp_path: Path) -> None:
     assert image == {"type": "image", "data": _b64(b"x"), "mimeType": "image/png"}
     assert plain["resource"] == {"uri": "attachment:a.txt", "mimeType": "text/plain", "text": "hi"}
     assert pdf["resource"]["blob"] == _b64(b"\xff")
+
+
+def test_a_served_image_reaches_an_image_agent_as_an_image(tmp_path: Path) -> None:
+    (tmp_path / "pic.png").write_bytes(b"\x89PNG\r\n")
+    builder = PromptBuilder(Roots.single(tmp_path), {"image": True})
+    blocks = builder.blocks(
+        _message(
+            {
+                "type": "resource",
+                "label": "pic.png",
+                "uri": (tmp_path / "pic.png").as_uri(),
+            },
+        )
+    )
+    (block,) = blocks[1:]
+    assert block == {
+        "type": "image",
+        "data": _b64(b"\x89PNG\r\n"),
+        "mimeType": "image/png",
+        "uri": (tmp_path / "pic.png").as_uri(),
+    }
+
+
+def test_an_image_content_type_beats_a_name_that_does_not_say_so(tmp_path: Path) -> None:
+    (tmp_path / "photo.bin").write_bytes(b"\xff\xd8\xff")
+    builder = PromptBuilder(Roots.single(tmp_path), {"image": True})
+    blocks = builder.blocks(
+        _message(
+            {
+                "type": "resource",
+                "label": "photo.bin",
+                "uri": (tmp_path / "photo.bin").as_uri(),
+                "contentType": "image/jpeg",
+            },
+        )
+    )
+    (block,) = blocks[1:]
+    assert (block["type"], block["mimeType"]) == ("image", "image/jpeg")
+
+
+def test_an_image_is_still_a_link_for_an_agent_that_takes_none(tmp_path: Path) -> None:
+    (tmp_path / "pic.png").write_bytes(b"\x89PNG\r\n")
+    builder = PromptBuilder(Roots.single(tmp_path), {})
+    blocks = builder.blocks(
+        _message(
+            {
+                "type": "resource",
+                "label": "pic.png",
+                "uri": (tmp_path / "pic.png").as_uri(),
+            },
+        )
+    )
+    (block,) = blocks[1:]
+    assert block == {
+        "type": "resource_link",
+        "uri": (tmp_path / "pic.png").as_uri(),
+        "name": "pic.png",
+    }
+
+
+def test_an_image_too_large_to_inline_is_still_a_link(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(prompts, "MAX_IMAGE", 4)
+    (tmp_path / "pic.png").write_bytes(b"x" * 5)
+    builder = PromptBuilder(Roots.single(tmp_path), {"image": True})
+    blocks = builder.blocks(
+        _message(
+            {
+                "type": "resource",
+                "label": "pic.png",
+                "uri": (tmp_path / "pic.png").as_uri(),
+            },
+        )
+    )
+    (block,) = blocks[1:]
+    assert block["type"] == "resource_link"
+
+
+def test_a_text_file_is_still_embedded_text_for_an_image_agent(tmp_path: Path) -> None:
+    (tmp_path / "notes.txt").write_text("hello\n")
+    builder = PromptBuilder(Roots.single(tmp_path), {"image": True, "embeddedContext": True})
+    blocks = builder.blocks(
+        _message(
+            {
+                "type": "resource",
+                "label": "notes.txt",
+                "uri": (tmp_path / "notes.txt").as_uri(),
+            },
+        )
+    )
+    (block,) = blocks[1:]
+    assert block == {
+        "type": "resource",
+        "resource": {"uri": (tmp_path / "notes.txt").as_uri(), "text": "hello\n"},
+    }
 
 
 @pytest.mark.parametrize("embedded", [True, False])

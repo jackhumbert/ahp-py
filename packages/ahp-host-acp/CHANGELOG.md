@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+### Added — an attached image file as an image block
+
+- A `resource` attachment that is an image file (by its content type or its extension) is sent as
+  an ACP `image` block to an agent whose `initialize` said `promptCapabilities.image`, read from
+  the served folder here, up to 8 MiB (`prompts.MAX_IMAGE`); larger, unreadable, or an agent that
+  takes no images keeps today's `resource_link`.
+
 ### Fixed — review fixes (security)
 
 - A permission request is judged, by the tool policy and by the relayed-tool shortcut, on
