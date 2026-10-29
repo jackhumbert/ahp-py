@@ -92,6 +92,9 @@ from ahp_host_flow.worktree import (
 
 _log = logging.getLogger(__name__)
 
+#: Worker message `_meta` key holding the `opts.x` values `[workflows] forward_x` lists.
+FORWARDED_X_META_KEY: Final = "ahp-py/flow-x"
+
 if TYPE_CHECKING:
     from ahp_host_flow.remotechats import RemoteWorkerChats as RemoteWorkerChats
     from ahp_host_flow.router import RoutingDispatcher as RoutingDispatcher
@@ -1369,6 +1372,28 @@ class ProviderDispatcher(StepDispatcher):
             )
         return _ResolvedChat(worker, title, existing, resumed)
 
+    def _forwarded_x(self, call: AgentCall) -> dict[str, Any]:
+        """The `opts.x` keys `[workflows] forward_x` lists that the call sets.
+
+        A value that is not plain JSON is skipped with a log line naming the key, never
+        silently. The values are part of `call.opts`, so they are already in the replay key.
+        """
+        listed = self.config.workflows.forward_x
+        if not listed:
+            return {}
+        x = x_opts(call.opts)
+        out: dict[str, Any] = {}
+        for key in listed:
+            if key not in x:
+                continue
+            try:
+                json.dumps(x[key], allow_nan=False)
+            except (TypeError, ValueError):
+                self._note(f"agent() #{call.ordinal}: opts.x.{key} is not JSON; not forwarded")
+                continue
+            out[key] = x[key]
+        return out
+
     def _build_message(
         self,
         call: AgentCall,
@@ -1396,8 +1421,14 @@ class ProviderDispatcher(StepDispatcher):
             if notes:
                 text = "\n".join(notes) + "\n" + text
         raw: dict[str, Any] = {"text": text, "origin": {"kind": "agent"}}
+        meta: dict[str, Any] = {}
         if schema:
-            raw["_meta"] = {OUTPUT_SCHEMA_META_KEY: dict(schema)}
+            meta[OUTPUT_SCHEMA_META_KEY] = dict(schema)
+        forwarded = self._forwarded_x(call)
+        if forwarded:
+            meta[FORWARDED_X_META_KEY] = forwarded
+        if meta:
+            raw["_meta"] = meta
         if attachments:
             raw["attachments"] = list(attachments)
         model = model_for(spec, provider, opts, self.run_model)

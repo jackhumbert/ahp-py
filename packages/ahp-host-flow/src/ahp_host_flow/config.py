@@ -130,6 +130,9 @@ class WorkflowsConfig:
     watch_interval: float = 2.0
     # Client tools offered to workers: all of the session's, none, or only these names.
     client_tools: bool | tuple[str, ...] = True
+    # `opts.x` keys copied into an in-process worker's message `_meta["ahp-py/flow-x"]`;
+    # empty (the default) forwards nothing.
+    forward_x: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -516,7 +519,9 @@ def _check_fallbacks(providers: Mapping[str, ProviderConfig], routing: Routing) 
 def _parse_workflows(raw: Any, base: Path) -> WorkflowsConfig:
     table = _table(raw, "workflows")
     _check_keys(
-        table, ("dirs", "sources", "python_sources", "watch_interval", "client_tools"), "workflows"
+        table,
+        ("dirs", "sources", "python_sources", "watch_interval", "client_tools", "forward_x"),
+        "workflows",
     )
     dirs = tuple(_path(d, base) for d in _str_list(table.get("dirs", []), "workflows.dirs"))
     sources = tuple(_str_list(table.get("sources", list(SOURCES_DEFAULT)), "workflows.sources"))
@@ -560,8 +565,16 @@ def _parse_workflows(raw: Any, base: Path) -> WorkflowsConfig:
             raise ConfigError(
                 "workflows.client_tools must be true, false or an array of tool names"
             )
+    forward_x = tuple(_str_list(table.get("forward_x", []), "workflows.forward_x"))
+    if len(set(forward_x)) != len(forward_x) or any(not k for k in forward_x):
+        raise ConfigError("workflows.forward_x must be distinct, non-empty key names")
     return WorkflowsConfig(
-        dirs, sources, python_sources, float(interval), client_tools=client_tools
+        dirs,
+        sources,
+        python_sources,
+        float(interval),
+        client_tools=client_tools,
+        forward_x=forward_x,
     )
 
 

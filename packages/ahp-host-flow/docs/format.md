@@ -291,6 +291,12 @@ provider of that name, ahead of any routing rule and the default. A non-object
 `x` or a provider that is not a non-empty string is ignored. An unconfigured
 name fails the call: `null` plus a `log()` line that lists the configured names.
 
+### opts.x forwarding
+
+A host's `[workflows] forward_x` lists `opts.x` keys copied into an in-process worker's
+message `_meta["ahp-py/flow-x"]` as `{key: value}`; nothing is forwarded by default. The
+values are part of `opts`, so they are already in the call's key.
+
 ### opts.x.chat
 
 `agent(prompt, {x: {chat: 'name'}})` runs the call as a follow-up turn in the

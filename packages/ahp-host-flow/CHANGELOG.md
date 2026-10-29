@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Added — `[workflows] forward_x`
+
+- Lists `opts.x` keys of an `agent()` call to copy into an in-process worker's message
+  `_meta["ahp-py/flow-x"]` as `{key: value}`. Empty by default (nothing forwarded). Non-JSON
+  values are skipped with a log line. The values are already in the replay key through `opts`.
+
 ### Added — a client can continue an ended run in a new turn
 
 - `_meta["ahp-py/flow"]` = `{continueRun: "<run id>"}` on a turn continues an earlier run of

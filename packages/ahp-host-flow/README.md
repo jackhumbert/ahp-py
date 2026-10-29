@@ -53,6 +53,25 @@ Put the host behind a reverse proxy by binding it off loopback with `--token-fil
 - Set the proxy's idle/read timeout above `--ping-interval` (or keep pings on), and
   its body/frame limit at or above `--max-size`.
 
+## Forwarding `opts.x` keys to a provider
+
+`[workflows] forward_x = ["tier", ...]` lists `opts.x` keys of an `agent()` call that are
+copied into the worker's user message, under `_meta["ahp-py/flow-x"]` as `{key: value}`
+(`ahp_host_flow.dispatch.FORWARDED_X_META_KEY`), so an in-process provider reads per-call
+settings the script declares from the message it already receives. The default is empty:
+nothing is forwarded and the message is unchanged. Only the host's config picks the keys; a
+script sets values for listed keys only, and a key it does not set adds nothing. Fleet and
+remote providers do not get the message `_meta`.
+
+- A host that lists a key trusts every workflow source it enables (`[workflows] sources`, a
+  `client` source included) with that key and its values: treat them as untrusted input in
+  the provider.
+- A value that is not plain JSON is skipped and the run's log says which key; the call goes on.
+- The forwarded values are part of `opts`, which the replay key already covers
+  (`{prompt, opts, phase, label}`), so a changed value never replays a call cached with
+  another one; nothing was added to the key.
+- The value reaches the inner agent unmasked, like the prompt (it is what the agent is sent).
+
 ## Typed workflow starts
 
 A client can start a workflow without building the `/name {json}` text. Put
@@ -1118,6 +1137,7 @@ rules = [ { model = "glm", provider = "glm" }, { phase = "Review", provider = "g
 dirs = ["~/flows"]
 sources = ["workspace", "user", "host"]   # the default; add "client" to opt in
 client_tools = true                       # or false, or ["lookup"]: client tools workers get
+forward_x = []                            # opts.x keys copied into the worker's message _meta
 
 [redact]
 patterns = ['sekrit-[0-9]+']
