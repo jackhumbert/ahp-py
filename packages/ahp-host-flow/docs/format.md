@@ -141,7 +141,7 @@ agent record per completed call (ordinal, key, status `ok`, `null` or `error`,
 value and output tokens; an error record may also carry `kind`, one of
 `unavailable`, `rate_limited`, `refused`, `timeout`, `empty`, `failed` or `budget`,
 an ahp-py extension old readers ignore); ahp-py adds a verb record per custom verb call and
-the header's `keyMode` (see Extensions). The key is the sha256 of the canonical JSON (sorted
+the header's `keyMode` and optional `principal` and `model` (see Extensions). The key is the sha256 of the canonical JSON (sorted
 keys, no whitespace) of `{prompt, opts, phase, label}`.
 
 Resume serves `agent()` calls from the journal by content: the n-th call
@@ -372,6 +372,19 @@ typed start wins over the text. Args are validated against `argsSchema` for type
 text starts; a mismatch fails the turn with errorType `flow.badArgs` and nothing is
 dispatched. A client-chosen `runId` is used when it is free; otherwise the host mints
 one and reports it in `runStarted`.
+
+### Continuing an ended run
+
+An ahp-py extension of the typed start: `_meta["ahp-py/flow"]` is `{continueRun: "<run id>"}`,
+with no `workflow`, `args` or `runId`. The host continues that run from its journal in the new
+turn (finished calls replay by key, the rest run live, a new run id with `resumedFrom`), on any
+chat of the host. The journal header gains an optional string `principal`, the turn's principal
+the run started for, written only when there is one; it is not part of any replay key, readers
+that do not know it ignore it and a journal without it reads as "no principal"
+(`JOURNAL_VERSION` stays 1, so no compatibility break). The header also records the optional `model` the run was asked for, which a continue reuses
+(never part of a key). A continue needs the caller's principal
+to equal the header's, absent equal to absent, and is decided before any other refusal. Refusals fail the turn as `flow.run`, not
+resumable, before any call is dispatched. `[resume] continue = false` disables the path.
 
 ### The shim
 

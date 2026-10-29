@@ -196,6 +196,10 @@ assert start == {"workflow": "host:nightly", "args": {"day": "mon"}, "runId": "r
 assert flow.parse_workflow_start(flow.meta(start)).run_id == "r1"
 ```
 
+A client continues an ended run of the same host with `{continueRun: "<run id>"}` instead
+(no `workflow`, `args` or `runId`): `flow.continue_start(run_id)` builds it and
+`flow.parse_continue_start(meta)` returns the id, or `None` when `meta` holds no such start.
+
 A host running a workflow also keeps a client attached while its steps are silent: every
 few seconds it sends a `chat/activityChanged` on the run's chat whose `_meta["ahp-py/flow"]`
 is a heartbeat descriptor, `{heartbeat: {running, tick}}` (`flow.HEARTBEAT_KIND` is its one

@@ -70,6 +70,48 @@ From ahp-client, `session.workflows()` lists them and
 `session.start_workflow(name, args, run_id=None)` starts one. In ahp_protocol,
 `workflows_of` reads the listing from a customization container.
 
+### Continuing an ended run
+
+Cancelling a run's turn leaves its journal on disk but ends the run. A client can pick it up
+again in a **new turn, on any chat or session of the same host**, with a second typed start:
+`_meta["ahp-py/flow"]` = `{continueRun: "<run id>"}` (`flow.continue_start(run_id)` builds it,
+`flow.parse_continue_start` reads it). It cannot be combined with `workflow`, `args` or `runId`
+(the turn fails as `flow.badArgs`): the script, filename and args come from the run's journal.
+
+- What replays: the same as a restart's resume (`RunOptions.continue_run`). Every finished
+  `agent()` call replays from the journal by key and is not dispatched again; a call that never
+  finished runs live, and so does everything after. The continued run has a **new run id**, its
+  journal header says `resumedFrom`, and the turn announces it with a fresh `runStarted` and the
+  line "Run <old> continued as run <new>". Phase counters start fresh for the new chat. The
+  original run's journal is not touched, so a run can be continued more than once and a continued
+  run can be continued in turn.
+- Ownership: the journal header records the principal the run started for
+  (`principal`, the turn's principal as for `VerbContext.principal`). A continue is refused unless
+  the caller's principal equals it; a run recorded with no principal, which includes every
+  journal written before the field existed, can be continued only by a caller with no principal.
+  The continued run records the same principal. Ownership is decided before anything else is
+  said: an id that does not exist, one that belongs to someone else (whether it is live,
+  restart-pending, corrupt or masked), and one whose journal header cannot be read get the same
+  answer, so an id is never confirmed to another principal and no principal is ever named in a
+  reason. Only the owner hears "still running", "cannot be read" or "masked". Runs recorded
+  with no principal (written before this feature, or started by a host-internal turn with
+  none) match only a principal-less caller: an authenticated owner cannot continue them.
+- Model: the journal header records the model the run was asked for (optional `model`), and a
+  continue runs with it whatever model its own message names, so `[resume] key = "model"` still
+  matches the cached calls. A journal that recorded none (older ones) takes the caller's model,
+  and the host logs that.
+- Refused, with the turn failed as `flow.run` (not resumable) and nothing dispatched: an unknown
+  id or another principal's, a run that is still live or that a host restart left pending
+  (this host or another process holding its journal), a journal that cannot be read, and a journal that holds its script or args masked
+  (the default when `[redact]` changed them; the original chat's message is not there to
+  recover them from, so set `[journal] keep_source = true` for runs that must be continued from
+  another chat). An owner may fork one ended run more than once: two continues one after
+  another each make a new run. Nothing continues by itself: a cancel stays a cancel.
+- `[resume] continue = false` turns the client path off (default `true`). It exists because a
+  continue runs the journal's snapshot of the script, not whatever the workflow catalog holds
+  now; a host that wants every client start to resolve through the current catalog and its
+  `argsSchema` switches it off. A restart's own resume is not affected.
+
 ## Running a script from the command line
 
 ```sh
@@ -506,6 +548,7 @@ byte-identical to what earlier versions wrote. A flow.toml can add to it:
 ```toml
 [resume]
 key = "model"
+continue = true    # a client may continue an ended run in a new turn (default true)
 ```
 
 `"model"` adds `{provider, model}` from routing and the `models` alias

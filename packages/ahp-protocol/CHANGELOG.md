@@ -8,6 +8,14 @@ the spec revision it targets.
 
 ## [Unreleased]
 
+### Added — `flow.continue_start` and `flow.parse_continue_start`
+
+- A typed start `{continueRun: "<run id>"}` under `_meta["ahp-py/flow"]` asks a host to
+  continue an earlier run of its own in a new turn. `continue_start` builds it (the id must
+  match `RUN_ID_PATTERN`), `parse_continue_start` returns the id or `None`, and raises
+  `ValueError` for a non-string id or one combined with `workflow`, `args` or `runId`. The
+  descriptor schema gains `continueStart`. `parse_workflow_start` is unchanged.
+
 ### Changed — the spec pin moves to upstream `main` @ `c5628cd4`
 
 - Re-pinned from `1ef06429` to `c5628cd4` (still `1.1.0`, unreleased;

@@ -150,6 +150,9 @@ class JournalConfig:
 class ResumeConfig:
     # 'default', 'model' (the routed provider and model join each key) or 'module:function'.
     key: str = "default"
+    # Whether a client may start a turn that continues an earlier run of this host
+    # (`continueRun`); TOML `continue`. A restart's own resume is not affected.
+    continue_run: bool = True
 
 
 @dataclass(frozen=True)
@@ -603,13 +606,16 @@ def _parse_verbs(raw: Any) -> dict[str, str]:
 
 def _parse_resume(raw: Any) -> ResumeConfig:
     table = _table(raw, "resume")
-    _check_keys(table, ("key",), "resume")
+    _check_keys(table, ("key", "continue"), "resume")
     key = table.get("key", "default")
     if not isinstance(key, str) or not (key in ("default", "model") or LOAD_SPEC.fullmatch(key)):
         raise ConfigError(
             f'resume.key must be "default", "model" or \'module:function\', got {key!r}'
         )
-    return ResumeConfig(key)
+    continue_run = table.get("continue", True)
+    if not isinstance(continue_run, bool):
+        raise ConfigError("resume.continue must be true or false")
+    return ResumeConfig(key, continue_run)
 
 
 #: A run id to try `changesets.branch` with (the shape `engine.RUN_ID` allows).

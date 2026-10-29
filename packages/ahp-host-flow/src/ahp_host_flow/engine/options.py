@@ -85,6 +85,12 @@ class RunOptions:
     state_dir: Path | None = None
     # Id of the new run; None means generated.
     run_id: str | None = None
+    # Who the run is for, recorded in the journal header so a later continue can be checked
+    # against it; None records nothing (a run with no principal).
+    principal: str | None = None
+    # The model the run was asked for, recorded in the journal header (never in a key) so a
+    # continue from another chat runs with the same one; None records nothing.
+    model: str | None = None
     # Id of an earlier run whose journal serves cached agent() calls.
     resume_from: str | None = None
     # Continue a run the host stopped, from its own journal snapshot: every finished call
@@ -154,6 +160,10 @@ class RunOptions:
                 raise ValueError(f"{name} must match [A-Za-z0-9][A-Za-z0-9_-]{{0,63}}")
         if (self.run_id is not None or self.resume_from is not None) and self.state_dir is None:
             raise ValueError("run_id and resume_from need state_dir")
+        if self.principal is not None and not isinstance(self.principal, str):
+            raise ValueError("principal must be a string")
+        if self.model is not None and not isinstance(self.model, str):
+            raise ValueError("model must be a string")
         if not isinstance(self.continue_run, bool):
             raise ValueError("continue_run must be a bool")
         if self.continue_run and self.resume_from is None:

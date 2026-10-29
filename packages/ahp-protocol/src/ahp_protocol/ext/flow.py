@@ -58,10 +58,12 @@ __all__ = [
     "WaitingView",
     "WorkflowInfo",
     "WorkflowStart",
+    "continue_start",
     "descriptor_of",
     "heartbeat",
     "meta",
     "offered_schedule",
+    "parse_continue_start",
     "parse_workflow_start",
     "phase_finished",
     "phase_started",
@@ -128,6 +130,7 @@ DESCRIPTOR_SCHEMA: Final[Mapping[str, Any]] = {
             "properties": {"heartbeat": {"$ref": "#/$defs/heartbeat"}},
             "additionalProperties": False,
         },
+        {"$ref": "#/$defs/continueStart"},
     ],
     "$defs": {
         "heartbeat": {
@@ -258,6 +261,12 @@ DESCRIPTOR_SCHEMA: Final[Mapping[str, Any]] = {
                 "args": {},
                 "runId": {"type": "string", "pattern": RUN_ID_PATTERN},
             },
+            "additionalProperties": False,
+        },
+        "continueStart": {
+            "type": "object",
+            "required": ["continueRun"],
+            "properties": {"continueRun": {"type": "string", "pattern": RUN_ID_PATTERN}},
             "additionalProperties": False,
         },
         # The customization marker on a workflow's prompt; it may grow, so it is open.
@@ -424,6 +433,18 @@ def workflow_start(
     return body
 
 
+def continue_start(run_id: str) -> dict[str, Any]:
+    """The descriptor that starts a turn continuing an earlier run of the same host.
+
+    ``{"continueRun": "<run id>"}``: no ``workflow``, ``args`` or ``runId``, since the host
+    reads the script and args from that run's journal and gives the continued run an id of
+    its own.
+    """
+    if not (isinstance(run_id, str) and _RUN_ID.fullmatch(run_id)):
+        raise ValueError(f"continueRun must match {RUN_ID_PATTERN}, got {run_id!r}")
+    return {"continueRun": run_id}
+
+
 def redacted_step(descriptor: Mapping[str, Any]) -> dict[str, Any]:
     """A copy of a step descriptor with its result (and error) replaced by ``[redacted]``.
 
@@ -533,6 +554,25 @@ def parse_workflow_start(meta: Any) -> WorkflowStart | None:
     if "runId" in d and not isinstance(run_id, str):
         raise ValueError("runId must be a string")
     return WorkflowStart(workflow, d.get("args"), "args" in d, run_id)
+
+
+def parse_continue_start(meta: Any) -> str | None:
+    """The run id a typed continue start names, or ``None`` if ``meta`` holds none.
+
+    A descriptor with a ``continueRun`` key is a continue start; it must not also carry
+    ``workflow``, ``args`` or ``runId``. The id is only checked to be a string: whether such
+    a run exists, is finished and belongs to the caller is the host's call.
+    """
+    d = descriptor_of(meta)
+    if d is None or "continueRun" not in d:
+        return None
+    run_id = d["continueRun"]
+    if not isinstance(run_id, str) or not run_id:
+        raise ValueError("continueRun must be a non-empty string")
+    clash = [k for k in ("workflow", "args", "runId") if k in d]
+    if clash:
+        raise ValueError(f"continueRun cannot be combined with {', '.join(clash)}")
+    return run_id
 
 
 @dataclass(frozen=True)

@@ -29,6 +29,9 @@
         }
       },
       "additionalProperties": false
+    },
+    {
+      "$ref": "#/$defs/continueStart"
     }
   ],
   "$defs": {
@@ -324,6 +327,19 @@
         },
         "args": {},
         "runId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$"
+        }
+      },
+      "additionalProperties": false
+    },
+    "continueStart": {
+      "type": "object",
+      "required": [
+        "continueRun"
+      ],
+      "properties": {
+        "continueRun": {
           "type": "string",
           "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$"
         }

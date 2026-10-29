@@ -67,6 +67,7 @@ from ahp_host_flow.dispatch import (
 )
 from ahp_host_flow.engine import (
     IDLE_TIMEOUT,
+    JOURNAL_FILE,
     QUOTA_FILE,
     RUN_ID,
     AbortSignal,
@@ -83,6 +84,8 @@ from ahp_host_flow.engine import (
     WorkflowDir,
     args_error,
     args_masked,
+    journal_busy,
+    journal_owner,
     load_journal,
     preamble_text,
     run_dir,
@@ -459,6 +462,8 @@ class FlowProvider:
         self._sessions: weakref.WeakSet[FlowSession] = weakref.WeakSet()
         #: Client-chosen run ids claimed by a run that has not yet created its journal.
         self._reserved_run_ids: set[str] = set()
+        #: Runs a client is continuing now, with the continuing principal.
+        self._continuing: dict[str, str | None] = {}
 
     async def _probe_provider(self, name: str) -> int | None:
         """Runs the concurrency probe on in-process provider *name* (two throwaway sessions)."""
@@ -485,6 +490,20 @@ class FlowProvider:
         return frozenset(
             entry.run_id for session in list(self._sessions) for entry in session._runs.values()
         ) | frozenset(self._reserved_run_ids)
+
+    def live_owner(self, run_id: str) -> tuple[bool, str | None]:
+        """Whether *run_id* is live or left pending by a restart, and the principal it is for.
+
+        Live runs, runs a restart left to resume (`_restored`) and runs a client is
+        continuing now all count; a continue of any of them is refused.
+        """
+        for session in list(self._sessions):
+            for entry in (*session._runs.values(), *session._restored.values()):
+                if entry.run_id == run_id:
+                    return True, entry.principal
+        if run_id in self._continuing:
+            return True, self._continuing[run_id]
+        return False, None
 
     def changeset_operations(self) -> Mapping[str, OperationHandler]:
         """Apply, Commit and Discard for kept worktrees (`ProvidesOperations`); called once."""
@@ -916,6 +935,106 @@ class FlowSession:
             )
         return source, args
 
+    async def _continue_run(
+        self, run_id: str, chat: str, message: UserMessage, sink: TurnSink
+    ) -> None:
+        """Start a turn that continues the earlier run *run_id* of this host (`continueRun`).
+
+        The engine does the work as for `resume_turn` (finished calls replay by key, the rest
+        run live, under a new run id); here the run is found, and refused, before anything is
+        dispatched: switched off, unknown (or not this caller's: the same answer, so a run id
+        is never confirmed to another principal), still live, unreadable, or masked in its
+        journal. The caller's principal must equal the one the journal header recorded.
+        """
+        provider = self.provider
+        redactor = provider.redactor
+        state_dir = provider.config.state_dir
+
+        async def refuse(reason: str) -> None:
+            await sink.turn_failed(redactor.mask(reason), "flow.run")
+
+        if not provider.config.resume.continue_run:
+            await refuse("continuing a run is switched off on this host ([resume] continue)")
+            return
+        unknown = f"no run {run_id!r} can be continued by this caller"
+        if (
+            not RUN_ID.fullmatch(run_id)
+            or not (run_dir(state_dir, run_id) / JOURNAL_FILE).is_file()
+        ):
+            await refuse(unknown)
+            return
+        # Ownership is decided first, so a caller who does not own the run learns nothing
+        # about it: a live, unreadable or masked run all answer as an unknown id.
+        live, live_principal = provider.live_owner(run_id)
+        if live:
+            if live_principal != message.principal:
+                await refuse(unknown)
+                return
+            await refuse(f"run {run_id!r} is still running; cancel it first or start a new run")
+            return
+        readable, owner = journal_owner(state_dir, run_id)
+        if not readable or owner != message.principal:
+            # No readable header, no way to establish an owner: the unknown-id answer.
+            await refuse(unknown)
+            return
+        if journal_busy(state_dir, run_id):
+            await refuse(f"run {run_id!r} is still running; cancel it first or start a new run")
+            return
+        try:
+            journal = load_journal(state_dir, run_id)
+        except (JournalError, ValueError) as exc:
+            _log.warning("cannot continue run %s: %s", run_id, exc)
+            await refuse(f"run {run_id!r} cannot be continued: its journal cannot be read")
+            return
+        header = journal.header
+        if source_masked(header) or args_masked(header):
+            await refuse(
+                f"run {run_id!r} cannot be continued from here: its journal holds the script "
+                "or args masked (set [journal] keep_source to continue such runs)"
+            )
+            return
+        node = self._node()
+        if node is None and language_of(header.filename) == "js":
+            await sink.turn_failed(str(NodeNotFoundError()), "flow.node")
+            return
+        if self.context.publisher is None:
+            await refuse("no session publisher")
+            return
+        # Held until the new run ends, and checked above, so two clients cannot continue one
+        # run at once (a continued run's own id is free again then, so a chain goes on).
+        provider._reserved_run_ids.add(run_id)
+        provider._continuing[run_id] = message.principal
+        # The run's own model, so `[resume] key = "model"` still matches its cached calls.
+        # A journal that recorded none (written before this) takes the caller's, and says so.
+        model = header.model
+        if model is None:
+            model = message.model.id if message.model else None
+            _log.info(
+                "continue of run %s: its journal records no model, using %s",
+                run_id,
+                model or "the default",
+            )
+        try:
+            entries, _ = await self._catalog(node, read_clients=False)
+            await self._run_workflow(
+                chat=chat,
+                sink=sink,
+                source=None,
+                filename=header.filename,
+                args=NO_ARGS,
+                workflow=None,
+                model=model,
+                node=node,
+                dirs=self._dirs(),
+                client_entries=[e for e in entries if e.source == "client"],
+                resume_from=run_id,
+                principal=message.principal,
+                continued_by_client=True,
+            )
+        finally:
+            provider._reserved_run_ids.discard(run_id)
+            provider._continuing.pop(run_id, None)
+
     async def send_user_message(self, message: UserMessage, sink: TurnSink) -> None:
         context = self.context
         chat = message.chat_uri or context.chat_uri
@@ -924,11 +1043,16 @@ class FlowSession:
         self._restored.pop(chat, None)
         redactor = self.provider.redactor
         try:
-            parsed, run_id, typed = self._parse_start(message.raw)
+            continue_id = flow.parse_continue_start(message.raw.get("_meta"))
+            if continue_id is None:
+                parsed, run_id, typed = self._parse_start(message.raw)
         except ValueError as exc:
             await sink.turn_failed(
                 redactor.mask(f"bad workflow start: {exc}"), flow.BAD_ARGS_ERROR_TYPE
             )
+            return
+        if continue_id is not None:
+            await self._continue_run(continue_id, chat, message, sink)
             return
         if isinstance(parsed, BadRequest) and typed:
             await sink.turn_failed(redactor.mask(parsed.message), flow.BAD_ARGS_ERROR_TYPE)
@@ -1003,8 +1127,12 @@ class FlowSession:
         resumed: RunEntry | None = None,
         principal: str | None = None,
         run_id: str | None = None,
+        continued_by_client: bool = False,
     ) -> None:
         """Run one workflow as the turn *sink* publishes; *resume_from* continues that run.
+
+        *continued_by_client* marks a continue a client asked for (`continueRun`) on a chat
+        that never held the run: it announces `runStarted` and counts phases afresh.
 
         *resumed* is, for a continued run, its entry: how often the turn was
         resumed (the call ids' `agent-r<k>` prefix) and how many `phaseStarted`
@@ -1066,6 +1194,8 @@ class FlowSession:
                 resume_from=resume_from,
                 continue_run=resume_from is not None,
                 run_id=run_id,
+                principal=principal,
+                model=model,
                 budget_total=limits.budget,
                 input_budget=limits.input_budget,
                 cost_budget=limits.cost_budget,
@@ -1307,6 +1437,13 @@ class FlowSession:
                 )
             if resume_from is None:
                 notes.put_nowait((f"Run {run_id}", flow.meta(flow.run_started(run_id, workflow))))
+            elif continued_by_client:
+                notes.put_nowait(
+                    (
+                        f"Run {resume_from} continued as run {run_id}",
+                        flow.meta(flow.run_started(run_id, workflow)),
+                    )
+                )
             else:
                 # No descriptor: the transcript keeps its one runStarted, and run_view
                 # keeps the original run id.

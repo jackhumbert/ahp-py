@@ -671,3 +671,24 @@ def test_flow_ext_workflow_workflows_of() -> None:
         flow.WorkflowInfo("c", "host:c", "", (), None, "host", "js"),
     )
     assert flow.workflows_of(None) == ()
+
+
+def test_flow_ext_continue_start() -> None:
+    assert flow.continue_start("r1") == {"continueRun": "r1"}
+    with pytest.raises(ValueError, match="continueRun must match"):
+        flow.continue_start("not a run id")
+    VALIDATOR.validate(flow.continue_start("r1"))
+    assert not VALIDATOR.is_valid({"continueRun": "r1", "workflow": "h:x"})
+    assert flow.parse_continue_start({}) is None
+    assert flow.parse_continue_start(flow.meta(flow.workflow_start("h:x"))) is None
+    assert flow.parse_continue_start(flow.meta(flow.continue_start("r1"))) == "r1"
+    # A continue start is not a workflow start, and the reverse.
+    assert flow.parse_workflow_start(flow.meta(flow.continue_start("r1"))) is None
+    for bad, why in (
+        ({"continueRun": 5}, "non-empty string"),
+        ({"continueRun": ""}, "non-empty string"),
+        ({"continueRun": "r1", "args": 1}, "combined with args"),
+        ({"continueRun": "r1", "workflow": "h:x", "runId": "r2"}, "workflow, runId"),
+    ):
+        with pytest.raises(ValueError, match=why):
+            flow.parse_continue_start(flow.meta(bad))

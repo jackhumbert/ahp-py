@@ -2,6 +2,22 @@
 
 ## [Unreleased]
 
+### Added — a client can continue an ended run in a new turn
+
+- `_meta["ahp-py/flow"]` = `{continueRun: "<run id>"}` on a turn continues an earlier run of
+  the host from its journal, from any chat or session: finished `agent()` calls replay, the
+  rest run live, under a new run id (`resumedFrom`), with a fresh `runStarted`. Cancel stays
+  cancel; nothing continues by itself.
+- The journal header records the run's principal (optional `principal`, `JOURNAL_VERSION`
+  stays 1; older journals read as none; the optional `model` is recorded too and a continue
+  reuses it). Ownership is checked before any other refusal, so a stranger gets one answer for
+  unknown, live, restart-pending, corrupt and masked runs. A continue is refused unless the caller's principal
+  equals it, and the continued run records the same one. `RunOptions.principal` sets it.
+- Refused with a `flow.run` failure and no dispatch: unknown id or another principal's (one
+  answer for both), a live run, an unreadable journal, a masked one. `[resume] continue =
+  false` switches the client path off (default `true`). Needs `ahp-protocol` with
+  `flow.parse_continue_start`.
+
 ### Fixed — review fixes (security)
 
 - The JS runner's host hooks (`hostCall`, `hostNotify`, `hostStart`) parse the script's

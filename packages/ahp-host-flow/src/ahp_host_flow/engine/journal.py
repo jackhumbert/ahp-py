@@ -160,6 +160,11 @@ class RunHeader:
     # journal written before M17. When the stored text no longer hashes to it, it is masked.
     source_sha: str | None = None
     args_sha: str | None = None
+    # Who the run was started for (the turn's principal); None when none was recorded, which
+    # is also what a journal written before this field reads as. Never part of a replay key.
+    principal: str | None = None
+    # The model the run was asked for; None when none was recorded (or an older journal).
+    model: str | None = None
 
 
 @dataclass(frozen=True)
@@ -355,6 +360,10 @@ class JournalWriter:
                 record["sourceSha"] = text_sha(header.source)
             if header.has_args:
                 record["argsSha"] = value_sha(header.args)
+            if header.principal is not None:
+                record["principal"] = header.principal
+            if header.model is not None:
+                record["model"] = header.model
             writer._write(record)
         except BaseException:
             # A header that cannot be written (args with NaN, say) leaves no run
@@ -546,6 +555,8 @@ def load_journal(state_dir: Path, run_id: str) -> LoadedJournal:
                 key_mode=key_mode if isinstance(key_mode, str) else "default",
                 source_sha=source_sha if isinstance(source_sha, str) else None,
                 args_sha=args_sha if isinstance(args_sha, str) else None,
+                principal=rec["principal"] if isinstance(rec.get("principal"), str) else None,
+                model=rec["model"] if isinstance(rec.get("model"), str) else None,
             )
         elif kind == "workflow":
             filename, source = rec.get("filename"), rec.get("source")
@@ -650,6 +661,45 @@ def load_journal(state_dir: Path, run_id: str) -> LoadedJournal:
         tuple(gates[o] for o in sorted(gates)),
         tuple(verbs[o] for o in sorted(verbs)),
     )
+
+
+def journal_owner(state_dir: Path, run_id: str) -> tuple[bool, str | None]:
+    """Whether the run's journal header can be read, and the principal it records.
+
+    Reads only the first line, so a journal torn or corrupt further down still names its
+    owner; `(False, None)` when there is no readable run header at all.
+    """
+    try:
+        with open(run_dir(state_dir, run_id) / JOURNAL_FILE, "rb") as f:
+            rec = json.loads(f.readline().decode("utf-8"))
+    except (OSError, ValueError):
+        return False, None
+    if not isinstance(rec, dict) or rec.get("type") != "run":
+        return False, None
+    principal = rec.get("principal")
+    return True, principal if isinstance(principal, str) else None
+
+
+def journal_busy(state_dir: Path, run_id: str) -> bool:
+    """Whether a live writer (this process or another) holds the run's `journal.lock`.
+
+    A journal written before the lock existed has none to find, so a live writer of that
+    vintage is not detected (as for `redact_agent_record`).
+    """
+    lock = run_dir(state_dir, run_id) / LOCK_FILE
+    if not lock.is_file():
+        return False
+    try:
+        guard = open(lock, "a+b")  # noqa: SIM115
+    except OSError:
+        return False
+    try:
+        if not _try_lock(guard):
+            return True
+        _unlock(guard)
+        return False
+    finally:
+        guard.close()
 
 
 def redact_agent_record(

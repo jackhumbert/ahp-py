@@ -369,6 +369,8 @@ class JournalRun:
                 effective.budget_total,
                 resumed_from=options.resume_from,
                 key_mode=effective.key_mode_name(),
+                principal=options.principal,
+                model=options.model,
             ),
             mask=effective.redact,
             keep_source=effective.keep_source,
