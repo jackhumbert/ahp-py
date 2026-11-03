@@ -62,6 +62,7 @@ def test_a_task_spawned_inside_the_block_does_not_inherit_the_mark() -> None:
 def test_a_delivery_for_a_chat_already_known_is_honoured_inside_the_window() -> None:
     """Only the chat being opened is a seed. Its URI does not exist before the host makes it,
     so any chat the provider already holds is a different chat and its change counts."""
+
     async def scenario() -> list[str]:
         known = {"ahp-chat:/old"}
         with opening_worker():
