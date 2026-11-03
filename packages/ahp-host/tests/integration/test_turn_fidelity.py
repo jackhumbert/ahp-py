@@ -200,24 +200,24 @@ class TestResponsePartOrdering:
 class TestSegmentation:
     """`_open_segment` on its own, where the transitions are cheap to state."""
 
-    def test_switching_away_and_back_makes_a_new_part(self) -> None:
+    async def test_switching_away_and_back_makes_a_new_part(self) -> None:
         sink = ActionTurnSink(None, "chat", "t1")  # type: ignore[arg-type]
         sink._markdown_part_id = "md-1"
         sink._segment = "markdown"
 
-        sink._open_segment("tool")
+        await sink._open_segment("tool")
         assert sink._markdown_part_id is None
 
         sink._markdown_part_id = "md-2"
         sink._segment = "markdown"
-        sink._open_segment("markdown")
+        await sink._open_segment("markdown")
         assert sink._markdown_part_id == "md-2", "a run of one kind was split"
 
-    def test_reasoning_and_text_interleave(self) -> None:
+    async def test_reasoning_and_text_interleave(self) -> None:
         sink = ActionTurnSink(None, "chat", "t1")  # type: ignore[arg-type]
-        sink._open_segment("reasoning")
+        await sink._open_segment("reasoning")
         sink._reasoning_part_id = "re-1"
-        sink._open_segment("markdown")
+        await sink._open_segment("markdown")
         assert sink._reasoning_part_id is None
 
 
