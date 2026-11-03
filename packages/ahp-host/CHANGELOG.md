@@ -18,6 +18,8 @@ versions each release speaks.
   refused open; and a chat the agent could not be told about at attach, restore or rehost has its
   turns refused with a `chat.config` error until a later delivery succeeds (the next turn retries,
   and so does any `chat/configChanged`).
+- A worker chat a provider opens (`open_tool_chat`) now has its seeded values delivered with
+  `chat_config_changed` too, which it never was, under the same rule: a failure opens nothing.
 
 ### Added — `resultMetadata` (upstream `c301d494`)
 

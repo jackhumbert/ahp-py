@@ -4469,6 +4469,13 @@ class Host:
         # Not announced -- the provider asked for it and holds the handle --
         # but known to the agent, so a client disposing it is `chat_closed`.
         session.opened_chats.add(chat)
+        # The worker's values, which the agent has never heard (it holds the
+        # handle, not the config). Failing closed like `createChat`.
+        if not await self._tell_chat_config(session, chat):
+            await self._rollback_chat(session, chat)
+            raise errors.internal_error(
+                "the agent could not be given the worker chat's config, so it was not opened"
+            )
         entry, projected = self._chat_entry(session, chat)
         session.published_chats[chat] = projected
         await self.sequencer.publish(session.uri, {"type": "session/chatAdded", "summary": entry})

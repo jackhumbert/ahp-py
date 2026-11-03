@@ -150,3 +150,27 @@ async def test_the_next_turn_retries_the_delivery() -> None:
         assert default not in session.undelivered_chats
     finally:
         await shut(host, wire, serving)
+
+
+async def test_a_worker_chat_the_agent_cannot_be_told_about_is_not_opened() -> None:
+    provider = _FlakyProvider()
+    host = Host(provider, LoopbackSingleUserPolicy())
+    wire, serving = await connect(host)
+    try:
+        await open_session(wire, "echo:/fc-5")
+        session = host._sessions["echo:/fc-5"]
+        agent = session.agent_session
+        assert isinstance(agent, EchoSession)
+        assert agent.context.publisher is not None
+        before = set(session.chat_uris)
+        provider.failing = True
+        with pytest.raises(Exception, match="config"):
+            await agent.context.publisher.open_tool_chat("W", tool_call_id="c1")
+        assert session.chat_uris == before
+        assert not session.provider_chats
+        provider.failing = False
+        worker = await agent.context.publisher.open_tool_chat("W", tool_call_id="c2")
+        # Told its values (the parent's, seeded) after registering.
+        assert worker.resource in agent.chat_config
+    finally:
+        await shut(host, wire, serving)
