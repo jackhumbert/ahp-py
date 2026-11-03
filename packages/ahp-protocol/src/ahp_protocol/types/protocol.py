@@ -39,13 +39,23 @@ __all__ = [
     "ActionOrigin",
     "AuthenticateParams",
     "AuthenticateTarget",
+    "ChatConfigState",
+    "ChatMovedAction",
+    "ChatReasoningAction",
+    "ChatState",
+    "ChatSummary",
+    "CreateChatParams",
     "Implementation",
     "InitializeResult",
     "McpServerAuthenticateTarget",
+    "MultipleChatProvidersCapability",
+    "ReasoningResponsePart",
+    "SessionChatSummary",
     "SessionStatus",
     "SessionSummary",
     "Snapshot",
     "StateAction",
+    "ToolCallResult",
     "session_status_flags",
 ]
 
@@ -140,6 +150,10 @@ class SessionSummary(TypedDict):
     modifiedAt: str
 
 
+class MultipleChatProvidersCapability(TypedDict, total=False):
+    """Presence-only: the empty object is the capability (1.1.0)."""
+
+
 class InitializeResult(TypedDict):
     protocolVersion: str
     serverSeq: int
@@ -150,6 +164,10 @@ class InitializeResult(TypedDict):
     terminalCommandPrefix: NotRequired[str]
     telemetry: NotRequired[dict[str, Any]]
     tcpConnections: NotRequired[dict[str, Any]]
+    #: Present when chats in one session may be backed by different agents. A
+    #: client MUST NOT send ``CreateChatParams.provider`` without it. Test
+    #: ``is not None``, never truthiness: ``{}`` is the capability.
+    multipleChatProviders: NotRequired[MultipleChatProvidersCapability]
 
 
 class McpServerAuthenticateTarget(TypedDict):
@@ -176,6 +194,117 @@ class AuthenticateParams(TypedDict):
     target: NotRequired[AuthenticateTarget]
 
 
+class CreateChatParams(TypedDict):
+    channel: URI
+    chat: URI
+    initialMessage: NotRequired[dict[str, Any]]
+    source: NotRequired[dict[str, Any]]
+    workingDirectories: NotRequired[list[URI]]
+    title: NotRequired[str]
+    #: The agent backing the new chat (1.1.0). Only with ``multipleChatProviders``.
+    provider: NotRequired[str]
+
+
+class ChatConfigState(TypedDict):
+    """A chat's configuration. It does not inherit from the session (1.1.0)."""
+
+    #: The chat's own ``SessionConfigSchema``; absent means the session's.
+    schema: NotRequired[dict[str, Any]]
+    #: Values for the ``chatMutable`` properties; a missing key takes the default.
+    values: dict[str, Any]
+
+
+class SessionChatSummary(TypedDict):
+    """A session catalogue entry (``SessionState.chats``)."""
+
+    resource: URI
+    title: str
+    origin: NotRequired[dict[str, Any]]
+    interactivity: NotRequired[int | str]
+    #: Reported only when it differs from the session's provider.
+    provider: NotRequired[str]
+    status: NotRequired[int]
+    changes: NotRequired[dict[str, Any]]
+
+
+class ChatSummary(TypedDict):
+    resource: URI
+    title: str
+    status: int
+    modifiedAt: str
+    activity: NotRequired[str]
+    changes: NotRequired[dict[str, Any]]
+    origin: NotRequired[dict[str, Any]]
+    movable: NotRequired[bool]
+    interactivity: NotRequired[int | str]
+    #: Reported only when it differs from the session's provider.
+    provider: NotRequired[str]
+    workingDirectories: NotRequired[list[URI]]
+
+
+class ChatState(TypedDict):
+    """The chat channel's state; the keys this package models, not all of them."""
+
+    resource: URI
+    title: str
+    status: int
+    modifiedAt: str
+    turns: list[dict[str, Any]]
+    activity: NotRequired[str]
+    movable: NotRequired[bool]
+    #: An identity field: never sent in ``session/chatUpdated``; ``chat/moved``
+    #: is what changes it.
+    provider: NotRequired[str]
+    config: NotRequired[ChatConfigState]
+    workingDirectories: NotRequired[list[URI]]
+    activeTurn: NotRequired[dict[str, Any]]
+    _meta: NotRequired[dict[str, Any]]
+
+
+class ChatMovedAction(TypedDict):
+    """Dispatched by the host on the chat channel after a cross-session move."""
+
+    type: str  # "chat/moved"
+    session: URI
+    #: Absent clears the chat's ``provider``.
+    provider: NotRequired[str]
+    #: Absent clears ``config.schema``; with no config it creates one.
+    schema: NotRequired[dict[str, Any]]
+
+
+class ReasoningResponsePart(TypedDict):
+    kind: str  # "reasoning"
+    id: str
+    content: str
+    #: Producer-recorded ISO 8601 start of the reasoning interval.
+    startedAt: NotRequired[str]
+    #: Final elapsed ms, from the producer's clock; ``0`` is a recorded value.
+    #: A client MUST NOT derive it from its own clock.
+    duration: NotRequired[int]
+
+
+class ChatReasoningAction(TypedDict):
+    type: str  # "chat/reasoning"
+    turnId: str
+    partId: str
+    content: str
+    #: Omitted to preserve the part's existing value.
+    startedAt: NotRequired[str]
+    #: Omitted to preserve the part's existing value.
+    duration: NotRequired[int]
+    _meta: NotRequired[dict[str, Any]]
+
+
+class ToolCallResult(TypedDict):
+    success: bool
+    pastTenseMessage: str | dict[str, Any]
+    content: NotRequired[list[dict[str, Any]]]
+    structuredContent: NotRequired[dict[str, Any]]
+    #: Mirrors MCP ``CallToolResult._meta`` (1.1.0).
+    resultMetadata: NotRequired[dict[str, Any]]
+    error: NotRequired[dict[str, Any]]
+
+
 # ─── Specs ───────────────────────────────────────────────────────────────────
 
 
@@ -184,6 +313,14 @@ def _is_response_id(value: Any, path: str) -> list[str]:
     if value is None or isinstance(value, str):
         return []
     return is_int(value, path)
+
+
+def _is_duration(value: Any, path: str) -> list[str]:
+    """A non-negative integer number of milliseconds; ``0`` is a recorded value."""
+    problems = is_int(value, path)
+    if problems:
+        return problems
+    return [] if value >= 0 else [f"{path}: expected a non-negative duration, got {value!r}"]
 
 
 _POSITION = ObjectSpec(
@@ -273,6 +410,8 @@ _INITIALIZE_RESULT = ObjectSpec(
         Field("telemetry", False, is_object),
         # 1.1.0, experimental: present (as `{}`) when `createTcpConnection` works.
         Field("tcpConnections", False, is_object),
+        # 1.1.0: presence-only, `{}` is the capability.
+        Field("multipleChatProviders", False, is_object),
     ),
 )
 
@@ -479,6 +618,90 @@ _CREATE_CHAT_PARAMS = ObjectSpec(
         Field("workingDirectories", False, array_of(is_string)),
         # 1.1.0: a client-selected initial display title.
         Field("title", False, is_string),
+        # 1.1.0: the agent backing the chat; needs `multipleChatProviders`.
+        Field("provider", False, is_string),
+    ),
+)
+
+_CHAT_CONFIG_STATE = ObjectSpec(
+    "ChatConfigState",
+    (Field("schema", False, is_object), Field("values", True, is_object)),
+)
+
+_SESSION_CHAT_SUMMARY = ObjectSpec(
+    "SessionChatSummary",
+    (
+        Field("resource", True, is_string),
+        Field("title", True, is_string),
+        Field("origin", False, is_object),
+        Field("interactivity", False, one_of(is_int, is_string)),
+        Field("provider", False, is_string),
+        Field("status", False, is_int),
+        Field("changes", False, is_object),
+    ),
+)
+
+_CHAT_SUMMARY = ObjectSpec(
+    "ChatSummary",
+    (
+        Field("resource", True, is_string),
+        Field("title", True, is_string),
+        Field("status", True, is_int),
+        Field("modifiedAt", True, is_string),
+        Field("activity", False, is_string),
+        Field("changes", False, is_object),
+        Field("origin", False, is_object),
+        Field("movable", False, is_bool),
+        Field("interactivity", False, one_of(is_int, is_string)),
+        Field("provider", False, is_string),
+        Field("workingDirectories", False, array_of(is_string)),
+    ),
+)
+
+_CHAT_MOVED_ACTION = ObjectSpec(
+    "ChatMovedAction",
+    (
+        Field("type", True, is_string),
+        Field("session", True, is_string),
+        Field("provider", False, is_string),
+        Field("schema", False, is_object),
+    ),
+)
+
+_REASONING_RESPONSE_PART = ObjectSpec(
+    "ReasoningResponsePart",
+    (
+        Field("kind", True, is_string),
+        Field("id", True, is_string),
+        Field("content", True, is_string),
+        Field("startedAt", False, is_string),
+        Field("duration", False, _is_duration),
+    ),
+)
+
+_CHAT_REASONING_ACTION = ObjectSpec(
+    "ChatReasoningAction",
+    (
+        Field("type", True, is_string),
+        Field("turnId", True, is_string),
+        Field("partId", True, is_string),
+        Field("content", True, is_string),
+        Field("startedAt", False, is_string),
+        Field("duration", False, _is_duration),
+        Field("_meta", False, is_object),
+    ),
+)
+
+_TOOL_CALL_RESULT = ObjectSpec(
+    "ToolCallResult",
+    (
+        Field("success", True, is_bool),
+        Field("pastTenseMessage", True, ref("StringOrMarkdown")),
+        Field("content", False, array_of(is_object)),
+        Field("structuredContent", False, is_object),
+        # 1.1.0: mirrors MCP `CallToolResult._meta`; arbitrary JSON inside.
+        Field("resultMetadata", False, is_object),
+        Field("error", False, is_object),
     ),
 )
 
@@ -638,8 +861,12 @@ SPECS: Final[dict[str, Spec]] = {
         _CHANGESET_OPERATION_TARGET,
         _CHANNEL_CREDIT_PARAMS,
         _CHANNEL_FRAME_PARAMS,
+        _CHAT_CONFIG_STATE,
         _CHAT_INPUT_QUESTION,
+        _CHAT_MOVED_ACTION,
+        _CHAT_REASONING_ACTION,
         _CHAT_SOURCE,
+        _CHAT_SUMMARY,
         _CREATE_CHAT_PARAMS,
         _CREATE_TCP_CONNECTION_PARAMS,
         _CUSTOMIZATION,
@@ -649,9 +876,11 @@ SPECS: Final[dict[str, Spec]] = {
         _PARTIAL_SESSION_SUMMARY,
         _POSITION,
         _RANGE,
+        _REASONING_RESPONSE_PART,
         _RECONNECT_PARAMS,
         _RECONNECT_RESULT,
         _SESSION_ADDED_PARAMS,
+        _SESSION_CHAT_SUMMARY,
         _SESSION_STATUS,
         _SESSION_SUMMARY,
         _SNAPSHOT,
@@ -662,5 +891,6 @@ SPECS: Final[dict[str, Spec]] = {
         _TCP_DATA_PARAMS,
         _TCP_EOF_PARAMS,
         _TCP_RESET_PARAMS,
+        _TOOL_CALL_RESULT,
     )
 }

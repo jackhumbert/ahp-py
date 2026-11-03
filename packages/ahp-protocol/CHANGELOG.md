@@ -8,6 +8,15 @@ the spec revision it targets.
 
 ## [Unreleased]
 
+### Added — per-chat agent, reasoning timing and `resultMetadata` types (upstream `c301d494`)
+
+- `TypedDict` views and runtime `Spec`s: `ChatMovedAction`, `ChatConfigState` (with
+  `schema`), `ChatSummary`, `SessionChatSummary` and `ChatState` (each with an optional
+  `provider`), `CreateChatParams.provider`, `MultipleChatProvidersCapability` and
+  `InitializeResult.multipleChatProviders` (presence-only), `ReasoningResponsePart` and
+  `ChatReasoningAction` (`startedAt`, and `duration` as a non-negative integer, `0`
+  allowed), and `ToolCallResult` (`structuredContent`, `resultMetadata`).
+
 ### Changed — the spec pin moves to upstream `main` @ `c301d494`
 
 - Re-pinned from `c5628cd4` to `c301d494` (still `1.1.0`, unreleased;
