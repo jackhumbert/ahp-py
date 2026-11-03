@@ -23,6 +23,7 @@ from dataclasses import dataclass
 from typing import Any, Final
 
 from ahp_protocol.ext.structured import STRUCTURED_OUTPUT_ERROR_TYPE
+from ahp_protocol.reducers.clock import now_iso
 from ahp_protocol.types import IS_CLIENT_DISPATCHABLE
 
 from ahp_host.core.changesets import ContentStore, file_edit
@@ -215,6 +216,9 @@ class ActionTurnSink:
         self._advertise_resource = advertise_resource
         self._markdown_part_id: str | None = None
         self._reasoning_part_id: str | None = None
+        #: When the open reasoning run began, on the monotonic clock; ``None`` once it
+        #: has been closed (`finish_reasoning`) or while there is no run.
+        self._reasoning_began: float | None = None
         self._segment: str | None = None
         #: Calls still in `streaming`, i.e. announced but never moved on by a
         #: `chat/toolCallReady`, and what was published about each of them. See
@@ -266,6 +270,7 @@ class ActionTurnSink:
         }
         if meta is not None:
             part["_meta"] = dict(meta)
+        await self.finish_reasoning()
         await self._sequencer.publish(
             self._channel,
             {"type": "chat/responsePart", "turnId": self._turn_id, "part": part},
@@ -285,7 +290,32 @@ class ActionTurnSink:
         """
         return {"type": "fileEdit", **file_edit(change, self._content)}
 
-    def _open_segment(self, kind: str) -> None:
+    async def finish_reasoning(self) -> None:
+        """Close the open reasoning run: a final `chat/reasoning` carrying its `duration`.
+
+        The producer measures it ("Clients MUST NOT derive it from their own clock"),
+        in whole milliseconds from the monotonic clock; zero is a recorded value. An
+        empty `content` "updates only the supplied timing fields". A no-op when no run
+        is open or it was already closed, so every ending can call it: a segment of
+        another kind opening, and the turn completing, failing or being cancelled
+        (the host calls it before it publishes a cancellation or a disposal's).
+        """
+        began, self._reasoning_began = self._reasoning_began, None
+        part = self._reasoning_part_id
+        if began is None or part is None:
+            return
+        await self._sequencer.publish(
+            self._channel,
+            {
+                "type": "chat/reasoning",
+                "turnId": self._turn_id,
+                "partId": part,
+                "content": "",
+                "duration": _elapsed_ms(began),
+            },
+        )
+
+    async def _open_segment(self, kind: str) -> None:
         """Start a new response part when the kind of output changes.
 
         The client renders parts in the order they were created, and appends a
@@ -296,12 +326,14 @@ class ActionTurnSink:
         """
         if kind == self._segment:
             return
+        if self._segment == "reasoning":
+            await self.finish_reasoning()
         self._segment = kind
         self._markdown_part_id = None
         self._reasoning_part_id = None
 
     async def _ensure_markdown_part(self) -> str:
-        self._open_segment("markdown")
+        await self._open_segment("markdown")
         if self._markdown_part_id is None:
             self._markdown_part_id = f"md-{uuid.uuid4()}"
             await self._sequencer.publish(
@@ -333,9 +365,10 @@ class ActionTurnSink:
         )
 
     async def reasoning_delta(self, text: str) -> None:
-        self._open_segment("reasoning")
+        await self._open_segment("reasoning")
         if self._reasoning_part_id is None:
             self._reasoning_part_id = f"re-{uuid.uuid4()}"
+            self._reasoning_began = time.monotonic()
             await self._sequencer.publish(
                 self._channel,
                 {
@@ -345,6 +378,9 @@ class ActionTurnSink:
                         "kind": "reasoning",
                         "id": self._reasoning_part_id,
                         "content": "",
+                        # The producer's clock, stamped when the run opens; the
+                        # duration follows when it closes (`finish_reasoning`).
+                        "startedAt": now_iso(),
                     },
                 },
             )
@@ -370,7 +406,7 @@ class ActionTurnSink:
     ) -> None:
         # `chat/toolCallStart` creates its own toolCall response part; emitting
         # an extra `chat/responsePart` for it would duplicate the part.
-        self._open_segment("tool")
+        await self._open_segment("tool")
         action: dict[str, Any] = {
             "type": "chat/toolCallStart",
             "turnId": self._turn_id,
@@ -692,6 +728,7 @@ class ActionTurnSink:
                     "turn_failed(resumable=True) from an agent session that is not "
                     "ResumesTurns; publishing the error as not resumable"
                 )
+        await self.finish_reasoning()
         await self._sequencer.publish(
             self._channel,
             {
@@ -1546,6 +1583,7 @@ class TurnRunner:
         if not self._is_active(turn_id):
             return
 
+        await sink.finish_reasoning()
         await self._sequencer.publish(
             self._channel,
             # Measured, not zero. The client renders it as the turn's elapsed

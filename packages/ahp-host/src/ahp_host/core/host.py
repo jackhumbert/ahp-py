@@ -5390,6 +5390,7 @@ class Host:
         # channel it must be answered on no longer exists. Cancelling first
         # ends the turn's pending scope, which is what retracts those entries
         # (`_run_turn`'s finally).
+        await self._finish_reasoning(chat_uri)
         await self._cancel_turn(session, chat_uri, "chat disposed")
         # And SAID so, on the channel, while it still exists. Cancelling the
         # task ends the turn for the host; a subscribed client learns nothing
@@ -7961,6 +7962,10 @@ class Host:
 
     async def _teardown(self, session: _Session) -> None:
         channel = session.uri
+        # While each turn's sink is still there to ask: a cancelled task takes its
+        # runner with it, and the open reasoning run's duration with that.
+        for chat in sorted(session.chat_uris):
+            await self._finish_reasoning(chat)
         for task in session.running():
             task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
@@ -8191,6 +8196,10 @@ class Host:
             self._spawn(self._capture_then_apply(connection, channel, action, origin, needed))
             return
 
+        if action.get("type") == "chat/turnCancelled":
+            # The reducer ends the turn the moment it applies this, and a reasoning
+            # run still open would be left without its duration.
+            await self._finish_reasoning(channel)
         await self._publish_dispatched(connection, channel, action, origin)
         await self._react(channel, action, connection)
         session = self._session_for(channel)
@@ -9068,6 +9077,14 @@ class Host:
             with contextlib.suppress(Exception):
                 await agent.cancel(reason)
 
+    async def _finish_reasoning(self, chat: str) -> None:
+        """Close the reasoning run open in *chat*'s running turn, before the turn is ended."""
+        session = self._session_for(chat)
+        runner = session.runners.get(chat) if session is not None else None
+        if runner is not None and runner.sink is not None:
+            with contextlib.suppress(Exception):
+                await runner.sink.finish_reasoning()
+
     async def _end_stranded_turn(self, session: _Session, chat: str) -> None:
         """Publish a terminal action for a turn nothing else will ever end.
 
@@ -9090,6 +9107,7 @@ class Host:
         started = session.turn_started.pop(chat, None)
         if not isinstance(turn_id, str):
             return
+        await self._finish_reasoning(chat)
         # Measured, like `_settle_turn`'s. `duration` is required on every
         # terminal action and a client renders it as the turn's elapsed time,
         # so a hardcoded zero would show every disposed turn as instantaneous.

@@ -1125,6 +1125,7 @@ class AcpSession:
             if text:
                 await sink.text_delta(text)
         elif isinstance(event, AgentThoughtChunk):
+            # The sink times live reasoning runs; history replayed by `session/load` has no timing.
             text = _text_block(event.content)
             if text:
                 await sink.reasoning_delta(text)

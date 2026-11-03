@@ -130,7 +130,7 @@ So a host that wants to be usable must:
 | Method | What it does |
 |---|---|
 | `text_delta(text)` | Append to the visible answer. Call repeatedly. |
-| `reasoning_delta(text)` | Append to the reasoning/thinking part. |
+| `reasoning_delta(text)` | Append to the reasoning/thinking part. The host times each contiguous run itself (AHP 1.1.0): `startedAt` on the part when it opens, and a final `duration` (whole ms, monotonic clock) when another kind of output starts or the turn ends in any way. You never supply either; a client never derives it. |
 | `tool_call_started(id, name, input, *, display_name=, intention=, meta=)` | Announce a call. `display_name` is what the user reads. |
 | `tool_call_delta(id, content=, *, invocation_message=)` | Stream the parameters, or move the progress line under the tool's name. Call it at any point in the call's life; the host picks the action that state accepts. |
 | `tool_call_output(id, content, *, meta=)` | What a still-running call has produced. **Replaces**, so pass everything so far. Moves the call to `running` if it is not there yet. |

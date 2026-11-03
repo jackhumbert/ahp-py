@@ -10,6 +10,16 @@ versions each release speaks.
 
 ## [Unreleased]
 
+### Added — reasoning timing (upstream `c301d494`)
+
+- `ActionTurnSink` stamps `startedAt` (`now_iso()`, the producer's clock) on a reasoning part
+  when it opens, and closes each contiguous run with a final `chat/reasoning` of `content: ""`
+  and `duration` in whole milliseconds from a monotonic clock (`ActionTurnSink.finish_reasoning`).
+  A run closes when another segment opens (text, a tool call, a notification) or the turn ends in
+  any way: it completes, fails, is cancelled by a client, or is disposed with its chat or session.
+  Contiguous runs stay separate parts with their own timing. Restored and replayed history
+  (a Claude transcript reload, ACP `session/load`) carries none.
+
 ### Added — `chat/moved` (upstream `c301d494`)
 
 - After every committed cross-session `moveChat` (an existing destination session, or
