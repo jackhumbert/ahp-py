@@ -461,7 +461,7 @@ async def test_a_rollback_does_not_close_a_guest_another_create_is_still_using()
                 await opened(chat_context)
 
             made.chat_config_changed = cco  # type: ignore[method-assign]
-            made.chat_opened = open_  # type: ignore[method-assign]
+            made.chat_opened = open_  # type: ignore[method-assign,assignment]
             return made
 
         guest.create_session = rigged  # type: ignore[method-assign]
