@@ -1557,15 +1557,26 @@ class ReconfiguresSessions(Protocol):
 
 @runtime_checkable
 class ReconfiguresChats(Protocol):
-    """An agent session that follows one chat's config overlay (1.1.0).
+    """An agent session that follows each chat's own config values (1.1.0).
 
     A property the provider marks ``chatMutable`` in its session config schema
     may be set for a single chat (`chat/configChanged`) -- upstream's case is
-    tool auto-approval, so approving in one chat stops changing every chat. The
-    host validates the change, the reducer applies it to the chat's
-    `ChatState.config`, and then this is called with the chat's whole overlay:
-    only the values set on that chat, which apply over the session's own. An
-    empty mapping means the chat follows the session again.
+    tool auto-approval, so approving in one chat stops changing every chat.
+
+    **A chat's config does not inherit from its session** (upstream `c301d494`).
+    ``ChatConfigState.values`` holds the chat's own value for each ``chatMutable``
+    property; a key it leaves out takes the property's schema ``default``, never
+    the session's value; and the values change only through `chat/configChanged`
+    on that chat. The host sets them when it creates a chat (a new chat starts
+    from the session's value at that moment, a fork or side chat from its
+    source's), and on restore it materialises them once for chats saved under
+    the old overlay rule, so no existing chat's behaviour changes.
+
+    So this is called with the chat's **complete** values -- for every chat that
+    has a config when the agent attaches (an empty mapping means "all defaults",
+    not "follow the session"), for each new chat, and after every change to it.
+    A later `ReconfiguresSessions.config_changed` of a ``chatMutable`` key is the
+    session's own value and must not move any chat this was called for.
 
     Without it the state would say one thing and the agent do another, so a
     provider should only mark a property ``chatMutable`` if it implements this.

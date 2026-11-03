@@ -98,6 +98,11 @@ from ahp_host.core.changesets import (
     content_uris,
     file_entry,
 )
+from ahp_host.core.chat_config import (
+    effective_schema,
+    materialise_chat_config,
+    seed_chat_config,
+)
 from ahp_host.core.config import RootConfig, type_matches
 from ahp_host.core.connection import DEFAULT_OUTBOX_LIMIT, Connection
 from ahp_host.core.outbound import OutboundRequests
@@ -958,8 +963,13 @@ def _pending_entries(state: Any) -> list[tuple[str, Mapping[str, Any]]]:
     return entries
 
 
+def _has_chat_config(state: Any) -> bool:
+    """Whether a chat has a `config` (the host sets one on every chat of a configured session)."""
+    return isinstance(state, Mapping) and isinstance(state.get("config"), Mapping)
+
+
 def _chat_config_values(state: Any) -> dict[str, Any]:
-    """`ChatState.config.values` -- the values set on one chat, or ``{}``."""
+    """`ChatState.config.values` -- the chat's own values, or ``{}``."""
     config = state.get("config") if isinstance(state, Mapping) else None
     values = config.get("values") if isinstance(config, Mapping) else None
     return dict(values) if isinstance(values, Mapping) else {}
@@ -2479,17 +2489,15 @@ class Host:
         if working_directories:
             session_state["workingDirectories"] = list(working_directories)
         await self.sequencer.register_channel(uri, session_state, "session")
-        await self.sequencer.register_channel(
-            chat_uri,
-            {
-                "resource": chat_uri,
-                "title": _DEFAULT_CHAT_TITLE,
-                "status": _STATUS_IDLE,
-                "modifiedAt": created_at,
-                "turns": [],
-            },
-            "chat",
-        )
+        chat_state: dict[str, Any] = {
+            "resource": chat_uri,
+            "title": _DEFAULT_CHAT_TITLE,
+            "status": _STATUS_IDLE,
+            "modifiedAt": created_at,
+            "turns": [],
+        }
+        self._seed_chat(chat_state, session_state)
+        await self.sequencer.register_channel(chat_uri, chat_state, "chat")
         await self.sequencer.register_channel(
             session.annotations_uri, {"annotations": []}, "annotations"
         )
@@ -2564,10 +2572,23 @@ class Host:
         withdrawn_by_chat: dict[str, list[RestoredInputRequest]] = {}
         for request in withdrawn:
             withdrawn_by_chat.setdefault(request.chat_uri, []).append(request)
-        for uri, state in stored.channels.items():
+        # The session's channel first, so its config (refreshed below) is there to
+        # materialise the chats' against.
+        restored_session: Mapping[str, Any] | None = None
+        migrated = False
+        for uri, state in sorted(stored.channels.items(), key=lambda item: item[0] != stored.uri):
             reducer = _reducer_for_restored(uri, state, stored.uri)
             restored_state = dict(state)
             if reducer == "chat":
+                if not stored.chat_config_materialised:
+                    # Written before chats stopped inheriting (upstream `c301d494`):
+                    # the values were an overlay on the session's. Fix them once, so
+                    # the chat keeps behaving as it did and never follows the
+                    # session again; `_persist` then records that it was done.
+                    materialised = materialise_chat_config(restored_state, restored_session)
+                    if materialised is not None and materialised != restored_state.get("config"):
+                        restored_state["config"] = materialised
+                        migrated = True
                 # A worker chat (`open_tool_chat`) is one only the provider opens: its
                 # `tool` origin is never a client's (`_chat_origin` takes only fork and
                 # sideChat), so the stored origin says which chats were the provider's.
@@ -2625,6 +2646,7 @@ class Host:
                 await self._refresh_config_schema(stored.provider, restored_state)
                 self._forget_restored_clients(session, restored_state)
                 restored_state.pop("changesets", None)
+                restored_session = restored_state
             await self.sequencer.register_channel(uri, restored_state, reducer)
 
         for request in withdrawn:
@@ -2647,6 +2669,8 @@ class Host:
             {"channel": ROOT_URI, "summary": self._full_summary(session)},
         )
         session.published_summary = self._project_summary(session)
+        if migrated or not stored.chat_config_materialised:
+            await self._persist(session)
         return session
 
     @staticmethod
@@ -2785,6 +2809,7 @@ class Host:
             # stale answer.
             metadata=self._persisted_metadata(session),
             interrupted_by_restart=tuple(sorted(session.interrupted)),
+            chat_config_materialised=True,
         )
         if immediate:
             await self.store.save(stored)
@@ -4420,19 +4445,19 @@ class Host:
                 origin_turn = OriginTurn(parent, turn_id)
         if origin_turn is not None:
             session.origin_turns[chat] = origin_turn
-        await self.sequencer.register_channel(
-            chat,
-            {
-                "resource": chat,
-                "title": title or _DEFAULT_CHAT_TITLE,
-                "status": _STATUS_IDLE,
-                "modifiedAt": now_iso(),
-                "turns": [],
-                "origin": {"kind": "tool", "chat": parent, "toolCallId": tool_call_id},
-                "interactivity": interactivity,
-            },
-            "chat",
-        )
+        tool_state: dict[str, Any] = {
+            "resource": chat,
+            "title": title or _DEFAULT_CHAT_TITLE,
+            "status": _STATUS_IDLE,
+            "modifiedAt": now_iso(),
+            "turns": [],
+            "origin": {"kind": "tool", "chat": parent, "toolCallId": tool_call_id},
+            "interactivity": interactivity,
+        }
+        # From the chat that spawned it, not the session: a worker used to run
+        # on whatever its parent chat ran on, and the parent may be stricter.
+        self._seed_chat(tool_state, self.sequencer.state_of(session.uri), parent)
+        await self.sequencer.register_channel(chat, tool_state, "chat")
         self._channel_created(None, chat, session=session.uri)
         session.chat_uris.add(chat)
         session.provider_chats.add(chat)
@@ -5098,10 +5123,10 @@ class Host:
                 await self._open_chat(
                     session, self._chat_context(session, chat, state, restored=True)
                 )
-        if isinstance(agent, ReconfiguresChats):
-            for chat in sorted(session.chat_uris):
-                if _chat_config_values(self.sequencer.state_of(chat)):
-                    await self._tell_chat_config(session, chat)
+        for chat in sorted(session.chat_uris):
+            # Every chat that has a config, even an empty one: an empty `values`
+            # now means "all defaults", not "follow the session".
+            await self._tell_chat_config(session, chat)
 
     async def _create_chat(self, connection: Connection, params: Mapping[str, Any]) -> None:
         """Open a second chat in a session.
@@ -5165,6 +5190,11 @@ class Host:
             state["origin"] = origin
         if directories is not None:
             state["workingDirectories"] = list(directories)
+        self._seed_chat(
+            state,
+            self.sequencer.state_of(session_uri),
+            origin["chat"] if origin is not None else None,
+        )
 
         initial = params.get("initialMessage")
         if isinstance(initial, Mapping):
@@ -5199,6 +5229,9 @@ class Host:
         await self.sequencer.register_channel(chat_uri, state, "chat")
         self._channel_created(connection, chat_uri, session=session_uri)
         session.chat_uris.add(chat_uri)
+        # Before the catalogue announces it, so no client can start a turn on a
+        # chat whose agent has not yet heard what it may do.
+        await self._tell_chat_config(session, chat_uri)
 
         session.published_chats[chat_uri] = {
             "title": state["title"],
@@ -5577,11 +5610,31 @@ class Host:
             )
         await self._publish_order(target, _placed(self._catalogue_order(target), moving, after))
         await self._reclaim_terminals(target, list(handed.terminals))
+        await self._seed_arrived_chats(target, moving)
         await self._rehost_chats(source, target, moving)
         await self._mirror_summary(source)
         await self._mirror_summary(target)
         await self._persist(source)
         await self._persist(target)
+
+    async def _seed_arrived_chats(self, target: _Session, chats: Sequence[str]) -> None:
+        """Give a moved chat a config if its new session has one and it had none.
+
+        "A moved chat's `config.values` move unchanged", so a chat that has a
+        config keeps it. One that has none (its old session had no config) gets
+        the seed a chat created here would, as `chat/configChanged` -- the only
+        action that can add a config to a chat.
+        """
+        session_state = self.sequencer.state_of(target.uri)
+        for chat in chats:
+            if _has_chat_config(self.sequencer.state_of(chat)):
+                continue
+            seeded = seed_chat_config(session_state)
+            if seeded is not None:
+                await self.sequencer.publish(
+                    chat,
+                    {"type": "chat/configChanged", "config": seeded["values"], "replace": True},
+                )
 
     async def _rehost_chats(self, source: _Session, target: _Session, chats: Sequence[str]) -> None:
         """Tell both agents about chats a committed move took between them.
@@ -5597,10 +5650,13 @@ class Host:
             return
         for chat in chats:
             state = self.sequencer.state_of(chat)
-            if isinstance(state, Mapping) and chat != target.chat_uri:
+            if not isinstance(state, Mapping):
+                continue
+            if chat != target.chat_uri:
                 await self._open_chat(
                     target, self._chat_context(target, chat, state, moved_from=source.uri)
                 )
+            await self._tell_chat_config(target, chat)
 
     async def _move_to_new_session(
         self, connection: Connection, source: _Session, chat: str
@@ -5650,6 +5706,7 @@ class Host:
         # The moved chat is the new session's DEFAULT, which its agent already
         # knows as `AgentSessionContext.chat_uri`; its descendants are
         # announced as arriving.
+        await self._seed_arrived_chats(created, moving)
         await self._rehost_chats(source, created, moving)
         await self._mirror_summary(source)
         await self._mirror_summary(created)
@@ -6750,20 +6807,22 @@ class Host:
     ) -> str | None:
         """Gate `chat/configChanged` (1.1.0), which is client-dispatchable.
 
-        The overlay is checked against the OWNING SESSION's schema -- a chat has
-        none of its own -- and only a property the provider marked
-        `chatMutable` may be set on one chat: "Every other property is changed
-        on the session with `session/configChanged`." The reducer checks
-        nothing. `replace` is allowed, unlike on the session: replacing the
-        overlay with one that omits a property is how a chat goes back to the
-        session's value.
+        The values are checked against the chat's effective schema (its own, else
+        the owning session's), and only a property marked `chatMutable` may be set
+        on one chat: "Every other property is changed on the session with
+        `session/configChanged`." The reducer checks nothing. `replace` is
+        allowed, unlike on the session: replacing the values with ones that omit
+        a property puts that property back to its schema default -- not to the
+        session's value, which a chat no longer follows.
         """
         session = self._session_for(channel)
         if session is None or channel not in session.chat_uris:
             return "not a chat of a session on this host"
-        state = self.sequencer.state_of(session.uri)
-        config = state.get("config") if isinstance(state, Mapping) else None
-        schema = config.get("schema") if isinstance(config, Mapping) else None
+        # The chat's own schema if it has one, else the session's: "a chat with
+        # its own `schema` does not use the session's config at all".
+        schema = effective_schema(
+            self.sequencer.state_of(channel), self.sequencer.state_of(session.uri)
+        )
         properties = schema.get("properties") if isinstance(schema, Mapping) else None
         if not isinstance(properties, Mapping):
             return "this session publishes no configuration"
@@ -7726,24 +7785,28 @@ class Host:
         created_at: str,
     ) -> None:
         chat_uri = session.chat_uri
-        await self.sequencer.register_channel(
-            chat_uri,
-            {
-                "resource": chat_uri,
-                # A CHAT's name, not the session's. `ChatState` inlines every
-                # field of the catalogue entry, so the two have to agree -- and
-                # `session.title` here made the default chat's tab read "New
-                # Session", which is the name of the thing that contains it.
-                "title": _DEFAULT_CHAT_TITLE,
-                "status": _STATUS_IDLE,
-                "modifiedAt": created_at,
-                # THE point of a fork. The client reads the transcript off the
-                # chat channel, so an empty list here is a fork that visibly
-                # lost the conversation while every command reported success.
-                "turns": forked[1] if forked is not None else [],
-            },
-            "chat",
+        chat_state: dict[str, Any] = {
+            "resource": chat_uri,
+            # A CHAT's name, not the session's. `ChatState` inlines every
+            # field of the catalogue entry, so the two have to agree -- and
+            # `session.title` here made the default chat's tab read "New
+            # Session", which is the name of the thing that contains it.
+            "title": _DEFAULT_CHAT_TITLE,
+            "status": _STATUS_IDLE,
+            "modifiedAt": created_at,
+            # THE point of a fork. The client reads the transcript off the
+            # chat channel, so an empty list here is a fork that visibly
+            # lost the conversation while every command reported success.
+            "turns": forked[1] if forked is not None else [],
+        }
+        # A forked session's chat starts from the source session's default chat,
+        # as a forked chat starts from its source.
+        self._seed_chat(
+            chat_state,
+            self.sequencer.state_of(session.uri),
+            forked[0].chat_uri if forked is not None else None,
         )
+        await self.sequencer.register_channel(chat_uri, chat_state, "chat")
         self._channel_created(connection, chat_uri, session=session.uri)
 
     async def _bring_up(
@@ -9299,6 +9362,12 @@ class Host:
         Validation already limited the change to properties the provider
         declared mutable. A restored session with no agent yet gets nothing to
         call: the new values are in state, and resuming reads them from there.
+
+        A `chatMutable` key is still forwarded: it is the session's own value
+        and the seed for chats created from now on (`_seed_chat`), and an agent
+        keeps it for chats it was never given values for. It moves no chat that
+        has a config -- a chat's values change only on that chat
+        (`chat/configChanged`) -- so a provider must not apply it to those.
         """
         session = self._sessions.get(channel)
         values = action.get("config")
@@ -9390,12 +9459,12 @@ class Host:
         await self._tell_chat_directories(session, chat)
 
     async def _react_to_chat_config(self, channel: str) -> None:
-        """Tell the agent one chat's config overlay changed, then save it.
+        """Tell the agent one chat's config values changed, then save it.
 
-        The whole overlay, read back from state as the reducer left it -- the
-        reducer decides what a merge or a `replace` produces, and an agent
-        re-deriving it would be a second reducer that could disagree.
-        Validation already limited it to `chatMutable` properties.
+        The chat's complete values, read back from state as the reducer left
+        them -- the reducer decides what a merge or a `replace` produces, and an
+        agent re-deriving it would be a second reducer that could disagree.
+        Validation already limited them to `chatMutable` properties.
         """
         session = next((s for s in self._sessions.values() if channel in s.chat_uris), None)
         if session is None:
@@ -9403,10 +9472,34 @@ class Host:
         await self._tell_chat_config(session, channel)
         await self._persist(session)
 
+    def _seed_chat(
+        self, state: dict[str, Any], session_state: Any, source_chat: str | None = None
+    ) -> None:
+        """Give a chat being created its `config`, if its session has one (AHP 1.1.0).
+
+        The one helper every creation path uses (`chat_config.seed_chat_config`):
+        a chat does not inherit from its session, so the host sets its values
+        when it creates it. From *source_chat* when there is one (a fork, a side
+        chat, a worker's parent, a forked session's source), else the session's
+        current value for each `chatMutable` property, which is what keeps a new
+        chat behaving as it did when chats inherited.
+        """
+        config = seed_chat_config(
+            session_state, self.sequencer.state_of(source_chat) if source_chat else None
+        )
+        if config is not None:
+            state["config"] = config
+
     async def _tell_chat_config(self, session: _Session, chat: str) -> None:
-        """`ReconfiguresChats`, with the overlay as the reducer left it."""
+        """`ReconfiguresChats`, with the chat's complete values as the reducer left them.
+
+        Nothing for a chat with no `config` (its session has none): an empty
+        mapping would say "all defaults", which is not "unconfigured".
+        """
         agent = session.agent_session
         if not isinstance(agent, ReconfiguresChats):
+            return
+        if not _has_chat_config(self.sequencer.state_of(chat)):
             return
         try:
             await agent.chat_config_changed(

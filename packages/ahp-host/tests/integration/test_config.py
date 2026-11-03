@@ -306,11 +306,12 @@ class TestSessionConfig:
 
 
 class TestChatConfig:
-    """`chat/configChanged` (1.1.0): values set on one chat, over the session's.
+    """`chat/configChanged` (1.1.0): a chat's own values, which its session does not change.
 
     The echo provider marks `prefix` both `sessionMutable` and `chatMutable`,
-    and `style` neither -- enough to see the overlay reach the agent for one
-    chat only, and to see the gate refuse what may not vary per chat.
+    and `style` neither -- enough to see a chat's values reach the agent for one
+    chat only, and to see the gate refuse what may not vary per chat. Every chat
+    has its own `config` from creation (`tests/unit/test_chat_config_rules.py`).
     """
 
     @pytest.fixture
@@ -379,9 +380,9 @@ class TestChatConfig:
         assert "Chat two heard:" in await self._reply(client, other, "t-other")
         assert "You said:" in await self._reply(client, default, "t-default")
 
-    async def test_replacing_the_overlay_resets_to_the_session(self, host: Host) -> None:
-        """ "To reset a property to the session's value, replace the overlay
-        with one that omits the property." """
+    async def test_replacing_the_values_resets_to_the_default(self, host: Host) -> None:
+        """Replacing the values with ones that omit a property puts it back to
+        the schema default (not the session's value: a chat does not inherit)."""
         client = await _attach(host)
         _, other = await self._two_chats(client, "echo:/chat-cfg-2")
 
@@ -401,20 +402,21 @@ class TestChatConfig:
 
         assert _rejection(client, "chat/configChanged") == "'style' cannot be set per chat"
         state = (await client.request("subscribe", {"channel": other}))["result"]["snapshot"]
-        assert "config" not in state["state"]
+        assert state["state"]["config"] == {"values": {"prefix": "You said:"}}
 
-    async def test_a_restarted_agent_is_told_each_overlay(self, host: Host) -> None:
-        """The overlay lives in chat state, which outlives the agent session;
-        one attached later learns it the way a client change would tell it."""
+    async def test_a_restarted_agent_is_told_each_chats_values(self, host: Host) -> None:
+        """The values live in chat state, which outlives the agent session; one
+        attached later learns every chat's, the default chat's included, the way
+        a client change would tell it."""
         client = await _attach(host)
-        _, other = await self._two_chats(client, "echo:/chat-cfg-4")
+        default, other = await self._two_chats(client, "echo:/chat-cfg-4")
         await self._set(client, other, {"prefix": "Again:"})
 
         session = host._sessions["echo:/chat-cfg-4"]
         fresh = EchoSession(session.agent_session.context)  # type: ignore[union-attr]
         await host._attach_agent(session, fresh)
 
-        assert fresh.chat_config == {other: {"prefix": "Again:"}}
+        assert fresh.chat_config == {default: {"prefix": "You said:"}, other: {"prefix": "Again:"}}
 
     async def test_the_agent_can_change_one_chats_own_value(self, host: Host) -> None:
         """`SessionPublisher.config_changed(chat=)`: a value a chat set for
@@ -434,7 +436,7 @@ class TestChatConfig:
 
         chat_state = host.sequencer.state_of(other)
         assert chat_state["config"] == {"values": {"prefix": "Moved:"}}
-        assert "config" not in host.sequencer.state_of(default)
+        assert host.sequencer.state_of(default)["config"] == {"values": {"prefix": "You said:"}}
         session_state = host.sequencer.state_of("echo:/chat-cfg-5")
         assert session_state["config"]["values"].get("prefix") != "Moved:"
         assert agent.chat_config[other] == {"prefix": "Mine:"}, "the agent heard its own change"
@@ -621,4 +623,10 @@ class TestChangingConfigMidSession(TestSessionConfig):
             for e in client.actions(chat_uri)
             if e["action"]["type"] == "chat/delta"
         )
-        assert deltas.startswith("Heard:"), f"the agent kept its creation-time prefix: {deltas!r}"
+        # The agent heard the session's change ...
+        agent = host._sessions[uri].agent_session
+        assert isinstance(agent, EchoSession)
+        assert agent.config_overrides == {"prefix": "Heard:"}
+        # ... but the existing chat does not follow it: a chat's config does not
+        # inherit from its session (upstream `c301d494`), only chats created now do.
+        assert deltas.startswith("You said:"), f"the chat followed the session: {deltas!r}"

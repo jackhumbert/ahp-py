@@ -131,6 +131,14 @@ class StoredSession:
     #: file written before this field existed; the session's own `inputNeeded`
     #: entries are still in its channel state, and are withdrawn the same way.
     input_requests: Sequence[Mapping[str, Any]] | None = None
+    #: Whether every chat's `config` was written under the non-inheriting rule
+    #: (AHP 1.1.0, upstream `c301d494`): a chat's values are its own and a key it
+    #: leaves out is the schema default. ``False`` is a file an earlier host wrote,
+    #: where a chat's values were an overlay on the session's; restore then
+    #: materialises each chat once (`chat_config.materialise_chat_config`) so no
+    #: chat's effective behaviour changes. Without the flag a restore could not
+    #: tell an old overlay from a value a client cleared on purpose.
+    chat_config_materialised: bool = False
 
     def to_json(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
@@ -152,6 +160,8 @@ class StoredSession:
             payload["interruptedByRestart"] = list(self.interrupted_by_restart)
         if self.input_requests is not None:
             payload["inputRequests"] = [dict(r) for r in self.input_requests]
+        if self.chat_config_materialised:
+            payload["chatConfigMaterialised"] = True
         return payload
 
     @classmethod
@@ -205,6 +215,10 @@ class StoredSession:
         if not isinstance(interrupted, list) or not all(isinstance(c, str) for c in interrupted):
             raise ValueError("interruptedByRestart must be a list of strings or absent")
 
+        materialised = payload.get("chatConfigMaterialised", False)
+        if not isinstance(materialised, bool):
+            raise ValueError("chatConfigMaterialised must be a boolean or absent")
+
         return cls(
             uri=_required_string(payload, "uri"),
             provider=_required_string(payload, "provider"),
@@ -215,6 +229,7 @@ class StoredSession:
             metadata=dict(metadata) if metadata is not None else None,
             interrupted_by_restart=tuple(interrupted),
             input_requests=input_requests,
+            chat_config_materialised=materialised,
         )
 
 

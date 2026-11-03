@@ -10,6 +10,32 @@ versions each release speaks.
 
 ## [Unreleased]
 
+### Changed — a chat's config no longer inherits from its session (upstream `c301d494`)
+
+This is a behaviour change. A chat's `config.values` are its own: a key it leaves out is the
+property's schema `default` (never the session's value), and they change only through
+`chat/configChanged` on that chat.
+
+- The host sets `ChatState.config` on **every** chat of a session that has a config, at
+  creation (`core/chat_config.py`, one helper for every path): the default chat, `createChat`,
+  forks and side chats (copied from the source chat), worker chats opened by a provider (from
+  the chat that spawned them), a forked session's default chat (from the source session's), and
+  a chat moved into a session whose old one had no config. Any other chat takes, for each
+  `chatMutable` property, the session's current value, else its default.
+- `session/configChanged` on a `chatMutable` key moves no chat that has a config. It is still
+  forwarded to `ReconfiguresSessions.config_changed` (it is the session's own value and the seed
+  for later chats).
+- `ReconfiguresChats.chat_config_changed` receives the chat's complete values and is called for
+  every chat with a config when the agent attaches (not only non-empty overlays), and for each
+  new or moved-in chat before it is announced.
+- Restore materialises each chat once, so no existing chat's behaviour changes: for each
+  `chatMutable` key, the chat's value if it set one, else the session's, else the default.
+  `StoredSession.chat_config_materialised` (`chatConfigMaterialised` on disk) records that it
+  was done, so a value a client cleared on purpose is not refilled on the next restore.
+- `chat/configChanged` is validated against the chat's effective schema (its own if it has one,
+  else the session's); keys that are not `chatMutable` are still rejected.
+- `EchoSession` uses a chat's own `prefix` (default `You said:`) once told its values.
+
 ### Added — `authenticate.target` (upstream `c5628cd4`)
 
 - `TokenStore` keeps targeted grants, keyed `(resource, session, customizationId)`, apart

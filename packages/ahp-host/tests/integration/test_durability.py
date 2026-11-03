@@ -111,21 +111,25 @@ class TestRestart:
     async def test_a_restored_session_takes_a_turn_with_its_current_config(
         self, tmp_path: Path
     ) -> None:
-        """Restored sessions resume their agent on the first turn -- with the
-        config the state holds now, including a mid-session change."""
+        """Restored sessions resume their agent on the first turn -- and tell it
+        each chat's own values, including a mid-session change to one. (A chat's
+        config does not inherit from its session: it is the chat's value that
+        survives, not a session-level change made after the chat existed.)"""
         first = _host(tmp_path, configurable=True)
         uri = "echo:/durable-resume"
         try:
             client = await _client(first)
             await client.request("createSession", {"channel": uri, "provider": "echo"})
             await client.collect(seconds=0.3)
-            await client.request("subscribe", {"channel": uri})
+            state = (await client.request("subscribe", {"channel": uri}))["result"]["snapshot"][
+                "state"
+            ]
             await client.notify(
                 "dispatchAction",
                 {
-                    "channel": uri,
+                    "channel": state["chats"][0]["resource"],
                     "clientSeq": 1,
-                    "action": {"type": "session/configChanged", "config": {"prefix": "Heard:"}},
+                    "action": {"type": "chat/configChanged", "config": {"prefix": "Heard:"}},
                 },
             )
             await client.collect(seconds=0.3)

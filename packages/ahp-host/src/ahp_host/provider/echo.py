@@ -69,6 +69,9 @@ def _first_active_client(context: AgentSessionContext) -> str | None:
 #: it reads, it needs only a symbol name, and it exists in every window.
 _PREFERRED_CLIENT_TOOLS: Final = ("usages", "toolSearch", "rename")
 
+#: The echo `prefix` property's default: what a chat with no value of its own says.
+DEFAULT_PREFIX: Final = "You said:"
+
 
 def _pick_client_tool(context: AgentSessionContext) -> Mapping[str, Any] | None:
     """A tool the client ACTUALLY published, never a name we made up.
@@ -160,8 +163,8 @@ class EchoSession:
         #: `sessionMutable` values changed after creation (`prefix`), which
         #: win over the creation-time config.
         self.config_overrides: dict[str, Any] = {}
-        #: Per chat, the values set on that chat alone (`chatMutable`, 1.1.0),
-        #: which win over the session's in that chat only.
+        #: Per chat, the chat's complete values (`chatMutable`, 1.1.0). A chat in
+        #: here never follows the session; a key it leaves out is the default.
         self.chat_config: dict[str, dict[str, Any]] = {}
         #: Messages steered into the running turn, echoed before it ends.
         self.steered: list[str] = []
@@ -185,10 +188,11 @@ class EchoSession:
         self.config_overrides.update(values)
 
     async def chat_config_changed(self, chat: str, values: Mapping[str, Any]) -> None:
-        """A client set `prefix` on one chat; only that chat's replies use it.
+        """A chat's `prefix`; only that chat's replies use it.
 
-        *values* is the chat's whole overlay, so it replaces what was there --
-        an empty one puts the chat back on the session's prefix.
+        *values* is the chat's complete values, so it replaces what was there --
+        a missing `prefix` is the default, not the session's (a chat does not
+        inherit its session's config).
         """
         self.chat_config[chat] = dict(values)
 
@@ -313,8 +317,8 @@ class EchoSession:
         # here, so the configuration is observably load-bearing rather than
         # decorative.
         session_prefix = self.config_overrides.get("prefix", self.context.config.get("prefix"))
-        overlay = self.chat_config.get(message.chat_uri or self.context.chat_uri, {})
-        prefix = overlay.get("prefix", session_prefix)
+        own = self.chat_config.get(message.chat_uri or self.context.chat_uri)
+        prefix = own.get("prefix", DEFAULT_PREFIX) if own is not None else session_prefix
         prefix = prefix if isinstance(prefix, str) else "You said:"
         text = message.text.upper() if self.context.config.get("style") == "shout" else message.text
         for chunk in (f"{prefix} ", text):
@@ -551,7 +555,7 @@ class EchoProvider:
             "prefix": {
                 "type": "string",
                 "title": "Reply prefix",
-                "default": "You said:",
+                "default": DEFAULT_PREFIX,
                 "sessionMutable": True,
                 "chatMutable": True,
             },
