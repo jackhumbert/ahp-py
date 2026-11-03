@@ -306,7 +306,7 @@ def test_tool_results_carry_result_metadata() -> None:
 
 # -- effective config ---------------------------------------------------------
 
-_SESSION_CFG = {
+_SESSION_CFG: dict[str, Any] = {
     "schema": {
         "type": "object",
         "properties": {
@@ -330,7 +330,7 @@ def test_effective_config_uses_the_chats_values_for_chat_mutable_keys() -> None:
 
 
 def test_a_missing_key_takes_the_schema_default_not_the_sessions_value() -> None:
-    chat = {"config": {"values": {}}}
+    chat: dict[str, Any] = {"config": {"values": {}}}
     assert effective_config({"config": _SESSION_CFG}, chat) == {"approvals": "ask", "model": "m1"}
 
 
