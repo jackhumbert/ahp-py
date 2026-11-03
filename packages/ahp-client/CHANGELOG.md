@@ -6,6 +6,13 @@ Every release states the protocol versions it speaks.
 
 ## [Unreleased]
 
+### Fixed
+
+- `Session.create_chat(provider=)` no longer refuses a provider when the root `agents` list is empty or
+  not loaded yet (the host answers); the "not in root agents" refusal is documented as a pre-check, not
+  a spec rule. The capability lookup uses `is not None`-style resolution of the chat's agent instead of
+  truthiness.
+
 ### Added — per-chat agent, reasoning timing and `resultMetadata` (upstream `c301d494`)
 
 - `Session.create_chat(provider=)` and `AhpClient.create_chat(..., provider=)`: sent only when

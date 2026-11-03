@@ -732,13 +732,21 @@ class Session:
                 "clients MUST NOT send CreateChatParams.provider"
             )
         agent = self._chat_agent(provider, source)
-        if provider is not None and not any(
-            a.get("provider") == provider for a in self._client.agents()
-        ):
+        roster = self._client.agents()
+        # With a *provider* and no root `agents` yet (empty or not loaded) none of
+        # the local pre-checks below can be answered, so skip them and let the
+        # host answer (InvalidParams for an unknown or incapable provider).
+        if provider is not None and not roster:
+            return await self._send_create_chat(
+                uri, initial_message, source, working_directories, title, provider
+            )
+        if provider is not None and not any(a.get("provider") == provider for a in roster):
+            # A convenience pre-check, NOT a spec client rule: the spec only says
+            # the host rejects a provider absent from the root `agents`.
             raise AhpClientError(f"agent {provider!r} is not in the root state's agents")
-        capabilities = (
-            self._client._capabilities_for(agent) if provider or source else self.capabilities
-        )
+        # `agent` already resolves to the session's own provider when neither a
+        # *provider* nor a *source* names another.
+        capabilities = self._client._capabilities_for(agent)
         # `is not None`, never truthiness: `multipleChats: {}` is the ordinary
         # advertisement and `{}` is falsy in Python, so a truthiness test reads
         # every plain multi-chat agent as not supporting multi-chat.
@@ -761,6 +769,19 @@ class Session:
                 "capabilities.multipleWorkingDirectories; clients MUST NOT supply "
                 "workingDirectories on createChat"
             )
+        return await self._send_create_chat(
+            uri, initial_message, source, working_directories, title, provider
+        )
+
+    async def _send_create_chat(
+        self,
+        uri: str | None,
+        initial_message: Mapping[str, Any] | str | None,
+        source: Mapping[str, Any] | None,
+        working_directories: Sequence[str] | None,
+        title: str | None,
+        provider: str | None,
+    ) -> Chat:
         chat_uri = uri or f"ahp-chat:/{uuid.uuid4()}"
         # The convenience form carries the required `origin` too: `Message`
         # requires `[text, origin]`, and "a client is only allowed to send

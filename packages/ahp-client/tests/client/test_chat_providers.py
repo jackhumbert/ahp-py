@@ -39,8 +39,9 @@ def _host(
     chats: list[dict[str, Any]] | None = None,
     session_config: dict[str, Any] | None = None,
     chat_states: dict[str, dict[str, Any]] | None = None,
+    agents: list[dict[str, Any]] | None = None,
 ) -> FakeHost:
-    host = FakeHost(agents=_AGENTS)
+    host = FakeHost(agents=_AGENTS if agents is None else agents)
     state: dict[str, Any] = {
         "lifecycle": "ready",
         "defaultChat": CHAT,
@@ -190,6 +191,43 @@ async def test_a_fork_of_a_foreign_chat_reads_the_source_chats_agent() -> None:
         session = await client.create_session(provider="echo")
         await session.create_chat(source={"kind": "fork", "chat": OTHER, "turnId": "t1"})
         assert "provider" not in _sent(host, "createChat")[-1]
+    await host.stop()
+
+
+async def test_a_fork_with_no_provider_gates_on_the_source_chats_agent_not_the_sessions() -> None:
+    """Session agent `echo` has no fork; the source chat's agent `second` has.
+
+    The fork is allowed only because the source chat's capabilities are read,
+    and one whose agent lacks fork is refused though the session's agent
+    advertises multi-chat.
+    """
+    host = _host(
+        chats=[
+            {"resource": OTHER, "title": "x", "provider": "second"},
+            {"resource": "ahp-chat://c/single", "title": "y", "provider": "single"},
+        ],
+    )
+    await host.start()
+    async with connect(transport=host.transport()) as client:
+        session = await client.create_session(provider="echo")
+        await session.create_chat(source={"kind": "fork", "chat": OTHER, "turnId": "t1"})
+        assert len(_sent(host, "createChat")) == 1
+        with pytest.raises(AhpClientError, match=r"'single'.*multipleChats"):
+            await session.create_chat(
+                source={"kind": "fork", "chat": "ahp-chat://c/single", "turnId": "t1"}
+            )
+        assert len(_sent(host, "createChat")) == 1
+    await host.stop()
+
+
+async def test_an_empty_root_roster_does_not_refuse_a_provider_locally() -> None:
+    """The roster is not a spec client rule; with none loaded the host answers."""
+    host = _host(agents=[])
+    await host.start()
+    async with connect(transport=host.transport()) as client:
+        session = await client.create_session(provider="echo")
+        await session.create_chat(provider="anything")
+        assert _sent(host, "createChat")[-1]["provider"] == "anything"
     await host.stop()
 
 
