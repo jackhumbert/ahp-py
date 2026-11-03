@@ -17,6 +17,19 @@ versions each release speaks.
   persists. Without it a `createChat` that names a `provider` is `InvalidParams`. The demo flag
   also serves a second echo agent, `echo-guest`, so there is something to name.
 
+### Added — per-chat agents: `createChat.provider` (upstream `c301d494`)
+
+- `createChat` takes `provider`. It is validated as upstream says: a registered agent whose
+  agent advertises `multipleChats`; a fork or side chat runs on its source chat's agent (absent
+  means that agent, a different value is `InvalidParams`); the `multipleChats` and
+  `multipleWorkingDirectories` checks read the chat's agent, not the session's.
+- A chat on an agent other than its session's is *foreign*. It reports `ChatState.provider`
+  (and `ChatSummary.provider`, `SessionChatSummary.provider`); a chat on the session's own agent
+  reports none. Its `config` is `{schema, values}`: the foreign agent's `resolve_config`
+  properties, `chatMutable` ones only, with their defaults. A foreign agent with no config
+  leaves the chat with none, and the session's config never governs it
+  (`chat_config.effective_schema`, `materialise_chat_config`).
+
 ### Fixed — a chat whose config the agent was not told fails closed
 
 - `Host._tell_chat_config` used to log and forget a `chat_config_changed` that raised, leaving an

@@ -100,6 +100,7 @@ from ahp_host.core.changesets import (
 )
 from ahp_host.core.chat_config import (
     effective_schema,
+    foreign_chat_config,
     materialise_chat_config,
     seed_chat_config,
 )
@@ -326,7 +327,15 @@ _CHAT_SUMMARY_FIELDS: Final = (
 #: `SessionChatSummary` (1.0.0): the compact chat catalogue a session list
 #: renders from `SessionSummary.chats` without subscribing to the session.
 #: Projected from each `ChatSummary`, in catalogue order.
-_COMPACT_CHAT_FIELDS: Final = ("resource", "title", "origin", "interactivity", "status", "changes")
+_COMPACT_CHAT_FIELDS: Final = (
+    "resource",
+    "title",
+    "origin",
+    "provider",
+    "interactivity",
+    "status",
+    "changes",
+)
 
 #: How long a title seeded from the first message may be. The session list is a
 #: narrow column; past this it is truncated by the renderer anyway, and a title
@@ -1616,6 +1625,14 @@ class _Session:
     title: str
     created_at: str
     agent_session: AgentSession | None = None
+    #: Agent sessions for chats that run on an agent other than the session's
+    #: (`createChat.provider`, AHP 1.1.0), by provider id -- "guests". The first
+    #: foreign chat of a provider creates its guest; the last one's disposal
+    #: closes it. Never `agent_session`: that one is the session's own.
+    guests: dict[str, AgentSession] = field(default_factory=dict)
+    #: Foreign chat -> the provider id it runs on. A chat not here runs on the
+    #: session's agent. Rebuilt on restore from each chat's `ChatState.provider`.
+    chat_providers: dict[str, str] = field(default_factory=dict)
     #: The running turn PER CHAT. One slot for the whole session meant a second
     #: chat's turn overwrote the first's handle, so `chat/turnCancelled` on chat
     #: A cancelled whichever chat had started most recently -- with no terminal
@@ -1889,7 +1906,9 @@ def _turns_through(turns: Any, turn_id: str) -> list[Mapping[str, Any]]:
     return []
 
 
-def _with_origin(summary: dict[str, Any], origin: Mapping[str, Any] | None) -> dict[str, Any]:
+def _with_origin(
+    summary: dict[str, Any], origin: Mapping[str, Any] | None, provider: str | None = None
+) -> dict[str, Any]:
     """`ChatSummary.origin` -- where a forked or side chat came from.
 
     On the SUMMARY, not only on the chat channel's own state. The client builds
@@ -1899,6 +1918,10 @@ def _with_origin(summary: dict[str, Any], origin: Mapping[str, Any] | None) -> d
     """
     if origin is not None:
         summary["origin"] = dict(origin)
+    if provider is not None:
+        # `ChatSummary.provider`: an identity field like `origin`, so on the entry
+        # and never in `_CHAT_SUMMARY_FIELDS` (`session/chatUpdated` cannot carry it).
+        summary["provider"] = provider
     return summary
 
 
@@ -2855,6 +2878,8 @@ class Host:
         session = self._sessions.get(channel)
         if session is None:
             session = next((s for s in self._sessions.values() if channel in s.chat_uris), None)
+            if session is not None:
+                return self._provider_of_chat(session, channel)
         return self._provider_of(session) if session is not None else self.provider
 
     async def _ensure_root(self) -> None:
@@ -5158,6 +5183,7 @@ class Host:
         session.provider_chats.discard(chat)
         session.opened_chats.discard(chat)
         session.undelivered_chats.discard(chat)
+        session.chat_providers.pop(chat, None)
         session.origin_turns.pop(chat, None)
         await self.sequencer.drop_channel(chat)
         self._channel_dropped(chat)
@@ -5190,9 +5216,18 @@ class Host:
             # send it without, and only the host can enforce that.
             raise errors.invalid_params("this host does not advertise multipleChatProviders")
 
-        capability = self._multichat(self._provider_of(session))
+        source = params.get("source")
+        # Which agent the chat runs on, and every capability check below reads
+        # THAT agent ("Agent capability checks for this request use the chat's agent").
+        chat_provider = self._chat_provider_for(session, params.get("provider"), source)
+        foreign = chat_provider != session.provider_id
+        capability = self._multichat(self.providers[chat_provider])
         if capability is None:
-            raise errors.invalid_params("this agent does not advertise multipleChats")
+            raise errors.invalid_params(
+                "this agent does not advertise multipleChats"
+                if not foreign
+                else f"the {chat_provider} agent does not advertise multipleChats"
+            )
         if self.sequencer.has_channel(chat_uri):
             # `AlreadyExists` (-32010), not `SessionAlreadyExists` (-32003) --
             # the same reasoning as `_create_terminal`: -32003 is "a session
@@ -5202,9 +5237,8 @@ class Host:
                 AHP_ERROR_CODES["AlreadyExists"], f"Channel already exists: {chat_uri}"
             )
 
-        source = params.get("source")
         origin = self._chat_origin(session, capability, source)
-        directories = self._chat_working_directories(session, params, source)
+        directories = self._chat_working_directories(session, params, source, chat_provider)
 
         created_at = now_iso()
         # 1.1.0: "a client-selected initial display title for the target chat".
@@ -5229,11 +5263,20 @@ class Host:
             state["origin"] = origin
         if directories is not None:
             state["workingDirectories"] = list(directories)
-        self._seed_chat(
-            state,
-            self.sequencer.state_of(session_uri),
-            origin["chat"] if origin is not None else None,
-        )
+        if foreign:
+            # Identity, reported only when it differs from the session's.
+            state["provider"] = chat_provider
+            config = await self._foreign_chat_config(
+                chat_provider, session, origin["chat"] if origin is not None else None
+            )
+            if config is not None:
+                state["config"] = config
+        else:
+            self._seed_chat(
+                state,
+                self.sequencer.state_of(session_uri),
+                origin["chat"] if origin is not None else None,
+            )
 
         initial = params.get("initialMessage")
         if isinstance(initial, Mapping):
@@ -5254,7 +5297,15 @@ class Host:
         lifecycle = self.sequencer.state_of(session.uri)
         if isinstance(lifecycle, Mapping) and lifecycle.get("lifecycle") == "ready":
             await self._resume_if_restored(session)
-        await self._open_chat(session, self._chat_context(session, chat_uri, state), refusable=True)
+        if foreign:
+            session.chat_providers[chat_uri] = chat_provider
+        try:
+            await self._open_chat(
+                session, self._chat_context(session, chat_uri, state), refusable=True
+            )
+        except BaseException:
+            session.chat_providers.pop(chat_uri, None)
+            raise
         if self._sessions.get(session_uri) is not session:
             # Disposed while the provider was being asked.
             raise errors.session_not_found(session_uri)
@@ -5262,6 +5313,8 @@ class Host:
             # A concurrent `createChat` took the URI meanwhile. Nothing was
             # created by this one. Not `chat_closed`: the URI now names the
             # chat the other call created, which the agent must keep.
+            if foreign:
+                session.chat_providers.pop(chat_uri, None)
             raise errors.AhpError(
                 AHP_ERROR_CODES["AlreadyExists"], f"Channel already exists: {chat_uri}"
             )
@@ -5294,6 +5347,7 @@ class Host:
                         "modifiedAt": created_at,
                     },
                     origin,
+                    chat_provider if foreign else None,
                 ),
             },
         )
@@ -5320,6 +5374,68 @@ class Host:
             await self._react(chat_uri, started, connection)
         await self._mirror_summary(session)
         return
+
+    def _chat_provider_for(self, session: _Session, requested: Any, source: Any) -> str:
+        """The provider id a new chat runs on, validated (AHP 1.1.0 `createChat.provider`).
+
+        Absent means the session's provider. A fork or side chat continues its
+        source chat's history, so it always uses the source chat's agent: absent
+        means that agent, and a different value is rejected. A provider must be
+        one of this host's agents; whether its agent advertises `multipleChats`
+        is the caller's capability check, made against the agent returned here.
+        """
+        source_agent: str | None = None
+        if isinstance(source, Mapping):
+            source_chat = source.get("chat")
+            if isinstance(source_chat, str) and source_chat in session.chat_uris:
+                source_agent = self._agent_of(session, source_chat)
+        if requested is None:
+            return source_agent or session.provider_id
+        if not isinstance(requested, str):
+            raise errors.invalid_params("provider must be a string")
+        if requested not in self.providers:
+            raise errors.invalid_params(f"no agent {requested!r} on this host")
+        if source_agent is not None and requested != source_agent:
+            raise errors.invalid_params(
+                f"a fork or side chat runs on its source chat's agent ({source_agent!r}), "
+                f"not {requested!r}"
+            )
+        return requested
+
+    async def _foreign_chat_config(
+        self, provider_id: str, session: _Session, source_chat: str | None
+    ) -> dict[str, Any] | None:
+        """`ChatState.config` for a chat on an agent other than its session's.
+
+        The session's config describes the session's agent, so none of it applies:
+        the chat carries its own `schema` -- the foreign agent's resolved
+        properties, `chatMutable` ones only -- and their defaults as `values`. A
+        fork or side chat copies its (foreign) source's config instead. ``None``
+        when the agent has no config to offer; such a chat has no config at all
+        (`effective_schema` does not fall back to the session's for it).
+        """
+        if source_chat is not None:
+            source = self.sequencer.state_of(source_chat)
+            config = source.get("config") if isinstance(source, Mapping) else None
+            return copy.deepcopy(dict(config)) if isinstance(config, Mapping) else None
+        provider = self.providers[provider_id]
+        if not isinstance(provider, ConfiguresSessions):
+            return None
+        state = self.sequencer.state_of(session.uri)
+        folders = state.get("workingDirectories") if isinstance(state, Mapping) else None
+        first = next((f for f in folders or () if isinstance(f, str)), None)
+        try:
+            resolved = await provider.resolve_config(
+                ConfigRequest(provider=provider_id, working_directory=first, values={})
+            )
+        except Exception as exc:
+            raise errors.internal_error(
+                f"the {provider_id} agent could not describe its config: "
+                f"{type(exc).__name__}: {exc}"
+            ) from exc
+        if not resolved.properties:
+            return None
+        return foreign_chat_config(resolved.properties)
 
     def _chat_origin(
         self, session: _Session, capability: Mapping[str, Any], source: Any
@@ -5375,7 +5491,11 @@ class Host:
         return origin
 
     def _chat_working_directories(
-        self, session: _Session, params: Mapping[str, Any], source: Any
+        self,
+        session: _Session,
+        params: Mapping[str, Any],
+        source: Any,
+        provider_id: str | None = None,
     ) -> Sequence[str] | None:
         """The chat's directory subset, validated against the session's set."""
         if isinstance(source, Mapping) and source.get("kind") == "fork":
@@ -5385,7 +5505,8 @@ class Host:
         requested = params.get("workingDirectories")
         if requested is None:
             return None
-        if self._multiroot(self._provider_of(session)) is None:
+        agent = self.providers.get(provider_id or session.provider_id, self._provider_of(session))
+        if self._multiroot(agent) is None:
             raise errors.invalid_params("this agent does not advertise multipleWorkingDirectories")
         state = self.sequencer.state_of(session.uri)
         owned = state.get("workingDirectories") if isinstance(state, Mapping) else None
@@ -5485,6 +5606,8 @@ class Host:
         entry: dict[str, Any] = {"resource": chat}
         if isinstance(state.get("origin"), Mapping):
             entry["origin"] = dict(state["origin"])
+        if isinstance(state.get("provider"), str):
+            entry["provider"] = state["provider"]
         entry.update(projected)
         return entry, projected
 
@@ -5664,8 +5787,26 @@ class Host:
         await self._persist(target)
 
     def _agent_of(self, session: _Session, chat: str) -> str:
-        """The provider id of the agent behind *chat*: its session's, until a chat has its own."""
-        return session.provider_id
+        """The provider id of the agent behind *chat*: its own if foreign, else its session's."""
+        return session.chat_providers.get(chat, session.provider_id)
+
+    def _agent_for(self, session: _Session, chat: str) -> AgentSession | None:
+        """The agent session that serves *chat*: the guest of a foreign chat, else the session's.
+
+        ``None`` when that agent is not running -- a restored session before its
+        first use, or a guest whose provider is gone. Every per-chat call goes
+        through here (turns, cancel, steering, truncation, config, folders,
+        open/close); what is session-wide goes to `session.agent_session` and the
+        guests explicitly.
+        """
+        provider = session.chat_providers.get(chat)
+        if provider is None:
+            return session.agent_session
+        return session.guests.get(provider)
+
+    def _provider_of_chat(self, session: _Session, chat: str) -> AgentProvider:
+        """The provider whose agent serves *chat*: capability checks read this one."""
+        return self.providers.get(self._agent_of(session, chat), self._provider_of(session))
 
     async def _announce_moved(
         self, source: _Session, target: _Session, chats: Sequence[str]
@@ -7429,7 +7570,7 @@ class Host:
         session = next((s for s in self._sessions.values() if channel in s.chat_uris), None)
         if session is None:
             return "no such chat"
-        if self._multiroot(self._provider_of(session)) is None:
+        if self._multiroot(self._provider_of_chat(session, channel)) is None:
             return "this agent does not advertise multipleWorkingDirectories"
         directory = action.get("directory")
         if not isinstance(directory, str):
@@ -9658,6 +9799,8 @@ class Host:
         try:
             await self._resume_if_restored(session)
             turn_id = action.get("turnId")
+            if agent is None:
+                agent = self._agent_for(session, runner.channel)
             if runner.channel in session.undelivered_chats:
                 # A later delivery may succeed where the first did not.
                 await self._tell_chat_config(session, runner.channel)
@@ -9668,9 +9811,9 @@ class Host:
                 )
                 return
             if resume and isinstance(turn_id, str):
-                await runner.resume(agent or session.agent_session, turn_id)
+                await runner.resume(agent, turn_id)
             else:
-                await runner.run(agent or session.agent_session, action, principal=principal)
+                await runner.run(agent, action, principal=principal)
         finally:
             # Retracted in a DETACHED task on purpose. This one is frequently
             # the task being cancelled, and a cancelled task cannot be relied on

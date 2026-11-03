@@ -26,6 +26,7 @@ from typing import Any
 __all__ = [
     "chat_mutable_properties",
     "effective_schema",
+    "foreign_chat_config",
     "materialise_chat_config",
     "seed_chat_config",
 ]
@@ -39,9 +40,29 @@ def effective_schema(chat_state: Any, session_state: Any) -> Mapping[str, Any] |
     own = _config(chat_state)
     if own is not None and isinstance(own.get("schema"), Mapping):
         return own["schema"]  # type: ignore[no-any-return]
+    if _is_foreign(chat_state):
+        # Its agent's config is not the session's, and it declared none of its own.
+        return None
     session = _config(session_state)
     schema = session.get("schema") if session is not None else None
     return schema if isinstance(schema, Mapping) else None
+
+
+def foreign_chat_config(properties: Mapping[str, Mapping[str, Any]]) -> dict[str, Any]:
+    """`ChatState.config` for a chat on an agent other than its session's (M2).
+
+    The agent's resolved properties, ``chatMutable`` ones only, as the chat's own
+    ``schema``; the ``values`` are their defaults. The schema may end up with no
+    properties: the chat still has one, so the session's never governs it.
+    """
+    chosen = {
+        key: copy.deepcopy(dict(prop))
+        for key, prop in chat_mutable_properties({"properties": properties}).items()
+    }
+    return {
+        "schema": {"type": "object", "properties": chosen},
+        "values": _initial_values(chosen, None),
+    }
 
 
 def chat_mutable_properties(schema: Mapping[str, Any] | None) -> dict[str, Mapping[str, Any]]:
@@ -90,6 +111,9 @@ def materialise_chat_config(chat_state: Any, session_state: Any) -> dict[str, An
     if own is not None and isinstance(own.get("schema"), Mapping):
         properties = chat_mutable_properties(own["schema"])
         values = _initial_values(properties, None)
+    elif _is_foreign(chat_state):
+        # A foreign chat without a config has nothing to materialise.
+        return dict(own) if own is not None else None
     else:
         session = _config(session_state)
         if session is None:
@@ -115,6 +139,11 @@ def _initial_values(
         elif "default" in prop:
             values[key] = copy.deepcopy(prop["default"])
     return values
+
+
+def _is_foreign(chat_state: Any) -> bool:
+    """A chat that reports a `provider` runs on an agent other than its session's."""
+    return isinstance(chat_state, Mapping) and isinstance(chat_state.get("provider"), str)
 
 
 def _config(state: Any) -> Mapping[str, Any] | None:
