@@ -259,6 +259,7 @@ class RecordingSink:
         *,
         success: bool = True,
         past_tense_message: str | None = None,
+        result_metadata: Mapping[str, Any] | None = None,
     ) -> None:
         self.past_tense[call_id] = past_tense_message
         self.events.append(("completed", call_id, success, result))
