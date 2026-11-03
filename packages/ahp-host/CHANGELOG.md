@@ -30,6 +30,27 @@ versions each release speaks.
   leaves the chat with none, and the session's config never governs it
   (`chat_config.effective_schema`, `materialise_chat_config`).
 
+### Added — per-chat agents: guest agent sessions (upstream `c301d494`)
+
+- A foreign chat runs on a *guest*: the first one of a provider creates that provider's agent
+  session through `create_session` (an `AgentSessionContext` whose `chat_uri` is that chat, with
+  the session's URI, working directories and publisher; `config` is the chat's own values),
+  and later foreign chats of the provider -- forks and side chats of a foreign chat included --
+  are opened on it through `HostsChats`. `_Session.guests` and `_Session.chat_providers` hold
+  them; `Host._agent_for(session, chat)` is the one routing helper.
+- Every per-chat call goes through it: turns, resume, cancel (`CancelsChats` and the
+  session-scoped `cancel`, which now waits for the *agent's* own chats), steering and
+  `GatesSteering`, history truncation, chat config and chat working directories, and chat
+  open/close. A worker chat a guest opens for a foreign chat belongs to the guest too.
+- Session-wide calls: archive and working directories fan out to the session's agent and every
+  guest, and so do active clients; session `config_changed`, MCP servers, customization toggles
+  and `describe()` go to the session's agent only (a foreign chat has its own schema); disposal
+  and `aclose()` close and dispose every guest. A guest whose last chat is disposed is closed
+  and dropped.
+- Fail closed for guests as for the session's agent: a guest that cannot be created, opened or
+  told a chat's config fails the `createChat` with nothing created, and a guest made for that
+  call is closed.
+
 ### Fixed — a chat whose config the agent was not told fails closed
 
 - `Host._tell_chat_config` used to log and forget a `chat_config_changed` that raised, leaving an

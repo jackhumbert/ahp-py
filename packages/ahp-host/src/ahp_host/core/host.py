@@ -1633,6 +1633,9 @@ class _Session:
     #: Foreign chat -> the provider id it runs on. A chat not here runs on the
     #: session's agent. Rebuilt on restore from each chat's `ChatState.provider`.
     chat_providers: dict[str, str] = field(default_factory=dict)
+    #: Serialises making or resuming a guest, so two foreign chats of one provider
+    #: created at once share one agent session instead of starting two.
+    guest_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     #: The running turn PER CHAT. One slot for the whole session meant a second
     #: chat's turn overwrote the first's handle, so `chat/turnCancelled` on chat
     #: A cancelled whichever chat had started most recently -- with no terminal
@@ -4496,7 +4499,21 @@ class Host:
         }
         # From the chat that spawned it, not the session: a worker used to run
         # on whatever its parent chat ran on, and the parent may be stricter.
-        self._seed_chat(tool_state, self.sequencer.state_of(session.uri), parent)
+        parent_provider = session.chat_providers.get(parent)
+        if parent_provider is not None:
+            # A worker of a foreign chat is that agent's: it runs, is told its config
+            # and is closed with the guest, and says so (`provider`). Its config is the
+            # parent's, never the session's, which does not describe that agent.
+            tool_state["provider"] = parent_provider
+            parent_state = self.sequencer.state_of(parent)
+            parent_config = (
+                parent_state.get("config") if isinstance(parent_state, Mapping) else None
+            )
+            if isinstance(parent_config, Mapping):
+                tool_state["config"] = copy.deepcopy(dict(parent_config))
+            session.chat_providers[chat] = parent_provider
+        else:
+            self._seed_chat(tool_state, self.sequencer.state_of(session.uri), parent)
         await self.sequencer.register_channel(chat, tool_state, "chat")
         self._channel_created(None, chat, session=session.uri)
         session.chat_uris.add(chat)
@@ -5100,7 +5117,12 @@ class Host:
         )
 
     async def _open_chat(
-        self, session: _Session, context: ChatContext, *, refusable: bool = False
+        self,
+        session: _Session,
+        context: ChatContext,
+        *,
+        refusable: bool = False,
+        agent: AgentSession | None = None,
     ) -> None:
         """Tell the session's agent a chat exists, if it hosts chats.
 
@@ -5109,7 +5131,8 @@ class Host:
         a provider can say `PermissionDenied`, anything else `InternalError`.
         Everywhere else the chat already exists, so a raise is only logged.
         """
-        agent = session.agent_session
+        # *agent* is for a chat not routed yet (a foreign chat being created).
+        agent = agent if agent is not None else self._agent_for(session, context.chat_uri)
         if not isinstance(agent, HostsChats):
             return
         try:
@@ -5130,7 +5153,7 @@ class Host:
 
     async def _close_chat(self, session: _Session, chat: str) -> None:
         """Tell the session's agent a chat it was told about is gone from it."""
-        agent = session.agent_session
+        agent = self._agent_for(session, chat)
         if chat not in session.opened_chats:
             return
         session.opened_chats.discard(chat)
@@ -5154,14 +5177,14 @@ class Host:
         in chat state, which outlives the agent, so one that comes up later is
         told exactly what a client changing it would have told it.
         """
-        session.opened_chats.clear()
-        session.undelivered_chats.clear()
+        # Only what this agent hosts: a guest's chats keep their own record.
+        native = {c for c in session.chat_uris if c not in session.chat_providers}
+        session.opened_chats -= native
+        session.undelivered_chats -= native
         session.agent_session = agent
         if isinstance(agent, HostsChats):
             order = self._catalogue_order(session)
-            chats = [c for c in order if c in session.chat_uris] + sorted(
-                session.chat_uris - set(order)
-            )
+            chats = [c for c in order if c in native] + sorted(native - set(order))
             for chat in chats:
                 if chat == session.chat_uri or chat in session.opened_chats:
                     continue
@@ -5171,7 +5194,7 @@ class Host:
                 await self._open_chat(
                     session, self._chat_context(session, chat, state, restored=True)
                 )
-        for chat in sorted(session.chat_uris):
+        for chat in sorted(native):
             # Every chat that has a config, even an empty one: an empty `values`
             # now means "all defaults", not "follow the session".
             await self._tell_chat_config(session, chat)
@@ -5183,7 +5206,7 @@ class Host:
         session.provider_chats.discard(chat)
         session.opened_chats.discard(chat)
         session.undelivered_chats.discard(chat)
-        session.chat_providers.pop(chat, None)
+        await self._forget_foreign_chat(session, chat)
         session.origin_turns.pop(chat, None)
         await self.sequencer.drop_channel(chat)
         self._channel_dropped(chat)
@@ -5297,27 +5320,47 @@ class Host:
         lifecycle = self.sequencer.state_of(session.uri)
         if isinstance(lifecycle, Mapping) and lifecycle.get("lifecycle") == "ready":
             await self._resume_if_restored(session)
-        if foreign:
-            session.chat_providers[chat_uri] = chat_provider
+        # The chat's agent: the session's, or a guest made (or found) for it. The
+        # route (`chat_providers`) is recorded only once the chat is registered, so a
+        # URI collision cannot overwrite the other chat's.
+        hosted_on: AgentSession | None = None
+        guest_made = False
         try:
-            await self._open_chat(
-                session, self._chat_context(session, chat_uri, state), refusable=True
-            )
+            if foreign:
+                hosted_on, guest_made = await self._ensure_guest(
+                    session, chat_provider, chat_uri, state
+                )
+            if not guest_made:
+                await self._open_chat(
+                    session,
+                    self._chat_context(session, chat_uri, state),
+                    refusable=True,
+                    agent=hosted_on,
+                )
         except BaseException:
-            session.chat_providers.pop(chat_uri, None)
+            if guest_made:
+                await self._release_guest(session, chat_provider)
             raise
         if self._sessions.get(session_uri) is not session:
             # Disposed while the provider was being asked.
+            if guest_made:
+                await self._release_guest(session, chat_provider)
             raise errors.session_not_found(session_uri)
         if self.sequencer.has_channel(chat_uri):
             # A concurrent `createChat` took the URI meanwhile. Nothing was
             # created by this one. Not `chat_closed`: the URI now names the
             # chat the other call created, which the agent must keep.
-            if foreign:
-                session.chat_providers.pop(chat_uri, None)
+            if guest_made:
+                await self._release_guest(session, chat_provider)
             raise errors.AhpError(
                 AHP_ERROR_CODES["AlreadyExists"], f"Channel already exists: {chat_uri}"
             )
+        if foreign:
+            session.chat_providers[chat_uri] = chat_provider
+            if guest_made:
+                # The guest was created FOR this chat (its context's `chat_uri`),
+                # so it needs no `chat_opened`; disposing the chat still closes it.
+                session.opened_chats.add(chat_uri)
         await self.sequencer.register_channel(chat_uri, state, "chat")
         self._channel_created(connection, chat_uri, session=session_uri)
         session.chat_uris.add(chat_uri)
@@ -5401,6 +5444,80 @@ class Host:
                 f"not {requested!r}"
             )
         return requested
+
+    def _all_agents(self, session: _Session) -> list[AgentSession]:
+        """The session's own agent session and every guest: for what is session-wide."""
+        agents: list[AgentSession] = []
+        if session.agent_session is not None:
+            agents.append(session.agent_session)
+        agents.extend(session.guests.values())
+        return agents
+
+    async def _dispose_agent(self, agent: AgentSession, session_uri: str) -> None:
+        """`disposed()` (the conversation is deleted, not just closed), then `aclose()`."""
+        if isinstance(agent, DisposesSessions):
+            try:
+                await agent.disposed()
+            except Exception:
+                _log.exception("disposed() failed for %s", session_uri)
+        with contextlib.suppress(Exception):
+            await agent.aclose()
+
+    async def _forget_foreign_chat(self, session: _Session, chat: str) -> None:
+        """Drop a disposed chat's routing; close its guest if it was the guest's last chat."""
+        provider = session.chat_providers.pop(chat, None)
+        if provider is not None:
+            await self._release_guest(session, provider)
+
+    async def _release_guest(self, session: _Session, provider: str) -> None:
+        """Close and drop *provider*'s guest when no chat of the session runs on it any more."""
+        if provider in session.chat_providers.values():
+            return
+        guest = session.guests.pop(provider, None)
+        if guest is not None:
+            await self._dispose_agent(guest, session.uri)
+
+    async def _ensure_guest(
+        self, session: _Session, provider_id: str, chat: str, chat_state: Mapping[str, Any]
+    ) -> tuple[AgentSession, bool]:
+        """The guest agent session for *provider_id*, made for *chat* if there is none.
+
+        Returns it and whether this call made it (a caller that then fails to
+        create the chat closes a guest it made, and leaves one it found). The first
+        foreign chat of a provider creates the guest through ``create_session`` with
+        a context whose ``chat_uri`` is that chat; the session's working
+        directories, URI and publisher are the session's. Config is the chat's own
+        values: a guest has no session-level config. Later chats are opened on it
+        through `HostsChats`, as the session's own agent hosts its extra chats.
+        """
+        async with session.guest_lock:
+            existing = session.guests.get(provider_id)
+            if existing is not None:
+                return existing, False
+            state = self.sequencer.state_of(session.uri)
+            state = state if isinstance(state, Mapping) else {}
+            folders = state.get("workingDirectories")
+            config = chat_state.get("config")
+            values = config.get("values") if isinstance(config, Mapping) else None
+            context = AgentSessionContext(
+                publisher=session.publisher,
+                session_uri=session.uri,
+                chat_uri=chat,
+                provider_id=provider_id,
+                working_directories=tuple(f for f in folders or () if isinstance(f, str)),
+                config=dict(values) if isinstance(values, Mapping) else {},
+                principal=session.principal,
+            )
+            try:
+                guest = await self.providers[provider_id].create_session(context)
+            except errors.AhpError:
+                raise
+            except Exception as exc:
+                raise errors.internal_error(
+                    f"the {provider_id} agent could not start: {type(exc).__name__}: {exc}"
+                ) from exc
+            session.guests[provider_id] = guest
+            return guest, True
 
     async def _foreign_chat_config(
         self, provider_id: str, session: _Session, source_chat: str | None
@@ -5571,6 +5688,7 @@ class Host:
         session.published_chats.pop(chat_uri, None)
         session.chat_changes.pop(chat_uri, None)
         session.origin_turns.pop(chat_uri, None)
+        await self._forget_foreign_chat(session, chat_uri)
         await self.sequencer.publish(session.uri, {"type": "session/chatRemoved", "chat": chat_uri})
         # "When a chat ends, its chat-scoped changesets implicitly become
         # un-subscribable" -- said with `changeset/cleared` first, as session
@@ -7107,7 +7225,7 @@ class Host:
         session = self._session_for(channel)
         if session is None:
             return None
-        agent = session.agent_session
+        agent = self._agent_for(session, channel)
         worker = channel in session.provider_chats
         steering = (
             action_type == "chat/pendingMessageSet" and action.get("kind") == _PENDING_STEERING
@@ -7209,7 +7327,7 @@ class Host:
         session = next((s for s in self._sessions.values() if channel in s.chat_uris), None)
         if session is None:
             return None
-        if isinstance(session.agent_session, TruncatesHistory):
+        if isinstance(self._agent_for(session, channel), TruncatesHistory):
             return None
         return "this agent cannot forget part of a conversation"
 
@@ -7285,15 +7403,18 @@ class Host:
         a second reducer that could disagree. Told before a departed client's
         calls are failed, so an adapter never offers a tool whose owner is gone.
         """
-        agent = session.agent_session
-        if not isinstance(agent, FollowsActiveClients):
-            return
         state = self.sequencer.state_of(session.uri)
         clients = state.get("activeClients") if isinstance(state, Mapping) else None
-        try:
-            await agent.active_clients_changed([c for c in clients or () if isinstance(c, Mapping)])
-        except Exception:
-            _log.exception("active_clients_changed failed for %s", session.uri)
+        # Every agent of the session: a guest's turns may call a client's tools too.
+        for agent in self._all_agents(session):
+            if not isinstance(agent, FollowsActiveClients):
+                continue
+            try:
+                await agent.active_clients_changed(
+                    [c for c in clients or () if isinstance(c, Mapping)]
+                )
+            except Exception:
+                _log.exception("active_clients_changed failed for %s", session.uri)
 
     async def _fail_client_tools(self, session: _Session, client_id: str, reason: str) -> None:
         """End every tool call this client was asked to run.
@@ -7609,10 +7730,12 @@ class Host:
             # A worker chat's turns are the provider's callbacks; there is no
             # agent conversation behind them to resume.
             return "a worker chat's turns cannot be resumed"
-        agent = session.agent_session
+        agent = self._agent_for(session, channel)
         if agent is not None and not isinstance(agent, ResumesTurns):
             return "this agent cannot resume a failed turn"
-        if agent is None and not isinstance(self._provider_of(session), ResumableAgentProvider):
+        if agent is None and not isinstance(
+            self._provider_of_chat(session, channel), ResumableAgentProvider
+        ):
             return "this agent cannot resume a failed turn"
         if state.get("activeTurn") is not None:
             return "a turn is already active"
@@ -8161,16 +8284,12 @@ class Host:
         # a session is not a reason to strand every turn stream watching it.
         for mid_turn in [session.chat_uri, *sorted(session.chat_uris - {session.chat_uri})]:
             await self._end_stranded_turn(session, mid_turn)
-        if session.agent_session is not None:
+        for agent in self._all_agents(session):
             # Deleted, not merely closed: `aclose` alone is also what a
             # shutdown does, and an agent living elsewhere too must tell them
-            # apart.
-            if isinstance(session.agent_session, DisposesSessions):
-                try:
-                    await session.agent_session.disposed()
-                except Exception:
-                    _log.exception("disposed() failed for %s", channel)
-            await session.agent_session.aclose()
+            # apart. The guests' conversations go with the session's.
+            await self._dispose_agent(agent, channel)
+        session.guests.clear()
 
         del self._sessions[channel]
         for changeset_uri in session.changesets:
@@ -9250,7 +9369,7 @@ class Host:
             # The provider's worker turn: its callback has the CancelledError,
             # and the agent session is not this chat's to interrupt.
             return
-        agent = session.agent_session
+        agent = self._agent_for(session, chat)
         if isinstance(agent, CancelsChats):
             if running:
                 try:
@@ -9258,7 +9377,11 @@ class Host:
                 except Exception:
                     _log.exception("cancel_chat failed for %s", chat)
             return
-        if agent is not None and not session.running():
+        # `AgentSession.cancel()` is session-scoped: only when nothing else THIS agent
+        # runs is still going (a guest's chats are not the session agent's).
+        if agent is not None and not any(
+            session.running(c) for c in session.chat_uris if self._agent_for(session, c) is agent
+        ):
             with contextlib.suppress(Exception):
                 await agent.cancel(reason)
 
@@ -9319,7 +9442,8 @@ class Host:
         # THIS chat's turn. Truncating one chat's history must not abort a turn
         # running in another.
         await self._cancel_turn(session, channel, "history truncated")
-        if not isinstance(session.agent_session, TruncatesHistory):
+        agent = self._agent_for(session, channel)
+        if not isinstance(agent, TruncatesHistory):
             return
         # Read EXACTLY as the reducer reads it. An absent key clears
         # everything; an explicit null is not the same thing -- the reducer
@@ -9334,7 +9458,7 @@ class Host:
         else:
             return
         with contextlib.suppress(Exception):
-            await session.agent_session.history_truncated(channel, target)
+            await agent.history_truncated(channel, target)
 
     async def _drain_queue(self, session: _Session, channel: str) -> None:
         """Consume what the chat's pending list lets run now.
@@ -9436,9 +9560,10 @@ class Host:
         """
         message = entry.get("message")
         runner = session.runners.get(channel)
+        agent = self._agent_for(session, channel)
         if (
             not isinstance(message, Mapping)
-            or not isinstance(session.agent_session, SteersTurns)
+            or not isinstance(agent, SteersTurns)
             or runner is None
             or runner.sink is None
         ):
@@ -9454,7 +9579,7 @@ class Host:
         )
         text = steering.text
         try:
-            taken = await session.agent_session.steer(channel, steering)
+            taken = await agent.steer(channel, steering)
         except Exception:
             _log.exception("steering %s failed", channel)
             taken = False
@@ -9622,9 +9747,11 @@ class Host:
         archived = action.get("isArchived")
         if session is None or not isinstance(archived, bool):
             return
-        if isinstance(session.agent_session, ArchivesSessions):
+        for agent in self._all_agents(session):
+            if not isinstance(agent, ArchivesSessions):
+                continue
             try:
-                await session.agent_session.archived_changed(archived)
+                await agent.archived_changed(archived)
             except Exception:
                 _log.exception("archived_changed failed for %s", channel)
         await self._persist(session)
@@ -9652,9 +9779,11 @@ class Host:
         state = self.sequencer.state_of(channel)
         directories = state.get("workingDirectories") if isinstance(state, Mapping) else None
         current = [d for d in directories or () if isinstance(d, str)]
-        if isinstance(session.agent_session, FollowsWorkingDirectories):
+        for agent in self._all_agents(session):
+            if not isinstance(agent, FollowsWorkingDirectories):
+                continue
             try:
-                await session.agent_session.working_directories_changed(current)
+                await agent.working_directories_changed(current)
             except Exception:
                 _log.exception("working_directories_changed failed for %s", channel)
         replaced = (
@@ -9739,7 +9868,7 @@ class Host:
         looser than the chat's own. `createChat` and `open_tool_chat` fail
         outright on ``False``.
         """
-        agent = session.agent_session
+        agent = self._agent_for(session, chat)
         if not isinstance(agent, ReconfiguresChats):
             return True
         if not _has_chat_config(self.sequencer.state_of(chat)):
@@ -9766,7 +9895,7 @@ class Host:
 
     async def _tell_chat_directories(self, session: _Session, chat: str) -> None:
         """`FollowsChatWorkingDirectories`, with the subset as the reducer left it."""
-        agent = session.agent_session
+        agent = self._agent_for(session, chat)
         if not isinstance(agent, FollowsChatWorkingDirectories):
             return
         state = self.sequencer.state_of(chat)
@@ -10835,8 +10964,8 @@ class Host:
                 task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await task
-            if session.agent_session is not None:
-                await session.agent_session.aclose()
+            for agent in self._all_agents(session):
+                await agent.aclose()
         # Terminals die WITH the host. Without this the shells outlive it:
         # measured, a child reparents to init and its own children survive, so
         # a host that has opened terminals over its life leaves a pile of
