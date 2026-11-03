@@ -31,6 +31,7 @@ from ahp_client.api.client import (
     connect,
 )
 from ahp_client.api.events import (
+    ChatMoved,
     Delta,
     InputRequested,
     MessageRedacted,
@@ -99,6 +100,7 @@ __all__ = [
     "ChangesetInfo",
     "ChangesetOperation",
     "Chat",
+    "ChatMoved",
     "ChatWatch",
     "Client",
     "ClientClaim",

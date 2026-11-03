@@ -225,6 +225,9 @@ class HostRuntime:
         #: ``None`` when the host supports no prefix. Absence and ``""`` are the
         #: same answer and both mean "do not offer the shorthand".
         self.terminal_command_prefix: str | None = None
+        #: ``InitializeResult.multipleChatProviders`` is a presence-only object
+        #: (``{}`` is the capability), so this is ``is not None``, never truthy.
+        self.multiple_chat_providers: bool = False
         self.session_summaries: dict[str, JsonObject] = {}
 
     # ── observation ──────────────────────────────────────────────────────────
@@ -580,6 +583,7 @@ class HostRuntime:
         # the other fell on the floor.
         prefix = result.get("terminalCommandPrefix")
         self.terminal_command_prefix = prefix if isinstance(prefix, str) and prefix else None
+        self.multiple_chat_providers = result.get("multipleChatProviders") is not None
         seq = result.get("serverSeq")
         if isinstance(seq, int) and not isinstance(seq, bool):
             self._server_seq = max(self._server_seq, seq)

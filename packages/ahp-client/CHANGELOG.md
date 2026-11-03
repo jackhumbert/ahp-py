@@ -6,6 +6,20 @@ Every release states the protocol versions it speaks.
 
 ## [Unreleased]
 
+### Added — per-chat agent, reasoning timing and `resultMetadata` (upstream `c301d494`)
+
+- `Session.create_chat(provider=)` and `AhpClient.create_chat(..., provider=)`: sent only when
+  given, and refused before sending when the handshake did not advertise
+  `multipleChatProviders` (`is not None`, never truthiness). With a provider, the
+  `multipleChats`, `fork`, `sideChat` and `multipleWorkingDirectories` checks read that agent's
+  `AgentCapabilities`; a fork with no provider reads the source chat's agent.
+- `Client.multiple_chat_providers`, `AhpClient.multiple_chat_providers`, `Chat.provider` (the
+  agent behind a chat) and `FakeHost(multiple_chat_providers=)`.
+- `ChatMoved` event for `chat/moved`; `Reasoning.started_at` / `.duration` (`None` when absent,
+  `0` kept); `ToolCallCompleted.result_metadata` and `ToolCallResultReview.result_metadata`.
+- `Chat.effective_config()` (and `ahp_client.api.config.effective_config`) under the new rule: a
+  chat's config does not inherit from the session.
+
 ### Added — `authenticate{target}` (upstream `c5628cd4`)
 
 - `AhpClient.authenticate(..., target=)` and `InputResponder.authenticate(..., target=)` take

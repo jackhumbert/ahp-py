@@ -22,6 +22,7 @@ from ahp_protocol.types import JsonObject
 from ahp_client.client import actions, elicitation
 
 __all__ = [
+    "ChatMoved",
     "Delta",
     "InputRequested",
     "MessageRedacted",
@@ -154,6 +155,49 @@ class Reasoning(_Base):
         """
         return str(self.action.get("partId", ""))
 
+    @property
+    def started_at(self) -> str | None:
+        """The producer-recorded ISO 8601 start of this reasoning run, if sent."""
+        raw = self.action.get("startedAt")
+        return raw if isinstance(raw, str) else None
+
+    @property
+    def duration(self) -> int | None:
+        """Final elapsed milliseconds, as measured by the producer; ``None`` while
+        the run is unfinished or the producer did not say.
+
+        ``0`` is a recorded value, so test ``is not None``. A client MUST NOT
+        derive this from its own clock.
+        """
+        raw = self.action.get("duration")
+        return raw if isinstance(raw, int) and not isinstance(raw, bool) else None
+
+
+@dataclass(frozen=True, slots=True)
+class ChatMoved(_Base):
+    """``chat/moved``: the chat now belongs to another session.
+
+    The host dispatches it on the chat's own channel after a cross-session
+    ``moveChat``. ``provider`` and ``schema`` are what the reducer *sets*, and an
+    absent one means the reducer *cleared* it -- so ``None`` here is "now the
+    destination's own agent / schema", not "unchanged".
+    """
+
+    @property
+    def session(self) -> str:
+        """The new owning session's URI."""
+        return str(self.action.get("session", ""))
+
+    @property
+    def provider(self) -> str | None:
+        raw = self.action.get("provider")
+        return raw if isinstance(raw, str) else None
+
+    @property
+    def schema(self) -> JsonObject | None:
+        raw = self.action.get("schema")
+        return raw if isinstance(raw, dict) else None
+
 
 @dataclass(frozen=True, slots=True)
 class ResponsePartAdded(_Base):
@@ -168,6 +212,13 @@ class _ToolCall(_Base):
     @property
     def tool_call_id(self) -> str:
         return str(self.action.get("toolCallId", ""))
+
+
+def _result_metadata(action: Mapping[str, Any]) -> JsonObject | None:
+    """``ToolCallResult.resultMetadata`` (MCP ``CallToolResult._meta``), if sent."""
+    result = action.get("result")
+    raw = result.get("resultMetadata") if isinstance(result, dict) else None
+    return raw if isinstance(raw, dict) else None
 
 
 @dataclass(frozen=True, slots=True)
@@ -370,6 +421,11 @@ class ToolCallResultReview(_ToolCall):
         it without reading it."""
         return self.action.get("result")
 
+    @property
+    def result_metadata(self) -> JsonObject | None:
+        """``result["resultMetadata"]`` -- the MCP result's ``_meta``, or ``None``."""
+        return _result_metadata(self.action)
+
     def confirm(self) -> None:
         self._send(True)
 
@@ -390,6 +446,11 @@ class ToolCallCompleted(_ToolCall):
     @property
     def result(self) -> Any:
         return self.action.get("result")
+
+    @property
+    def result_metadata(self) -> JsonObject | None:
+        """``result["resultMetadata"]`` -- the MCP result's ``_meta``, or ``None``."""
+        return _result_metadata(self.action)
 
 
 @dataclass(frozen=True, slots=True)
@@ -574,6 +635,7 @@ TurnEvent: TypeAlias = (
     | TurnInProgress
     | Delta
     | Reasoning
+    | ChatMoved
     | ResponsePartAdded
     | ToolCallStarted
     | ToolCallReady
@@ -613,6 +675,7 @@ _BY_TYPE: dict[str, Any] = {
     "chat/turnStarted": TurnStarted,
     "chat/delta": Delta,
     "chat/reasoning": Reasoning,
+    "chat/moved": ChatMoved,
     "chat/responsePart": ResponsePartAdded,
     "chat/toolCallStart": ToolCallStarted,
     "chat/toolCallReady": ToolCallReady,

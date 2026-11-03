@@ -187,6 +187,10 @@ class AhpClient(CommandsMixin):
         self._malformed = 0
         self._last_seen_server_seq = 0
         self._mirror: StateMirror | None = None
+        #: ``InitializeResult.multipleChatProviders`` is not ``None`` -- ``None``
+        #: here means no handshake has been seen on this object (a connection
+        #: resumed with `reconnect` never ran one), which is "unknown", not "no".
+        self.multiple_chat_providers: bool | None = None
 
     # ── observation ──────────────────────────────────────────────────────────
 
@@ -339,6 +343,7 @@ class AhpClient(CommandsMixin):
         raw = await self.request("initialize", params)
         result: JsonObject = raw if isinstance(raw, dict) else {}
         self._absorb_server_seq(result.get("serverSeq"))
+        self.multiple_chat_providers = result.get("multipleChatProviders") is not None
         if self._config.verify_negotiated_version:
             self._verify_version(result.get("protocolVersion"), offered)
         return result

@@ -28,6 +28,8 @@ from typing import Any, Final
 from ahp_protocol.channels import AUTOMATIONS_URI, ROOT_URI
 from ahp_protocol.types import JsonObject
 
+from ahp_client.client.errors import AhpClientError
+
 __all__ = [
     "AUTOMATIONS_SCOPED",
     "CALLER_SCOPED",
@@ -107,6 +109,9 @@ class CommandsMixin:
     Kept in its own module so the command surface can be read, counted and
     tested without wading through that machinery.
     """
+
+    #: Set by `AhpClient.initialize`; ``None`` until a handshake has run.
+    multiple_chat_providers: bool | None
 
     async def request(  # pragma: no cover - provided by AhpClient
         self,
@@ -190,7 +195,9 @@ class CommandsMixin:
 
     # ── chats ────────────────────────────────────────────────────────────────
 
-    async def create_chat(self, session: str, chat: str, **extra: Any) -> JsonObject:
+    async def create_chat(
+        self, session: str, chat: str, *, provider: str | None = None, **extra: Any
+    ) -> JsonObject:
         """Create a chat inside *session*.
 
         **Two URIs, and they are different things.** `CreateChatParams` requires
@@ -205,8 +212,22 @@ class CommandsMixin:
         The spec contradicts itself on who allocates the URI -- `chat-channel.md`
         says the server does, while `CreateChatParams.chat` is documented
         client-chosen and VS Code sends one. We send one.
+
+        *provider* (1.1.0) names the agent that backs the new chat. It is sent
+        only when given, and refused here -- before anything is sent -- when the
+        handshake this client ran did not advertise `multipleChatProviders`
+        ("Clients MUST NOT send `CreateChatParams.provider` without it"). A
+        client that never ran `initialize` (a resumed connection) cannot know,
+        so it sends and lets the host decide.
         """
-        return await self._scoped("createChat", session, {"chat": chat, **extra})
+        if provider is not None and self.multiple_chat_providers is False:
+            raise AhpClientError(
+                "the host did not advertise InitializeResult.multipleChatProviders; "
+                "clients MUST NOT send CreateChatParams.provider"
+            )
+        return await self._scoped(
+            "createChat", session, {"chat": chat, "provider": provider, **extra}
+        )
 
     async def dispose_chat(self, chat: str) -> JsonObject:
         """Dispose a chat.

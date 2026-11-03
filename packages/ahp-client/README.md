@@ -143,6 +143,26 @@ client that hardcodes `!` offers it to hosts that never claimed it. It is a
 heuristic calibrated against the reference host, not a protocol guarantee; the
 prefix itself is on `client.terminal_command_prefix`.
 
+### More than one chat, and per-chat agents
+
+`session.create_chat()` opens another chat in a session, gated on the agent's
+`multipleChats` advertisement (`{}` advertises it: test `is not None`, never
+truthiness). `provider="other-agent"` backs the new chat with a *different* agent
+from the session's. It needs the host's `multipleChatProviders` handshake
+capability (`client.multiple_chat_providers`) and is refused locally without it,
+and the `multipleChats` / `fork` / `sideChat` checks then read **that agent's**
+capabilities. `chat.provider` is the agent behind a chat, and a `chat/moved`
+event (`ChatMoved`) reports the new session, provider and config schema after a
+cross-session move.
+
+A chat's config does **not** inherit from the session: `chat.effective_config()`
+is the chat's own values for the `chatMutable` properties (a missing key takes the
+schema default), the session's values for the rest, and nothing from the session
+when the chat carries its own `config.schema`. `Reasoning` events carry the
+producer's `started_at` and `duration` (`None` when absent; `0` is a recorded
+value, and a client must not derive it from its own clock), and tool-result
+events carry `result_metadata`.
+
 ### Changesets
 
 What the agent changed, and what you may do about it. Read-mostly: one of the

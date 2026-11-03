@@ -63,6 +63,7 @@ class FakeHost:
         protocol_version: str = "0.9.0",
         server_seq: int = 0,
         terminal_command_prefix: str | None = None,
+        multiple_chat_providers: bool = False,
     ) -> None:
         self.protocol_version = protocol_version
         #: ``InitializeResult.terminalCommandPrefix``. ``None`` means the host
@@ -71,6 +72,9 @@ class FakeHost:
         #: tells a client not to offer the affordance at all. A fake that always
         #: advertised ``"!"`` would let a hardcoded prefix pass.
         self.terminal_command_prefix = terminal_command_prefix
+        #: ``InitializeResult.multipleChatProviders``: ``{}`` when ``True``,
+        #: **omitted** when ``False`` -- a presence flag, so absence is the answer.
+        self.multiple_chat_providers = multiple_chat_providers
         self.root_state: JsonObject = {"agents": agents or [], "activeSessions": 0}
         self.received: list[JsonObject] = []
         self._handlers: dict[str, Handler] = {}
@@ -333,6 +337,8 @@ def _default_initialize(host: FakeHost, params: JsonObject) -> JsonObject:
         # "Absence means the host does not support command prefixes", so this is
         # omitted rather than sent as null or "".
         result["terminalCommandPrefix"] = host.terminal_command_prefix
+    if host.multiple_chat_providers:
+        result["multipleChatProviders"] = {}
     requested = params.get("initialSubscriptions") or []
     for uri in requested:
         if uri == ROOT_URI:

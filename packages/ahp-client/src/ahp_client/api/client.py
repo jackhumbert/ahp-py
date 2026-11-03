@@ -51,6 +51,7 @@ from ahp_client.api.changesets import (
     ChangesetInfo,
     changeset_catalogue,
 )
+from ahp_client.api.config import effective_config
 from ahp_client.api.events import (
     ToolCallReady,
     ToolCallResultReview,
@@ -288,6 +289,17 @@ class Client:
         subscribe to, which is why this is a query and not a second code path.
         """
         return split_terminal_command(text, self.terminal_command_prefix)
+
+    @property
+    def multiple_chat_providers(self) -> bool:
+        """Whether chats in one session may be backed by different agents.
+
+        ``InitializeResult.multipleChatProviders`` is a presence-only object, so
+        this is ``is not None`` on the handshake: ``{}`` is the capability and is
+        falsy in Python. A client MUST NOT send ``CreateChatParams.provider``
+        without it; :meth:`Session.create_chat` refuses to.
+        """
+        return self._runtime.multiple_chat_providers
 
     @property
     def completion_trigger_characters(self) -> Sequence[str]:
@@ -682,8 +694,21 @@ class Session:
         source: Mapping[str, Any] | None = None,
         working_directories: Sequence[str] | None = None,
         title: str | None = None,
+        provider: str | None = None,
     ) -> Chat:
         """Open a second chat in this session, and subscribe to it.
+
+        *provider* (1.1.0) backs the chat with a different agent from the
+        session's. It needs ``InitializeResult.multipleChatProviders``
+        (:attr:`Client.multiple_chat_providers`) and is refused locally without
+        it. With it, ``multipleChats``, ``fork``, ``sideChat`` and
+        ``multipleWorkingDirectories`` are read from **that agent's**
+        capabilities rather than the session's: "capability checks for a request
+        use the chat's agent". A ``source`` with no *provider* means the source
+        chat's own agent, which the catalogue's ``provider`` names when it
+        differs from the session's. The host still rejects (``InvalidParams``) a
+        provider it has not registered or a fork whose provider differs from the
+        source chat's.
 
         *title* is the chat's initial display title (1.1.0, ungated: "Keep
         title optional without new capabilities"). A host on an older version
@@ -700,14 +725,27 @@ class Session:
         client-chosen and VS Code sends one), which is what makes the subscribe
         below possible without waiting for `session/chatAdded` to name it.
         """
-        capabilities = self.capabilities
+        if provider is not None and not self._client.multiple_chat_providers:
+            # Presence flag read as a bool by the runtime (`is not None`).
+            raise AhpClientError(
+                "the host did not advertise InitializeResult.multipleChatProviders; "
+                "clients MUST NOT send CreateChatParams.provider"
+            )
+        agent = self._chat_agent(provider, source)
+        if provider is not None and not any(
+            a.get("provider") == provider for a in self._client.agents()
+        ):
+            raise AhpClientError(f"agent {provider!r} is not in the root state's agents")
+        capabilities = (
+            self._client._capabilities_for(agent) if provider or source else self.capabilities
+        )
         # `is not None`, never truthiness: `multipleChats: {}` is the ordinary
         # advertisement and `{}` is falsy in Python, so a truthiness test reads
         # every plain multi-chat agent as not supporting multi-chat.
         multiple = capabilities.get("multipleChats")
         if multiple is None:
             raise AhpClientError(
-                f"agent {self.provider or self.state.get('provider', '')!r} does not advertise "
+                f"agent {agent!r} does not advertise "
                 "capabilities.multipleChats; the spec says clients MUST NOT call createChat"
             )
         if source is not None:
@@ -719,7 +757,7 @@ class Session:
             # `AgentCapabilities.multipleWorkingDirectories`" -- the same
             # told-in-advance rule as `multipleChats`, gated the same way.
             raise AhpClientError(
-                f"agent {self.provider or self.state.get('provider', '')!r} does not advertise "
+                f"agent {agent!r} does not advertise "
                 "capabilities.multipleWorkingDirectories; clients MUST NOT supply "
                 "workingDirectories on createChat"
             )
@@ -743,8 +781,29 @@ class Session:
             if working_directories is not None
             else None,
             title=title,
+            provider=provider,
         )
         return await self.open_chat(chat_uri)
+
+    def _session_provider(self) -> str:
+        return self.provider or str(self.state.get("provider", ""))
+
+    def _chat_agent(self, provider: str | None, source: Mapping[str, Any] | None) -> str:
+        """The agent a new chat will be backed by, for the capability checks.
+
+        The requested *provider*; else, for a fork or side chat, the source
+        chat's agent (the catalogue's ``provider`` when it differs from the
+        session's); else the session's own.
+        """
+        if provider is not None:
+            return provider
+        if source is not None:
+            chat = source.get("chat")
+            for summary in self.chats():
+                declared = summary.get("provider")
+                if summary.get("resource") == chat and isinstance(declared, str):
+                    return declared
+        return self._session_provider()
 
     @staticmethod
     def _check_source(source: Mapping[str, Any], multiple: Mapping[str, Any]) -> None:
@@ -1300,6 +1359,27 @@ class Chat:
     def state(self) -> JsonObject:
         state = self._client.mirror.state(self.uri)
         return state if isinstance(state, dict) else {}
+
+    @property
+    def provider(self) -> str:
+        """The agent backing this chat.
+
+        ``ChatState.provider`` is reported only when it differs from the
+        session's, so absence means the session's own agent; this resolves both.
+        """
+        own = self.state.get("provider")
+        return own if isinstance(own, str) else self._session.provider
+
+    def effective_config(self) -> JsonObject:
+        """The config values in force for this chat, keyed by property id.
+
+        A chat's config **does not inherit from the session**: its own values for
+        the ``chatMutable`` properties (a missing key takes the schema
+        ``default``), the session's values for the rest, and nothing from the
+        session at all when the chat carries its own ``config.schema``. See
+        :func:`ahp_client.api.config.effective_config`.
+        """
+        return effective_config(self._session.state, self.state)
 
     def flow_view(self) -> RunView:
         """The latest workflow run in this chat, folded from its state.
