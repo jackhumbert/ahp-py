@@ -5502,16 +5502,27 @@ class Host:
         if provider in session.chat_providers.values():
             return
         guest = session.guests.pop(provider, None)
+        # What it persisted described the chats it just lost; a later guest on this
+        # provider is a new agent, not that one coming back.
+        session.guest_resume.pop(provider, None)
         if guest is not None:
             await self._dispose_agent(guest, session.uri)
 
     def _guest_context(
-        self, session: _Session, provider_id: str, chat: str, chat_state: Mapping[str, Any]
+        self,
+        session: _Session,
+        provider_id: str,
+        chat: str,
+        chat_state: Mapping[str, Any],
+        *,
+        resume: bool = False,
     ) -> AgentSessionContext:
         """The `AgentSessionContext` of a guest whose first chat is *chat*.
 
         The session's URI, working directories and publisher; the chat's own
-        values as `config`, because a guest has no session-level config.
+        values as `config`, because a guest has no session-level config. Only a
+        resumed guest (*resume*) is handed what its provider persisted; a new one
+        starts clean.
         """
         state = self.sequencer.state_of(session.uri)
         state = state if isinstance(state, Mapping) else {}
@@ -5525,7 +5536,7 @@ class Host:
             provider_id=provider_id,
             working_directories=tuple(f for f in folders or () if isinstance(f, str)),
             config=dict(values) if isinstance(values, Mapping) else {},
-            resume_state=session.guest_resume.get(provider_id),
+            resume_state=session.guest_resume.get(provider_id) if resume else None,
             principal=session.principal,
         )
 
@@ -5628,6 +5639,7 @@ class Host:
                     provider_id,
                     first,
                     first_state if isinstance(first_state, Mapping) else {},
+                    resume=True,
                 )
             )
         except Exception:

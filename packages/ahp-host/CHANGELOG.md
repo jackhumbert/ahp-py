@@ -10,6 +10,11 @@ versions each release speaks.
 
 ## [Unreleased]
 
+### Fixed — a new guest no longer inherits a closed guest's resume state
+
+- Releasing a provider's guest forgets its persisted resume state, and only a resumed guest
+  (`_resume_guest_locked`) is handed one; a guest created fresh for a new foreign chat starts clean.
+
 ### Added — per-chat agents: docs and tests (upstream `c301d494`)
 
 - The README has a "Per-chat agents" paragraph and the provider guide says what a guest agent

@@ -395,3 +395,35 @@ async def test_a_native_chat_still_moves_with_chat_moved_carrying_no_provider() 
         assert "provider" not in state(host, native)
     finally:
         await shut(host, wire, serving)
+
+
+async def test_a_fresh_guest_never_gets_another_chats_resume_state() -> None:
+    host, _, guest = pair()
+    wire, serving = await connect(host)
+    try:
+        await open_session(wire, SESSION)
+        session = host._sessions[SESSION]
+        a, b = "ahp-chat:/gs-rs-a", "ahp-chat:/gs-rs-b"
+        await _chat(wire, SESSION, a, provider="echo2")
+        # What persisting the session while A's guest was up leaves behind.
+        session.guest_resume["echo2"] = {"tag": "from-chat-a"}
+        assert "error" not in await wire.request("disposeChat", {"channel": a})
+        assert session.guests == {}
+        assert "echo2" not in session.guest_resume
+        await _chat(wire, SESSION, b, provider="echo2")
+        assert [c.resume_state for c in guest.contexts] == [None, None]
+    finally:
+        await shut(host, wire, serving)
+
+
+async def test_creating_a_foreign_chat_ignores_a_stale_resume_state() -> None:
+    host, _, guest = pair()
+    wire, serving = await connect(host)
+    try:
+        await open_session(wire, SESSION)
+        host._sessions[SESSION].guest_resume["echo2"] = {"tag": "stale"}
+        await _chat(wire, SESSION, "ahp-chat:/gs-rs-c", provider="echo2")
+        [context] = guest.contexts
+        assert context.resume_state is None
+    finally:
+        await shut(host, wire, serving)
