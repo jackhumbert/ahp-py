@@ -6110,9 +6110,11 @@ class Host:
         """
         for chat in chats:
             await self._close_chat(source, chat)
-        if target.agent_session is None:
-            return
         for chat in chats:
+            if self._agent_for(target, chat) is None:
+                # Not running yet: it hears about the chat when it comes up. (Only
+                # native chats move -- `_consent_to_move` refuses a foreign one.)
+                continue
             state = self.sequencer.state_of(chat)
             if not isinstance(state, Mapping):
                 continue
