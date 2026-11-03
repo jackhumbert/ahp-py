@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+### Fixed — the opening mark no longer leaks into spawned tasks
+
+- `opening_worker()` marks the task that opened the chat, not a boolean the context copies: a task
+  created inside the window no longer keeps the mark for life. `FlowSession.chat_config_changed`
+  also honours a delivery for a chat it already holds (`seeds_chat`); only the new chat's seed
+  is ignored.
+
 ### Fixed — the host's seed for a worker chat is not an overlay
 
 - The host now tells an agent a worker chat's values from inside `open_tool_chat` (ahp-host

@@ -8,27 +8,40 @@ client made: forwarding them on top as an overlay would let the seed override th
 per-call `effort` or approval mode the flow decided. So `chat_config_changed`
 ignores a delivery that arrives inside an `opening_worker()` block.
 
-A context variable rather than a flag on the provider: the host delivers in the
-task that is awaiting `open_tool_chat`, while a client's `chat/configChanged`
-(which must still count) arrives in another task, and parallel opens do not see
-each other's mark.
+The mark is the task that opened the chat (a context variable holding it), not a
+flag: the host delivers in the task awaiting `open_tool_chat`, while a client's
+`chat/configChanged` (which must still count) arrives in another task. A task
+created inside the window copies the context, so a plain boolean would stay set
+for its whole life; comparing against the current task does not. The new chat's
+URI does not exist until the host makes it, so `seeds_chat` also requires that the
+chat is not one the provider already holds.
 """
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
-from collections.abc import Iterator
+from collections.abc import Collection, Iterator
 from contextvars import ContextVar
 
-__all__ = ["is_opening_worker", "opening_worker"]
+__all__ = ["is_opening_worker", "opening_worker", "seeds_chat"]
 
-_OPENING: ContextVar[bool] = ContextVar("ahp_host_flow_opening_worker", default=False)
+_OPENING: ContextVar[asyncio.Task[object] | None] = ContextVar(
+    "ahp_host_flow_opening_worker", default=None
+)
+
+
+def _current() -> asyncio.Task[object] | None:
+    try:
+        return asyncio.current_task()
+    except RuntimeError:  # no running loop
+        return None
 
 
 @contextlib.contextmanager
 def opening_worker() -> Iterator[None]:
     """Wrap an ``await publisher.open_tool_chat(...)``."""
-    token = _OPENING.set(True)
+    token = _OPENING.set(_current())
     try:
         yield
     finally:
@@ -36,5 +49,11 @@ def opening_worker() -> Iterator[None]:
 
 
 def is_opening_worker() -> bool:
-    """Whether the current task is inside an `opening_worker()` block."""
-    return _OPENING.get()
+    """Whether the current task is the one inside an `opening_worker()` block."""
+    opener = _OPENING.get()
+    return opener is not None and opener is _current()
+
+
+def seeds_chat(chat: str, known: Collection[str]) -> bool:
+    """Whether a delivery for *chat* is the host's seed for the chat being opened."""
+    return is_opening_worker() and chat not in known
