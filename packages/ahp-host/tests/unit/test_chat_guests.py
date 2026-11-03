@@ -503,3 +503,58 @@ async def test_a_guest_whose_chats_cannot_be_attached_is_not_orphaned() -> None:
         assert guest.sessions[0].was_closed
     finally:
         await shut(host, wire, serving)
+
+
+def _steering(identifier: str, text: str) -> dict[str, Any]:
+    return {
+        "type": "chat/pendingMessageSet",
+        "kind": "steering",
+        "id": identifier,
+        "message": {"text": text, "origin": {"kind": "user"}},
+    }
+
+
+async def test_a_chat_whose_config_was_not_delivered_is_not_steered() -> None:
+    host, _, guest = pair(delay=0.3)
+    wire, serving = await connect(host)
+    try:
+        await open_session(wire, SESSION)
+        foreign = "ahp-chat:/gs-st-a"
+        await _chat(wire, SESSION, foreign, provider="echo2")
+        await wire.dispatch(foreign, turn_started("t1", "slow"))
+        assert await wire.until(lambda: state(host, foreign).get("activeTurn") is not None)
+        host._sessions[SESSION].undelivered_chats.add(foreign)
+        seq = await wire.dispatch(foreign, _steering("s1", "also this"))
+        await wire.echoed(foreign, seq)
+        await asyncio.sleep(0.1)
+        assert guest.sessions[0].steered == []
+        pending = state(host, foreign).get("queuedMessages") or []
+        assert [p["id"] for p in pending] == ["s1"]
+    finally:
+        await shut(host, wire, serving)
+
+
+async def test_a_failed_config_delivery_mid_turn_ends_the_running_turn() -> None:
+    host, _, guest = pair(delay=1.0)
+    wire, serving = await connect(host)
+    try:
+        await open_session(wire, SESSION)
+        foreign = "ahp-chat:/gs-st-b"
+        await _chat(wire, SESSION, foreign, provider="echo2")
+        await wire.dispatch(foreign, turn_started("t1", "slow"))
+        assert await wire.until(lambda: state(host, foreign).get("activeTurn") is not None)
+        guest.sessions[0].fail_chat_config = True
+        seq = await wire.dispatch(
+            foreign, {"type": "chat/configChanged", "config": {"prefix": "Hi:"}}
+        )
+        echo = await wire.echoed(foreign, seq)
+        assert "rejectionReason" not in echo, echo
+        assert await wire.until(lambda: state(host, foreign).get("activeTurn") is None)
+        turn = state(host, foreign)["turns"][-1]
+        assert turn["state"] == "error"
+        assert "config" in turn["responseParts"][-1]["error"]["message"]
+        assert host._sessions[SESSION].running(foreign) == []
+        assert [c for c, _ in guest.sessions[0].cancelled] == [foreign]
+        assert foreign in host._sessions[SESSION].undelivered_chats
+    finally:
+        await shut(host, wire, serving)

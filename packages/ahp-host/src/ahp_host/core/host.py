@@ -9741,6 +9741,9 @@ class Host:
             or not isinstance(agent, SteersTurns)
             or runner is None
             or runner.sink is None
+            # Not into an agent running on values it was never given: the entry stays
+            # pending, and `_react_to_chat_config` has ended the turn.
+            or channel in session.undelivered_chats
         ):
             return False
         identifier = entry.get("id")
@@ -10009,8 +10012,29 @@ class Host:
         session = next((s for s in self._sessions.values() if channel in s.chat_uris), None)
         if session is None:
             return
-        await self._tell_chat_config(session, channel)
+        if not await self._tell_chat_config(session, channel):
+            await self._end_unconfigured_turn(session, channel)
         await self._persist(session)
+
+    async def _end_unconfigured_turn(self, session: _Session, channel: str) -> None:
+        """End the turn running on *channel* after its agent could not be told new values.
+
+        The agent keeps running on the values it had, which the user has just replaced:
+        more permissive, or simply not what they chose. The turn ends in error (not
+        `turnCancelled`, which would read as the user's stop) and the agent is told to
+        stop; later turns are refused until a delivery succeeds (`_run_turn`).
+        """
+        runner = session.runners.get(channel)
+        if not session.running(channel):
+            return
+        if runner is not None and runner.sink is not None:
+            with contextlib.suppress(Exception):
+                await runner.sink.turn_failed(
+                    "the agent could not be given the chat's new config, so the turn was stopped",
+                    "chat.config",
+                    resumable=False,
+                )
+        await self._cancel_turn(session, channel, "chat config could not be delivered")
 
     def _seed_chat(
         self, state: dict[str, Any], session_state: Any, source_chat: str | None = None

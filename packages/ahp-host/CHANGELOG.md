@@ -10,6 +10,12 @@ versions each release speaks.
 
 ## [Unreleased]
 
+### Fixed — no steering into a turn running on config the agent never got
+
+- When a `chat/configChanged` cannot be delivered to a chat's agent while a turn runs, the turn
+  ends in error (`chat.config`, not a cancel) and the agent is told to stop, instead of carrying on
+  with the old values. `_steer` leaves a steering entry pending for a chat in `undelivered_chats`.
+
 ### Fixed — a failed `createChat` no longer closes a guest another create is using
 
 - `_ensure_guest` reserves the guest for the create that found or made it (`_Session.guest_pending`)
