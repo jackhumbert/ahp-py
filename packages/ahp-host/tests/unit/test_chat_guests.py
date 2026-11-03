@@ -290,3 +290,108 @@ async def test_a_worker_chat_of_a_foreign_chat_belongs_to_the_guest() -> None:
         assert guest.sessions[0].was_closed
     finally:
         await shut(host, wire, serving)
+
+
+# -- moveChat (M5) ---------------------------------------------------------
+
+
+async def _two_sessions(wire: Any) -> tuple[str, str]:
+    await open_session(wire, SESSION)
+    await open_session(wire, "echo:/gs-2")
+    return SESSION, "echo:/gs-2"
+
+
+async def test_a_foreign_chat_cannot_move_to_another_session() -> None:
+    host, _, guest = pair()
+    wire, serving = await connect(host)
+    try:
+        source, target = await _two_sessions(wire)
+        foreign = "ahp-chat:/gs-12b"
+        await _chat(wire, source, foreign, provider="echo2")
+        before = state(host, source)["chats"]
+        refused = await wire.request(
+            "moveChat",
+            {"channel": foreign, "destination": {"kind": "session", "session": target}},
+        )
+        # An unsupported destination is PermissionDenied here, as for a chat moving
+        # to a session of another agent.
+        assert refused["error"]["code"] == -32009, refused
+        assert "agent" in refused["error"]["message"]
+        assert state(host, source)["chats"] == before
+        assert foreign in host._sessions[source].chat_uris
+        assert foreign not in host._sessions[target].chat_uris
+        assert host._sessions[source].chat_providers == {foreign: "echo2"}
+        assert not guest.sessions[0].was_closed
+        # Nor into a session of its own.
+        again = await wire.request(
+            "moveChat", {"channel": foreign, "destination": {"kind": "newSession"}}
+        )
+        assert again["error"]["code"] == -32009, again
+        assert foreign in host._sessions[source].chat_uris
+    finally:
+        await shut(host, wire, serving)
+
+
+async def test_a_tree_containing_a_foreign_chat_cannot_move() -> None:
+    host, _, _ = pair()
+    wire, serving = await connect(host)
+    try:
+        source, target = await _two_sessions(wire)
+        native = "ahp-chat:/gs-13a"
+        await _chat(wire, source, native)
+        await run_turn(wire, native, "t1", "history")
+        # A side chat is a descendant, so it moves with its parent -- but only when
+        # nothing under it is foreign. Route one under it by hand.
+        side = "ahp-chat:/gs-13s"
+        await _chat(wire, source, side, source={"kind": "sideChat", "chat": native, "turnId": "t1"})
+        host._sessions[source].chat_providers[side] = "echo2"
+        refused = await wire.request(
+            "moveChat",
+            {"channel": native, "destination": {"kind": "session", "session": target}},
+        )
+        assert refused["error"]["code"] == -32009, refused
+        assert native in host._sessions[source].chat_uris
+        host._sessions[source].chat_providers.pop(side)
+    finally:
+        await shut(host, wire, serving)
+
+
+async def test_same_session_reorders_of_foreign_chats_work() -> None:
+    host, _, _ = pair()
+    wire, serving = await connect(host)
+    try:
+        await open_session(wire, SESSION)
+        first, second = "ahp-chat:/gs-14a", "ahp-chat:/gs-14b"
+        await _chat(wire, SESSION, first, provider="echo2")
+        await _chat(wire, SESSION, second, provider="echo2")
+        moved = await wire.request(
+            "moveChat",
+            {"channel": second, "destination": {"kind": "session", "session": SESSION}},
+        )
+        assert moved["result"] == {"session": SESSION}, moved
+        order = [c["resource"] for c in state(host, SESSION)["chats"]]
+        assert order.index(second) < order.index(first)
+    finally:
+        await shut(host, wire, serving)
+
+
+async def test_a_native_chat_still_moves_with_chat_moved_carrying_no_provider() -> None:
+    host, own, _ = pair()
+    wire, serving = await connect(host)
+    try:
+        source, target = await _two_sessions(wire)
+        native = "ahp-chat:/gs-15a"
+        await _chat(wire, source, native)
+        await _chat(wire, source, "ahp-chat:/gs-15f", provider="echo2")
+        moved = await wire.request(
+            "moveChat",
+            {"channel": native, "destination": {"kind": "session", "session": target}},
+        )
+        assert moved["result"] == {"session": target}, moved
+        [action] = wire.actions(native, "chat/moved")
+        assert action["session"] == target
+        assert "provider" not in action
+        assert "schema" not in action
+        assert "provider" not in state(host, native)
+    finally:
+        await shut(host, wire, serving)

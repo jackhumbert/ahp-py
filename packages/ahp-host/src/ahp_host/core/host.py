@@ -5971,6 +5971,16 @@ class Host:
         self, source: _Session, moving: Sequence[str], destination_uri: str
     ) -> None:
         """Everything that can refuse a cross-session move, before any of it happens."""
+        if any(chat in source.chat_providers for chat in moving):
+            # "Hosts MAY refuse, as an unsupported destination, a move they cannot
+            # support": a chat on another agent is served by this session's guest,
+            # and its conversation lives there. Moving it would mean handing a live
+            # agent session between sessions, so it is refused -- the chat or any
+            # chat under it. Same code as a move to a session of another agent.
+            raise errors.AhpError(
+                -32009,
+                "a chat on another agent than its session's cannot move to another session",
+            )
         for chat in moving:
             if source.running(chat):
                 # A transient source condition the spec lets a host refuse:

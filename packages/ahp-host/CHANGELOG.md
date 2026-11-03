@@ -62,6 +62,16 @@ versions each release speaks.
   error naming it, and restore does not fail. A host restarted without
   `multiple_chat_providers` still serves existing foreign chats and refuses new ones.
 
+### Changed — per-chat agents: `moveChat` (upstream `c301d494`)
+
+- A cross-session `moveChat` (an existing session or `newSession`) of a foreign chat, or of a
+  tree containing one, is refused as an unsupported destination (`PermissionDenied`, -32009, the
+  code already used for a move to a session of another agent -- upstream names none) with
+  nothing changed. The spec lets a host refuse a move it cannot support, and a live guest
+  conversation is not something this host hands between sessions. Same-session reorders of
+  foreign chats work as usual, and a native chat's move still dispatches `chat/moved` with no
+  `provider` and no `schema`.
+
 ### Fixed — a chat whose config the agent was not told fails closed
 
 - `Host._tell_chat_config` used to log and forget a `chat_config_changed` that raised, leaving an
