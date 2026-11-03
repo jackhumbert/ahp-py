@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Added — `resultMetadata` through the sink wrappers (upstream `c301d494`)
+
+- The masking sink wrappers in `bridge.py` forward `result_metadata` to the outer sink, masked like
+  the rest of a result.
+
 ### Changed — a chat's Approvals and effort no longer follow the session (upstream `c301d494`)
 
 - A run resolves its calls' modes from its main chat's values alone once the host has given

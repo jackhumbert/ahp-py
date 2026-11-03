@@ -66,6 +66,8 @@ class ToolCall:
     title: str = ""
     kind: str = "other"
     raw_input: Any = None
+    #: The agent's `rawOutput`, as last sent (an update that omits it keeps it).
+    raw_output: Any = None
     locations: Sequence[Mapping[str, Any]] = field(default_factory=tuple)
     content: Sequence[Mapping[str, Any]] = field(default_factory=tuple)
     status: str = "pending"
@@ -81,6 +83,8 @@ class ToolCall:
             self.kind = kind
         if "rawInput" in update and update["rawInput"] is not None:
             self.raw_input = update["rawInput"]
+        if "rawOutput" in update and update["rawOutput"] is not None:
+            self.raw_output = update["rawOutput"]
         if isinstance(locations := update.get("locations"), list):
             self.locations = [loc for loc in locations if isinstance(loc, Mapping)]
         if isinstance(content := update.get("content"), list):
@@ -105,6 +109,23 @@ class ToolCall:
         if self.raw_input is not None:
             update["rawInput"] = self.raw_input
         return update
+
+    @property
+    def result_metadata(self) -> Mapping[str, Any] | None:
+        """`ToolCallResult.resultMetadata`: the `_meta` of an MCP result in the raw output.
+
+        Only when `rawOutput` is shaped like an MCP `CallToolResult` (it has `content`,
+        `structuredContent` or `isError`) and its `_meta` is an object: ACP leaves
+        `rawOutput` to the agent, so an object that merely has a `_meta` key is the agent's
+        own data, not a tool result's metadata.
+        """
+        raw = self.raw_output
+        if not isinstance(raw, Mapping):
+            return None
+        if not any(key in raw for key in ("content", "structuredContent", "isError")):
+            return None
+        meta = raw.get("_meta")
+        return meta if isinstance(meta, Mapping) else None
 
     @property
     def finished(self) -> bool:

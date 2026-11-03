@@ -1709,13 +1709,20 @@ class TurnSink(Protocol):
         *,
         success: bool = True,
         past_tense_message: str | None = None,
+        result_metadata: Mapping[str, Any] | None = None,
     ) -> None:
         """Finish a call. `success` and `pastTenseMessage` are REQUIRED by the
         protocol, so they are keyword arguments with defaults rather than
         something an adapter can forget.
 
         *result* is a `ToolCallResult` mapping (``{"content": [...], ...}``),
-        or just the content list, which the host wraps."""
+        or just the content list, which the host wraps.
+
+        *result_metadata* (1.1.0) becomes `ToolCallResult.resultMetadata`, only when
+        given: it mirrors the `_meta` of an MCP `CallToolResult`, for a host rebuilding
+        an MCP App's result from state. It is not `_meta` on the call (that is the
+        provider's own) and it is carried through result confirmation next to
+        `structuredContent`."""
         ...
 
     async def file_edit(self, change: FileChange) -> Mapping[str, Any]:

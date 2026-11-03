@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+### Added — `resultMetadata` from an MCP raw output (upstream `c301d494`)
+
+- A tool call whose `rawOutput` is shaped like an MCP `CallToolResult` (it has `content`,
+  `structuredContent` or `isError`) and carries an object `_meta` completes with that `_meta` as
+  `resultMetadata` (`ToolCall.result_metadata`). An object that merely has a `_meta` key is the
+  agent's own data and is not read as one.
+
 ### Added — an attached image file as an image block
 
 - A `resource` attachment that is an image file (by its content type or its extension) is sent as

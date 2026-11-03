@@ -43,6 +43,8 @@ class RecordingSink:
         #: The latest line under each call's name, and each call's past tense.
         self.invocations: dict[str, str] = {}
         self.past_tense: dict[str, str | None] = {}
+        #: Each completed call's `result_metadata` (None when the adapter gave none).
+        self.result_metadata: dict[str, Mapping[str, Any] | None] = {}
         self.outputs: dict[str, list[Mapping[str, Any]]] = {}
         self.usage_meta: list[Mapping[str, Any] | None] = []
         #: The client tool calls the adapter asked this sink to run, and what
@@ -120,8 +122,10 @@ class RecordingSink:
         *,
         success: bool = True,
         past_tense_message: str | None = None,
+        result_metadata: Mapping[str, Any] | None = None,
     ) -> None:
         self.past_tense[call_id] = past_tense_message
+        self.result_metadata[call_id] = result_metadata
         self.events.append(("completed", call_id, success, result))
 
     async def turn_failed(

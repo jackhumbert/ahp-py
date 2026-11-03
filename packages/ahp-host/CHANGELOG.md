@@ -10,6 +10,15 @@ versions each release speaks.
 
 ## [Unreleased]
 
+### Added — `resultMetadata` (upstream `c301d494`)
+
+- `TurnSink.tool_call_completed(..., result_metadata=)` puts `ToolCallResult.resultMetadata` (the
+  `_meta` of an MCP `CallToolResult`) on the result, only when given (an empty mapping is a
+  value), and winning over one already in the result mapping. It sits next to `structuredContent`;
+  the reducer carries both through result confirmation. A client tool's own `chat/toolCallComplete`
+  keeps its `resultMetadata` in state, because the host publishes the client's action as
+  dispatched (pinned by a test). The host builds no result of its own that needs it.
+
 ### Added — reasoning timing (upstream `c301d494`)
 
 - `ActionTurnSink` stamps `startedAt` (`now_iso()`, the producer's clock) on a reasoning part

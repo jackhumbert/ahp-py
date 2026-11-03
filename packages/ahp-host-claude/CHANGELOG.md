@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+### Notes — `resultMetadata` is not wired (upstream `c301d494`)
+
+- Checked the installed Claude Agent SDK (0.2.160): `ToolResultBlock` is `tool_use_id`, `content`
+  and `is_error`, and `UserMessage.tool_use_result` is an untyped dict the SDK does not document.
+  Its only `_meta` is on tool *definitions* sent to the CLI (`_build_meta`), not on results, so
+  there is no MCP result `_meta` to pass as `result_metadata`, and none is guessed at.
+
 ### Changed — a chat's approval mode and effort no longer follow the session (upstream `c301d494`)
 
 Security-relevant. A chat's config does not inherit from its session, so `ahp-host` gives every

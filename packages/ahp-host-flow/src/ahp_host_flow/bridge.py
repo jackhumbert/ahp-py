@@ -256,13 +256,21 @@ class MaskingSink:
         *,
         success: bool = True,
         past_tense_message: str | None = None,
+        result_metadata: Mapping[str, Any] | None = None,
     ) -> None:
         await self._flush()
+        # Passed on only when there is one: a sink written before 1.1.0 has no such keyword.
+        extra = (
+            {"result_metadata": self._redactor.mask_value(result_metadata)}
+            if result_metadata is not None
+            else {}
+        )
         await self._sink.tool_call_completed(
             call_id,
             self._redactor.mask_value(result),
             success=success,
             past_tense_message=self._str(past_tense_message),
+            **extra,
         )
 
     async def system_notification(
@@ -484,14 +492,20 @@ class TurnTee:
         *,
         success: bool = True,
         past_tense_message: str | None = None,
+        result_metadata: Mapping[str, Any] | None = None,
     ) -> None:
         self._touch()
         await self.flush()
+        # Passed on only when there is one: a sink written before 1.1.0 has no such keyword.
+        extra = (
+            {"result_metadata": self._mask(result_metadata)} if result_metadata is not None else {}
+        )
         await self.sink.tool_call_completed(
             call_id,
             self._mask(result),
             success=success,
             past_tense_message=self._mask_str(past_tense_message),
+            **extra,
         )
 
     async def system_notification(

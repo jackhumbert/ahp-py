@@ -1260,11 +1260,16 @@ class AcpSession:
         elif diffs:
             self._edits.abandoned(diffs, self.directory)
         notice = [{"type": "text", "text": call.notice}] if call.notice else []
+        # Only when the agent's raw output carried one: a sink written before 1.1.0 has no keyword.
+        extra: dict[str, Any] = (
+            {"result_metadata": call.result_metadata} if call.result_metadata is not None else {}
+        )
         await sink.tool_call_completed(
             call.call_id,
             {"content": [*notice, *text_of(call.content, shown=shown), *edits]},
             success=call.status != "failed",
             past_tense_message=call.past_tense(),
+            **extra,
         )
         if changed:
             await self._publish_changes()

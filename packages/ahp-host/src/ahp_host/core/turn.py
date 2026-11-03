@@ -665,6 +665,7 @@ class ActionTurnSink:
         *,
         success: bool = True,
         past_tense_message: str | None = None,
+        result_metadata: Mapping[str, Any] | None = None,
     ) -> None:
         action: dict[str, Any] = {
             "type": "chat/toolCallComplete",
@@ -673,7 +674,7 @@ class ActionTurnSink:
             # Both REQUIRED by `ToolCallResult`. Omitting them left the client
             # computing `completed && success` as falsey, so it never used the
             # past-tense label and the row stayed in the present tense forever.
-            "result": _tool_result(result, success, past_tense_message),
+            "result": _tool_result(result, success, past_tense_message, result_metadata),
         }
         await self._ensure_runnable(call_id)
         await self._sequencer.publish(self._channel, action)
@@ -1410,8 +1411,17 @@ def _decoded_tool_input(value: Any) -> Any:
         return value
 
 
-def _tool_result(result: Any, success: bool, past_tense_message: str | None) -> dict[str, Any]:
+def _tool_result(
+    result: Any,
+    success: bool,
+    past_tense_message: str | None,
+    result_metadata: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
     """A `ToolCallResult` with the two fields the protocol makes mandatory.
+
+    *result_metadata* is `ToolCallResult.resultMetadata` (mirroring MCP
+    `CallToolResult._meta`), set only when given -- an empty mapping is a value
+    -- and winning over one already in a *result* mapping.
 
     A bare content list is the result's `content`: the natural thing to pass
     once `file_edit` hands back content items, and it used to become `{}` --
@@ -1425,6 +1435,8 @@ def _tool_result(result: Any, success: bool, past_tense_message: str | None) -> 
         "pastTenseMessage",
         past_tense_message or ("Ran the tool" if success else "The tool failed"),
     )
+    if result_metadata is not None:
+        wire["resultMetadata"] = dict(result_metadata)
     return wire
 
 

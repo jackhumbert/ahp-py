@@ -175,11 +175,16 @@ class _HeldSink(RecordingSink):
         *,
         success: bool = True,
         past_tense_message: str | None = None,
+        result_metadata: Mapping[str, Any] | None = None,
     ) -> None:
         self.reached.set()
         await self.release.wait()
         await super().tool_call_completed(
-            call_id, result, success=success, past_tense_message=past_tense_message
+            call_id,
+            result,
+            success=success,
+            past_tense_message=past_tense_message,
+            result_metadata=result_metadata,
         )
 
 
