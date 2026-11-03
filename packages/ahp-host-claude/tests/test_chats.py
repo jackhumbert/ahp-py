@@ -257,25 +257,67 @@ async def test_a_chat_can_approve_more_without_loosening_the_others(tmp_path: Pa
     assert y.approvals == "default"
 
 
-async def test_the_sessions_mode_passes_over_a_chat_with_its_own(tmp_path: Path) -> None:
+async def test_loosening_the_sessions_approvals_does_not_loosen_an_existing_chat(
+    tmp_path: Path,
+) -> None:
+    """Security-relevant (AHP 1.1.0, upstream `c301d494`): a chat's config does
+    not inherit from its session. Every chat the host has described -- the
+    default chat included -- keeps its own mode when the session's changes, and
+    a chat created afterwards starts from the session's value (the host seeds
+    it and tells the agent: `chat_config_changed` with the complete values)."""
     harness = Harness(tmp_path)
     session = await harness.session()
     await session.chat_opened(ChatContext(session_uri="s", chat_uri="ahp-chat:/x"))
+    # The default chat set its mode; the other has no key at all (= the default, Ask).
+    await session.chat_config_changed(DEFAULT, {"permissionMode": "default"})
+    await session.chat_config_changed("ahp-chat:/x", {})
+
+    await session.config_changed({"permissionMode": "auto"})
+
+    assert session.session_approvals == "auto"
+    assert session.approvals == "default", "the default chat followed the session"
+    assert session.chats["ahp-chat:/x"].approvals == "default", "an existing chat followed it"
+    # A new chat: opened, then given the values the host seeded from the session.
+    await session.chat_opened(ChatContext(session_uri="s", chat_uri="ahp-chat:/new"))
+    await session.chat_config_changed("ahp-chat:/new", {"permissionMode": "auto"})
+    assert session.chats["ahp-chat:/new"].approvals == "auto"
+    # ... and still does not follow a later change.
+    await session.config_changed({"permissionMode": "plan"})
+    assert session.chats["ahp-chat:/new"].approvals == "auto"
+    assert session.chats["ahp-chat:/x"].approvals == "default"
+
+
+async def test_a_session_change_moves_no_running_client_of_a_described_chat(
+    tmp_path: Path,
+) -> None:
+    harness = Harness(tmp_path, _answer("b1", "x"))
+    session = await harness.session()
+    await session.chat_opened(ChatContext(session_uri="s", chat_uri="ahp-chat:/x"))
+    await session.chat_config_changed("ahp-chat:/x", {"permissionMode": "default"})
+    await session.send_user_message(UserMessage(text="b", chat_uri="ahp-chat:/x"), RecordingSink())
+    modes_before = list(harness.clients[0].permission_modes)
+
+    await session.config_changed({"permissionMode": "acceptEdits"})
+
+    assert harness.clients[0].permission_modes == modes_before
+    assert not harness.clients[0].disconnected
+
+
+async def test_a_chat_the_host_has_not_described_follows_the_session(tmp_path: Path) -> None:
+    """A session with no config has no chat config: chats keep following it."""
+    harness = Harness(tmp_path)
+    session = await harness.session()
     await session.chat_opened(ChatContext(session_uri="s", chat_uri="ahp-chat:/y"))
-    await session.chat_config_changed("ahp-chat:/x", {"permissionMode": "acceptEdits"})
 
     await session.config_changed({"permissionMode": "plan"})
 
     assert session.approvals == "plan"
     assert session.chats["ahp-chat:/y"].approvals == "plan"
-    assert session.chats["ahp-chat:/x"].approvals == "acceptEdits"
 
 
-async def test_an_overlay_without_the_key_puts_the_chat_back_on_the_session(
-    tmp_path: Path,
-) -> None:
-    """ "To reset a property to the session's value, replace the overlay with
-    one that omits the property" -- the host hands over the whole overlay."""
+async def test_a_missing_key_is_the_default_not_the_sessions_value(tmp_path: Path) -> None:
+    """Strict by default: a chat whose values leave the mode out runs in Ask,
+    even where the session itself is looser."""
     harness = Harness(tmp_path)
     session = await harness.session(config={"permissionMode": "acceptEdits"})
     await session.chat_opened(ChatContext(session_uri="s", chat_uri="ahp-chat:/x"))
@@ -284,7 +326,8 @@ async def test_an_overlay_without_the_key_puts_the_chat_back_on_the_session(
 
     await session.chat_config_changed("ahp-chat:/x", {})
 
-    assert session.chats["ahp-chat:/x"].approvals == "acceptEdits"
+    assert session.chats["ahp-chat:/x"].approvals == "default"
+    assert session.session_approvals == "acceptEdits"
 
 
 async def test_the_default_chat_keeps_its_own_apart_from_the_sessions(tmp_path: Path) -> None:
@@ -360,6 +403,7 @@ async def test_leaving_plan_mode_in_a_chat_with_its_own_mode_stays_in_that_chat(
     assert session.session_approvals == "default"
     await session.config_changed({"permissionMode": "acceptEdits"})
     assert x.approvals == "default", "the chat's own mode stopped being its own"
+    assert session.session_approvals == "acceptEdits"
 
 
 async def test_a_mode_moved_in_a_chat_without_its_own_is_the_sessions(tmp_path: Path) -> None:

@@ -75,10 +75,14 @@ Status: pre-alpha.
 
   It can also be set for **one chat** (AHP 1.1.0, `chat/configChanged`; the
   property is `chatMutable`): Accept edits in one chat no longer loosens every
-  other. The session's mode then applies to every chat without one of its
-  own, a mode Claude Code moves itself (a plan approved, a switch on
-  claude.ai) moves only where it was set, and clearing a chat's value puts it
-  back on the session's. Needs ahp-host with `ReconfiguresChats`.
+  other. A chat's mode is its own and **never follows the session's**: the
+  host gives each chat its value when it creates it (a new chat starts from
+  the session's mode at that moment, a fork from its source's), so loosening
+  the session's approvals later leaves every existing chat as it was. A mode
+  Claude Code moves itself (a plan approved, a switch on claude.ai) moves only
+  the chat it happened in, and a chat whose values leave the mode out is in
+  Ask, the property's default, not the session's mode. Needs ahp-host with
+  `ReconfiguresChats`.
 - **Effort**, a session setting (`effort`: Default, Low, Medium, High, Extra
   high, Max), passed to Claude Code at start-up. Claude Code cannot change it
   on a running client, so a change mid-session restarts Claude on the same
@@ -114,8 +118,8 @@ Status: pre-alpha.
   turns in its own history. A source that cannot be cut there (its turns
   predate this adapter's marks, or it is not running here) is handed to Claude
   as its transcript instead. Forking a whole session (`createSession.fork`)
-  works the same way. The approval mode and effort are the session's unless a
-  chat sets its own (above); folders and customizations are the session's
+  works the same way. A chat's approval mode and effort are its own, set when it
+  was created (above); folders and customizations are the session's
   and apply to every chat; Remote Control is the default chat's only, and a session listed through claude.ai cannot open a second
   chat. A chat can be narrowed to some of the session's folders, or none: with
   none it gets no file or shell tools, and one that leaves out the session's

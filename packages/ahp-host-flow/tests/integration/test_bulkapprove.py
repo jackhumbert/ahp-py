@@ -1,10 +1,18 @@
-"""A session Approvals change reaches the running workers (plan §8 M15)."""
+"""A run's Approvals change reaches its running workers (plan §8 M15).
+
+Said on the run's main chat: a chat's config does not inherit from its session (upstream
+`c301d494`), so a session-level change reaches none of them.
+"""
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
+import pytest
+
+from tests import flow_fakes
 from tests.flow_fakes import ModalProvider
 from tests.flow_hosting import SESSION, FlowFixture, boot_flow, final_json
 from tests.hosting import start_turn, state, wait_turn
@@ -17,6 +25,13 @@ WORKFLOW = (
     "async def main(args):\n"
     "    return await agent('go', label='modal')\n"
 )
+
+
+@pytest.fixture(autouse=True)
+def _fakes() -> Iterator[None]:
+    flow_fakes.reset_fakes()
+    yield
+    flow_fakes.reset_fakes()
 
 
 def _worker_entries(fx: FlowFixture) -> list[Any]:
@@ -40,7 +55,7 @@ async def test_bulkapprove_config_change_approves_a_running_workers_next_prompt(
     try:
         entry = await _running(fx, tmp_path)
         await fx.wire.dispatch(
-            SESSION, {"type": "session/configChanged", "config": {"permissionMode": "auto"}}
+            fx.chat, {"type": "chat/configChanged", "config": {"permissionMode": "auto"}}
         )
         session = ModalProvider.instances[0].sessions[0]
         assert await fx.wire.until(lambda: session.mode == "auto")
@@ -65,13 +80,34 @@ async def test_bulkapprove_effort_is_not_fanned_out(tmp_path: Path) -> None:
     try:
         await _running(fx, tmp_path)
         await fx.wire.dispatch(
-            SESSION, {"type": "session/configChanged", "config": {"effort": "high"}}
+            fx.chat, {"type": "chat/configChanged", "config": {"effort": "high"}}
         )
         await fx.wire.dispatch(
-            SESSION, {"type": "session/configChanged", "config": {"permissionMode": "auto"}}
+            fx.chat, {"type": "chat/configChanged", "config": {"permissionMode": "auto"}}
         )
         session = ModalProvider.instances[0].sessions[0]
         assert await fx.wire.until(lambda: session.mode == "auto")
         assert session.overlays == [{"permissionMode": "auto"}]
+    finally:
+        await fx.shut()
+
+
+async def test_bulkapprove_a_session_change_leaves_the_running_worker_asking(
+    tmp_path: Path,
+) -> None:
+    """Security-relevant: the session's loosened Approvals does not reach a run whose main
+    chat has its own values."""
+    fx = await boot_flow(tmp_path, str(tmp_path / "no-node"), TOML)
+    try:
+        await _running(fx, tmp_path)
+        await fx.wire.dispatch(
+            SESSION, {"type": "session/configChanged", "config": {"permissionMode": "auto"}}
+        )
+        assert await fx.wire.until(
+            lambda: state(fx.host, SESSION)["config"]["values"].get("permissionMode") == "auto"
+        )
+        session = ModalProvider.instances[0].sessions[0]
+        assert session.mode != "auto"
+        assert session.overlays == []
     finally:
         await fx.shut()

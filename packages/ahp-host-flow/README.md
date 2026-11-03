@@ -1029,9 +1029,11 @@ session when it takes steering mid-turn (`SteersTurns`), and otherwise rejected
 with the reason. Worker chats of a provider that is not interactive stay
 read-only.
 
-Changing the session's Approvals config reaches the workers that are running: "approve
-all for this run" applies to their next prompt at once (effort is not fanned out). So does
-an Approvals overlay on a run's main chat, for that run's running workers, and a named chat
+Changing a run's Approvals reaches the workers that are running: "approve all for this
+run" applies to their next prompt at once (effort is not fanned out). Say it on the run's
+main chat (`chat/configChanged`): a chat's config does not inherit from its session
+(upstream `c301d494`), so the session's own Approvals change reaches only a run whose main
+chat has no values, and is otherwise the seed for chats created later. A named chat
 (`opts.x.chat`) gets the run's current Approvals before each of its calls.
 
 ### Approval rules

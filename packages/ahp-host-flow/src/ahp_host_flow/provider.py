@@ -1288,7 +1288,7 @@ class FlowSession:
             sink=sink,
             publisher=publisher,
             chat=chat,
-            run_values=lambda: {**self._values, **self._chat_overlays.get(chat, {})},
+            run_values=lambda: self._run_values(chat),
             redactor=redactor,
             on_log=on_log,
             call_id_prefix=call_id_prefix,
@@ -1348,7 +1348,7 @@ class FlowSession:
             chat=chat,
             session_uri=context.session_uri,
             working_directories=context.working_directories,
-            run_values=lambda: {**self._values, **self._chat_overlays.get(chat, {})},
+            run_values=lambda: self._run_values(chat),
             run_model=model,
             workers=self._workers,
             pending_overlays=self._chat_overlays,
@@ -1376,7 +1376,7 @@ class FlowSession:
                 clients=self._fleet,
                 client_wait=self.provider.fleet_client_wait if resume_from is not None else 0.0,
                 rejoin_wait=self.provider.fleet_client_wait,
-                run_values=lambda: {**self._values, **self._chat_overlays.get(chat, {})},
+                run_values=lambda: self._run_values(chat),
                 run_model=model,
                 aborted=lambda: abort.aborted,
                 redactor=redactor,
@@ -1534,22 +1534,42 @@ class FlowSession:
             with contextlib.suppress(Exception):
                 await dispatcher.aclose()
 
-    async def config_changed(self, values: Mapping[str, Any]) -> None:
-        """Take the session's new config; an Approvals change also reaches every live worker.
+    def _run_values(self, chat: str) -> dict[str, Any]:
+        """The config a run on *chat* resolves its calls' modes from.
 
-        "Approve all for this run" applies at once: the latest change wins for running
-        workers, and new calls still resolve their mode through `inner_config` as before.
-        Effort is not fanned out.
+        A chat the host has given values (`chat_config_changed`) runs on those alone: a key
+        they leave out is unset (flow.toml decides), never the session's value, because a
+        chat's config does not inherit from its session (AHP 1.1.0, upstream `c301d494`).
+        Only a chat the host has not described follows the session's.
+        """
+        own = self._chat_overlays.get(chat)
+        return dict(own) if own is not None else dict(self._values)
+
+    async def config_changed(self, values: Mapping[str, Any]) -> None:
+        """Take the session's new config; an Approvals change reaches the runs that follow it.
+
+        The session's value is the seed for chats created from now on and what a chat the
+        host has not described follows. A chat that has its own values is not moved by it, so
+        "approve all for this run" is a change on the run's main chat (`chat_config_changed`)
+        and the session's loosening reaches only the running workers of runs without one.
+        New calls still resolve their mode through `inner_config`. Effort is not fanned out.
         """
         self._values.update(_own(values))
         mode = values.get(APPROVAL_KEY)
         if isinstance(mode, str) and mode in APPROVAL_MODES:
-            for chat, inner in list(self._workers.items()):
-                # One worker failing never stops the others.
+            for chat, run in list(self._inprocess.items()):
+                if chat in self._chat_overlays:
+                    continue
+                # One run failing never stops the others.
                 with contextlib.suppress(Exception):
-                    await forward_overlay(inner, chat, {APPROVAL_KEY: mode})
+                    await run.approval_changed(mode)
 
     async def chat_config_changed(self, chat: str, values: Mapping[str, Any]) -> None:
+        """A chat's complete values (AHP 1.1.0).
+
+        A main chat's drive its runs' calls (`_run_values`); a running worker chat's go on to
+        its inner session.
+        """
         mapped = _own(values)
         inner = self._workers.get(chat)
         if inner is None:

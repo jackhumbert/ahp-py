@@ -2713,15 +2713,19 @@ class LocalClaudeSession(ClaudeSession):
         self._chat_states: dict[str, Any] = dict(chat_states or {})
         #: Tells the provider which session answers a chat (completions).
         self._on_chat = on_chat
-        #: The session's own approval mode and effort: what a chat follows
-        #: unless it set its own. `approvals` and `effort` are what THIS
-        #: conversation runs with -- the same, unless its chat has a value of
-        #: its own. Meaningful on the default chat's session, which holds them.
+        #: The session's own approval mode and effort. A chat the host has given
+        #: values (below) never follows them again (AHP 1.1.0: a chat's config
+        #: does not inherit from its session); they are what a chat the host has
+        #: not described yet runs with. `approvals` and `effort` are what THIS
+        #: conversation runs with. Meaningful on the default chat's session,
+        #: which holds them.
         self.session_approvals = self.approvals
         self.session_effort = self.effort
-        #: Per chat, by URI (the default chat's included), the values set on
-        #: that chat alone (`chat_config_changed`, AHP 1.1.0). Not saved here:
-        #: they live in the chat's state, which the host hands back on resume.
+        #: Per chat, by URI (the default chat's included), that chat's complete
+        #: values (`chat_config_changed`, AHP 1.1.0), present for every chat the
+        #: host has described -- even with no keys, which means all defaults
+        #: (Ask, default effort), never the session's. Not saved here: they live
+        #: in the chat's state, which the host hands back on resume.
         self._overlays: dict[str, dict[str, Any]] = {}
 
     # -- chats -------------------------------------------------------------------
@@ -2897,11 +2901,13 @@ class LocalClaudeSession(ClaudeSession):
     # -- what is the session's, passed on to every chat --------------------------
 
     async def config_changed(self, values: Mapping[str, Any]) -> None:
-        """The session's own settings: every chat without a value of its own follows.
+        """The session's own settings.
 
         Remote Control is the session's alone. The approval mode and effort
-        become the session's values, and each conversation is brought to what
-        is in force for its chat -- a chat that set its own keeps it.
+        become the session's values, which only a chat the host has not given
+        values yet follows. A chat that has them (`chat_config_changed`) is
+        untouched: loosening the session's approvals must not loosen a chat that
+        already runs stricter (AHP 1.1.0, upstream `c301d494`).
         """
         if self._parent is not None:
             await self._parent.config_changed(values)
@@ -2918,34 +2924,35 @@ class LocalClaudeSession(ClaudeSession):
                 await self._reconfigure(conversation)
 
     async def chat_config_changed(self, chat: str, values: Mapping[str, Any]) -> None:
-        """One chat's own approval mode or effort (`ReconfiguresChats`, AHP 1.1.0).
+        """One chat's approval mode and effort (`ReconfiguresChats`, AHP 1.1.0).
 
         Security-relevant, as `config_changed` is: what that chat's Claude runs
-        without asking. *values* is the chat's whole overlay, so it replaces
-        what the chat had; a key it leaves out puts the chat back on the
-        session's value. Only that chat's conversation moves -- approving more
-        in one chat no longer loosens every other.
+        without asking. *values* is the chat's complete values, so it replaces
+        what the chat had; a key it leaves out is the property's default (Ask,
+        default effort), never the session's value. Only that chat's
+        conversation moves -- approving more in one chat does not loosen any
+        other, and neither does a later change to the session's.
         """
         if self._parent is not None:
             await self._parent.chat_config_changed(chat, values)
             return
-        overlay = {key: values[key] for key in _PER_CHAT if key in values}
-        if overlay:
-            self._overlays[chat] = overlay
-        else:
-            self._overlays.pop(chat, None)
+        self._overlays[chat] = {key: values[key] for key in _PER_CHAT if key in values}
         conversation = self._existing(chat)
         if conversation is not None:
             await self._reconfigure(conversation)
 
     def _effective(self, chat: str) -> tuple[str, str]:
-        """The approval mode and effort in force for *chat*: its own, else the session's."""
-        overlay = self._overlays.get(chat, {})
-        mode = (
-            approval_mode(overlay[CONFIG_KEY]) if CONFIG_KEY in overlay else self.session_approvals
-        )
-        effort = effort_level(overlay[EFFORT_KEY]) if EFFORT_KEY in overlay else self.session_effort
-        return mode, effort
+        """The approval mode and effort in force for *chat*.
+
+        A chat the host has described runs on its own values, and a key it leaves
+        out is the strict default (`approval_mode` and `effort_level` of nothing:
+        Ask, default effort) -- never the session's. Only a chat the host has not
+        described follows the session.
+        """
+        values = self._overlays.get(chat)
+        if values is None:
+            return self.session_approvals, self.session_effort
+        return approval_mode(values.get(CONFIG_KEY)), effort_level(values.get(EFFORT_KEY))
 
     async def _reconfigure(self, conversation: LocalClaudeSession) -> None:
         """Bring one conversation to what is in force for its chat.
@@ -2998,9 +3005,9 @@ class LocalClaudeSession(ClaudeSession):
 
         Security-relevant. Leaving plan mode, a mode the user picked as they
         approved a call, a switch on claude.ai: the gate follows before the
-        next call asks. A chat with a mode of its own (AHP 1.1.0) keeps the
+        next call asks. A chat the host has given values (AHP 1.1.0) keeps the
         change to itself, and clients are told on that chat. Otherwise the mode
-        is the session's, and every chat without one of its own follows.
+        is the session's, and every chat the host has not described follows.
 
         Our own switch reported back is not a change, and never gets here
         (`_gate_echo`).
@@ -3011,7 +3018,7 @@ class LocalClaudeSession(ClaudeSession):
         chat = self.context.chat_uri
         overlay = root._overlays.get(chat)
         publisher = root.context.publisher
-        if overlay is not None and CONFIG_KEY in overlay:
+        if overlay is not None:
             overlay[CONFIG_KEY] = mode
             self.approvals = mode
             if publisher is not None:
@@ -3027,7 +3034,7 @@ class LocalClaudeSession(ClaudeSession):
             except Exception:
                 log.exception("publishing the approval mode failed")
         for conversation in (root, *root._chats.values()):
-            if CONFIG_KEY in root._overlays.get(conversation.context.chat_uri, {}):
+            if conversation.context.chat_uri in root._overlays:
                 continue
             if conversation.approvals == mode:
                 continue

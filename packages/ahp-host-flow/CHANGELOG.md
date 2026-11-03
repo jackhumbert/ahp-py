@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Changed — a chat's Approvals and effort no longer follow the session (upstream `c301d494`)
+
+- A run resolves its calls' modes from its main chat's values alone once the host has given
+  it any (`FlowSession._run_values`): a key they leave out is unset (flow.toml decides), never
+  the session's value. A chat the host has not described still follows the session.
+- The session's Approvals change no longer reaches the running workers of a run whose main
+  chat has values; "approve all for this run" is `chat/configChanged` on the run's main chat.
+
 ### Added — `[workflows] forward_x`
 
 - Lists `opts.x` keys of an `agent()` call to copy into an in-process worker's message

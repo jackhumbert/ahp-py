@@ -2,6 +2,22 @@
 
 ## [Unreleased]
 
+### Changed — a chat's approval mode and effort no longer follow the session (upstream `c301d494`)
+
+Security-relevant. A chat's config does not inherit from its session, so `ahp-host` gives every
+chat its own values and `LocalClaudeSession` runs each chat on them alone.
+
+- `chat_config_changed` receives the chat's complete values. A key it leaves out is the
+  property's default (Ask, default effort), never the session's value; an empty mapping is all
+  defaults, not "follow the session".
+- `config_changed` (the session's own value, and the seed for chats created later) no longer
+  moves a chat the host has given values: loosening the session's approvals does not loosen an
+  existing chat. A chat the host has not described (a session with no config) still follows it.
+- A mode Claude Code moves itself stays in the chat it happened in, for every described chat
+  (it was only for chats that had set their own mode).
+- Tests: a session loosened to Auto leaves an existing chat in Ask while a chat created after
+  starts in Auto, at the provider level and through a real `Host`.
+
 ### Fixed — review fixes
 
 - `usage_per_message` can be set in the config file and is honoured by the standalone

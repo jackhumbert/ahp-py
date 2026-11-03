@@ -301,7 +301,7 @@ def model_for(
 
 
 async def forward_overlay(inner: AgentSession, chat: str, values: Mapping[str, Any]) -> None:
-    """Hand a worker chat's config overlay to its inner session, as far as it takes one."""
+    """Hand a worker chat's config values to its inner session, as far as it takes them."""
     if isinstance(inner, ReconfiguresChats):
         await inner.chat_config_changed(chat, values)
     elif isinstance(inner, ReconfiguresSessions):

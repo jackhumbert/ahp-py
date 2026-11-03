@@ -27,9 +27,11 @@ server's AGENTS.md requires ("Adding a provider adapter").
   bypass mode or a directory (`permissions.choices`); a chat narrowed away
   from the session's folder runs its gate in Ask (`ClaudeSession._gate`); the
   permission mode Claude Code reports at init is put back to the session's; a
-  chat's own approval mode (AHP 1.1.0) moves only that chat's gate, and a
-  mode Claude Code moves itself stays in the chat that set one
-  (`LocalClaudeSession.chat_config_changed`, `_follow_mode`); host tools
+  chat's approval mode (AHP 1.1.0) is its own and moves only that chat's gate:
+  it never follows the session's, a key its values leave out is Ask (the
+  default), and a mode Claude Code moves itself stays in the chat it happened
+  in (`LocalClaudeSession.chat_config_changed`, `_effective`, `_follow_mode`;
+  tested in `tests/test_chat_config_host.py`); host tools
   (`mcp__host__...`, the per-turn `StructuredOutput`) pass the approval gate
   like client tools, since they run in the host and touch nothing on this
   machine (`ClaudeSession._pre_tool_use`, `client_tools.is_host_tool`); the
