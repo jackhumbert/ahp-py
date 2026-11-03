@@ -902,6 +902,14 @@ class _SurfaceConnection:
             values = [handshake.get(key) for handshake in handshakes]
             if values[0] is not None and all(value == values[0] for value in values):
                 agreed[key] = values[0]
+        # A presence-only capability (`{}` is falsy in Python, so `is not None`): only
+        # when EVERY node has it, since `createChat.provider` goes to the session's
+        # node and a node without it would refuse. Which providers each node serves is
+        # that node's to judge -- the merged root's `agents` is a union.
+        if all(
+            isinstance(handshake.get("multipleChatProviders"), Mapping) for handshake in handshakes
+        ):
+            agreed["multipleChatProviders"] = {}
         hosting = [
             handshake
             for node, handshake in zip(self.nodes.values(), handshakes, strict=True)

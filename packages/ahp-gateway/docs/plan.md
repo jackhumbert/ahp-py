@@ -248,7 +248,12 @@ it shares: a capability, or an option that allows something (`fork`,
 restricts (`immutablePrimary`) where any has it - the surface decides whether
 to offer "new chat" before it knows which machine a session lands on. The
 handshake extras `completionTriggerCharacters` and `terminalCommandPrefix` are
-advertised only when every node agrees on them (invariant 4).
+advertised only when every node agrees on them (invariant 4). `multipleChatProviders` (AHP
+1.1.0, a chat on an agent other than its session's) is advertised only when **every** node
+advertises it. `createChat` goes to the session's node and `provider` passes through
+untouched. The merged `agents` is a union, so a provider one node serves and another does not
+can be named for a session on the wrong node: that node answers `InvalidParams`, which is
+correct, and the gateway does not second-guess it.
 
 **Telemetry is the gateway's own.** `InitializeResult.telemetry` is the host's
 alone - the client offers nothing, and agrees to a signal by subscribing to its

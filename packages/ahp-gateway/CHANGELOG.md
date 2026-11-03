@@ -6,6 +6,14 @@ Every release states the protocol versions it speaks.
 
 ## [Unreleased]
 
+### Added — per-chat agents (upstream `c301d494`)
+
+- `InitializeResult.multipleChatProviders` is advertised to surfaces only when every connected
+  node advertises it (`_agreed_handshake_fields`, beside `completionTriggerCharacters`).
+  `createChat.provider` reaches the session's node untouched; a provider that node does not
+  serve is its `InvalidParams`, which the gateway passes through (pinned by tests against real
+  hosts).
+
 ### Added — `authenticate.target`
 
 - A targeted `authenticate` (`target`: one MCP server in one session) is routed only to the
