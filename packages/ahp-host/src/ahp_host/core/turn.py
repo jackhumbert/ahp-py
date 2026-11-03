@@ -1535,6 +1535,11 @@ class TurnRunner:
 
         await self._drive(turn_id, sink, go)
 
+    async def refuse(self, turn_id: str, message: str) -> None:
+        """End the turn as failed without handing it to any agent."""
+        sink = self._sink(None, turn_id)
+        await sink.turn_failed(message, "chat.config", resumable=False)
+
     async def resume(self, agent_session: AgentSession | None, turn_id: str) -> None:
         """Continue a failed turn the reducer has just reopened (`chat/turnResume`).
 

@@ -1702,6 +1702,11 @@ class _Session:
     #: `HostsChats.chat_opened`. Per agent session, so one that comes up late
     #: (bring-up, a lazy resume) is told about exactly the chats it missed.
     opened_chats: set[str] = field(default_factory=set)
+    #: Chats whose complete config values the agent could not be told
+    #: (`Host._tell_chat_config` raised). Such an agent would fall back to the
+    #: session's values, which may be looser than the chat's own, so its turns
+    #: are refused until a later delivery succeeds (fail closed).
+    undelivered_chats: set[str] = field(default_factory=set)
     #: Per chat, the pending-message ids already handed to the agent -- as a
     #: turn or as steering. "Hosts MUST reject edits or client removals that
     #: they can no longer honor after handoff" (1.1.0): an id is marked BEFORE
@@ -5108,6 +5113,7 @@ class Host:
         told exactly what a client changing it would have told it.
         """
         session.opened_chats.clear()
+        session.undelivered_chats.clear()
         session.agent_session = agent
         if isinstance(agent, HostsChats):
             order = self._catalogue_order(session)
@@ -5127,6 +5133,17 @@ class Host:
             # Every chat that has a config, even an empty one: an empty `values`
             # now means "all defaults", not "follow the session".
             await self._tell_chat_config(session, chat)
+
+    async def _rollback_chat(self, session: _Session, chat: str) -> None:
+        """Undo a chat registered a moment ago and never announced."""
+        await self._close_chat(session, chat)
+        session.chat_uris.discard(chat)
+        session.provider_chats.discard(chat)
+        session.opened_chats.discard(chat)
+        session.undelivered_chats.discard(chat)
+        session.origin_turns.pop(chat, None)
+        await self.sequencer.drop_channel(chat)
+        self._channel_dropped(chat)
 
     async def _create_chat(self, connection: Connection, params: Mapping[str, Any]) -> None:
         """Open a second chat in a session.
@@ -5231,7 +5248,12 @@ class Host:
         session.chat_uris.add(chat_uri)
         # Before the catalogue announces it, so no client can start a turn on a
         # chat whose agent has not yet heard what it may do.
-        await self._tell_chat_config(session, chat_uri)
+        if not await self._tell_chat_config(session, chat_uri):
+            # Fail closed: nothing of the chat survives, as for a refused open.
+            await self._rollback_chat(session, chat_uri)
+            raise errors.internal_error(
+                "the agent could not be given the chat's config, so the chat was not created"
+            )
 
         session.published_chats[chat_uri] = {
             "title": state["title"],
@@ -9541,23 +9563,35 @@ class Host:
         if config is not None:
             state["config"] = config
 
-    async def _tell_chat_config(self, session: _Session, chat: str) -> None:
+    async def _tell_chat_config(self, session: _Session, chat: str) -> bool:
         """`ReconfiguresChats`, with the chat's complete values as the reducer left them.
 
         Nothing for a chat with no `config` (its session has none): an empty
         mapping would say "all defaults", which is not "unconfigured".
+
+        Returns whether the agent now has the chat's values (or has none to be
+        given). A failure is not forgiven: the chat joins `undelivered_chats`,
+        whose turns are refused until a later delivery succeeds, because an
+        agent that missed the values falls back to the session's -- possibly
+        looser than the chat's own. `createChat` and `open_tool_chat` fail
+        outright on ``False``.
         """
         agent = session.agent_session
         if not isinstance(agent, ReconfiguresChats):
-            return
+            return True
         if not _has_chat_config(self.sequencer.state_of(chat)):
-            return
+            session.undelivered_chats.discard(chat)
+            return True
         try:
             await agent.chat_config_changed(
                 chat, _chat_config_values(self.sequencer.state_of(chat))
             )
         except Exception:
             _log.exception("chat_config_changed failed for %s", chat)
+            session.undelivered_chats.add(chat)
+            return False
+        session.undelivered_chats.discard(chat)
+        return True
 
     async def _react_to_chat_working_directories(self, channel: str) -> None:
         """Tell the agent one chat's folder subset changed, then save it."""
@@ -9602,6 +9636,15 @@ class Host:
         try:
             await self._resume_if_restored(session)
             turn_id = action.get("turnId")
+            if runner.channel in session.undelivered_chats:
+                # A later delivery may succeed where the first did not.
+                await self._tell_chat_config(session, runner.channel)
+            if runner.channel in session.undelivered_chats and isinstance(turn_id, str):
+                await runner.refuse(
+                    turn_id,
+                    "the agent could not be given this chat's config, so the turn was not run",
+                )
+                return
             if resume and isinstance(turn_id, str):
                 await runner.resume(agent or session.agent_session, turn_id)
             else:

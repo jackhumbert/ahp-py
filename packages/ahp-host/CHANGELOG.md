@@ -10,6 +10,15 @@ versions each release speaks.
 
 ## [Unreleased]
 
+### Fixed — a chat whose config the agent was not told fails closed
+
+- `Host._tell_chat_config` used to log and forget a `chat_config_changed` that raised, leaving an
+  agent that fell back to the session's values (for Claude, the session's approvals, possibly
+  looser than the chat's own). Now `createChat` fails with an error and nothing created, as for a
+  refused open; and a chat the agent could not be told about at attach, restore or rehost has its
+  turns refused with a `chat.config` error until a later delivery succeeds (the next turn retries,
+  and so does any `chat/configChanged`).
+
 ### Added — `resultMetadata` (upstream `c301d494`)
 
 - `TurnSink.tool_call_completed(..., result_metadata=)` puts `ToolCallResult.resultMetadata` (the
