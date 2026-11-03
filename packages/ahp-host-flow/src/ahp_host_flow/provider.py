@@ -97,6 +97,7 @@ from ahp_host_flow.fleet import FleetClients, FleetDispatcher
 from ahp_host_flow.gates import MainChatGates, MainChatVerbs
 from ahp_host_flow.limits import ProviderSlotsRegistry, probe
 from ahp_host_flow.loading import LazyProviders, lazy_verbs, load_launcher, resume_key_hook
+from ahp_host_flow.opening import is_opening_worker
 from ahp_host_flow.remotechats import RemoteWorkerChats
 from ahp_host_flow.router import RoutingDispatcher
 from ahp_host_flow.sandbox import (
@@ -1570,6 +1571,9 @@ class FlowSession:
         A main chat's drive its runs' calls (`_run_values`); a running worker chat's go on to
         its inner session.
         """
+        if is_opening_worker():
+            # The host's seed for a worker chat being opened, not a change (see `opening`).
+            return
         mapped = _own(values)
         inner = self._workers.get(chat)
         if inner is None:

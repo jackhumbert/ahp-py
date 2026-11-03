@@ -31,6 +31,7 @@ from ahp_host_flow.engine import (
     usage_reporter,
     with_preamble,
 )
+from ahp_host_flow.opening import opening_worker
 from ahp_host_flow.routing import x_opts
 
 #: The gateway's flow tool names (ahp-gateway `FLOW_TOOLS`); duplicated because neither package
@@ -371,7 +372,10 @@ class FleetDispatcher(StepDispatcher):
         folder = xo.get("cwd")
         if "cwd" in xo:
             fleet_folder(folder)
-        worker = await self.publisher.open_tool_chat(title, tool_call_id=call_id, chat=self.chat)
+        with opening_worker():
+            worker = await self.publisher.open_tool_chat(
+                title, tool_call_id=call_id, chat=self.chat
+            )
         raw_schema = opts.get("schema")
         schema = raw_schema if isinstance(raw_schema, Mapping) else None
         started = self._steps[call_id]

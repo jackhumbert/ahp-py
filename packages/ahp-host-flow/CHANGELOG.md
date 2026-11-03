@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Fixed — the host's seed for a worker chat is not an overlay
+
+- The host now tells an agent a worker chat's values from inside `open_tool_chat` (ahp-host
+  fails closed when it cannot). Those are the baseline the worker's inner session was built
+  from, not a client's change, so `FlowSession.chat_config_changed` ignores a delivery that
+  arrives inside `opening_worker()` (a context variable around every `open_tool_chat` call);
+  otherwise the seed would reach the inner session as an overlay and override the per-call effort
+  or approval mode the flow had decided.
+
 ### Added — `resultMetadata` through the sink wrappers (upstream `c301d494`)
 
 - The masking sink wrappers in `bridge.py` forward `result_metadata` to the outer sink, masked like

@@ -30,6 +30,7 @@ from ahp_host.provider.base import (
 
 from ahp_host_flow.engine import Redactor
 from ahp_host_flow.engine.usage import has_cost_usd, read_usage
+from ahp_host_flow.opening import opening_worker
 
 if TYPE_CHECKING:
     from ahp_host_flow.approvals import Approver
@@ -168,12 +169,13 @@ class ScopedPublisher:
         chat: str | None = None,
         interactivity: str = "read-only",
     ) -> ProviderChat:
-        opened = await self.outer.open_tool_chat(
-            title,
-            tool_call_id=tool_call_id,
-            chat=self._redirect(chat, "open_tool_chat"),
-            interactivity=interactivity,
-        )
+        with opening_worker():
+            opened = await self.outer.open_tool_chat(
+                title,
+                tool_call_id=tool_call_id,
+                chat=self._redirect(chat, "open_tool_chat"),
+                interactivity=interactivity,
+            )
         self._owned.add(opened.resource)
         return opened
 

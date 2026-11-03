@@ -79,6 +79,7 @@ from ahp_host_flow.engine import (
     with_preamble,
 )
 from ahp_host_flow.engine.dispatcher import _STOP_CAUSE
+from ahp_host_flow.opening import opening_worker
 from ahp_host_flow.routing import route, x_opts
 from ahp_host_flow.worktree import (
     Worktree,
@@ -1364,12 +1365,13 @@ class ProviderDispatcher(StepDispatcher):
         elif resumed is not None:
             worker = resumed[0]
         else:
-            worker = await self.publisher.open_tool_chat(
-                title,
-                tool_call_id=call_id,
-                chat=self.chat,
-                interactivity="full" if spec.interactive else "read-only",
-            )
+            with opening_worker():
+                worker = await self.publisher.open_tool_chat(
+                    title,
+                    tool_call_id=call_id,
+                    chat=self.chat,
+                    interactivity="full" if spec.interactive else "read-only",
+                )
         return _ResolvedChat(worker, title, existing, resumed)
 
     def _forwarded_x(self, call: AgentCall) -> dict[str, Any]:

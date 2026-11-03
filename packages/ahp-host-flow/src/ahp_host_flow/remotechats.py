@@ -35,6 +35,7 @@ from ahp_host_flow.engine import (
     report_dispatch,
 )
 from ahp_host_flow.engine.remote import RemoteToolError
+from ahp_host_flow.opening import opening_worker
 
 
 class _WorkerOut:
@@ -175,7 +176,10 @@ class RemoteWorkerChats(StepDispatcher):
 
     async def _run_call(self, call: AgentCall, name: str, title: str, call_id: str) -> AgentResult:
         body = self._bodies[call.ordinal]
-        worker = await self.publisher.open_tool_chat(title, tool_call_id=call_id, chat=self.chat)
+        with opening_worker():
+            worker = await self.publisher.open_tool_chat(
+                title, tool_call_id=call_id, chat=self.chat
+            )
         raw_schema = call.opts.get("schema")
         started = self._steps[call_id]
         started["chat"] = worker.resource
