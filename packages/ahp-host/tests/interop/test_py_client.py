@@ -180,3 +180,38 @@ async def test_the_clients_mirror_matches_our_state(host: Host) -> None:
         if key not in ignored and mirrored.get(key) != ours.get(key)
     }
     assert not differing, f"the mirror diverged on {sorted(differing)}"
+
+
+@requires_client
+async def test_a_chat_on_another_agent_runs_there_through_the_client() -> None:
+    """Per-chat agents (1.1.0): the Python client asks for `provider`, the host puts the
+    chat on a guest, and the client's view reports it."""
+    from ahp_client import Delta, TurnCompleted
+
+    chats = {"multipleChats": {"fork": True, "sideChat": True}}
+    host = Host(
+        [
+            EchoProvider(capabilities=chats),
+            EchoProvider(provider_id="echo2", display_name="Echo 2", capabilities=chats),
+        ],
+        LoopbackSingleUserPolicy(),
+        multiple_chat_providers=True,
+    )
+    try:
+        async with (
+            _Paired(host) as client,
+            await asyncio.wait_for(client.create_session(provider="echo"), timeout=20) as session,
+        ):
+            assert client.multiple_chat_providers
+            chat = await session.create_chat(provider="echo2")
+            assert chat.provider == "echo2"
+            text = ""
+            async for event in chat.prompt("on the guest"):
+                if isinstance(event, Delta):
+                    text += event.text
+                elif isinstance(event, TurnCompleted):
+                    break
+            assert "on the guest" in text
+            assert host._sessions[session.uri].chat_providers == {chat.uri: "echo2"}
+    finally:
+        await host.aclose()

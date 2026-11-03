@@ -6,6 +6,11 @@ Every release states the protocol versions it speaks.
 
 ## [Unreleased]
 
+### Changed — docs
+
+- The README notes that a host may refuse a cross-session `moveChat` of a chat on another agent
+  than its session's (`ahp-host` does, `PermissionDenied`), while reordering it works.
+
 ### Fixed
 
 - `Session.create_chat(provider=)` no longer refuses a provider when the root `agents` list is empty or

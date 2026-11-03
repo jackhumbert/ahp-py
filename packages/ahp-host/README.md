@@ -235,7 +235,7 @@ All 34 commands, and none of them a stub:
 `initialize` · `ping` · `subscribe` · `unsubscribe` · `reconnect` ·
 `listSessions` (paginated) · `createSession` (with `fork`) · `disposeSession` ·
 `dispatchAction` · `fetchTurns` · `createChat` · `disposeChat` ·
-`moveChat` (reorder, or move to another session with the agent's consent) ·
+`moveChat` (reorder, or move to another session with the agent's consent; a chat on another agent than its session's only reorders) ·
 `resolveSessionConfig` · `sessionConfigCompletions` · `completions` ·
 `authenticate` · `createTerminal` · `disposeTerminal` · `createResourceWatch` ·
 `invokeChangesetOperation` · `resourceResolve` · `resourceRead` ·
@@ -289,6 +289,33 @@ chat's folder subset, which the host keeps inside the session's set — a
 `endTurn` pinned when the message is accepted, is refused when it names an
 unknown chat or turn, and reaches the provider resolved
 (`UserMessage.attached_chats`).
+
+**Per-chat agents (AHP 1.1.0).** A chat can run on an agent other than its session's:
+`Host(..., multiple_chat_providers=True)` (`--multiple-chat-providers` in the demo, which also
+serves a second echo agent) advertises `multipleChatProviders`, and `createChat` then takes
+`provider`. It is opt-in because it changes what a session persists. The host rejects with
+`InvalidParams` a `provider` sent without the capability, one that is not a registered agent,
+one whose agent lacks `multipleChats`, and a fork or side chat naming an agent other than its
+source chat's (absent means the source's); the `multipleChats`, `fork`, `sideChat` and
+`multipleWorkingDirectories` checks read the *chat's* agent. Such a *foreign* chat reports
+`provider` (on `ChatState`, `ChatSummary` and `SessionChatSummary`; a chat on the session's own
+agent reports none) and carries its own `config`: that agent's `resolve_config` properties,
+`chatMutable` ones only, with their defaults — the session's config never governs it, and an
+agent with no config leaves the chat without one. The first foreign chat of a provider creates
+that provider's agent session (the *guest*, through `create_session`, with the session's URI,
+folders and publisher and `chat_uri` set to that chat); later ones, forks and side chats
+included, are opened on it through `HostsChats`. Every per-chat call goes to the chat's own
+agent (turns, steering, cancel, truncation, chat config and folders, open and close);
+archive, folder changes and active clients fan out to the session's agent and every guest;
+session config, MCP servers and customization toggles stay with the session's agent. A guest
+is closed with its last chat, and with the session or the host. It persists its own resume
+state and resumes lazily, on first use of one of its chats. A chat whose agent is no longer
+registered stays but refuses its turns with a `chat.provider` error. **A foreign chat cannot
+move to another session** (or a tree containing one): the spec lets a host refuse a move it
+cannot support, and the answer is `PermissionDenied`, as for a move to a session of another
+agent; reordering it within its session works. An agent that cannot be told a chat's config
+(`chat_config_changed` raising) fails closed: `createChat` is refused with nothing created,
+and an existing chat's turns are refused until a delivery succeeds.
 
 **The agent can change after start-up**: an `UpdatesAgentInfo` provider that
 finds its models late republishes them (`root/agentsChanged`, only when the

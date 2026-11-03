@@ -10,6 +10,11 @@ versions each release speaks.
 
 ## [Unreleased]
 
+### Added — per-chat agents: docs and tests (upstream `c301d494`)
+
+- The README has a "Per-chat agents" paragraph and the provider guide says what a guest agent
+  receives. An interop test drives a chat on another agent through the Python client.
+
 ### Added — per-chat agents: the capability (upstream `c301d494`)
 
 - `Host(..., multiple_chat_providers=True)` and `ahp-host --multiple-chat-providers` advertise

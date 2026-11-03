@@ -153,7 +153,8 @@ capability (`client.multiple_chat_providers`) and is refused locally without it,
 and the `multipleChats` / `fork` / `sideChat` checks then read **that agent's**
 capabilities. `chat.provider` is the agent behind a chat, and a `chat/moved`
 event (`ChatMoved`) reports the new session, provider and config schema after a
-cross-session move.
+cross-session move. A host may refuse that move for a chat on another agent than its
+session's (`ahp-host` does, as `PermissionDenied`); reordering within the session works.
 
 A chat's config does **not** inherit from the session: `chat.effective_config()`
 is the chat's own values for the `chatMutable` properties (a missing key takes the
