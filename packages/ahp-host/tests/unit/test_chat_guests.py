@@ -8,6 +8,7 @@ agent; session-wide calls fan out or stay with the session's agent as documented
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 import pytest
@@ -425,5 +426,80 @@ async def test_creating_a_foreign_chat_ignores_a_stale_resume_state() -> None:
         await _chat(wire, SESSION, "ahp-chat:/gs-rs-c", provider="echo2")
         [context] = guest.contexts
         assert context.resume_state is None
+    finally:
+        await shut(host, wire, serving)
+
+
+async def test_a_rollback_does_not_close_a_guest_another_create_is_still_using() -> None:
+    """Two creates on a new provider: the second reuses the guest the first made, and its
+    route is not recorded until it is registered. The first failing meanwhile must not close
+    the guest under the second."""
+    host, _, guest = pair()
+    wire, serving = await connect(host)
+    wire2, serving2 = await connect(host, "c2")
+    try:
+        await open_session(wire, SESSION)
+        await wire2.request("subscribe", {"channel": SESSION})
+        a, b = "ahp-chat:/gs-race-a", "ahp-chat:/gs-race-b"
+        fail_a, entered_b, gate_b = asyncio.Event(), asyncio.Event(), asyncio.Event()
+        original = guest.create_session
+
+        async def rigged(context: Any) -> Any:
+            made = await original(context)
+            config, opened = made.chat_config_changed, made.chat_opened
+
+            async def cco(chat: str, values: Any) -> None:
+                if chat == a:
+                    await fail_a.wait()
+                    raise RuntimeError("refused")
+                await config(chat, values)
+
+            async def open_(chat_context: Any) -> None:
+                if chat_context.chat_uri == b:
+                    entered_b.set()
+                    await gate_b.wait()
+                await opened(chat_context)
+
+            made.chat_config_changed = cco  # type: ignore[method-assign]
+            made.chat_opened = open_  # type: ignore[method-assign]
+            return made
+
+        guest.create_session = rigged  # type: ignore[method-assign]
+        first = asyncio.create_task(_chat(wire, SESSION, a, provider="echo2"))
+        for _ in range(200):
+            if guest.sessions:
+                break
+            await asyncio.sleep(0.01)
+        second = asyncio.create_task(_chat(wire2, SESSION, b, provider="echo2"))
+        await asyncio.wait_for(entered_b.wait(), 5)
+        fail_a.set()
+        assert "error" in await asyncio.wait_for(first, 5)
+        assert not guest.sessions[0].was_closed
+        gate_b.set()
+        assert "error" not in await asyncio.wait_for(second, 5)
+        assert not guest.sessions[0].was_closed
+        assert host._sessions[SESSION].guests == {"echo2": guest.sessions[0]}
+    finally:
+        fail_a.set()
+        gate_b.set()
+        await shut(host, wire2, serving2)
+        await shut(host, wire, serving)
+
+
+async def test_a_guest_whose_chats_cannot_be_attached_is_not_orphaned() -> None:
+    host, _, guest = pair()
+    wire, serving = await connect(host)
+    try:
+        await open_session(wire, SESSION)
+
+        async def broken(*args: Any, **kwargs: Any) -> None:
+            raise RuntimeError("attach failed")
+
+        host._attach_guest_chats = broken  # type: ignore[method-assign]
+        response = await _chat(wire, SESSION, "ahp-chat:/gs-orph", provider="echo2")
+        assert "error" in response, response
+        session = host._sessions[SESSION]
+        assert session.guests == {}
+        assert guest.sessions[0].was_closed
     finally:
         await shut(host, wire, serving)

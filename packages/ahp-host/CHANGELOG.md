@@ -10,6 +10,13 @@ versions each release speaks.
 
 ## [Unreleased]
 
+### Fixed — a failed `createChat` no longer closes a guest another create is using
+
+- `_ensure_guest` reserves the guest for the create that found or made it (`_Session.guest_pending`)
+  and the route takes over once recorded; `_release_guest` closes a guest only when no chat is
+  routed to it and no create holds a reservation. A guest whose first chats cannot be attached
+  is released instead of orphaned.
+
 ### Fixed — a new guest no longer inherits a closed guest's resume state
 
 - Releasing a provider's guest forgets its persisted resume state, and only a resumed guest

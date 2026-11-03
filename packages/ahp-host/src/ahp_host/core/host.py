@@ -1639,6 +1639,9 @@ class _Session:
     #: Serialises making or resuming a guest, so two foreign chats of one provider
     #: created at once share one agent session instead of starting two.
     guest_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    #: Creates in flight per provider that hold its guest but have no route yet
+    #: (`_ensure_guest`); a guest is not released while one is pending.
+    guest_pending: dict[str, int] = field(default_factory=dict)
     #: The running turn PER CHAT. One slot for the whole session meant a second
     #: chat's turn overwrote the first's handle, so `chat/turnCancelled` on chat
     #: A cancelled whichever chat had started most recently -- with no terminal
@@ -5353,11 +5356,13 @@ class Host:
         # URI collision cannot overwrite the other chat's.
         hosted_on: AgentSession | None = None
         guest_made = False
+        reserved = False
         try:
             if foreign:
                 hosted_on, guest_made = await self._ensure_guest(
                     session, chat_provider, chat_uri, state
                 )
+                reserved = True
             if not guest_made:
                 await self._open_chat(
                     session,
@@ -5366,25 +5371,27 @@ class Host:
                     agent=hosted_on,
                 )
         except BaseException:
-            if guest_made:
-                await self._release_guest(session, chat_provider)
+            if reserved:
+                await self._release_guest(session, chat_provider, reserved=True)
             raise
         if self._sessions.get(session_uri) is not session:
             # Disposed while the provider was being asked.
-            if guest_made:
-                await self._release_guest(session, chat_provider)
+            if reserved:
+                await self._release_guest(session, chat_provider, reserved=True)
             raise errors.session_not_found(session_uri)
         if self.sequencer.has_channel(chat_uri):
             # A concurrent `createChat` took the URI meanwhile. Nothing was
             # created by this one. Not `chat_closed`: the URI now names the
             # chat the other call created, which the agent must keep.
-            if guest_made:
-                await self._release_guest(session, chat_provider)
+            if reserved:
+                await self._release_guest(session, chat_provider, reserved=True)
             raise errors.AhpError(
                 AHP_ERROR_CODES["AlreadyExists"], f"Channel already exists: {chat_uri}"
             )
         if foreign:
             session.chat_providers[chat_uri] = chat_provider
+            # The route now holds the guest.
+            self._unreserve_guest(session, chat_provider)
             if guest_made:
                 # The guest was created FOR this chat (its context's `chat_uri`),
                 # so it needs no `chat_opened`; disposing the chat still closes it.
@@ -5497,9 +5504,24 @@ class Host:
         if provider is not None:
             await self._release_guest(session, provider)
 
-    async def _release_guest(self, session: _Session, provider: str) -> None:
-        """Close and drop *provider*'s guest when no chat of the session runs on it any more."""
-        if provider in session.chat_providers.values():
+    def _unreserve_guest(self, session: _Session, provider: str) -> None:
+        left = session.guest_pending.get(provider, 0) - 1
+        if left > 0:
+            session.guest_pending[provider] = left
+        else:
+            session.guest_pending.pop(provider, None)
+
+    async def _release_guest(
+        self, session: _Session, provider: str, *, reserved: bool = False
+    ) -> None:
+        """Close and drop *provider*'s guest when nothing of the session uses it any more.
+
+        Uses are the chats routed to it and the creates in flight that found or made it
+        (`_ensure_guest` reserves it for them); *reserved* gives back the caller's own.
+        """
+        if reserved:
+            self._unreserve_guest(session, provider)
+        if provider in session.chat_providers.values() or session.guest_pending.get(provider):
             return
         guest = session.guests.pop(provider, None)
         # What it persisted described the chats it just lost; a later guest on this
@@ -5573,6 +5595,9 @@ class Host:
         for chat in chats:
             await self._tell_chat_config(session, chat)
 
+    def _reserve_guest(self, session: _Session, provider: str) -> None:
+        session.guest_pending[provider] = session.guest_pending.get(provider, 0) + 1
+
     async def _ensure_guest(
         self, session: _Session, provider_id: str, chat: str, chat_state: Mapping[str, Any]
     ) -> tuple[AgentSession, bool]:
@@ -5589,10 +5614,12 @@ class Host:
         async with session.guest_lock:
             existing = session.guests.get(provider_id)
             if existing is not None:
+                self._reserve_guest(session, provider_id)
                 return existing, False
             if self._foreign_chats_of(session, provider_id):
                 resumed = await self._resume_guest_locked(session, provider_id)
                 if resumed is not None:
+                    self._reserve_guest(session, provider_id)
                     return resumed, False
             context = self._guest_context(session, provider_id, chat, chat_state)
             try:
@@ -5604,9 +5631,15 @@ class Host:
                     f"the {provider_id} agent could not start: {type(exc).__name__}: {exc}"
                 ) from exc
             session.guests[provider_id] = guest
+            self._reserve_guest(session, provider_id)
             # Chats a restored session already had on this provider (when it could
             # not be resumed) are announced on the fresh agent.
-            await self._attach_guest_chats(session, provider_id, guest, first=chat)
+            try:
+                await self._attach_guest_chats(session, provider_id, guest, first=chat)
+            except BaseException:
+                # Nobody was given the guest, so nobody else will close it.
+                await self._release_guest(session, provider_id, reserved=True)
+                raise
             return guest, True
 
     async def _resume_guest(self, session: _Session, provider_id: str) -> None:
