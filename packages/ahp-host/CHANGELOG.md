@@ -10,6 +10,13 @@ versions each release speaks.
 
 ## [Unreleased]
 
+### Added — per-chat agents: the capability (upstream `c301d494`)
+
+- `Host(..., multiple_chat_providers=True)` and `ahp-host --multiple-chat-providers` advertise
+  `InitializeResult.multipleChatProviders: {}`. It is opt-in because it changes what a session
+  persists. Without it a `createChat` that names a `provider` is `InvalidParams`. The demo flag
+  also serves a second echo agent, `echo-guest`, so there is something to name.
+
 ### Fixed — a chat whose config the agent was not told fails closed
 
 - `Host._tell_chat_config` used to log and forget a `chat_config_changed` that raised, leaving an

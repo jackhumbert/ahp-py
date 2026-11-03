@@ -82,6 +82,7 @@ the ones that execute or destroy are separate from the ones that only read:
 | `--confirm-tools` | The agent asks before running its tool, and honours edits to the input |
 | `--client-tools` | The agent delegates to a tool the **client** owns |
 | `--multi-chat` | Advertise `capabilities.multipleChats` — chat tabs, fork, and side chats |
+| `--multiple-chat-providers` | Advertise `multipleChatProviders` and serve a second echo agent (`echo-guest`), so a chat can run on another agent than its session's. Needs `--multi-chat` |
 | `--serve-directory PATH` | Expose `PATH` over the `resource*` commands, jailed to that root |
 | `--writable` | **Also allow writes** under `--serve-directory`. A second opt-in, on purpose |
 | `--terminal` | Install a real pty backend. **This runs commands** |

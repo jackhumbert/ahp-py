@@ -2043,6 +2043,7 @@ class Host:
         automation_history: int = DEFAULT_AUTOMATION_HISTORY,
         max_content_bytes: int | None = DEFAULT_MAX_STORE_BYTES,
         run_credentials: RunCredentials | None = None,
+        multiple_chat_providers: bool = False,
     ) -> None:
         if policy is None:  # pragma: no cover - defensive; typing already forbids it
             raise ValueError("a Policy is required; there is no default")
@@ -2064,6 +2065,12 @@ class Host:
         #: no longer serves (an id renamed since it was stored).
         self.provider: AgentProvider = providers[0]
         self.policy = policy
+        #: Advertise `InitializeResult.multipleChatProviders` (AHP 1.1.0): a chat
+        #: may run on an agent other than its session's (`createChat.provider`).
+        #: Opt-in because it changes what a session persists: it keeps one agent
+        #: session per foreign provider, and the chats routed to them. Without
+        #: it a `createChat` that names a `provider` is `InvalidParams`.
+        self.multiple_chat_providers = multiple_chat_providers
         self.info = info or HostInfo()
         self.supported_versions = tuple(supported_versions)
         # Without `sequence_file` the counter restarts with the process, which
@@ -3212,6 +3219,9 @@ class Host:
             result["telemetry"] = dict(self.telemetry)
         if self.default_directory is not None:
             result["defaultDirectory"] = self.default_directory
+        if self.multiple_chat_providers:
+            # "Presence means clients may send `createChat.provider`."
+            result["multipleChatProviders"] = {}
         triggers = self.completion_triggers()
         if triggers:
             # Without this the `completions` command is fully implemented and
@@ -5174,6 +5184,11 @@ class Host:
             raise errors.session_not_found(session_uri)
         if not self.policy.may_see_channel(connection.info, session_uri):
             raise errors.AhpError(-32009, f"Not permitted to modify {session_uri}")
+
+        if params.get("provider") is not None and not self.multiple_chat_providers:
+            # "Requires `InitializeResult.multipleChatProviders`": a client MUST NOT
+            # send it without, and only the host can enforce that.
+            raise errors.invalid_params("this host does not advertise multipleChatProviders")
 
         capability = self._multichat(self._provider_of(session))
         if capability is None:

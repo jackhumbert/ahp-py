@@ -161,6 +161,16 @@ def _parse_args() -> argparse.Namespace:
             "open a second chat at all"
         ),
     )
+    parser.add_argument(
+        "--multiple-chat-providers",
+        action="store_true",
+        help=(
+            "advertise multipleChatProviders and serve a second echo agent "
+            '("echo-guest"), so a chat can run on an agent other than its '
+            "session's (createChat.provider). Needs --multi-chat: both agents "
+            "must advertise multipleChats for a foreign chat to be allowed"
+        ),
+    )
     parser.add_argument("-v", "--verbose", action="store_true", help="debug logging")
     return parser.parse_args()
 
@@ -178,27 +188,39 @@ async def _run() -> None:
     workspace = (
         DemoWorkspace(Path(args.serve_directory)) if args.changes and args.serve_directory else None
     )
-    host = Host(
-        EchoProvider(
-            delay=args.delay,
-            display_name=args.agent_name,
-            model_name=args.model_name,
-            customizations=args.customizations,
-            elicit=args.elicit,
-            confirm_tools=args.confirm_tools,
-            client_tools=args.client_tools,
-            configurable=args.configurable,
-            workspace=workspace,
-            capabilities=(
-                {"multipleChats": {"fork": True, "sideChat": True}} if args.multi_chat else None
-            ),
-            # Echo's `complete()` scans for "#" and nothing else, so "#" is the
-            # only honest advertisement. Naming "@" as well would open a picker
-            # that is always empty. Declared by the PROVIDER, which is the one
-            # that knows; the host advertises it (`DeclaresCompletionTriggers`).
-            completion_trigger_characters=("#",),
+    echo = EchoProvider(
+        delay=args.delay,
+        display_name=args.agent_name,
+        model_name=args.model_name,
+        customizations=args.customizations,
+        elicit=args.elicit,
+        confirm_tools=args.confirm_tools,
+        client_tools=args.client_tools,
+        configurable=args.configurable,
+        workspace=workspace,
+        capabilities=(
+            {"multipleChats": {"fork": True, "sideChat": True}} if args.multi_chat else None
         ),
+        # Echo's `complete()` scans for "#" and nothing else, so "#" is the
+        # only honest advertisement. Naming "@" as well would open a picker
+        # that is always empty. Declared by the PROVIDER, which is the one
+        # that knows; the host advertises it (`DeclaresCompletionTriggers`).
+        completion_trigger_characters=("#",),
+    )
+    # A second agent for a chat to run on (`createChat.provider`). Plain: it is
+    # there to be a different agent, not to repeat every demo flag.
+    guest = EchoProvider(
+        provider_id="echo-guest",
+        display_name=f"{args.agent_name} (guest)",
+        model_name=args.model_name,
+        delay=args.delay,
+        configurable=args.configurable,
+        capabilities={"multipleChats": {"fork": True, "sideChat": True}},
+    )
+    host = Host(
+        [echo, guest] if args.multiple_chat_providers else echo,
         LoopbackSingleUserPolicy(),
+        multiple_chat_providers=args.multiple_chat_providers,
         info=HostInfo(name="ahp-host (demo)"),
         # `Path(None)` crashed the host outright when --terminal was passed
         # without --serve-directory. And the backend's own docstring says it
