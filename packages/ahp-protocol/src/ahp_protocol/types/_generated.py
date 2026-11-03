@@ -2,7 +2,7 @@
 
 Regenerate with `python scripts/generate_tables.py`.
 
-Source: main (c5628cd4b09f76cf143ebe655e872c0fb3f1b8d8)
+Source: main (c301d494e6f9bb358b1430125a979e79b2e5c333)
 """
 
 from __future__ import annotations
@@ -59,6 +59,7 @@ ACTION_TYPES: Final[frozenset[str]] = frozenset([
     'chat/isArchivedChanged',
     'chat/isReadChanged',
     'chat/movableChanged',
+    'chat/moved',
     'chat/pendingMessageRemoved',
     'chat/pendingMessageSet',
     'chat/queuedMessagesReordered',
@@ -202,6 +203,7 @@ IS_CLIENT_DISPATCHABLE: Final[dict[str, bool]] = {
     'chat/isReadChanged': True,
     'chat/isArchivedChanged': True,
     'chat/configChanged': True,
+    'chat/moved': False,
     'chat/inputRequested': False,
     'chat/inputAnswerChanged': True,
     'chat/inputCompleted': True,
@@ -313,6 +315,7 @@ ACTION_INTRODUCED_IN: Final[dict[str, str]] = {
     'chat/isReadChanged': '0.9.0',
     'chat/isArchivedChanged': '0.9.0',
     'chat/configChanged': '1.1.0',
+    'chat/moved': '1.1.0',
     'chat/inputRequested': '0.4.0',
     'chat/inputAnswerChanged': '0.4.0',
     'chat/inputCompleted': '0.4.0',

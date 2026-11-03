@@ -18,8 +18,8 @@ suite, so a dependency bump that moves the spec under it fails loudly.
 |---|---|
 | Upstream | [`microsoft/agent-host-protocol`](https://github.com/microsoft/agent-host-protocol) (MIT) |
 | Spec ref | `main` — ahead of any release; upstream's tree declares `1.1.0`, unreleased |
-| Spec commit | `c5628cd4b09f76cf143ebe655e872c0fb3f1b8d8` |
-| Conformance corpus vendored from | `main` @ `c5628cd4` → `types/test-cases/` |
+| Spec commit | `c301d494e6f9bb358b1430125a979e79b2e5c333` |
+| Conformance corpus vendored from | `main` @ `c301d494` → `types/test-cases/` |
 | `UPSTREAM_PROTOCOL_VERSION` | `1.1.0` — upstream's development version at that commit |
 | `UPSTREAM_SUPPORTED_PROTOCOL_VERSIONS` | `1.0.0, 0.9.0` — what *upstream* declares |
 | `DEFAULT_SUPPORTED_VERSIONS` | `1.0.0, 0.9.0, 0.8.0, 0.7.0, 0.6.0` — what a peer built on this pin can honestly speak |
@@ -53,12 +53,51 @@ earlier one sits in the client's pending list for good.
 must still resolve to the pinned commit; a branch moves, so the commit only has
 to be on it. Either way the archive is cut from the **commit**. When
 `spec/v1.1.0` is tagged, re-pin to it and diff every `reducer.ts` between
-`c5628cd4` and the tag — upstream may change 1.1.0 again before releasing it.
+`c301d494` and the tag — upstream may change 1.1.0 again before releasing it.
 
-For the record, as of **2026-10-25**: `spec/v1.0.0` (2026-10-02) is still the
-newest spec tag, and the pinned commit is upstream `main`'s head, 56 commits
+For the record, as of **2026-11-03**: `spec/v1.0.0` (2026-10-02) is still the
+newest spec tag, and the pinned commit is upstream `main`'s head, 72 commits
 past it. Upstream's `CHANGELOG.md` has only an empty `[1.1.0] — Unreleased`
 heading; the change notes live in `docs/.changes/*.json` until release.
+
+The `main` @ `c5628cd4` → `main` @ `c301d494` absorb (2026-11-03). Sixteen
+upstream commits, four of them spec changes; two `reducer.ts` files changed
+(`chat` and `session`, diffed by hand) and the other eight are byte-identical.
+Reducer fixtures 335 → 346, round-trips 97 → 104 (079–085 are new); all 124
+pre-existing JS-semantics cases regenerate byte-identically and 18 new ones cover
+the branches below. `DEFAULT_SUPPORTED_VERSIONS` and `UPSTREAM_PROTOCOL_VERSION`
+(`1.1.0`) do not move.
+
+- **`chat/moved`** (new action, `1.1.0`, not client-dispatchable): the chat's new
+  `session`, `provider?` and `schema?` after a cross-session `moveChat`. The reducer
+  sets `provider` and `config.schema` from the action and clears each one it leaves
+  out, keeps `config.values`, and creates `config: {schema, values: {}}` when there
+  was no config and the action carries a schema. An explicit `null` is not
+  `undefined` and is written through.
+- **per-chat agent**: `CreateChatParams.provider`, `provider` on `ChatState`,
+  `ChatSummary` and `SessionChatSummary`, `ChatConfigState.schema`, and the
+  `InitializeResult.multipleChatProviders` capability. `provider` is an identity
+  field: the `session` reducer now drops it from `session/chatUpdated`.changes, as
+  it already did `resource`.
+- **`ToolCallResult.resultMetadata`** (MCP `_meta`): carried through
+  `chat/toolCallResultConfirmed` next to `structuredContent`.
+- **reasoning timing**: `startedAt` and `duration` on `ReasoningResponsePart` and
+  `chat/reasoning`, overwritten only when the action carries them
+  (`!== undefined`), so `duration: 0` and an explicit `null` are both written.
+- **Behaviour change: chat config no longer inherits from the session.** This is a
+  doc change with no reducer change, and the one thing here that breaks a reading
+  we shipped. A chat's `config.values` hold its `chatMutable` properties; a missing
+  key takes the schema `default`, not the session's value; non-`chatMutable`
+  properties are session-wide; a chat with its own `config.schema` does not use the
+  session's config at all. The host sets `config` on every chat, the default chat
+  included, whenever the session has one. Fixtures 291 and 292 were renamed and
+  317–319 added to pin `config.schema` surviving `chat/configChanged`.
+- **Version gating of `chat/moved`.** `ACTION_INTRODUCED_IN` dates it `1.1.0`, but
+  nothing in this repository gates sending an action on the negotiated version
+  (see the `0.9.0` row of the defects table: such a gate would be wrong), so
+  `chat/moved` is **not** withheld from a pre-1.1.0 connection. A `1.0.0` peer's
+  chat reducer ignores an action it does not know (invariant 3), so sending is
+  harmless.
 
 The `main` @ `1ef06429` → `main` @ `c5628cd4` absorb (2026-10-25). **No
 `reducer.ts` changed** (diffed by hand, as step 6 requires), and all 124
@@ -158,8 +197,8 @@ mapped into the wheel at `ahp_protocol/conformance/_upstream/` by hatch's
 
 | Vendored | Source | Why not fetched at runtime |
 |---|---|---|
-| `types/test-cases/reducers/**` (335 fixtures) | git repository only | not published as a release asset |
-| `types/test-cases/round-trips/**` (97 fixtures) | git repository only | same |
+| `types/test-cases/reducers/**` (346 fixtures) | git repository only | not published as a release asset |
+| `types/test-cases/round-trips/**` (104 fixtures) | git repository only | same |
 | `types/test-cases/version-negotiation.json` (22 cases) | git repository only | same |
 | `schema/*.schema.json` (5 files) | release asset **or** git repository | asset exists, but must match the pinned commit |
 | `ts/` — `registry.ts`, `action-origin.generated.ts`, `actions.ts`, `errors.ts`, `session-state.ts` | git repository only | the codegen inputs for `_generated.py` |

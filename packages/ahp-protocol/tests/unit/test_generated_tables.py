@@ -25,13 +25,13 @@ ROOT = Path(__file__).resolve().parents[2]
 
 def test_action_tables_cover_every_action() -> None:
     """A missing entry would silently make an action non-dispatchable or unversioned."""
-    assert len(ACTION_TYPES) == 107
+    assert len(ACTION_TYPES) == 108
     assert set(IS_CLIENT_DISPATCHABLE) == set(ACTION_TYPES)
     assert set(ACTION_INTRODUCED_IN) == set(ACTION_TYPES)
 
 
 def test_client_dispatchable_count() -> None:
-    """48 of 107. Upstream has more `@clientDispatchable` JSDoc annotations, but
+    """48 of 108. Upstream has more `@clientDispatchable` JSDoc annotations, but
     its own generator only counts declarations carrying `type: ActionType.X`, so
     the generated map -- which `isClientDispatchable` reads -- is authoritative.
     1.1.0 added one: `chat/configChanged`."""
@@ -157,8 +157,8 @@ def test_root_session_chat_action_counts() -> None:
         counts[action.split("/")[0]] = counts.get(action.split("/")[0], 0) + 1
     assert counts["root"] == 4
     assert counts["session"] == 30
-    assert counts["chat"] == 38
-    assert counts["root"] + counts["session"] + counts["chat"] == 72
+    assert counts["chat"] == 39
+    assert counts["root"] + counts["session"] + counts["chat"] == 73
 
 
 def test_schemas_are_vendored_but_not_trusted() -> None:

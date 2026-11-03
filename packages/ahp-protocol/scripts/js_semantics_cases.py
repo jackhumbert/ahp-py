@@ -1000,6 +1000,152 @@ case(
     [{"type": "chat/configChanged", "config": "ab"}],
 )
 
+# ── 1.1.0 absorb: chat/moved, reasoning timing, resultMetadata, chatUpdated ──
+_SCHEMA = {"type": "object", "properties": {}}
+_MOVED_CFG = {**_CHAT, "provider": "p0", "config": {"schema": {"old": 1}, "values": {"a": 1}}}
+case(
+    "chat/moved-null-provider-and-schema",
+    "chat",
+    _MOVED_CFG,
+    [{"type": "chat/moved", "session": "s2", "provider": None, "schema": None}],
+)
+case(
+    "chat/moved-null-schema-no-config",
+    "chat",
+    _CHAT,
+    [{"type": "chat/moved", "session": "s2", "schema": None}],
+)
+case(
+    "chat/moved-absent-clears-both",
+    "chat",
+    _MOVED_CFG,
+    [{"type": "chat/moved", "session": "s2"}],
+)
+case(
+    "chat/moved-config-without-values",
+    "chat",
+    {**_CHAT, "config": {"schema": {"old": 1}}},
+    [{"type": "chat/moved", "session": "s2", "provider": "p1", "schema": _SCHEMA}],
+)
+case(
+    "chat/moved-config-without-values-no-schema",
+    "chat",
+    {**_CHAT, "config": {}},
+    [{"type": "chat/moved", "session": "s2"}],
+)
+case(
+    "chat/moved-null-config-with-schema",
+    "chat",
+    {**_CHAT, "config": None},
+    [{"type": "chat/moved", "session": "s2", "schema": _SCHEMA}],
+)
+case(
+    "chat/moved-creates-config",
+    "chat",
+    _CHAT,
+    [{"type": "chat/moved", "session": "s2", "provider": "p1", "schema": _SCHEMA}],
+)
+
+
+def _reasoning_chat(**part: Any) -> dict[str, Any]:
+    return {
+        **_CHAT,
+        "activeTurn": {
+            "id": "t1",
+            "startedAt": "1970-01-01T00:00:00.000Z",
+            "message": {"text": "hi", "origin": {"kind": "user"}},
+            "responseParts": [{"kind": "reasoning", "id": "r1", "content": "a", **part}],
+        },
+    }
+
+
+def _reasoning(**extra: Any) -> dict[str, Any]:
+    return {"type": "chat/reasoning", "turnId": "t1", "partId": "r1", "content": "b", **extra}
+
+
+case("chat/reasoning-duration-zero", "chat", _reasoning_chat(), [_reasoning(duration=0)])
+case("chat/reasoning-duration-null", "chat", _reasoning_chat(), [_reasoning(duration=None)])
+case(
+    "chat/reasoning-duration-null-over-value",
+    "chat",
+    _reasoning_chat(duration=5, startedAt="x"),
+    [_reasoning(duration=None, startedAt=None)],
+)
+case(
+    "chat/reasoning-timing-absent-keeps",
+    "chat",
+    _reasoning_chat(duration=5, startedAt="x"),
+    [_reasoning()],
+)
+case(
+    "chat/reasoning-timing-overwrites",
+    "chat",
+    _reasoning_chat(duration=5, startedAt="x"),
+    [_reasoning(duration=0, startedAt="y")],
+)
+
+
+def _confirm(approved: bool) -> dict[str, Any]:
+    return {
+        "type": "chat/toolCallResultConfirmed",
+        "turnId": "t1",
+        "toolCallId": "c1",
+        "approved": approved,
+    }
+
+
+case(
+    "chat/toolCallResultConfirmed-result-metadata",
+    "chat",
+    _chat_tool_call(
+        "pending-result-confirmation",
+        success=True,
+        pastTenseMessage="done",
+        resultMetadata={"k": 1},
+    ),
+    [_confirm(True)],
+)
+case(
+    "chat/toolCallResultConfirmed-result-metadata-null",
+    "chat",
+    _chat_tool_call(
+        "pending-result-confirmation",
+        success=True,
+        pastTenseMessage="done",
+        resultMetadata=None,
+    ),
+    [_confirm(True)],
+)
+case(
+    "chat/toolCallResultConfirmed-result-metadata-absent",
+    "chat",
+    _chat_tool_call("pending-result-confirmation", success=True, pastTenseMessage="done"),
+    [_confirm(True)],
+)
+case(
+    "chat/toolCallResultConfirmed-denied-drops-result-metadata",
+    "chat",
+    _chat_tool_call(
+        "pending-result-confirmation",
+        success=True,
+        pastTenseMessage="done",
+        resultMetadata={"k": 1},
+    ),
+    [_confirm(False)],
+)
+case(
+    "sess/chatUpdated-drops-provider",
+    "session",
+    {**_SESSION, "chats": [{"resource": "c", "title": "n", "provider": "p0"}]},
+    [{"type": "session/chatUpdated", "chat": "c", "changes": {"provider": "p1", "title": "m"}}],
+)
+case(
+    "sess/chatUpdated-null-provider-dropped",
+    "session",
+    {**_SESSION, "chats": [{"resource": "c", "title": "n"}]},
+    [{"type": "session/chatUpdated", "chat": "c", "changes": {"provider": None}}],
+)
+
 if __name__ == "__main__":
     for entry in CASES:
         sys.stdout.write(json.dumps(entry) + "\n")

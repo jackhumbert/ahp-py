@@ -299,9 +299,14 @@ def session_reducer(state: Any, action: Mapping[str, Any]) -> Any:
         index = index_of(chats, "resource", get(action, "chat"))
         if index < 0:
             return state
-        # Upstream destructures `resource` out of `changes`: identity fields are
-        # ignored even when a sender wrongly carries them.
-        changes = {k: v for k, v in _obj(get(action, "changes")).items() if k != "resource"}
+        # Upstream destructures `resource` and `provider` out of `changes`:
+        # identity fields are ignored even when a sender wrongly carries them
+        # (`provider` since 1.1.0; a chat's agent only changes via `chat/moved`).
+        changes = {
+            k: v
+            for k, v in _obj(get(action, "changes")).items()
+            if k not in ("resource", "provider")
+        }
         updated = list(chats)
         updated[index] = {**chats[index], **changes}
         return {**state, "chats": updated}

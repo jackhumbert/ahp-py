@@ -195,7 +195,7 @@ def test_the_reverse_here_column_matches_the_servers_dispatch_tables() -> None:
 
 def test_dispatchable_action_count_is_pinned() -> None:
     dispatchable = [a for a in ACTION_TYPES if IS_CLIENT_DISPATCHABLE.get(a)]
-    assert len(ACTION_TYPES) == 107
+    assert len(ACTION_TYPES) == 108
     assert len(dispatchable) == 48
 
 

@@ -132,7 +132,7 @@ mirror, which binds any of them by name at registration. The TypeScript
 | `session` | ✅ | ✅ |
 | `terminal` | ✅ | ✅ |
 
-## Client-dispatchable actions (48 of 107)
+## Client-dispatchable actions (48 of 108)
 
 Enumerated from the generated `IS_CLIENT_DISPATCHABLE` table.
 

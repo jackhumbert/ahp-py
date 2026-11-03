@@ -5129,6 +5129,890 @@
      }
     }
    }
+  },
+  {
+   "name": "chat/moved-null-provider-and-schema",
+   "reducer": "chat",
+   "initial": {
+    "turns": [],
+    "status": 1,
+    "modifiedAt": "1970-01-01T00:00:00.000Z",
+    "provider": "p0",
+    "config": {
+     "schema": {
+      "old": 1
+     },
+     "values": {
+      "a": 1
+     }
+    }
+   },
+   "actions": [
+    {
+     "type": "chat/moved",
+     "session": "s2",
+     "provider": null,
+     "schema": null
+    }
+   ],
+   "expected": {
+    "turns": [],
+    "status": 1,
+    "modifiedAt": "1970-01-01T00:00:00.000Z",
+    "provider": null,
+    "config": {
+     "values": {
+      "a": 1
+     },
+     "schema": null
+    }
+   }
+  },
+  {
+   "name": "chat/moved-null-schema-no-config",
+   "reducer": "chat",
+   "initial": {
+    "turns": [],
+    "status": 1,
+    "modifiedAt": "1970-01-01T00:00:00.000Z"
+   },
+   "actions": [
+    {
+     "type": "chat/moved",
+     "session": "s2",
+     "schema": null
+    }
+   ],
+   "expected": {
+    "turns": [],
+    "status": 1,
+    "modifiedAt": "1970-01-01T00:00:00.000Z",
+    "config": {
+     "schema": null,
+     "values": {}
+    }
+   }
+  },
+  {
+   "name": "chat/moved-absent-clears-both",
+   "reducer": "chat",
+   "initial": {
+    "turns": [],
+    "status": 1,
+    "modifiedAt": "1970-01-01T00:00:00.000Z",
+    "provider": "p0",
+    "config": {
+     "schema": {
+      "old": 1
+     },
+     "values": {
+      "a": 1
+     }
+    }
+   },
+   "actions": [
+    {
+     "type": "chat/moved",
+     "session": "s2"
+    }
+   ],
+   "expected": {
+    "turns": [],
+    "status": 1,
+    "modifiedAt": "1970-01-01T00:00:00.000Z",
+    "config": {
+     "values": {
+      "a": 1
+     }
+    }
+   }
+  },
+  {
+   "name": "chat/moved-config-without-values",
+   "reducer": "chat",
+   "initial": {
+    "turns": [],
+    "status": 1,
+    "modifiedAt": "1970-01-01T00:00:00.000Z",
+    "config": {
+     "schema": {
+      "old": 1
+     }
+    }
+   },
+   "actions": [
+    {
+     "type": "chat/moved",
+     "session": "s2",
+     "provider": "p1",
+     "schema": {
+      "type": "object",
+      "properties": {}
+     }
+    }
+   ],
+   "expected": {
+    "turns": [],
+    "status": 1,
+    "modifiedAt": "1970-01-01T00:00:00.000Z",
+    "provider": "p1",
+    "config": {
+     "schema": {
+      "type": "object",
+      "properties": {}
+     }
+    }
+   }
+  },
+  {
+   "name": "chat/moved-config-without-values-no-schema",
+   "reducer": "chat",
+   "initial": {
+    "turns": [],
+    "status": 1,
+    "modifiedAt": "1970-01-01T00:00:00.000Z",
+    "config": {}
+   },
+   "actions": [
+    {
+     "type": "chat/moved",
+     "session": "s2"
+    }
+   ],
+   "expected": {
+    "turns": [],
+    "status": 1,
+    "modifiedAt": "1970-01-01T00:00:00.000Z",
+    "config": {}
+   }
+  },
+  {
+   "name": "chat/moved-null-config-with-schema",
+   "reducer": "chat",
+   "initial": {
+    "turns": [],
+    "status": 1,
+    "modifiedAt": "1970-01-01T00:00:00.000Z",
+    "config": null
+   },
+   "actions": [
+    {
+     "type": "chat/moved",
+     "session": "s2",
+     "schema": {
+      "type": "object",
+      "properties": {}
+     }
+    }
+   ],
+   "expected": {
+    "turns": [],
+    "status": 1,
+    "modifiedAt": "1970-01-01T00:00:00.000Z",
+    "config": {
+     "schema": {
+      "type": "object",
+      "properties": {}
+     },
+     "values": {}
+    }
+   }
+  },
+  {
+   "name": "chat/moved-creates-config",
+   "reducer": "chat",
+   "initial": {
+    "turns": [],
+    "status": 1,
+    "modifiedAt": "1970-01-01T00:00:00.000Z"
+   },
+   "actions": [
+    {
+     "type": "chat/moved",
+     "session": "s2",
+     "provider": "p1",
+     "schema": {
+      "type": "object",
+      "properties": {}
+     }
+    }
+   ],
+   "expected": {
+    "turns": [],
+    "status": 1,
+    "modifiedAt": "1970-01-01T00:00:00.000Z",
+    "provider": "p1",
+    "config": {
+     "schema": {
+      "type": "object",
+      "properties": {}
+     },
+     "values": {}
+    }
+   }
+  },
+  {
+   "name": "chat/reasoning-duration-zero",
+   "reducer": "chat",
+   "initial": {
+    "turns": [],
+    "status": 1,
+    "modifiedAt": "1970-01-01T00:00:00.000Z",
+    "activeTurn": {
+     "id": "t1",
+     "startedAt": "1970-01-01T00:00:00.000Z",
+     "message": {
+      "text": "hi",
+      "origin": {
+       "kind": "user"
+      }
+     },
+     "responseParts": [
+      {
+       "kind": "reasoning",
+       "id": "r1",
+       "content": "a"
+      }
+     ]
+    }
+   },
+   "actions": [
+    {
+     "type": "chat/reasoning",
+     "turnId": "t1",
+     "partId": "r1",
+     "content": "b",
+     "duration": 0
+    }
+   ],
+   "expected": {
+    "turns": [],
+    "status": 1,
+    "modifiedAt": "1970-01-01T00:00:00.000Z",
+    "activeTurn": {
+     "id": "t1",
+     "startedAt": "1970-01-01T00:00:00.000Z",
+     "message": {
+      "text": "hi",
+      "origin": {
+       "kind": "user"
+      }
+     },
+     "responseParts": [
+      {
+       "kind": "reasoning",
+       "id": "r1",
+       "content": "ab",
+       "duration": 0
+      }
+     ]
+    }
+   }
+  },
+  {
+   "name": "chat/reasoning-duration-null",
+   "reducer": "chat",
+   "initial": {
+    "turns": [],
+    "status": 1,
+    "modifiedAt": "1970-01-01T00:00:00.000Z",
+    "activeTurn": {
+     "id": "t1",
+     "startedAt": "1970-01-01T00:00:00.000Z",
+     "message": {
+      "text": "hi",
+      "origin": {
+       "kind": "user"
+      }
+     },
+     "responseParts": [
+      {
+       "kind": "reasoning",
+       "id": "r1",
+       "content": "a"
+      }
+     ]
+    }
+   },
+   "actions": [
+    {
+     "type": "chat/reasoning",
+     "turnId": "t1",
+     "partId": "r1",
+     "content": "b",
+     "duration": null
+    }
+   ],
+   "expected": {
+    "turns": [],
+    "status": 1,
+    "modifiedAt": "1970-01-01T00:00:00.000Z",
+    "activeTurn": {
+     "id": "t1",
+     "startedAt": "1970-01-01T00:00:00.000Z",
+     "message": {
+      "text": "hi",
+      "origin": {
+       "kind": "user"
+      }
+     },
+     "responseParts": [
+      {
+       "kind": "reasoning",
+       "id": "r1",
+       "content": "ab",
+       "duration": null
+      }
+     ]
+    }
+   }
+  },
+  {
+   "name": "chat/reasoning-duration-null-over-value",
+   "reducer": "chat",
+   "initial": {
+    "turns": [],
+    "status": 1,
+    "modifiedAt": "1970-01-01T00:00:00.000Z",
+    "activeTurn": {
+     "id": "t1",
+     "startedAt": "1970-01-01T00:00:00.000Z",
+     "message": {
+      "text": "hi",
+      "origin": {
+       "kind": "user"
+      }
+     },
+     "responseParts": [
+      {
+       "kind": "reasoning",
+       "id": "r1",
+       "content": "a",
+       "duration": 5,
+       "startedAt": "x"
+      }
+     ]
+    }
+   },
+   "actions": [
+    {
+     "type": "chat/reasoning",
+     "turnId": "t1",
+     "partId": "r1",
+     "content": "b",
+     "duration": null,
+     "startedAt": null
+    }
+   ],
+   "expected": {
+    "turns": [],
+    "status": 1,
+    "modifiedAt": "1970-01-01T00:00:00.000Z",
+    "activeTurn": {
+     "id": "t1",
+     "startedAt": "1970-01-01T00:00:00.000Z",
+     "message": {
+      "text": "hi",
+      "origin": {
+       "kind": "user"
+      }
+     },
+     "responseParts": [
+      {
+       "kind": "reasoning",
+       "id": "r1",
+       "content": "ab",
+       "duration": null,
+       "startedAt": null
+      }
+     ]
+    }
+   }
+  },
+  {
+   "name": "chat/reasoning-timing-absent-keeps",
+   "reducer": "chat",
+   "initial": {
+    "turns": [],
+    "status": 1,
+    "modifiedAt": "1970-01-01T00:00:00.000Z",
+    "activeTurn": {
+     "id": "t1",
+     "startedAt": "1970-01-01T00:00:00.000Z",
+     "message": {
+      "text": "hi",
+      "origin": {
+       "kind": "user"
+      }
+     },
+     "responseParts": [
+      {
+       "kind": "reasoning",
+       "id": "r1",
+       "content": "a",
+       "duration": 5,
+       "startedAt": "x"
+      }
+     ]
+    }
+   },
+   "actions": [
+    {
+     "type": "chat/reasoning",
+     "turnId": "t1",
+     "partId": "r1",
+     "content": "b"
+    }
+   ],
+   "expected": {
+    "turns": [],
+    "status": 1,
+    "modifiedAt": "1970-01-01T00:00:00.000Z",
+    "activeTurn": {
+     "id": "t1",
+     "startedAt": "1970-01-01T00:00:00.000Z",
+     "message": {
+      "text": "hi",
+      "origin": {
+       "kind": "user"
+      }
+     },
+     "responseParts": [
+      {
+       "kind": "reasoning",
+       "id": "r1",
+       "content": "ab",
+       "duration": 5,
+       "startedAt": "x"
+      }
+     ]
+    }
+   }
+  },
+  {
+   "name": "chat/reasoning-timing-overwrites",
+   "reducer": "chat",
+   "initial": {
+    "turns": [],
+    "status": 1,
+    "modifiedAt": "1970-01-01T00:00:00.000Z",
+    "activeTurn": {
+     "id": "t1",
+     "startedAt": "1970-01-01T00:00:00.000Z",
+     "message": {
+      "text": "hi",
+      "origin": {
+       "kind": "user"
+      }
+     },
+     "responseParts": [
+      {
+       "kind": "reasoning",
+       "id": "r1",
+       "content": "a",
+       "duration": 5,
+       "startedAt": "x"
+      }
+     ]
+    }
+   },
+   "actions": [
+    {
+     "type": "chat/reasoning",
+     "turnId": "t1",
+     "partId": "r1",
+     "content": "b",
+     "duration": 0,
+     "startedAt": "y"
+    }
+   ],
+   "expected": {
+    "turns": [],
+    "status": 1,
+    "modifiedAt": "1970-01-01T00:00:00.000Z",
+    "activeTurn": {
+     "id": "t1",
+     "startedAt": "1970-01-01T00:00:00.000Z",
+     "message": {
+      "text": "hi",
+      "origin": {
+       "kind": "user"
+      }
+     },
+     "responseParts": [
+      {
+       "kind": "reasoning",
+       "id": "r1",
+       "content": "ab",
+       "duration": 0,
+       "startedAt": "y"
+      }
+     ]
+    }
+   }
+  },
+  {
+   "name": "chat/toolCallResultConfirmed-result-metadata",
+   "reducer": "chat",
+   "initial": {
+    "activeTurn": {
+     "id": "t1",
+     "startedAt": "1970-01-01T00:00:00.000Z",
+     "message": {
+      "text": "hi",
+      "origin": {
+       "kind": "user"
+      }
+     },
+     "responseParts": [
+      {
+       "kind": "toolCall",
+       "toolCall": {
+        "toolCallId": "c1",
+        "status": "pending-result-confirmation",
+        "invocationMessage": "running",
+        "toolInput": "{\"arg\": 1}",
+        "success": true,
+        "pastTenseMessage": "done",
+        "resultMetadata": {
+         "k": 1
+        }
+       }
+      }
+     ]
+    },
+    "turns": [],
+    "status": 1,
+    "modifiedAt": "1970-01-01T00:00:00.000Z"
+   },
+   "actions": [
+    {
+     "type": "chat/toolCallResultConfirmed",
+     "turnId": "t1",
+     "toolCallId": "c1",
+     "approved": true
+    }
+   ],
+   "expected": {
+    "activeTurn": {
+     "id": "t1",
+     "startedAt": "1970-01-01T00:00:00.000Z",
+     "message": {
+      "text": "hi",
+      "origin": {
+       "kind": "user"
+      }
+     },
+     "responseParts": [
+      {
+       "kind": "toolCall",
+       "toolCall": {
+        "status": "completed",
+        "toolCallId": "c1",
+        "invocationMessage": "running",
+        "toolInput": "{\"arg\": 1}",
+        "success": true,
+        "pastTenseMessage": "done",
+        "resultMetadata": {
+         "k": 1
+        }
+       }
+      }
+     ]
+    },
+    "turns": [],
+    "status": 8,
+    "modifiedAt": "1970-01-01T00:00:00.000Z"
+   }
+  },
+  {
+   "name": "chat/toolCallResultConfirmed-result-metadata-null",
+   "reducer": "chat",
+   "initial": {
+    "activeTurn": {
+     "id": "t1",
+     "startedAt": "1970-01-01T00:00:00.000Z",
+     "message": {
+      "text": "hi",
+      "origin": {
+       "kind": "user"
+      }
+     },
+     "responseParts": [
+      {
+       "kind": "toolCall",
+       "toolCall": {
+        "toolCallId": "c1",
+        "status": "pending-result-confirmation",
+        "invocationMessage": "running",
+        "toolInput": "{\"arg\": 1}",
+        "success": true,
+        "pastTenseMessage": "done",
+        "resultMetadata": null
+       }
+      }
+     ]
+    },
+    "turns": [],
+    "status": 1,
+    "modifiedAt": "1970-01-01T00:00:00.000Z"
+   },
+   "actions": [
+    {
+     "type": "chat/toolCallResultConfirmed",
+     "turnId": "t1",
+     "toolCallId": "c1",
+     "approved": true
+    }
+   ],
+   "expected": {
+    "activeTurn": {
+     "id": "t1",
+     "startedAt": "1970-01-01T00:00:00.000Z",
+     "message": {
+      "text": "hi",
+      "origin": {
+       "kind": "user"
+      }
+     },
+     "responseParts": [
+      {
+       "kind": "toolCall",
+       "toolCall": {
+        "status": "completed",
+        "toolCallId": "c1",
+        "invocationMessage": "running",
+        "toolInput": "{\"arg\": 1}",
+        "success": true,
+        "pastTenseMessage": "done",
+        "resultMetadata": null
+       }
+      }
+     ]
+    },
+    "turns": [],
+    "status": 8,
+    "modifiedAt": "1970-01-01T00:00:00.000Z"
+   }
+  },
+  {
+   "name": "chat/toolCallResultConfirmed-result-metadata-absent",
+   "reducer": "chat",
+   "initial": {
+    "activeTurn": {
+     "id": "t1",
+     "startedAt": "1970-01-01T00:00:00.000Z",
+     "message": {
+      "text": "hi",
+      "origin": {
+       "kind": "user"
+      }
+     },
+     "responseParts": [
+      {
+       "kind": "toolCall",
+       "toolCall": {
+        "toolCallId": "c1",
+        "status": "pending-result-confirmation",
+        "invocationMessage": "running",
+        "toolInput": "{\"arg\": 1}",
+        "success": true,
+        "pastTenseMessage": "done"
+       }
+      }
+     ]
+    },
+    "turns": [],
+    "status": 1,
+    "modifiedAt": "1970-01-01T00:00:00.000Z"
+   },
+   "actions": [
+    {
+     "type": "chat/toolCallResultConfirmed",
+     "turnId": "t1",
+     "toolCallId": "c1",
+     "approved": true
+    }
+   ],
+   "expected": {
+    "activeTurn": {
+     "id": "t1",
+     "startedAt": "1970-01-01T00:00:00.000Z",
+     "message": {
+      "text": "hi",
+      "origin": {
+       "kind": "user"
+      }
+     },
+     "responseParts": [
+      {
+       "kind": "toolCall",
+       "toolCall": {
+        "status": "completed",
+        "toolCallId": "c1",
+        "invocationMessage": "running",
+        "toolInput": "{\"arg\": 1}",
+        "success": true,
+        "pastTenseMessage": "done"
+       }
+      }
+     ]
+    },
+    "turns": [],
+    "status": 8,
+    "modifiedAt": "1970-01-01T00:00:00.000Z"
+   }
+  },
+  {
+   "name": "chat/toolCallResultConfirmed-denied-drops-result-metadata",
+   "reducer": "chat",
+   "initial": {
+    "activeTurn": {
+     "id": "t1",
+     "startedAt": "1970-01-01T00:00:00.000Z",
+     "message": {
+      "text": "hi",
+      "origin": {
+       "kind": "user"
+      }
+     },
+     "responseParts": [
+      {
+       "kind": "toolCall",
+       "toolCall": {
+        "toolCallId": "c1",
+        "status": "pending-result-confirmation",
+        "invocationMessage": "running",
+        "toolInput": "{\"arg\": 1}",
+        "success": true,
+        "pastTenseMessage": "done",
+        "resultMetadata": {
+         "k": 1
+        }
+       }
+      }
+     ]
+    },
+    "turns": [],
+    "status": 1,
+    "modifiedAt": "1970-01-01T00:00:00.000Z"
+   },
+   "actions": [
+    {
+     "type": "chat/toolCallResultConfirmed",
+     "turnId": "t1",
+     "toolCallId": "c1",
+     "approved": false
+    }
+   ],
+   "expected": {
+    "activeTurn": {
+     "id": "t1",
+     "startedAt": "1970-01-01T00:00:00.000Z",
+     "message": {
+      "text": "hi",
+      "origin": {
+       "kind": "user"
+      }
+     },
+     "responseParts": [
+      {
+       "kind": "toolCall",
+       "toolCall": {
+        "status": "cancelled",
+        "toolCallId": "c1",
+        "invocationMessage": "running",
+        "toolInput": "{\"arg\": 1}",
+        "reason": "result-denied"
+       }
+      }
+     ]
+    },
+    "turns": [],
+    "status": 8,
+    "modifiedAt": "1970-01-01T00:00:00.000Z"
+   }
+  },
+  {
+   "name": "sess/chatUpdated-drops-provider",
+   "reducer": "session",
+   "initial": {
+    "provider": "p",
+    "title": "T",
+    "status": 1,
+    "lifecycle": "ready",
+    "activeClients": [],
+    "chats": [
+     {
+      "resource": "c",
+      "title": "n",
+      "provider": "p0"
+     }
+    ]
+   },
+   "actions": [
+    {
+     "type": "session/chatUpdated",
+     "chat": "c",
+     "changes": {
+      "provider": "p1",
+      "title": "m"
+     }
+    }
+   ],
+   "expected": {
+    "provider": "p",
+    "title": "T",
+    "status": 1,
+    "lifecycle": "ready",
+    "activeClients": [],
+    "chats": [
+     {
+      "resource": "c",
+      "title": "m",
+      "provider": "p0"
+     }
+    ]
+   }
+  },
+  {
+   "name": "sess/chatUpdated-null-provider-dropped",
+   "reducer": "session",
+   "initial": {
+    "provider": "p",
+    "title": "T",
+    "status": 1,
+    "lifecycle": "ready",
+    "activeClients": [],
+    "chats": [
+     {
+      "resource": "c",
+      "title": "n"
+     }
+    ]
+   },
+   "actions": [
+    {
+     "type": "session/chatUpdated",
+     "chat": "c",
+     "changes": {
+      "provider": null
+     }
+    }
+   ],
+   "expected": {
+    "provider": "p",
+    "title": "T",
+    "status": 1,
+    "lifecycle": "ready",
+    "activeClients": [],
+    "chats": [
+     {
+      "resource": "c",
+      "title": "n"
+     }
+    ]
+   }
   }
  ]
 }

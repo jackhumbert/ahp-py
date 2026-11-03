@@ -594,6 +594,29 @@ def _append_text(kind: str, content: Any) -> Callable[[Mapping[str, Any]], Any]:
     return updater
 
 
+def _append_reasoning(action: Mapping[str, Any]) -> Callable[[Mapping[str, Any]], Any]:
+    """Updater for ``chat/reasoning`` (1.1.0): append, then stamp the timing.
+
+    ``startedAt`` and ``duration`` are written only when the action carries them
+    (``!== undefined``): an absent key leaves the part's value alone, while an
+    explicit ``null`` is written through, as is a ``duration`` of ``0``.
+    """
+    append = _append_text(_REASONING, action.get("content"))
+
+    def updater(part: Mapping[str, Any]) -> Any:
+        updated = append(part)
+        if updated is part:
+            return part
+        updated = dict(updated)
+        for key in ("startedAt", "duration"):
+            value = get(action, key)
+            if value is not UNDEFINED:
+                updated[key] = value
+        return updated
+
+    return updater
+
+
 # ─── Chat Reducer ────────────────────────────────────────────────────────────
 
 
@@ -662,7 +685,7 @@ def chat_reducer(state: Any, action: Mapping[str, Any]) -> Any:
             state,
             get(action, "turnId"),
             get(action, "partId"),
-            _append_text(_REASONING, action.get("content")),
+            _append_reasoning(action),
         )
 
     if action_type == "chat/responsePart":
@@ -1065,6 +1088,7 @@ def chat_reducer(state: Any, action: Mapping[str, Any]) -> Any:
                         "pastTenseMessage": get(tc, "pastTenseMessage"),
                         "content": get(tc, "content"),
                         "structuredContent": get(tc, "structuredContent"),
+                        "resultMetadata": get(tc, "resultMetadata"),
                         "error": get(tc, "error"),
                     }
                 )
@@ -1428,6 +1452,24 @@ def chat_reducer(state: Any, action: Mapping[str, Any]) -> Any:
             else {**_spread_object(get(config, "values")), **incoming}
         )
         return {**state, "config": {**_spread_object(config), "values": values}}
+
+    if action_type == "chat/moved":
+        # The chat's new home (1.1.0). `provider` and `config.schema` are
+        # replaced by what the action carries and cleared when it leaves them
+        # out; `config.values` travel unchanged. An explicit null is not
+        # `undefined`, so it is written through.
+        next_state = {k: v for k, v in state.items() if k not in ("provider", "config")}
+        provider = get(action, "provider")
+        if provider is not UNDEFINED:
+            next_state["provider"] = provider
+        config = state.get("config")
+        schema = get(action, "schema")
+        if truthy(config):
+            kept = {k: v for k, v in _spread_object(config).items() if k != "schema"}
+            next_state["config"] = kept if schema is UNDEFINED else {**kept, "schema": schema}
+        elif schema is not UNDEFINED:
+            next_state["config"] = {"schema": schema, "values": {}}
+        return next_state
 
     # Unknown action: return the state unchanged. Never raise -- upstream's
     # `softAssertNever` logs and degrades so a peer speaking a newer version of

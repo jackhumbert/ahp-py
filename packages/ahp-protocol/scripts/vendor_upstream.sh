@@ -11,7 +11,7 @@ UPSTREAM_REPO="https://github.com/microsoft/agent-host-protocol.git"
 # commit below; a branch moves, so the commit must merely be on it. Either way
 # the archive is taken from the COMMIT, never the ref.
 SPEC_REF="main"
-SPEC_COMMIT="c5628cd4b09f76cf143ebe655e872c0fb3f1b8d8"
+SPEC_COMMIT="c301d494e6f9bb358b1430125a979e79b2e5c333"
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CHECKOUT="$ROOT/.research/agent-host-protocol"

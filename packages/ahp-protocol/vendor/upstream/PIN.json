@@ -1,6 +1,6 @@
 {
   "upstream": "microsoft/agent-host-protocol",
   "specRef": "main",
-  "specCommit": "c5628cd4b09f76cf143ebe655e872c0fb3f1b8d8",
+  "specCommit": "c301d494e6f9bb358b1430125a979e79b2e5c333",
   "vendored": ["test-cases/reducers", "test-cases/round-trips", "test-cases/version-negotiation.json", "schema", "ts"]
 }
