@@ -59,7 +59,7 @@ import logging
 import os
 import secrets
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -139,6 +139,11 @@ class StoredSession:
     #: chat's effective behaviour changes. Without the flag a restore could not
     #: tell an old overlay from a value a client cleared on purpose.
     chat_config_materialised: bool = False
+    #: Per guest provider id (AHP 1.1.0, per-chat agents), the opaque
+    #: ``resume_state_of`` of the agent session running that provider's foreign
+    #: chats -- round-tripped like `resume_state`. Which chats are foreign is not
+    #: here: it is each chat's own ``provider`` in `channels`.
+    guest_resume_states: Mapping[str, Mapping[str, Any]] = field(default_factory=dict)
 
     def to_json(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
@@ -162,6 +167,8 @@ class StoredSession:
             payload["inputRequests"] = [dict(r) for r in self.input_requests]
         if self.chat_config_materialised:
             payload["chatConfigMaterialised"] = True
+        if self.guest_resume_states:
+            payload["guestResumeStates"] = {k: dict(v) for k, v in self.guest_resume_states.items()}
         return payload
 
     @classmethod
@@ -219,6 +226,12 @@ class StoredSession:
         if not isinstance(materialised, bool):
             raise ValueError("chatConfigMaterialised must be a boolean or absent")
 
+        guests = payload.get("guestResumeStates", {})
+        if not isinstance(guests, Mapping) or not all(
+            isinstance(k, str) and isinstance(v, Mapping) for k, v in guests.items()
+        ):
+            raise ValueError("guestResumeStates must be an object of objects or absent")
+
         return cls(
             uri=_required_string(payload, "uri"),
             provider=_required_string(payload, "provider"),
@@ -230,6 +243,7 @@ class StoredSession:
             interrupted_by_restart=tuple(interrupted),
             input_requests=input_requests,
             chat_config_materialised=materialised,
+            guest_resume_states={k: dict(v) for k, v in guests.items()},
         )
 
 

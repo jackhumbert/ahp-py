@@ -1633,6 +1633,9 @@ class _Session:
     #: Foreign chat -> the provider id it runs on. A chat not here runs on the
     #: session's agent. Rebuilt on restore from each chat's `ChatState.provider`.
     chat_providers: dict[str, str] = field(default_factory=dict)
+    #: Per provider id, the opaque resume state of a guest that is not running
+    #: (restored from the store) or was last saved; resumed lazily on first use.
+    guest_resume: dict[str, Mapping[str, Any]] = field(default_factory=dict)
     #: Serialises making or resuming a guest, so two foreign chats of one provider
     #: created at once share one agent session instead of starting two.
     guest_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
@@ -2591,6 +2594,7 @@ class Host:
             content=self._content_store(),
             principal=_stored_principal(stored.metadata),
         )
+        session.guest_resume = {k: dict(v) for k, v in stored.guest_resume_states.items()}
         # Every open request the previous process had published is withdrawn:
         # the turn that asked is failed below, and a turn resumed later runs
         # with a fresh sink and asks afresh, so nothing can answer one any more.
@@ -2670,6 +2674,11 @@ class Host:
                 # and a provider republishes what it still has.
                 restored_state.pop("changesets", None)
                 session.chat_uris.add(uri)
+                # A chat on another agent says so itself (`ChatState.provider`); that is
+                # the route, so nothing separate is stored (or can disagree).
+                foreign = restored_state.get("provider")
+                if isinstance(foreign, str) and foreign != stored.provider:
+                    session.chat_providers[uri] = foreign
             elif reducer == "terminal":
                 # Whatever was running died with the previous process: a
                 # terminal stored mid-command comes back exited, with the
@@ -2818,6 +2827,19 @@ class Host:
             else:
                 if captured is not None:
                     session.resume_state = dict(captured)
+        for guest_provider, guest in session.guests.items():
+            guest_home = self.providers.get(guest_provider)
+            if not isinstance(guest_home, ResumableAgentProvider):
+                continue
+            try:
+                guest_state = await guest_home.resume_state_of(guest)
+            except Exception:
+                _log.exception(
+                    "resume_state_of failed for a %s guest of %s", guest_provider, session.uri
+                )
+            else:
+                if guest_state is not None:
+                    session.guest_resume[guest_provider] = dict(guest_state)
         channels: dict[str, Mapping[str, Any]] = {}
         for uri in [session.uri, session.annotations_uri, *session.chat_uris, *session.terminals]:
             state = self.sequencer.state_of(uri)
@@ -2848,6 +2870,12 @@ class Host:
             metadata=self._persisted_metadata(session),
             interrupted_by_restart=tuple(sorted(session.interrupted)),
             chat_config_materialised=True,
+            # Only guests that still have a chat to run: a stale state is dropped.
+            guest_resume_states={
+                provider: state
+                for provider, state in session.guest_resume.items()
+                if provider in set(session.chat_providers.values())
+            },
         )
         if immediate:
             await self.store.save(stored)
@@ -5477,6 +5505,63 @@ class Host:
         if guest is not None:
             await self._dispose_agent(guest, session.uri)
 
+    def _guest_context(
+        self, session: _Session, provider_id: str, chat: str, chat_state: Mapping[str, Any]
+    ) -> AgentSessionContext:
+        """The `AgentSessionContext` of a guest whose first chat is *chat*.
+
+        The session's URI, working directories and publisher; the chat's own
+        values as `config`, because a guest has no session-level config.
+        """
+        state = self.sequencer.state_of(session.uri)
+        state = state if isinstance(state, Mapping) else {}
+        folders = state.get("workingDirectories")
+        config = chat_state.get("config")
+        values = config.get("values") if isinstance(config, Mapping) else None
+        return AgentSessionContext(
+            publisher=session.publisher,
+            session_uri=session.uri,
+            chat_uri=chat,
+            provider_id=provider_id,
+            working_directories=tuple(f for f in folders or () if isinstance(f, str)),
+            config=dict(values) if isinstance(values, Mapping) else {},
+            resume_state=session.guest_resume.get(provider_id),
+            principal=session.principal,
+        )
+
+    def _foreign_chats_of(self, session: _Session, provider_id: str) -> list[str]:
+        """Chats routed to *provider_id*, in catalogue order (any not listed last)."""
+        mine = {c for c, p in session.chat_providers.items() if p == provider_id}
+        order = self._catalogue_order(session)
+        return [c for c in order if c in mine] + sorted(mine - set(order))
+
+    async def _attach_guest_chats(
+        self, session: _Session, provider_id: str, guest: AgentSession, first: str
+    ) -> None:
+        """Tell a guest that came up late about the chats it missed, then their config.
+
+        *first* is the chat its context names; every other foreign chat of the
+        provider is announced as ``restored``, as `_attach_agent` does for the
+        session's own agent.
+        """
+        chats = self._foreign_chats_of(session, provider_id)
+        session.opened_chats.difference_update(chats)
+        session.undelivered_chats.difference_update(chats)
+        if first in chats:
+            session.opened_chats.add(first)
+        for chat in chats:
+            if chat == first:
+                continue
+            state = self.sequencer.state_of(chat)
+            if isinstance(state, Mapping):
+                await self._open_chat(
+                    session,
+                    self._chat_context(session, chat, state, restored=True),
+                    agent=guest,
+                )
+        for chat in chats:
+            await self._tell_chat_config(session, chat)
+
     async def _ensure_guest(
         self, session: _Session, provider_id: str, chat: str, chat_state: Mapping[str, Any]
     ) -> tuple[AgentSession, bool]:
@@ -5485,29 +5570,20 @@ class Host:
         Returns it and whether this call made it (a caller that then fails to
         create the chat closes a guest it made, and leaves one it found). The first
         foreign chat of a provider creates the guest through ``create_session`` with
-        a context whose ``chat_uri`` is that chat; the session's working
-        directories, URI and publisher are the session's. Config is the chat's own
-        values: a guest has no session-level config. Later chats are opened on it
-        through `HostsChats`, as the session's own agent hosts its extra chats.
+        a context whose ``chat_uri`` is that chat (`_guest_context`). Later chats are
+        opened on it through `HostsChats`, as the session's own agent hosts its extra
+        chats. A restored session's guest is resumed first (`_resume_guest`), so the
+        chats it already had keep their conversation.
         """
         async with session.guest_lock:
             existing = session.guests.get(provider_id)
             if existing is not None:
                 return existing, False
-            state = self.sequencer.state_of(session.uri)
-            state = state if isinstance(state, Mapping) else {}
-            folders = state.get("workingDirectories")
-            config = chat_state.get("config")
-            values = config.get("values") if isinstance(config, Mapping) else None
-            context = AgentSessionContext(
-                publisher=session.publisher,
-                session_uri=session.uri,
-                chat_uri=chat,
-                provider_id=provider_id,
-                working_directories=tuple(f for f in folders or () if isinstance(f, str)),
-                config=dict(values) if isinstance(values, Mapping) else {},
-                principal=session.principal,
-            )
+            if self._foreign_chats_of(session, provider_id):
+                resumed = await self._resume_guest_locked(session, provider_id)
+                if resumed is not None:
+                    return resumed, False
+            context = self._guest_context(session, provider_id, chat, chat_state)
             try:
                 guest = await self.providers[provider_id].create_session(context)
             except errors.AhpError:
@@ -5517,7 +5593,49 @@ class Host:
                     f"the {provider_id} agent could not start: {type(exc).__name__}: {exc}"
                 ) from exc
             session.guests[provider_id] = guest
+            # Chats a restored session already had on this provider (when it could
+            # not be resumed) are announced on the fresh agent.
+            await self._attach_guest_chats(session, provider_id, guest, first=chat)
             return guest, True
+
+    async def _resume_guest(self, session: _Session, provider_id: str) -> None:
+        """Give a restored guest its agent back, on the first use of one of its chats.
+
+        The counterpart of `_resume_if_restored`: the provider gets what it
+        persisted (`StoredSession.guest_resume_states`) and its first chat in the
+        catalogue as the context's ``chat_uri``; the rest are announced as restored.
+        Failing leaves the chat without an agent, and its turns fail.
+        """
+        async with session.guest_lock:
+            await self._resume_guest_locked(session, provider_id)
+
+    async def _resume_guest_locked(
+        self, session: _Session, provider_id: str
+    ) -> AgentSession | None:
+        existing = session.guests.get(provider_id)
+        if existing is not None:
+            return existing
+        provider = self.providers.get(provider_id)
+        chats = self._foreign_chats_of(session, provider_id)
+        if not isinstance(provider, ResumableAgentProvider) or not chats:
+            return None
+        first = chats[0]
+        first_state = self.sequencer.state_of(first)
+        try:
+            guest = await provider.resume_session(
+                self._guest_context(
+                    session,
+                    provider_id,
+                    first,
+                    first_state if isinstance(first_state, Mapping) else {},
+                )
+            )
+        except Exception:
+            _log.exception("could not resume the %s guest of %s", provider_id, session.uri)
+            return None
+        session.guests[provider_id] = guest
+        await self._attach_guest_chats(session, provider_id, guest, first=first)
+        return guest
 
     async def _foreign_chat_config(
         self, provider_id: str, session: _Session, source_chat: str | None
@@ -9926,8 +10044,22 @@ class Host:
         to every connected client, to move a timestamp nobody is watching.
         """
         try:
-            await self._resume_if_restored(session)
             turn_id = action.get("turnId")
+            foreign = session.chat_providers.get(runner.channel)
+            if foreign is None:
+                await self._resume_if_restored(session)
+            elif foreign not in self.providers:
+                # Restored with an agent this host no longer serves: the chat stays,
+                # its turns say why they cannot run. (Never a fallback to another agent.)
+                if isinstance(turn_id, str):
+                    await runner.refuse(
+                        turn_id,
+                        f"this chat runs on the {foreign!r} agent, which this host does not serve",
+                        "chat.provider",
+                    )
+                return
+            elif session.guests.get(foreign) is None:
+                await self._resume_guest(session, foreign)
             if agent is None:
                 agent = self._agent_for(session, runner.channel)
             if runner.channel in session.undelivered_chats:

@@ -51,6 +51,17 @@ versions each release speaks.
   told a chat's config fails the `createChat` with nothing created, and a guest made for that
   call is closed.
 
+### Added — per-chat agents: persist and restore (upstream `c301d494`)
+
+- `StoredSession.guest_resume_states` (`guestResumeStates` in the file, absent when empty) keeps
+  each guest's `resume_state_of`, for a `ResumableAgentProvider`. Which chats are foreign is not
+  stored twice: a restored chat's own `provider` is its route (`chat_providers`).
+- A guest is resumed lazily, as the session's agent is: on the first turn of one of its chats
+  (`Host._resume_guest`), or when another foreign chat of its provider is created. A provider
+  that is no longer registered leaves the chat present; its turns fail with a `chat.provider`
+  error naming it, and restore does not fail. A host restarted without
+  `multiple_chat_providers` still serves existing foreign chats and refuses new ones.
+
 ### Fixed — a chat whose config the agent was not told fails closed
 
 - `Host._tell_chat_config` used to log and forget a `chat_config_changed` that raised, leaving an
