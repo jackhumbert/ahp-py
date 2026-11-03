@@ -5609,6 +5609,7 @@ class Host:
                 target.uri, {"type": "session/chatAdded", "summary": entry}
             )
         await self._publish_order(target, _placed(self._catalogue_order(target), moving, after))
+        await self._announce_moved(source, target, moving)
         await self._reclaim_terminals(target, list(handed.terminals))
         await self._seed_arrived_chats(target, moving)
         await self._rehost_chats(source, target, moving)
@@ -5616,6 +5617,37 @@ class Host:
         await self._mirror_summary(target)
         await self._persist(source)
         await self._persist(target)
+
+    def _agent_of(self, session: _Session, chat: str) -> str:
+        """The provider id of the agent behind *chat*: its session's, until a chat has its own."""
+        return session.provider_id
+
+    async def _announce_moved(
+        self, source: _Session, target: _Session, chats: Sequence[str]
+    ) -> None:
+        """`chat/moved` on each moved chat's channel, after the catalogue actions (1.1.0).
+
+        "After a cross-session move the host dispatches `chat/moved` on the chat's
+        channel with its new session, `provider` and `config.schema`", published
+        after `session/chatRemoved` and `session/chatAdded`. The reducer sets
+        `provider` and `config.schema` from the action and CLEARS each one it
+        leaves out, so they are computed here as it should leave them: `provider`
+        only when the chat's agent differs from the destination session's (a moved
+        chat keeps its agent), and the chat's own `config.schema` whenever it has
+        one (dropping it would silently turn a chat with its own schema into one
+        governed by the session's). `config.values` are untouched by the reducer.
+        """
+        for chat in chats:
+            action: dict[str, Any] = {"type": "chat/moved", "session": target.uri}
+            agent = self._agent_of(source, chat)
+            if agent != target.provider_id:
+                action["provider"] = agent
+            state = self.sequencer.state_of(chat)
+            config = state.get("config") if isinstance(state, Mapping) else None
+            schema = config.get("schema") if isinstance(config, Mapping) else None
+            if schema is not None:
+                action["schema"] = copy.deepcopy(schema)
+            await self.sequencer.publish(chat, action)
 
     async def _seed_arrived_chats(self, target: _Session, chats: Sequence[str]) -> None:
         """Give a moved chat a config if its new session has one and it had none.
@@ -5702,6 +5734,7 @@ class Host:
                     created.uri, {"type": "session/chatAdded", "summary": entry}
                 )
             await self._reclaim_terminals(created, list(under.terminals))
+        await self._announce_moved(source, created, moving)
         await self._reclaim_terminals(created, list(handed.terminals))
         # The moved chat is the new session's DEFAULT, which its agent already
         # knows as `AgentSessionContext.chat_uri`; its descendants are

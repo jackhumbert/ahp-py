@@ -10,6 +10,19 @@ versions each release speaks.
 
 ## [Unreleased]
 
+### Added — `chat/moved` (upstream `c301d494`)
+
+- After every committed cross-session `moveChat` (an existing destination session, or
+  `newSession`) the host dispatches `chat/moved` on each moved chat's channel, for the chat and
+  its descendants, after the source's `session/chatRemoved` and the destination's
+  `session/chatAdded`/`chatsReordered`. It carries the destination `session`, plus `provider`
+  and `schema` as the reducer should leave them (the chat's agent when it differs from the
+  destination's, and the chat's own `config.schema`); today every chat's agent is its
+  session's, so both are absent. A reorder inside one session sends nothing. A move between
+  sessions of different providers is still refused (`PermissionDenied`). `ACTION_INTRODUCED_IN`
+  dates the action `1.1.0`, but the host gates no action on the negotiated version, so a
+  `1.0.0` peer receives it too and its reducer ignores it.
+
 ### Changed — a chat's config no longer inherits from its session (upstream `c301d494`)
 
 This is a behaviour change. A chat's `config.values` are its own: a key it leaves out is the
