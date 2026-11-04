@@ -333,4 +333,6 @@ async def test_real_layout_session_cwd_and_spine(real_roots: Roots) -> None:
     assert clients[0].options.cwd == str(work / "app")
 
     listing = await NamedRootsResourceProvider(real_roots).list_dir("file:///")
-    assert {e.name for e in listing} == {p.parts[1] for p in real_roots.paths}
+    # The top of a Windows machine lists its drives; elsewhere, the first folder.
+    top = {p.drive if os.name == "nt" else p.parts[1] for p in real_roots.paths}
+    assert {e.name for e in listing} == top
