@@ -10,6 +10,13 @@ versions each release speaks.
 
 ## [Unreleased]
 
+### Fixed — the bare-JSON scan is linear again before Python 3.14
+
+- On 3.11–3.13 the decoder's recursion limit trips about 1000 levels into `[1,[1,…`, and the
+  scan then stepped one opener at a time, re-recursing at each: seconds on a long reply. After a
+  `RecursionError` it now jumps to the next opener whose bracket closes at all (one string-aware
+  pass). What it finds is unchanged; 3.14 was never affected.
+
 ### Fixed — no steering into a turn running on config the agent never got
 
 - When a `chat/configChanged` cannot be delivered to a chat's agent while a turn runs, the turn

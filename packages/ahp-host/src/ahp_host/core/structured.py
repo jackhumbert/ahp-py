@@ -8,6 +8,7 @@ take a host tool, and the prompt texts. The turn driver lives alongside them.
 
 from __future__ import annotations
 
+import bisect
 import dataclasses
 import json
 import re
@@ -184,6 +185,37 @@ def schema_errors(validator: jsonschema.protocols.Validator, value: Any) -> str 
     )
 
 
+def _closing_openers(text: str) -> list[int]:
+    """The offsets of every ``{``/``[`` in *text* whose bracket closes, ascending.
+
+    One pass with a stack. Quotes open a string only inside a bracket, as they
+    would for the decoder; a closer that does not match the innermost opener
+    means nothing still open can decode, so the stack is dropped.
+    """
+    closing: list[int] = []
+    stack: list[int] = []
+    in_string = escaped = False
+    for k, ch in enumerate(text):
+        if in_string:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_string = False
+        elif ch in "{[":
+            stack.append(k)
+        elif ch in "}]":
+            if stack and text[stack[-1]] == ("{" if ch == "}" else "["):
+                closing.append(stack.pop())
+            else:
+                stack.clear()
+        elif ch == '"' and stack:
+            in_string = True
+    closing.sort()
+    return closing
+
+
 def last_json_block(text: str) -> tuple[bool, Any]:
     """The last JSON value in *text*, as ``(found, value)``.
 
@@ -200,6 +232,7 @@ def last_json_block(text: str) -> tuple[bool, Any]:
     text = text[-_BARE_SCAN_LIMIT:]
     decoder = json.JSONDecoder()
     found, last, i = False, None, 0
+    closing: list[int] | None = None
     while i < len(text):
         if text[i] == "{" and not _OBJECT_START.match(text, i):
             # Cheaper than a failed decode, which builds an error that counts
@@ -216,11 +249,17 @@ def last_json_block(text: str) -> tuple[bool, Any]:
                 i = max(i + 1, exc.pos)
                 continue
             except RecursionError:
-                # Too deep to decode: skip the run of openers, keeping its last.
+                # Too deep to decode: skip the run of openers, keeping its last,
+                # then on to the next opener that closes at all. Before 3.14 the
+                # limit trips ~1000 levels in, so stepping through ``[1,[1,``
+                # one opener at a time re-recursed at each: quadratic again.
                 j = i
                 while j < len(text) and text[j] in "{[":
                     j += 1
-                i = max(i + 1, j - 1)
+                if closing is None:
+                    closing = _closing_openers(text)
+                i = bisect.bisect_left(closing, max(i + 1, j - 1))
+                i = closing[i] if i < len(closing) else len(text)
                 continue
             found = True
         else:
