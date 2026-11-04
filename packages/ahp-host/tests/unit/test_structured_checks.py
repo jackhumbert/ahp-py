@@ -98,6 +98,11 @@ def test_unclosed_brackets_take_linear_time(text: str) -> None:
     assert time.perf_counter() - began < 1.0
 
 
+def test_a_value_after_one_too_deep_to_decode_is_found() -> None:
+    text = "[1," * 20000 + "]" * 20000 + ' then {"b": "]"}'
+    assert last_json_block(text) == (True, {"b": "]"})
+
+
 def test_a_value_at_the_end_of_a_long_reply_is_found() -> None:
     text = "[1," * 50000 + ' and finally {"answer": 42}'
     assert last_json_block(text) == (True, {"answer": 42})
