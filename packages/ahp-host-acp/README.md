@@ -13,7 +13,8 @@ client, a gateway in front of several hosts) can then start and follow sessions
 with it.
 
 Status: pre-alpha. Tested against opencode (`opencode acp`), OpenClaw's ACP
-bridge (`openclaw acp`) and the package's own reference agent (`ahp-acp-openai`).
+bridge (`openclaw acp`), Qwen Code (`qwen --acp`) and the package's own
+reference agent (`ahp-acp-openai`).
 
 ## What a client sees
 
