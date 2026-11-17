@@ -773,7 +773,8 @@ with `principal_of` and no such hook grants a run no folder (fail closed); a rai
 refuses. `OwnedSessionPolicy` implements it as `allow_resources` and an owner. For the socket, `bearer_token_validator(token)` checks an
 `Authorization: Bearer` header, and `serve_websocket` takes `ping_interval` (so a
 proxy's idle timeout does not cut a quiet connection) and `max_size` (the frame
-limit; keep a proxy's at or above it).
+limit, 16 MiB by default so a message with an image attached inline fits; keep a
+proxy's at or above it).
 
 `Host.counters()` reports connections, sessions, active turns, pending requests,
 watches, channels and `serverSeq`. `AuditSink` records decisions — admissions,

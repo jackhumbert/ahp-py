@@ -94,7 +94,7 @@ async def test_wsopts_options_reach_websockets(monkeypatch: pytest.MonkeyPatch) 
     async with serve_websocket(_host()):
         pass
     assert recorded[-1]["ping_interval"] == 20.0
-    assert recorded[-1]["max_size"] == 1048576
+    assert recorded[-1]["max_size"] == 16 * 2**20
 
     with pytest.raises(ValueError, match="ping_interval"):
         async with serve_websocket(_host(), ping_interval=0):
@@ -135,12 +135,18 @@ async def _first_result(url: str) -> dict[str, Any] | None:
 
 
 async def test_wsopts_max_size_admits_a_large_frame() -> None:
-    """2 MiB against a 4 MiB limit passes and against the 1 MiB default does not:
-    a factor of two either way, far above any framing overhead."""
+    """2 MiB against a 4 MiB limit passes and against a 1 MiB limit does not:
+    a factor of two either way, far above any framing overhead. The default
+    admits it too: a message with an image inline is that size."""
     async with serve_websocket(_host(), max_size=4 * 2**20) as server:
         reply = await _first_result(f"ws://127.0.0.1:{server.bound_port}/")
     assert reply is not None
     assert "result" in reply
 
     async with serve_websocket(_host()) as server:
+        reply = await _first_result(f"ws://127.0.0.1:{server.bound_port}/")
+    assert reply is not None
+    assert "result" in reply
+
+    async with serve_websocket(_host(), max_size=2**20) as server:
         assert await _first_result(f"ws://127.0.0.1:{server.bound_port}/") is None

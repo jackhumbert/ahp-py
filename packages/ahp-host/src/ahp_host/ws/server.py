@@ -43,8 +43,11 @@ _log = logging.getLogger(__name__)
 #: websockets' own `serve()` default for `ping_interval`, in seconds. Passing it
 #: changes nothing; it is named here so the option has a visible default.
 DEFAULT_PING_INTERVAL: Final = 20.0
-#: websockets' own `serve()` default for `max_size`, one MiB per incoming message.
-DEFAULT_MAX_SIZE: Final = 2**20
+#: 16 MiB per incoming message, not websockets' own 1 MiB: a message carries its
+#: attachments inline (`embeddedResource`, base64), so one photograph is several
+#: MiB, and over the limit websockets closes the connection (1009) rather than
+#: refusing the message. The same figure as ahp-client's `max_size`.
+DEFAULT_MAX_SIZE: Final = 16 * 2**20
 
 
 def is_loopback(bind: str) -> bool:

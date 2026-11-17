@@ -10,6 +10,14 @@ versions each release speaks.
 
 ## [Unreleased]
 
+### Changed — the WebSocket server takes messages up to 16 MiB
+
+- `DEFAULT_MAX_SIZE` is 16 MiB, was websockets' own 1 MiB. A message carries an inline
+  attachment (`embeddedResource`) as base64, so one with a photograph was over the limit and the
+  connection was closed (1009). Every server built on `serve_websocket` without a `max_size`
+  (`ahp-node`, `ahp-host-acp`, `ahp-host-claude`, the gateway) now takes what ahp-client sends.
+  Pass `max_size` for a smaller limit.
+
 ### Fixed — the bare-JSON scan is linear again before Python 3.14
 
 - On 3.11–3.13 the decoder's recursion limit trips about 1000 levels into `[1,[1,…`, and the
