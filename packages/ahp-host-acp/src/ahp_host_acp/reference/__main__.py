@@ -17,6 +17,8 @@ The agent is configured from the environment only (the API key has no option):
   AHP_OPENAI_TIMEOUT    seconds a model request may stay silent (default 300)
   AHP_OPENAI_MAX_STEPS  model requests per prompt (default 25)
   AHP_OPENAI_SYSTEM     system prompt; {cwd} is the session folder (optional)
+  AHP_OPENAI_CONTEXT_WINDOW  the model's context window in tokens (optional)
+  AHP_OPENAI_VISION     1 if the model takes images (default 0)
 """
 
 

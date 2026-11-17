@@ -370,6 +370,7 @@ matrix is checked against. Run it as `ahp-acp-openai` or
 | `AHP_OPENAI_MAX_STEPS` | Model calls per turn before it stops (25) |
 | `AHP_OPENAI_SYSTEM` | Replaces the default system prompt |
 | `AHP_OPENAI_CONTEXT_WINDOW` | The model's context window in tokens, reported as `usage_update.size` (unset: 0, not known) |
+| `AHP_OPENAI_VISION` | `1` if the model takes images (unset: `0`) |
 
 ```toml
 command = ["ahp-acp-openai"]
@@ -379,6 +380,25 @@ AHP_OPENAI_BASE_URL = "http://localhost:11434/v1"
 AHP_OPENAI_MODEL = "qwen3"
 # The key, if any, stays in the host's own environment (AHP_OPENAI_API_KEY).
 ```
+
+With `AHP_OPENAI_VISION=1` the agent says it takes images (`promptCapabilities.image`), so
+the host sends it an attached image, and it passes each to the endpoint as an `image_url`
+content part holding a `data:` URL. Set it only for a model that takes images: another
+answers with an error, which fails the turn. A client offers image attachments only for
+a model listed with `vision = true`, so say both:
+
+```toml
+[env]
+AHP_OPENAI_VISION = "1"
+
+[[models]]
+id = "qwen3"
+name = "Qwen 3"
+vision = true
+```
+
+An image stays in the conversation, so it is sent again with every later request of the
+session.
 
 It streams text and reasoning (`reasoning_content` or `reasoning`), offers the
 client-tool relay's tools to the model as OpenAI tools (so `StructuredOutput`
@@ -390,7 +410,7 @@ runs.
 
 It does not load, resume or fork sessions: after a host restart the AHP session
 and its transcript come back (host-side resume), but the agent starts a new
-conversation. It does not take images, has no HTTP proxy support and reports no cost. A `429` from the endpoint ends the turn with
+conversation. It takes no audio, has no HTTP proxy support and reports no cost. A `429` from the endpoint ends the turn with
 an error whose text says it was rate limited (`429`).
 
 Its tests use a packaged loopback stub, never a real endpoint. To try a live

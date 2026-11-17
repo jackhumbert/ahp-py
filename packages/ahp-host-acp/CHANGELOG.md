@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Added — the reference agent takes images
+
+- With `AHP_OPENAI_VISION=1`, `ahp-acp-openai` says `promptCapabilities.image` and sends each
+  `image` block of a prompt to the endpoint as an `image_url` content part (a `data:` URL), in
+  order with the text. Unset, it takes none, as before, and a prompt stays a plain string.
+
 ### Added — `resultMetadata` from an MCP raw output (upstream `c301d494`)
 
 - A tool call whose `rawOutput` is shaped like an MCP `CallToolResult` (it has `content`,

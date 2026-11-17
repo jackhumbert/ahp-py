@@ -182,6 +182,57 @@ def test_refagent_context_window_must_be_a_count() -> None:
             from_env({**env, "AHP_OPENAI_CONTEXT_WINDOW": bad})
 
 
+_IMAGE_PROMPT: list[dict[str, Any]] = [
+    {"type": "text", "text": "what is this?"},
+    {"type": "image", "data": "aGVsbG8=", "mimeType": "image/png"},
+    {"type": "text", "text": "and this?"},
+    {"type": "image", "data": "d29ybGQ=", "mimeType": "image/jpeg"},
+    {"type": "image", "data": "bm8=", "mimeType": "audio/wav"},
+]
+
+
+async def test_refagent_images_reach_the_endpoint_with_vision(tmp_path: Path) -> None:
+    with StubServer([say("a cat"), say("yes")]) as stub:
+        async with _agent(stub, extra_env={"AHP_OPENAI_VISION": "1"}) as run:
+            assert run.client.agent_capabilities["promptCapabilities"]["image"] is True
+            sid = await _session(run, tmp_path)
+            await asyncio.wait_for(run.client.prompt(sid, _IMAGE_PROMPT), WAIT)
+            await _prompt(run, sid, "sure?")
+    content = [
+        {"type": "text", "text": "what is this?"},
+        {"type": "image_url", "image_url": {"url": "data:image/png;base64,aGVsbG8="}},
+        {"type": "text", "text": "and this?"},
+        {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,d29ybGQ="}},
+    ]
+    assert stub.requests[0]["messages"][-1] == {"role": "user", "content": content}
+    # The image is part of the conversation: the next request carries it again.
+    users = [m["content"] for m in stub.requests[1]["messages"] if m["role"] == "user"]
+    assert users == [content, "sure?"]
+
+
+async def test_refagent_takes_no_images_unless_told(tmp_path: Path) -> None:
+    with StubServer([say("ok")]) as stub:
+        async with _agent(stub) as run:
+            assert run.client.agent_capabilities["promptCapabilities"]["image"] is False
+            sid = await _session(run, tmp_path)
+            await asyncio.wait_for(run.client.prompt(sid, _IMAGE_PROMPT), WAIT)
+    assert stub.requests[0]["messages"][-1] == {
+        "role": "user",
+        "content": "what is this?\n\nand this?",
+    }
+
+
+def test_refagent_vision_must_be_a_switch() -> None:
+    env = {"AHP_OPENAI_BASE_URL": "http://localhost:1/v1", "AHP_OPENAI_MODEL": "m"}
+    assert from_env(env).vision is False
+    for on in ("1", "true", " On "):
+        assert from_env({**env, "AHP_OPENAI_VISION": on}).vision is True
+    for off in ("", "0", "false"):
+        assert from_env({**env, "AHP_OPENAI_VISION": off}).vision is False
+    with pytest.raises(ValueError, match="AHP_OPENAI_VISION"):
+        from_env({**env, "AHP_OPENAI_VISION": "maybe"})
+
+
 async def test_refagent_cancel_mid_stream(tmp_path: Path) -> None:
     with StubServer([Reply(deltas=({"content": "Hel"},), hang=True)]) as stub:
         async with _agent(stub) as run:

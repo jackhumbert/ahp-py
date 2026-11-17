@@ -94,6 +94,13 @@ class ReferenceConfig:
     system_prompt: str = SYSTEM_PROMPT
     #: The model's context window in tokens, reported as `usage_update.size`; 0: not known.
     context_window: int = 0
+    #: Whether the model takes images. Off by default: an endpoint whose model does not
+    #: answers an image with an error, which would fail the turn.
+    vision: bool = False
+
+
+_TRUE: Final = frozenset({"1", "true", "yes", "on"})
+_FALSE: Final = frozenset({"", "0", "false", "no", "off"})
 
 
 def from_env(environ: Mapping[str, str]) -> ReferenceConfig:
@@ -138,6 +145,9 @@ def from_env(environ: Mapping[str, str]) -> ReferenceConfig:
             context_window = 0
         if context_window < 1:
             raise ConfigError("AHP_OPENAI_CONTEXT_WINDOW must be a whole number, 1 or more")
+    raw_vision = environ.get("AHP_OPENAI_VISION", "").strip().lower()
+    if raw_vision not in _TRUE and raw_vision not in _FALSE:
+        raise ConfigError("AHP_OPENAI_VISION must be 1 or 0")
     return ReferenceConfig(
         base_url=base_url,
         model=model,
@@ -146,6 +156,7 @@ def from_env(environ: Mapping[str, str]) -> ReferenceConfig:
         max_steps=max_steps,
         system_prompt=environ.get("AHP_OPENAI_SYSTEM") or SYSTEM_PROMPT,
         context_window=context_window,
+        vision=raw_vision in _TRUE,
     )
 
 
@@ -178,8 +189,21 @@ def _content_text(text: str) -> list[dict[str, Any]]:
     return [{"type": "content", "content": {"type": "text", "text": text}}]
 
 
-def _prompt_text(blocks: Any) -> str:
+def _prompt_content(blocks: Any, vision: bool = False) -> str | list[dict[str, Any]]:
+    """A prompt as a user message's `content`.
+
+    A string, as every endpoint takes, unless there is an image and `vision` is set: then
+    OpenAI's content parts, the text and each image (a `data:` URL) in the order they came.
+    """
+    content: list[dict[str, Any]] = []
     parts: list[str] = []
+    images = False
+
+    def flush() -> None:
+        if parts:
+            content.append({"type": "text", "text": "\n\n".join(parts)})
+            parts.clear()
+
     for block in blocks if isinstance(blocks, list) else []:
         if not isinstance(block, dict):
             continue
@@ -195,7 +219,18 @@ def _prompt_text(blocks: Any) -> str:
             resource = block.get("resource")
             if isinstance(resource, dict) and isinstance(resource.get("text"), str):
                 parts.append(f"Contents of {resource.get('uri')}:\n{resource['text']}")
-    return "\n\n".join(parts)
+        elif kind == "image" and vision:
+            data, mime = block.get("data"), block.get("mimeType")
+            if isinstance(data, str) and isinstance(mime, str) and mime.startswith("image/"):
+                flush()
+                content.append(
+                    {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{data}"}}
+                )
+                images = True
+    if not images:
+        return "\n\n".join(parts)
+    flush()
+    return content
 
 
 def _diff(target: str, content: str) -> dict[str, Any] | None:
@@ -420,7 +455,11 @@ class Agent:
             "protocolVersion": 1,
             "agentCapabilities": {
                 "loadSession": False,
-                "promptCapabilities": {"image": False, "audio": False, "embeddedContext": True},
+                "promptCapabilities": {
+                    "image": self._config.vision,
+                    "audio": False,
+                    "embeddedContext": True,
+                },
                 "mcpCapabilities": {"http": False, "sse": False},
             },
             "authMethods": [],
@@ -481,7 +520,8 @@ class Agent:
             if armed is None:
                 raise _RpcError(_INTERNAL_ERROR, "a prompt is already running in this session")
         try:
-            return self._turn(session, _prompt_text(params.get("prompt")), armed)
+            content = _prompt_content(params.get("prompt"), self._config.vision)
+            return self._turn(session, content, armed)
         finally:
             with self._lock:
                 session.running = False
@@ -569,10 +609,12 @@ class Agent:
             return None, "".join(chunks)
         return done, ""
 
-    def _turn(self, session: _Session, text: str, cancel: threading.Event) -> dict[str, Any]:
+    def _turn(
+        self, session: _Session, content: str | list[dict[str, Any]], cancel: threading.Event
+    ) -> dict[str, Any]:
         history = session.history
         start = len(history)
-        history.append({"role": "user", "content": text})
+        history.append({"role": "user", "content": content})
         totals = {"prompt": 0, "completion": 0, "cached": 0, "total": 0}
         counted = False
 
