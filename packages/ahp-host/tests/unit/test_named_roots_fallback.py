@@ -35,9 +35,29 @@ async def test_named_roots_fall_back_to_the_primary_root_not_the_virtual_top(
     )
     wire, serving = await connect(host)
     try:
-        # Refused, so the host falls back (to the primary root, not `file:///`).
+        # Refused, so the host falls back to the primary root -- spelled as the
+        # tree spells it, the URI a client can browse, not the real path.
         await open_session(wire, "echo:/fb-1", workingDirectories=["file:///nowhere/at/all"])
-        assert state(host, "echo:/fb-1")["workingDirectories"] == [roots.primary.as_uri()]
+        assert state(host, "echo:/fb-1")["workingDirectories"] == ["file:///one"]
+        assert roots.real_path("file:///one") == roots.primary
+    finally:
+        await shut(host, wire, serving)
+
+
+async def test_named_roots_in_the_real_layout_fall_back_to_the_real_uri(tmp_path: Path) -> None:
+    first = tmp_path / "first"
+    first.mkdir()
+    roots = Roots.named({"one": first}, layout="real")
+    host = Host(
+        EchoProvider(),
+        LoopbackSingleUserPolicy(),
+        resources=NamedRootsResourceProvider(roots),
+        default_directory=roots.default_directory(),
+    )
+    wire, serving = await connect(host)
+    try:
+        await open_session(wire, "echo:/fb-4", workingDirectories=["file:///nowhere/at/all"])
+        assert state(host, "echo:/fb-4")["workingDirectories"] == [roots.primary.as_uri()]
     finally:
         await shut(host, wire, serving)
 

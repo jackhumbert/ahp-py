@@ -7745,12 +7745,22 @@ class Host:
         as a session's working directory it names the filesystem's own top to
         anything that reads it literally (an agent's cwd). Its primary root is
         the folder that is meant. A single-root host is unchanged.
+
+        The primary root is spelled the way clients see it (`Roots.tree_uri`):
+        `file:///src` in the tree layout, the real URI in the real layout. The
+        real spelling in a tree (`file:///E:/src`) is servable here, but a
+        gateway shows it as `/<node>/E:/src`, a path the tree does not have, so
+        a client could not open the session's folder -- and offered it again,
+        to be refused again, for every session after it. Providers turn the
+        tree URI back into the real path (`Roots.real_path`) for the agent.
         """
         assert self.default_directory is not None
         roots = getattr(self.resources, "roots", None)
         primary = getattr(roots, "primary", None)
         if getattr(roots, "is_named", False) and isinstance(primary, Path):
-            candidate = primary.as_uri()
+            tree_uri = getattr(roots, "tree_uri", None)
+            spelled = tree_uri(primary) if callable(tree_uri) else None
+            candidate = spelled if isinstance(spelled, str) else primary.as_uri()
             if self._inside_the_jail(candidate):
                 return candidate
         return self.default_directory
