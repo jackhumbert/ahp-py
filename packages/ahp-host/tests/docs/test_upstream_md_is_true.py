@@ -15,7 +15,7 @@ from pathlib import Path
 from ahp_protocol import DEFAULT_SUPPORTED_VERSIONS
 
 ROOT = Path(__file__).resolve().parents[2]
-UPSTREAM = (ROOT / "UPSTREAM.md").read_text()
+UPSTREAM = (ROOT / "UPSTREAM.md").read_text(encoding="utf-8")
 
 
 def test_it_does_not_describe_a_local_vendor_tree() -> None:
@@ -42,6 +42,7 @@ def test_the_interop_client_pin_matches_what_the_interop_tests_install() -> None
     name must be the one `tests/interop/` actually installs."""
     pattern = r"@microsoft/agent-host-protocol@([\d.]+)"
     documented = set(re.findall(pattern, UPSTREAM))
-    installed = set(re.findall(pattern, (ROOT / "tests/interop/test_real_client.py").read_text()))
+    interop = (ROOT / "tests/interop/test_real_client.py").read_text(encoding="utf-8")
+    installed = set(re.findall(pattern, interop))
     assert documented, "UPSTREAM.md no longer names the npm interop client"
     assert documented == installed, f"docs say {documented}, the interop tests use {installed}"

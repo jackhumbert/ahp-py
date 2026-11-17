@@ -11,7 +11,7 @@ import re
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-README = (ROOT / "README.md").read_text()
+README = (ROOT / "README.md").read_text(encoding="utf-8")
 
 
 def _cli_flags() -> set[str]:
@@ -96,7 +96,7 @@ def test_upstream_pin_matches_what_we_negotiate() -> None:
     """
     from ahp_protocol.versions import DEFAULT_SUPPORTED_VERSIONS
 
-    upstream = (ROOT / "UPSTREAM.md").read_text()
+    upstream = (ROOT / "UPSTREAM.md").read_text(encoding="utf-8")
     preferred = DEFAULT_SUPPORTED_VERSIONS[0]
     line = next(
         (row for row in upstream.splitlines() if "negotiated on the wire" in row),
@@ -115,7 +115,7 @@ def _answered_commands() -> set[str]:
     the flag check is derived from `--help`: a hand-kept list never contains
     the thing someone just added, which is the only case that matters.
     """
-    source = (ROOT / "src" / "ahp_host" / "core" / "host.py").read_text()
+    source = (ROOT / "src" / "ahp_host" / "core" / "host.py").read_text(encoding="utf-8")
     found = set(re.findall(r'if method == "([a-zA-Z]+)"', source))
     # The two frozensets span lines, so match across them. An earlier version
     # of this parse missed `resourceRead` and `resourceCopy` and then blamed
@@ -171,7 +171,7 @@ def test_the_typed_marker_ships() -> None:
     package = Path(ahp_host.__file__).parent
     assert (package / "py.typed").is_file()
 
-    classifiers = (ROOT / "pyproject.toml").read_text()
+    classifiers = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
     assert "Typing :: Typed" in classifiers, "the marker ships but the claim was dropped"
 
 

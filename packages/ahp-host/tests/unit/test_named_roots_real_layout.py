@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -50,7 +51,8 @@ async def test_the_top_lists_only_the_spine(tree: tuple[Path, Path, Path]) -> No
     base, proj, data = tree
     provider = _provider(proj, data)
     top = [e.name for e in await provider.list_dir("file:///")]
-    assert top == sorted({p.parts[1] for p in (proj, data)})
+    # The top of a Windows machine lists its drives; elsewhere, the first folder.
+    assert top == sorted({p.drive if os.name == "nt" else p.parts[1] for p in (proj, data)})
     assert all(e.type == "directory" for e in await provider.list_dir("file:///"))
     assert [e.name for e in await provider.list_dir(base.as_uri())] == ["home", "srv"]
     assert [e.name for e in await provider.list_dir((base / "home").as_uri())] == ["dev"]

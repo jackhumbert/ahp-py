@@ -787,7 +787,8 @@ async def test_a_real_changeset_against_the_sibling_host(tmp_path: Any) -> None:
     (root / "src" / "greeter" / "core.py").write_text('GREETING = "hello"\nRETRIES = 1\n')
     (root / "config.json").write_text('{"retries": 1, "verbose": false}\n')
     (root / "docs" / "notes.md").write_text("# Notes\n")
-    subprocess.run(["git", "init", "-q", "-b", "main"], cwd=root, check=True)
+    # No template: a machine's own (its hooks, say) must not reach a test repository.
+    subprocess.run(["git", "init", "-q", "-b", "main", "--template="], cwd=root, check=True)
     subprocess.run(["git", "add", "-A"], cwd=root, check=True)
     subprocess.run(
         ["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "base"],

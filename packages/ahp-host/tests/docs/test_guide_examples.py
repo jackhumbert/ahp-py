@@ -41,7 +41,7 @@ def test_the_guide_exists() -> None:
 
 @pytest.mark.parametrize("page", _pages(), ids=lambda p: p.name)
 def test_every_python_block_runs(page: Path) -> None:
-    blocks = _BLOCK.findall(page.read_text())
+    blocks = _BLOCK.findall(page.read_text(encoding="utf-8"))
     assert blocks, f"{page.name} has no executable examples"
 
     # One namespace per page, in document order: a later block may use a class
