@@ -26,6 +26,11 @@ _DISPLAY: Final[Mapping[str, str]] = {
     "switch_mode": "Switch mode",
 }
 
+#: The most base64 text one image in a tool result may be (2 MiB, about 1.5 MiB
+#: of image). A result is kept in the chat's state and sent to every client, and
+#: a WebSocket message tops out at 16 MiB, so a few full-size renders would not fit.
+MAX_RESULT_IMAGE: Final = 2 * 1024 * 1024
+
 _PAST: Final[Mapping[str, str]] = {
     "read": "Read",
     "edit": "Edited",
@@ -186,10 +191,18 @@ class ToolCall:
 def text_of(
     content: Sequence[Mapping[str, Any]], *, shown: Collection[str] = ()
 ) -> list[dict[str, Any]]:
-    """ACP tool-call content as the host's text parts.
+    """ACP tool-call content as the host's tool result parts.
 
     `content` blocks carry their text; `terminal` ids mean nothing without
     ACP's terminal methods, which this client does not offer.
+
+    An `image` block becomes an `embeddedResource` part (AHP's
+    `ToolResultEmbeddedResourceContent`: base64 `data` and a `contentType`),
+    which is the one way a tool result shows a picture: clients render an
+    embedded `image/*` inline and have no image syntax in a reply's markdown.
+    The bytes ride in the session state and reach every client of the chat, so
+    one above :data:`MAX_RESULT_IMAGE` is named in a line of text instead; an
+    agent that makes large images should send a smaller preview.
 
     A `diff` becomes a unified-looking text summary, except for the paths in
     *shown*: those have a `fileEdit` item beside it (AHP 1.0.0's tool-result
@@ -208,6 +221,17 @@ def text_of(
                 parts.append({"type": "text", "text": str(block.get("text", ""))})
             elif isinstance(block, Mapping) and block.get("type") == "resource_link":
                 parts.append({"type": "text", "text": str(block.get("uri", ""))})
+            elif isinstance(block, Mapping) and block.get("type") == "image":
+                data, mime = block.get("data"), block.get("mimeType")
+                if not (isinstance(data, str) and data and isinstance(mime, str)):
+                    continue
+                if not mime.startswith("image/"):
+                    continue
+                if len(data) > MAX_RESULT_IMAGE:
+                    size = len(data) * 3 // 4 // 1024
+                    parts.append({"type": "text", "text": f"[{mime} image left out: {size} KiB]"})
+                else:
+                    parts.append({"type": "embeddedResource", "data": data, "contentType": mime})
         elif kind == "diff":
             path = str(item.get("path", ""))
             if path in shown:
