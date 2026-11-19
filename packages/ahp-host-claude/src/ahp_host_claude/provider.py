@@ -402,6 +402,44 @@ def _text_of(content: Any) -> str:
     return "\n".join(parts)
 
 
+#: The most base64 text one image in a tool result may be (2 MiB, about 1.5 MiB
+#: of image). A result is kept in the chat's state and sent to every client, and
+#: a WebSocket message tops out at 16 MiB, so a few full-size images would not fit.
+MAX_RESULT_IMAGE: Final = 2 * 1024 * 1024
+
+
+def _result_content(text: str, content: Any) -> list[dict[str, Any]]:
+    """A tool result's AHP content: its text, then each image in it.
+
+    Claude's `image` blocks (``{"type": "image", "source": {"type": "base64",
+    "media_type", "data"}}``, as Read gives for a picture or an MCP tool for a
+    screenshot) become `embeddedResource` parts, which clients render inline;
+    a reply's markdown has no way to show one. The bytes ride in the session
+    state to every client, so one above :data:`MAX_RESULT_IMAGE` is named in a
+    line of text instead.
+    """
+    parts: list[dict[str, Any]] = [{"type": "text", "text": text}]
+    if isinstance(content, str) or not content:
+        return parts
+    for item in content:
+        if not (isinstance(item, Mapping) and item.get("type") == "image"):
+            continue
+        source = item.get("source")
+        if not isinstance(source, Mapping) or source.get("type") != "base64":
+            continue
+        data, mime = source.get("data"), source.get("media_type")
+        if not (isinstance(data, str) and data and isinstance(mime, str)):
+            continue
+        if not mime.startswith("image/"):
+            continue
+        if len(data) > MAX_RESULT_IMAGE:
+            size = len(data) * 3 // 4 // 1024
+            parts.append({"type": "text", "text": f"[{mime} image left out: {size} KiB]"})
+        else:
+            parts.append({"type": "embeddedResource", "data": data, "contentType": mime})
+    return parts
+
+
 #: How long a turn started elsewhere may take to reach the host before its
 #: messages are dropped rather than holding up everything behind them.
 _ATTACH_TIMEOUT = 10.0
@@ -2288,7 +2326,7 @@ class ClaudeSession:
                     text = _text_of(block.content)
                     await self._report_answer_from_result(block.tool_use_id, failed, text)
                     name, tool_input = subagent.inputs.get(block.tool_use_id, ("", {}))
-                    content: list[dict[str, Any]] = [{"type": "text", "text": text}]
+                    content = _result_content(text, block.content)
                     diff = await self._file_edit(sink, block.tool_use_id, success=not failed)
                     if diff is not None:
                         content.append(dict(diff))
@@ -2516,7 +2554,7 @@ class ClaudeSession:
                 block.tool_use_id, failed, item.tool_use_result
             )
             name, tool_input = self._inputs.get(block.tool_use_id, ("", {}))
-            content: list[dict[str, Any]] = [{"type": "text", "text": text}]
+            content = _result_content(text, block.content)
             worker = self._worker_chats.get(block.tool_use_id)
             if worker is not None:
                 # The forward edge of the worker chat's `tool` origin.
