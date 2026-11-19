@@ -1741,6 +1741,22 @@ class TurnSink(Protocol):
         """
         ...
 
+    async def content_part(self, data: bytes, *, content_type: str) -> Mapping[str, Any]:
+        """Show *data* in the transcript: an image the agent sends, say.
+
+        Stores the bytes in the session's content store (as `file_edit` does)
+        and publishes a `contentRef` response part naming them, which a client
+        fetches with `resourceRead` and renders by its `contentType` (an
+        `image/*` inline). Returns the part. It ends the current text segment,
+        so what the agent says next starts below it.
+
+        Raises `ValueError` for content over the store's per-item limit, which
+        would otherwise be truncated -- half an image is no image. The store is
+        a bounded cache that does not survive a host restart, so content shown
+        long ago may no longer open.
+        """
+        ...
+
     async def system_notification(
         self, text: str, *, markdown: bool = False, meta: Mapping[str, Any] | None = None
     ) -> None:

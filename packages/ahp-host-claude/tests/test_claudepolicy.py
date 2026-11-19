@@ -58,6 +58,7 @@ def test_claudepolicy_mapping_table_pinned(tmp_path: Path) -> None:
         "Edit": ("write", "file_path"),
         "MultiEdit": ("write", "file_path"),
         "NotebookEdit": ("write", "notebook_path"),
+        "mcp__ahp__show_image": ("read", "file_path"),
     }
     kwargs: dict[str, Any] = {"cwd": tmp_path, "roots": (tmp_path,)}
     assert tool_request("mcp__client__ping", {"a": 1}, **kwargs).kind == "tool"

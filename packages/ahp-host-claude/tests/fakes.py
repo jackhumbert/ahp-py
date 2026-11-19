@@ -193,6 +193,7 @@ class RecordingSink:
         #: Each usage report's `_meta`.
         self.usage_meta: list[Mapping[str, Any] | None] = []
         self.notifications: list[str] = []
+        self.content_parts: list[tuple[bytes, str]] = []
         self.notification_meta: list[Mapping[str, Any] | None] = []
         #: Whether each failure was offered for resuming.
         self.resumable: list[bool] = []
@@ -267,6 +268,14 @@ class RecordingSink:
     async def file_edit(self, change: Any) -> Mapping[str, Any]:
         self.file_edits.append(change)
         return {"type": "fileEdit", "uri": change.uri}
+
+    async def content_part(self, data: bytes, *, content_type: str) -> Mapping[str, Any]:
+        if len(data) > 4 * 1024 * 1024:
+            raise ValueError(f"{len(data)} bytes is over the limit")
+        part = {"kind": "contentRef", "uri": f"test:/{len(self.content_parts)}"}
+        self.content_parts.append((data, content_type))
+        self.events.append(("contentRef", content_type))
+        return part
 
     async def system_notification(
         self, text: str, *, markdown: bool = False, meta: Mapping[str, Any] | None = None

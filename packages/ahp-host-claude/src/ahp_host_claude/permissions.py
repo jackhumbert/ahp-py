@@ -180,6 +180,8 @@ POLICY_TOOLS: Final[Mapping[str, tuple[str, str]]] = {
     "Edit": ("write", "file_path"),
     "MultiEdit": ("write", "file_path"),
     "NotebookEdit": ("write", "notebook_path"),
+    # `show_image.NAME`: it reads the file it shows.
+    "mcp__ahp__show_image": ("read", "file_path"),
 }
 
 
@@ -292,6 +294,8 @@ def describe(tool_name: str, tool_input: Mapping[str, Any]) -> tuple[str, str]:
             return "Start on the plan", "Approve the plan above to let Claude start"
         case "AskUserQuestion":
             return "Ask you", _short(_first_question(tool_input) or "Questions for you")
+        case "mcp__ahp__show_image":
+            return "Show image", _name_of(tool_input.get("file_path", ""))
     return tool_name, tool_name
 
 
@@ -333,6 +337,8 @@ def past_tense(tool_name: str, tool_input: Mapping[str, Any], *, failed: bool) -
             return f"Edited {message}"
         case "Write":
             return f"Wrote {message}"
+        case "mcp__ahp__show_image":
+            return f"Showed {message}"
         case "Grep":
             return f"Searched for {message}"
         case "Glob":

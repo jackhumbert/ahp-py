@@ -112,6 +112,11 @@ class ContentStore:
         return len(self._blobs)
 
     @property
+    def max_blob(self) -> int:
+        """The most bytes one item may be before `put` truncates it."""
+        return self._max_blob
+
+    @property
     def size(self) -> int:
         """Bytes currently held."""
         return self._bytes

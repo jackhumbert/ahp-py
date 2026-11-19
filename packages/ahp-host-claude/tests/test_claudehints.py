@@ -37,6 +37,7 @@ def test_claudehints_table_pinned() -> None:
         "MultiEdit",
         "NotebookEdit",
         "Bash",
+        "mcp__ahp__show_image",
     }
 
 

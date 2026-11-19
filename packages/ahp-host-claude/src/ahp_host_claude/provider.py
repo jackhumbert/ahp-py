@@ -85,6 +85,7 @@ from ahp_host_claude import (
     edits,
     history,
     questions,
+    show_image,
 )
 from ahp_host_claude.attachments import prompt_content
 from ahp_host_claude.claude_ai import (
@@ -833,6 +834,9 @@ class ClaudeSession:
             servers[client_tools.HOST_SERVER] = client_tools.host_server(
                 self._host_tools, self._run_host_tool
             )
+        if tools:
+            # Pictures the agent shows: it reads a file, so only with a folder.
+            servers[show_image.SERVER] = show_image.server(self._show_image)
         if servers:
             options["mcp_servers"] = servers
         if _FORWARDS_SUBAGENT_TEXT:
@@ -1469,6 +1473,16 @@ class ClaudeSession:
                     "permissionDecision": "allow",
                 }
             }
+        if name == show_image.NAME and asked is None and self._shows_freely(tool_input):
+            # Security-relevant: a picture inside the session's folders is shown
+            # without asking, as Claude Code lets Read read one. Anywhere else,
+            # the approval gate asks as for any MCP tool.
+            return {
+                "hookSpecificOutput": {
+                    "hookEventName": "PreToolUse",
+                    "permissionDecision": "allow",
+                }
+            }
         if name in edits.EDIT_TOOLS and isinstance(call_id, str) and isinstance(tool_input, dict):
             # The file as it is just before the call runs, for its diff.
             cwd = self._cwd()
@@ -1477,6 +1491,39 @@ class ClaudeSession:
         if asked is not None:
             return asked
         return pre_tool_use_decision(name, self._gate())
+
+    def _shows_freely(self, tool_input: Any) -> bool:
+        """Whether a `show_image` call names a file inside the session's folders."""
+        try:
+            cwd, extra, tools = self._access()
+        except PermissionError:
+            return False
+        path = show_image.resolve(
+            tool_input.get("file_path") if isinstance(tool_input, dict) else None, cwd
+        )
+        return tools and path is not None and show_image.inside(path, (cwd, *extra))
+
+    async def _show_image(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        """Run a `show_image` call: the file's bytes, shown in the running turn."""
+        sink = self._sink
+        cwd = self._cwd()
+        if sink is None or cwd is None:
+            return client_tools.error("No turn is running.")
+        path = show_image.resolve(arguments.get("file_path"), cwd)
+        if path is None:
+            return client_tools.error("file_path is required.")
+        try:
+            data = await asyncio.to_thread(path.read_bytes)
+        except OSError as exc:
+            return client_tools.error(f"Could not read {path}: {exc.strerror or exc}")
+        kind = show_image.content_type(data)
+        if kind is None:
+            return client_tools.error(f"{path.name} is not a PNG, JPEG, GIF or WebP image.")
+        try:
+            await sink.content_part(data, content_type=kind)
+        except ValueError as exc:
+            return client_tools.error(f"{path.name} is too large to show: {exc}.")
+        return {"content": [{"type": "text", "text": f"Showed {path.name} to the user."}]}
 
     def _cwd(self) -> Path | None:
         try:

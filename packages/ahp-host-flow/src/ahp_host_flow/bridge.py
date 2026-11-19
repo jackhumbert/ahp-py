@@ -281,6 +281,10 @@ class MaskingSink:
         await self._flush()
         await self._sink.system_notification(self._str(text) or "", markdown=markdown, meta=meta)
 
+    async def content_part(self, data: bytes, *, content_type: str) -> Mapping[str, Any]:
+        await self._flush()
+        return await self._sink.content_part(data, content_type=content_type)  # type: ignore[no-any-return]
+
     def __getattr__(self, name: str) -> Any:
         return getattr(self._sink, name)
 
@@ -518,6 +522,11 @@ class TurnTee:
         await self.sink.system_notification(
             self._mask_str(text) or "", markdown=markdown, meta=meta
         )
+
+    async def content_part(self, data: bytes, *, content_type: str) -> Mapping[str, Any]:
+        self._touch()
+        await self.flush()
+        return await self.sink.content_part(data, content_type=content_type)
 
     async def usage(
         self,

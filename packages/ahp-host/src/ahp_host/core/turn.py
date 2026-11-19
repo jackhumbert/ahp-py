@@ -290,6 +290,28 @@ class ActionTurnSink:
         """
         return {"type": "fileEdit", **file_edit(change, self._content)}
 
+    async def content_part(self, data: bytes, *, content_type: str) -> dict[str, Any]:
+        """Publish a `ResourceResponsePart` (`kind: contentRef`) for *data*.
+
+        Like `systemNotification`, the part has no `id` and nothing targets it
+        afterwards. The ref's `contentType` is what the client renders by.
+        """
+        if len(data) > self._content.max_blob:
+            raise ValueError(f"{len(data)} bytes is over the {self._content.max_blob}-byte limit")
+        part: dict[str, Any] = {
+            "kind": "contentRef",
+            **self._content.put(data, content_type=content_type),
+        }
+        await self.finish_reasoning()
+        await self._sequencer.publish(
+            self._channel,
+            {"type": "chat/responsePart", "turnId": self._turn_id, "part": part},
+        )
+        self._segment = None
+        self._markdown_part_id = None
+        self._reasoning_part_id = None
+        return part
+
     async def finish_reasoning(self) -> None:
         """Close the open reasoning run: a final `chat/reasoning` carrying its `duration`.
 
