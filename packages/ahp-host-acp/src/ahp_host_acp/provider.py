@@ -139,6 +139,12 @@ _PROVIDER_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}")
 SETTLE_TIMEOUT: Final = 15.0
 #: `PermissionDenied`: what this host will not do (`ahp_protocol` error table).
 PERMISSION_DENIED: Final = -32009
+#: How long an answer to `AcpProvider.refresh_options` stands. A client resolves
+#: the new-session form again on every value the user changes, and then creates
+#: the session; one start of the agent should cover all of that.
+REFRESH_SECONDS: Final = 15.0
+#: How long the agent gets to start, open a session and close it for a refresh.
+REFRESH_TIMEOUT: Final = 30.0
 
 AgentChanged = Callable[[], Awaitable[None]]
 
@@ -205,6 +211,10 @@ class AgentSpec:
     #: Offer side chats (`multipleChats.sideChat`): see :mod:`ahp_host_acp.side_chat`.
     #: `None` (the default) advertises nothing and refuses a side chat.
     side_chat: SideChatMode | None = None
+    #: Ask the agent for its options before a session is configured or created,
+    #: instead of offering what it reported last: see `AcpProvider.refresh_options`.
+    #: Off by default, since asking starts the agent and opens a session in it.
+    refresh_options: bool = False
 
 
 def launch_argv(spec: AgentSpec, cwd: Path) -> tuple[str, ...]:
@@ -1689,10 +1699,94 @@ class AcpProvider:
         self._info = self._describe()
         self._agent_updates: AgentInfoChanged | None = None
         self._sessions: weakref.WeakSet[AcpSession] = weakref.WeakSet()
+        self._refresh_lock = asyncio.Lock()
+        self._refreshed: float | None = None
 
     @property
     def agent(self) -> AgentInfo:
         return self._info
+
+    async def refresh_options(self) -> None:
+        """Ask the agent what a session can be configured with, now.
+
+        Only with `AgentSpec.refresh_options`. A session's config schema is
+        fixed when it is created, from what the agent's last `session/new`
+        said (:mod:`ahp_host_acp.catalogue`), so an option that changes
+        between sessions -- a list of files the agent finds on disk, say --
+        is one session behind: the first session after a change is offered the
+        old list and cannot pick a new value. Asking first closes that gap.
+
+        It costs what the default avoids: the agent is started on its own, in
+        the primary root with no MCP servers, and opens a session. The session
+        is closed again when the agent can (`sessionCapabilities.close`);
+        from an agent that cannot, it stays in the agent's history, which is
+        why this is the operator's choice. A failure is logged and the last
+        report stands; either way the answer is good for `REFRESH_SECONDS`.
+        """
+        if not self.spec.refresh_options:
+            return
+        async with self._refresh_lock:
+            now = asyncio.get_running_loop().time()
+            if self._refreshed is not None and now - self._refreshed < REFRESH_SECONDS:
+                return
+            try:
+                await asyncio.wait_for(self._ask_agent(), REFRESH_TIMEOUT)
+            except Exception as exc:  # a form must not fail because the agent answered badly
+                log.warning(
+                    "asking %s for its options failed: %s",
+                    self.provider_id,
+                    exc or type(exc).__name__,
+                )
+            self._refreshed = asyncio.get_running_loop().time()
+        await self._agent_changed()
+
+    async def _ask_agent(self) -> None:
+        spec, cwd = self.spec, self.roots.primary
+        env = dict(spec.env) if spec.env_allow is None else child_env(spec.env_allow, spec.env)
+
+        async def connect(
+            on_notification: NotificationHandler, on_request: RequestHandler
+        ) -> AcpConnection:
+            return await self._connect(
+                launch_argv(spec, cwd),
+                cwd=cwd,
+                env=env,
+                inherit_env=spec.env_allow is None,
+                on_notification=on_notification,
+                on_request=on_request,
+            )
+
+        async def ignore(update: SessionUpdate) -> None:
+            return None
+
+        async def nothing_to_permit(params: Mapping[str, Any]) -> dict[str, Any]:
+            return {"outcome": "cancelled"}
+
+        agent = AcpClient(
+            connection_factory=connect,
+            client_info={"name": "ahp-host-acp", "version": _version()},
+            on_update=ignore,
+            on_permission=nothing_to_permit,
+            protocol_version=PROTOCOL_VERSION,
+        )
+        await agent.connect()
+        try:
+            await agent.initialize()
+            result = await agent.new_session(cwd)
+            self.catalogue.remember_capabilities(agent.agent_capabilities)
+            self.catalogue.remember_new_session(result)
+            session_id = result.get("sessionId")
+            if isinstance(session_id, str) and agent.supports("close"):
+                try:
+                    await agent.close_session(session_id)
+                except AcpError as exc:
+                    log.warning(
+                        "%s did not close the session it was asked through: %s",
+                        self.provider_id,
+                        exc,
+                    )
+        finally:
+            await agent.aclose()
 
     def _describe(self) -> AgentInfo:
         """`AgentInfo` from the config and what the agent last reported.
@@ -1792,6 +1886,7 @@ class AcpProvider:
         return session
 
     async def create_session(self, context: AgentSessionContext) -> AcpSession:
+        await self.refresh_options()  # a no-op unless the spec asks, or just after a resolve
         session = self._session(context, config_properties=self._config_properties())
         fork = context.fork
         if fork is not None and fork.turns:
@@ -1839,8 +1934,10 @@ class AcpProvider:
         Empty until the agent has opened a session once (on this host, or on
         an earlier run with a catalogue file): options are the agent's to
         report, and asking would mean starting it, and a stray session in its
-        history, just to fill in a form.
+        history, just to fill in a form. `AgentSpec.refresh_options` accepts
+        that cost and asks (`refresh_options`).
         """
+        await self.refresh_options()
         properties = self._config_properties()
         values = {key: prop["default"] for key, prop in properties.items() if "default" in prop}
         for key, value in request.values.items():

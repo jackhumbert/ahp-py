@@ -83,9 +83,10 @@ server's AGENTS.md requires ("Adding a provider adapter"). It is the ACP
   reason is the JSON-RPC error message. Each terminal runs in its own process
   group and kill/release kill the group (`ahp_acp.kill_tree`); import `AcpError` from `ahp_acp`, not
   `jsonrpc`.
-- `launcher` and `env_allow` live in `AGENT_OPTIONS`, config `_KEYS` and
-  `AgentSpec`; keep the three in step. The agent command after a launcher is
-  never resolved on the host (only the launcher's program is).
+- `launcher`, `env_allow` and `refresh_options` live in `AGENT_OPTIONS`, config `_KEYS` and
+  `AgentSpec`; keep the three in step. `refresh_options` starts the agent to fill in a form
+  (`AcpProvider.refresh_options`), which the default deliberately does not: keep it opt-in. The
+  agent command after a launcher is never resolved on the host (only the launcher's program is).
 - Tests run `tests/fake_agent.py` as a real subprocess; no network, no real
   agent. `tests/test_host.py` drives it through a real `Host` over an
   in-memory transport (`tests/hosting.py`).

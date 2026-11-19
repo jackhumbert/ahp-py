@@ -13,6 +13,8 @@
     # env_allow = ["PATH", "HOME", "LANG"]
     # relay_command = ["python3", "-m", "ahp_host_acp.relay"]
     # relay_host = "172.17.0.1"
+    # Ask the agent for its options before each new session (starts it; see the README).
+    # refresh_options = true
 
     [policy]                      # advisory tool policy; host_tools serves fs/* and terminal/*
     # host_tools = true
@@ -83,6 +85,7 @@ _KEYS = frozenset(
         "relay_host",
         "policy",
         "decline_feedback",
+        "refresh_options",
         "env",
         "models",
         "model_command",
@@ -124,6 +127,7 @@ class Settings:
     policy: ToolPolicy | None = None
     client_methods: bool = False
     decline_feedback: bool = True
+    refresh_options: bool = False
     verbose: bool = False
 
 
@@ -206,6 +210,13 @@ def _decline_feedback(data: Mapping[str, Any]) -> bool:
     value = data.get("decline_feedback", True)
     if not isinstance(value, bool):
         raise ConfigError("decline_feedback must be true or false")
+    return value
+
+
+def _refresh_options(data: Mapping[str, Any]) -> bool:
+    value = data.get("refresh_options", False)
+    if not isinstance(value, bool):
+        raise ConfigError("refresh_options must be true or false")
     return value
 
 
@@ -428,6 +439,7 @@ def load(args: argparse.Namespace) -> Settings:
         policy=policy,
         client_methods=client_methods,
         decline_feedback=_decline_feedback(data),
+        refresh_options=_refresh_options(data),
         env=_strings(data, "env"),
         config_options=_option_values(data),
         mcp_servers=_mcp_servers(data),

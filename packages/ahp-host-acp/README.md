@@ -92,7 +92,13 @@ directory), and the agent's entry on the root channel follows it as it
 changes (`root/agentsChanged`). A session's config schema, though, is fixed
 when the session is created, and AHP has no way to add to it later; the agent
 starts on a session's first turn, so the very first session an agent ever has
-offers no config. Every session after it does.
+offers no config. Every session after it does, from what the agent said last:
+an option whose values change between sessions (a list of files the agent
+finds, say) is one session behind. `refresh_options = true` asks the agent
+before a session is configured or created instead. That starts the agent on
+its own and opens a session in it, which is closed again when the agent offers
+`session/close` and otherwise stays in its history; one answer is reused for
+15 seconds.
 
 Side chats are opt-in (see below). Not yet: annotation attachments (they live on a host channel this
 adapter does not read); telling the agent *why* a call was declined -- ACP's
@@ -229,6 +235,7 @@ ollama.com with `OLLAMA_API_KEY`.
 | `[[models]]` / `--model ID` (repeatable) | `id`, `name`, `context_window`, `vision`. The first is each new session's default. None: no picker, the agent's own default. |
 | `model_command` / `--model-command` | Prompt template switching the model, `{model}` standing for the id. For agents without ACP model support. |
 | `[config_options]` | ACP session config options (`session/set_config_option`), fixed on every session: a value id string, or `true`/`false` for a boolean option. Clients see them read-only and cannot change them. OpenClaw offers `thought_level`, `reasoning_level`, `verbose_level`, `elevated_level`, ... |
+| `refresh_options` | `true` asks the agent for its options and models before each new session is configured or created, so a changed option list is offered at once. It starts the agent and opens (and, when the agent can, closes) a session each time. Default `false`: the options are the ones it reported last. |
 | `[[mcp_servers]]` | MCP servers for the agent to connect to: `name`, and `command` (a list, or one string split shell-style; its program is looked up on `PATH`) with an optional `[mcp_servers.env]` table; or `type = "http"` / `"sse"` with `url` and an optional `[mcp_servers.headers]` table, given only to an agent that says it takes that transport. |
 | `[roots]` / `--root NAME=PATH` (repeatable) | Named folders. Clients browse (read-only) a small tree of them; sessions may start in any. |
 | `root` / `--root PATH` | One unnamed folder, served as itself. |
@@ -316,7 +323,7 @@ provider = from_config(roots={"work": "~/work"}, command=["opencode", "acp"])
 The file is the config file described under Run it; `port`, `bind`,
 `token_file` and `verbose` are ignored in it (as keywords they are refused, like
 any unknown option). Keyword options (`provider_id`,
-`agent_name`, `description`, `command`, `launcher`, `env_allow`, `relay_command`, `relay_host`, `policy`, `decline_feedback`, `env`, `models`, `model_command`,
+`agent_name`, `description`, `command`, `launcher`, `env_allow`, `relay_command`, `relay_host`, `policy`, `decline_feedback`, `refresh_options`, `env`, `models`, `model_command`,
 `config_options`, `mcp_servers`) override the file, `roots=` (a path, a list of
 paths or a name -> path table) overrides its root, and `state_dir=` its
 state directory.

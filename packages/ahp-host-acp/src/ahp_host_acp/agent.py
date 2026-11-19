@@ -10,6 +10,7 @@
     # env_allow = ["PATH", "HOME", "LANG"]  # host variables the agent may inherit
     # relay_command = ["python3", "-m", "ahp_host_acp.relay"]  # the relay inside the container
     # relay_host = "172.17.0.1"               # where the host listens for it
+    # refresh_options = true                  # ask the agent for its options per new session
 
     [agents.env]
     OPENCODE_CONFIG = '~/.config/ahp/opencode.json'
@@ -80,6 +81,7 @@ from ahp_host_acp.config import (
     _option_values,
     _path,
     _policy,
+    _refresh_options,
     _relay_command,
     _relay_host,
     _roots_from_file,
@@ -108,6 +110,7 @@ AGENT_OPTIONS = frozenset(
         "relay_host",
         "policy",
         "decline_feedback",
+        "refresh_options",
         "env",
         "models",
         "model_command",
@@ -156,6 +159,7 @@ def provider_from_options(options: Mapping[str, Any], roots: Roots, state_dir: P
             policy=policy,
             client_methods=client_methods,
             decline_feedback=_decline_feedback(options),
+            refresh_options=_refresh_options(options),
             env=_strings(options, "env"),
             model_command=model_command,
             config_options=_option_values(options),

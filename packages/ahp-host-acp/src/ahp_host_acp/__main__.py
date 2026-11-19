@@ -102,6 +102,7 @@ def build_host(settings: Settings) -> Host:
             policy=settings.policy,
             client_methods=settings.client_methods,
             decline_feedback=settings.decline_feedback,
+            refresh_options=settings.refresh_options,
             env=settings.env,
             model_command=settings.model_command,
             config_options=settings.config_options,

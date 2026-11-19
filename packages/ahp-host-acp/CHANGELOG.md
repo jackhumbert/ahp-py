@@ -2,6 +2,25 @@
 
 ## [Unreleased]
 
+### Added — `refresh_options`: the agent's current options for a new session
+
+- `refresh_options = true` (config file, `acp` agent options, `AgentSpec.refresh_options`; default
+  false) makes `resolve_config` and `create_session` ask the agent first: it is started on its own
+  in the primary root, with no MCP servers, opens a session, and what `session/new` says replaces
+  the last report. The session is closed when the agent offers `session/close` and otherwise
+  stays in its history. One answer is reused for 15 seconds (`provider.REFRESH_SECONDS`); a
+  failure is logged and the last report stands. Without it an option whose values change between
+  sessions was one session behind, since a session's schema is fixed when it is created.
+  `tests/test_session_updates.py`.
+
+### Added — an image in a tool result reaches the client
+
+- An ACP tool call's `image` content block (`data`, `mimeType`) is published as an
+  `embeddedResource` part of the tool result (`ToolResultEmbeddedResourceContent`), which clients
+  show inline; it was dropped before, so an agent that made a picture could only name its file.
+  One above `tools.MAX_RESULT_IMAGE` (2 MiB of base64) is replaced by a line of text, since a
+  result stays in the chat's state and is sent to every client. `tests/test_tools.py`.
+
 ### Added — the reference agent takes images
 
 - With `AHP_OPENAI_VISION=1`, `ahp-acp-openai` says `promptCapabilities.image` and sends each

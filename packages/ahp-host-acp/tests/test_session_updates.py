@@ -35,10 +35,15 @@ def _provider(
     models: tuple[ModelInfo, ...] = (),
     config_options: Mapping[str, str | bool] | None = None,
     mcp_servers: tuple[McpServer, ...] = (),
+    refresh_options: bool = False,
 ) -> AcpProvider:
     env = {"FAKE_ACP_LOG": str(log), **{f"FAKE_ACP_{flag}": "1" for flag in flags}}
     spec = AgentSpec(
-        FAKE_AGENT, env=env, config_options=config_options or {}, mcp_servers=mcp_servers
+        FAKE_AGENT,
+        env=env,
+        config_options=config_options or {},
+        mcp_servers=mcp_servers,
+        refresh_options=refresh_options,
     )
     return AcpProvider(root, spec, models=models, catalogue_file=catalogue)
 
@@ -116,6 +121,64 @@ async def test_options_reach_the_schema_once_the_agent_has_reported_them(
     again = _provider(tmp_path, log, "CONFIG_OPTIONS", catalogue=catalogue)
     assert again.agent.to_wire() == provider.agent.to_wire()
     assert list((await again.resolve_config(ConfigRequest())).properties) == ["mode", "yolo"]
+
+
+async def test_refresh_options_asks_the_agent_before_a_session_exists(
+    tmp_path: Path, log: Path, catalogue: Path
+) -> None:
+    """Without it the first session after an option changes is offered the old
+    list; with it the form is filled in from the agent, in a session that is
+    closed again."""
+    provider = _provider(
+        tmp_path, log, "CONFIG_OPTIONS", "CLOSE", catalogue=catalogue, refresh_options=True
+    )
+    resolved = await provider.resolve_config(ConfigRequest())
+    assert list(resolved.properties) == ["mode", "yolo"]
+    assert [m["id"] for m in provider.agent.to_wire()["models"]] == ["a", "b"]
+    opened = _logged(log, "session/new")
+    assert len(opened) == 1
+    # In the primary root, with none of the session's MCP servers started for a form.
+    assert opened[0] == {"cwd": str(tmp_path), "mcpServers": []}
+    assert len(_logged(log, "session/close")) == 1
+    # The form resolves again on every change, and then the session is created:
+    # one start of the agent covers all of it.
+    await provider.resolve_config(ConfigRequest(values={"mode": "plan"}))
+    session = await provider.create_session(context(tmp_path))
+    await session.aclose()
+    assert len(_logged(log, "session/new")) == 1
+    # Kept like any other report.
+    again = _provider(tmp_path, log, "CONFIG_OPTIONS", catalogue=catalogue)
+    assert list((await again.resolve_config(ConfigRequest())).properties) == ["mode", "yolo"]
+
+
+async def test_refresh_options_leaves_the_session_with_an_agent_that_cannot_close(
+    tmp_path: Path, log: Path
+) -> None:
+    provider = _provider(tmp_path, log, "CONFIG_OPTIONS", refresh_options=True)
+    assert list((await provider.resolve_config(ConfigRequest())).properties) == ["mode", "yolo"]
+    assert len(_logged(log, "session/new")) == 1
+    assert _logged(log, "session/close") == []
+
+
+async def test_refresh_options_that_fails_keeps_the_last_report(
+    tmp_path: Path, log: Path, warmed: Path
+) -> None:
+    spec = AgentSpec((sys.executable, "-c", "raise SystemExit(3)"), refresh_options=True)
+    provider = AcpProvider(tmp_path, spec, catalogue_file=warmed)
+    assert list((await provider.resolve_config(ConfigRequest())).properties) == ["mode", "yolo"]
+
+
+def test_refresh_options_is_a_config_key(tmp_path: Path) -> None:
+    from ahp_host_acp.agent import provider_from_options
+    from ahp_host_acp.config import ConfigError
+    from ahp_host_acp.roots import Roots
+
+    roots = Roots.single(tmp_path)
+    on = provider_from_options({"command": ["x"], "refresh_options": True}, roots, tmp_path)
+    assert on.spec.refresh_options is True
+    assert provider_from_options({"command": ["x"]}, roots, tmp_path).spec.refresh_options is False
+    with pytest.raises(ConfigError, match="refresh_options"):
+        provider_from_options({"command": ["x"], "refresh_options": "yes"}, roots, tmp_path)
 
 
 async def test_without_a_picker_the_model_option_is_session_config(

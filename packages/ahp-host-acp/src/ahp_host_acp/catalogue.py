@@ -15,7 +15,8 @@ its latest slash commands, each model's context window and the capabilities
 its last `initialize` declared (whether it can fork a session), and, given a
 file, keeps them across restarts. Only `session/new` updates the options: a
 value changed later in one session is that session's, not the default a new
-one starts with.
+one starts with. That makes the options one session old; a provider whose spec
+sets `refresh_options` opens a session just to ask (`AcpProvider.refresh_options`).
 
 The file holds only what the agent itself reported. A stale entry (an agent
 upgrade that dropped an option) costs one refused `session/set_config_option`,
