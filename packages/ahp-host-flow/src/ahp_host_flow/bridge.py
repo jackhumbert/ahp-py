@@ -285,6 +285,19 @@ class MaskingSink:
         await self._flush()
         return await self._sink.content_part(data, content_type=content_type)  # type: ignore[no-any-return]
 
+    async def content_ref(
+        self,
+        uri: str,
+        *,
+        content_type: str,
+        size_hint: int | None = None,
+        nonce: str | None = None,
+    ) -> Mapping[str, Any]:
+        await self._flush()
+        return await self._sink.content_ref(  # type: ignore[no-any-return]
+            uri, content_type=content_type, size_hint=size_hint, nonce=nonce
+        )
+
     def __getattr__(self, name: str) -> Any:
         return getattr(self._sink, name)
 
@@ -527,6 +540,20 @@ class TurnTee:
         self._touch()
         await self.flush()
         return await self.sink.content_part(data, content_type=content_type)
+
+    async def content_ref(
+        self,
+        uri: str,
+        *,
+        content_type: str,
+        size_hint: int | None = None,
+        nonce: str | None = None,
+    ) -> Mapping[str, Any]:
+        self._touch()
+        await self.flush()
+        return await self.sink.content_ref(
+            uri, content_type=content_type, size_hint=size_hint, nonce=nonce
+        )
 
     async def usage(
         self,

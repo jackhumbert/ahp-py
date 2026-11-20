@@ -148,6 +148,21 @@ class RecordingSink:
     ) -> None:
         self.events.append(("notice", text))
 
+    async def content_part(self, data: bytes, *, content_type: str) -> Mapping[str, Any]:
+        self.events.append(("content", data, content_type))
+        return {"kind": "contentRef", "uri": "test:/stored", "contentType": content_type}
+
+    async def content_ref(
+        self,
+        uri: str,
+        *,
+        content_type: str,
+        size_hint: int | None = None,
+        nonce: str | None = None,
+    ) -> Mapping[str, Any]:
+        self.events.append(("ref", uri, content_type, size_hint, nonce))
+        return {"kind": "contentRef", "uri": uri, "contentType": content_type}
+
     async def request_input(self, request: InputRequest) -> InputOutcome:
         raise AssertionError("not used")
 

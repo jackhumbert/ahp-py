@@ -270,6 +270,8 @@ A question answered on another device can be **withdrawn here**
 can (`tool_call_confirmed`). A provider republishing its customization tree no
 longer wipes a client's plugins or the user's on/off switches: the host merges
 the replacement. A tool result can **be a diff** (`TurnSink.file_edit`, `fileEdit` content); a
+turn can **show an image** as a `contentRef` part, from bytes the host keeps until it
+restarts (`TurnSink.content_part`) or naming a file it serves (`TurnSink.content_ref`); a
 turn can carry a **system notification**; and a failed turn can be **resumed**
 (`chat/turnResume`) by an agent that is `ResumesTurns`, accepted only when the
 spec's preconditions hold. A **structured turn** (an ahp-py extension) returns a

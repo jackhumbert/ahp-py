@@ -77,3 +77,47 @@ async def test_an_image_is_a_content_ref_part_a_client_can_read() -> None:
         assert_frames_valid(wire, ("chat", chat))
     finally:
         await shut(host, wire, serving)
+
+
+class Pointing(EchoSession):
+    async def send_user_message(self, message: UserMessage, sink: TurnSink) -> None:
+        await sink.text_delta("Rendered:")
+        await sink.content_ref(
+            "file:///work/out/image.png", content_type="image/png", size_hint=1234, nonce="v2"
+        )
+        await sink.content_ref("file:///work/out/plain.png", content_type="image/png")
+        await sink.text_delta("Done.")
+
+
+class PointingProvider(EchoProvider):
+    async def create_session(self, context: AgentSessionContext) -> Pointing:
+        return Pointing(context)
+
+
+async def test_a_ref_to_existing_content_names_it_as_given() -> None:
+    host = Host(PointingProvider(), LoopbackSingleUserPolicy())
+    wire, serving = await connect(host)
+    try:
+        chat = await open_session(wire, "echo:/point-1")
+        await wire.dispatch(chat, turn_started("t1"))
+        assert await wire.until(lambda: finished(host, chat, "t1"))
+
+        parts = _parts(host, chat)
+        assert [p["kind"] for p in parts] == ["markdown", "contentRef", "contentRef", "markdown"]
+        assert parts[1] == {
+            "kind": "contentRef",
+            "uri": "file:///work/out/image.png",
+            "contentType": "image/png",
+            "sizeHint": 1234,
+            "nonce": "v2",
+        }
+        # Optional fields are left out rather than sent as null.
+        assert parts[2] == {
+            "kind": "contentRef",
+            "uri": "file:///work/out/plain.png",
+            "contentType": "image/png",
+        }
+        assert parts[3]["content"] == "Done."
+        assert_frames_valid(wire, ("chat", chat))
+    finally:
+        await shut(host, wire, serving)

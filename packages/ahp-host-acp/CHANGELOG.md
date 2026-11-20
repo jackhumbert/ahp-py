@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+### Added — images in the agent's reply
+
+- An `agent_message_chunk` carrying an image is shown in the chat as a `contentRef` part; it
+  was dropped before. A `resource_link` to an image file (`file:` URI, `image/*` `mimeType`)
+  names the file itself (`TurnSink.content_ref`), with the file's size and a nonce from its
+  modification time, so it costs nothing in the session and lasts as long as the file; a client
+  can read it only when the file is under a folder the host serves. An inline `image` block
+  goes in the content store (`TurnSink.content_part`). A missing file, one over
+  `shown.MAX_LINKED_IMAGE` (11 MiB) or undecodable bytes are named in a line of text.
+  `tests/test_shown.py`.
+
 ### Added — `refresh_options`: the agent's current options for a new session
 
 - `refresh_options = true` (config file, `acp` agent options, `AgentSpec.refresh_options`; default

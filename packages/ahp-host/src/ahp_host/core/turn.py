@@ -298,10 +298,29 @@ class ActionTurnSink:
         """
         if len(data) > self._content.max_blob:
             raise ValueError(f"{len(data)} bytes is over the {self._content.max_blob}-byte limit")
-        part: dict[str, Any] = {
-            "kind": "contentRef",
-            **self._content.put(data, content_type=content_type),
-        }
+        ref = self._content.put(data, content_type=content_type)
+        return await self.content_ref(
+            ref["uri"], content_type=content_type, size_hint=ref["sizeHint"]
+        )
+
+    async def content_ref(
+        self,
+        uri: str,
+        *,
+        content_type: str,
+        size_hint: int | None = None,
+        nonce: str | None = None,
+    ) -> dict[str, Any]:
+        """Publish a `ResourceResponsePart` (`kind: contentRef`) naming *uri* as it is.
+
+        Like `systemNotification`, the part has no `id` and nothing targets it
+        afterwards. The ref's `contentType` is what the client renders by.
+        """
+        part: dict[str, Any] = {"kind": "contentRef", "uri": uri, "contentType": content_type}
+        if size_hint is not None:
+            part["sizeHint"] = size_hint
+        if nonce is not None:
+            part["nonce"] = nonce
         await self.finish_reasoning()
         await self._sequencer.publish(
             self._channel,

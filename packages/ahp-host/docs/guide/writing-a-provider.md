@@ -136,6 +136,8 @@ So a host that wants to be usable must:
 | `tool_call_output(id, content, *, meta=)` | What a still-running call has produced. **Replaces**, so pass everything so far. Moves the call to `running` if it is not there yet. |
 | `tool_call_completed(id, result, *, success=, past_tense_message=)` | Finish it. Both keyword fields are **required by the protocol**. `result` is a `ToolCallResult` mapping or just its content list. |
 | `file_edit(change)` | A `fileEdit` content item for a `FileChange`, its bytes in the session's content store. Put it in a result's content and the client renders a diff. |
+| `content_part(data, *, content_type=)` | Show bytes in the transcript (an image, say): stored in the session's content store and published as a `contentRef` part a client reads with `resourceRead`. Refused over 4 MiB; gone after a host restart. |
+| `content_ref(uri, *, content_type=, size_hint=, nonce=)` | Show content that already exists at a URI the host serves (a file under its folders): a `contentRef` part naming it, nothing copied. Lasts as long as the file. `nonce` marks a file written again under the same name. |
 | `system_notification(text, *, markdown=, meta=)` | A note from the harness in the transcript: "conversation compacted", "sent from another device". |
 | `turn_failed(message, error_type=, duration_ms=, *, resumable=)` | End in error. `error_type` is required — omitting it renders `Error: (undefined) …`. `resumable=True` offers `chat/turnResume`; see [Resuming a failed turn](#resuming-a-failed-turn). |
 | `usage(*, input_tokens=, output_tokens=, cache_read_tokens=, model=)` | Report the turn's tokens. No usage, no context gauge — the client renders nothing rather than a zero. |

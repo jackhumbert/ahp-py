@@ -10,6 +10,14 @@ versions each release speaks.
 
 ## [Unreleased]
 
+### Added — `TurnSink.content_ref`: show content that already exists
+
+- `content_ref(uri, *, content_type, size_hint=None, nonce=None)` publishes a `contentRef`
+  response part naming *uri* as it is, for content a client can already read with
+  `resourceRead`, such as a file under one of the host's folders. Nothing is copied into the
+  content store, so the part lasts as long as the file and survives a restart. `content_part`
+  stores its bytes and then publishes through it. `tests/unit/test_content_part.py`.
+
 ### Changed — the WebSocket server takes messages up to 16 MiB
 
 - `DEFAULT_MAX_SIZE` is 16 MiB, was websockets' own 1 MiB. A message carries an inline

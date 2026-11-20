@@ -120,6 +120,7 @@ from ahp_host_acp.mcp import McpServer
 from ahp_host_acp.options import AgentOptions, coerce, same
 from ahp_host_acp.paths import directory_of
 from ahp_host_acp.roots import Roots, as_roots
+from ahp_host_acp.shown import show_block
 from ahp_host_acp.side_chat import SideChatMode, SideChatOrigin, SideChatSeed, render_preamble
 from ahp_host_acp.tools import ToolCall, text_of
 
@@ -1134,6 +1135,11 @@ class AcpSession:
             text = _text_block(event.content)
             if text:
                 await sink.text_delta(text)
+            elif not await show_block(_mapping(event.content), sink):
+                log.debug(
+                    "ignoring a %s block in the agent's message",
+                    _mapping(event.content).get("type"),
+                )
         elif isinstance(event, AgentThoughtChunk):
             # The sink times live reasoning runs; history replayed by `session/load` has no timing.
             text = _text_block(event.content)

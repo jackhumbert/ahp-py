@@ -78,6 +78,7 @@ a real subprocess and speak MCP's newline-delimited JSON-RPC to it.
 from __future__ import annotations
 
 import atexit
+import base64
 import json
 import os
 import queue
@@ -489,6 +490,32 @@ def prompt(session_id: str, words: str) -> dict[str, Any]:
         return {"stopReason": "end_turn"}
     if words == "environ":
         text(session_id, json.dumps({"env": sorted(os.environ), "argv": sys.argv}))
+        return {"stopReason": "end_turn"}
+    if words == "image":
+        # A render written to the session folder, shown by link; the same bytes
+        # inline; and a link to a file that is not there.
+        picture = cwd / "render.png"
+        picture.write_bytes(b"\x89PNG\r\n\x1a\nfake")
+        text(session_id, "Here:")
+        link = {"type": "resource_link", "uri": picture.resolve().as_uri(), "name": "render.png"}
+        update(
+            session_id,
+            {"sessionUpdate": "agent_message_chunk", "content": {**link, "mimeType": "image/png"}},
+        )
+        inline = {
+            "type": "image",
+            "data": base64.b64encode(picture.read_bytes()).decode(),
+            "mimeType": "image/png",
+        }
+        update(session_id, {"sessionUpdate": "agent_message_chunk", "content": inline})
+        gone = {
+            **link,
+            "uri": (cwd / "gone.png").resolve().as_uri(),
+            "name": "gone.png",
+            "mimeType": "image/png",
+        }
+        update(session_id, {"sessionUpdate": "agent_message_chunk", "content": gone})
+        text(session_id, "Done.")
         return {"stopReason": "end_turn"}
     if words == "hello":
         text(session_id, "thinking…", "agent_thought_chunk")

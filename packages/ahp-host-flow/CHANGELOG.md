@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Added — `content_ref` passes through the sink wrappers
+
+- `MaskingSink` and `TurnTee` forward ahp-host's new `TurnSink.content_ref` after flushing
+  buffered text, as they do `content_part`, so a shown file never lands above text sent before it.
+
 ### Fixed — the opening mark no longer leaks into spawned tasks
 
 - `opening_worker()` marks the task that opened the chat, not a boolean the context copies: a task

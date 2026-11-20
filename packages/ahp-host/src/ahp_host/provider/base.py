@@ -1753,7 +1753,30 @@ class TurnSink(Protocol):
         Raises `ValueError` for content over the store's per-item limit, which
         would otherwise be truncated -- half an image is no image. The store is
         a bounded cache that does not survive a host restart, so content shown
-        long ago may no longer open.
+        long ago may no longer open. For content that already exists as a file
+        a client can read, `content_ref` lasts as long as the file instead.
+        """
+        ...
+
+    async def content_ref(
+        self,
+        uri: str,
+        *,
+        content_type: str,
+        size_hint: int | None = None,
+        nonce: str | None = None,
+    ) -> Mapping[str, Any]:
+        """Show content that already exists at *uri*: a file the agent made, say.
+
+        Publishes a `contentRef` response part naming *uri* as it is; nothing
+        is copied into the content store, so the part lasts as long as what it
+        names and costs the session state nothing. A client fetches it with
+        `resourceRead`, so *uri* must be one this host serves to whoever may
+        see the session -- a file under one of its folders -- or the client
+        shows the ref without its content. *nonce* tells a client that caches
+        by URI that the content changed while the URI did not (a file written
+        again under the same name). Returns the part, and ends the current text
+        segment as `content_part` does.
         """
         ...
 

@@ -69,6 +69,12 @@ reference agent (`ahp-acp-openai`).
 - The agent's **plan** as one "Update plan" row per change, with the task list
   as its result ("Updated the plan: 2 of 5 done"), and the entry in progress
   as the session's activity.
+- **Images in the reply**: an `agent_message_chunk` whose block is a
+  `resource_link` to an image file is shown in the chat by naming the file
+  (it lasts as long as the file, and shows when the file is under a served
+  folder); an inline `image` block is shown from the host's content store,
+  until the host restarts. An agent that writes image files should send the
+  link.
 - **Diffs**: a completed edit's result is a `fileEdit` per file -- the diff a
   client renders in the call's row, from the file before that call to after
   it. A diff whose file could not be read back keeps a text summary instead.
