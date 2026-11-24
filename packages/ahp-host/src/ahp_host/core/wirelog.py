@@ -37,9 +37,10 @@ Three properties this deliberately keeps:
 * **There is no opt-out.** A flag to log credentials verbatim is a flag someone
   eventually sets on a machine they do not control.
 
-A canvas's live source `url` is redacted too, wherever a `CanvasState` appears
-(it is the object carrying `canvasId`): "Source URLs MUST be redacted from
-diagnostic logs" (1.0.0). A URL elsewhere is ordinary data and stays.
+A canvas's live source `uri` is redacted too, wherever a `CanvasState` appears
+(it is the object carrying `canvasId`): "Source URIs MUST be redacted from
+diagnostic logs" (1.1.0, which renamed the field from 1.0.0's `url`; both keys
+are redacted). A URL elsewhere is ordinary data and stays.
 
 A content redaction (`Host.redact`) is a different matter, and the limit is
 stated plainly: the wire log is an append-only transcript. Frames written
@@ -114,7 +115,7 @@ def redact(value: Any) -> Any:
         return {
             key: REDACTED
             if (isinstance(key, str) and key.lower().replace("-", "_") in _SENSITIVE_KEYS)
-            or (canvas and key == "url")
+            or (canvas and key in ("uri", "url"))
             else redact(item)
             for key, item in value.items()
         }

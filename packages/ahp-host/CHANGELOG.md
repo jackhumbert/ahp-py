@@ -10,6 +10,19 @@ versions each release speaks.
 
 ## [Unreleased]
 
+### Changed — a canvas goes on the wire as `uri`
+
+- Upstream `main` renamed `CanvasState.url` to `uri`, and `Canvas.to_wire` sends the new key.
+  The Python field is still `Canvas.url` and still HTTP(S) only, so a provider changes nothing.
+  Wire logs redact either key. `tests/integration/test_canvases.py`.
+
+### Added — automations refuse what this host cannot run
+
+- A definition with a `oneTime` trigger, or a `target` other than `newSession`, is refused with
+  a reason naming it. The host advertises neither, and saving one would run it as a new session
+  on a schedule instead. A patch may set `target`; unknown members of it are kept.
+  `tests/integration/test_automations.py`.
+
 ### Added — `TurnSink.content_ref`: show content that already exists
 
 - `content_ref(uri, *, content_type, size_hint=None, nonce=None)` publishes a `contentRef`

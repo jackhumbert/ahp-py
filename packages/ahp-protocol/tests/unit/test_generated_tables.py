@@ -105,8 +105,8 @@ def test_error_codes_match_the_spec() -> None:
 
 def test_upstream_version_constants() -> None:
     # The pin is a commit on upstream `main`, whose source tree declares the
-    # version under development; 1.1.0 is not released.
-    assert UPSTREAM_PROTOCOL_VERSION == "1.1.0"
+    # version under development: 1.1.0 is released, 1.2.0 is not.
+    assert UPSTREAM_PROTOCOL_VERSION == "1.2.0"
     # "Released compatibility baselines, independent of the current development
     # PROTOCOL_VERSION" (registry.ts) -- and at this pin, no longer led by it.
     assert UPSTREAM_SUPPORTED_PROTOCOL_VERSIONS == ("1.0.0", "0.9.0")
@@ -161,32 +161,34 @@ def test_root_session_chat_action_counts() -> None:
     assert counts["root"] + counts["session"] + counts["chat"] == 73
 
 
-def test_schemas_are_vendored_but_not_trusted() -> None:
-    """We vendor the schemas for reference, and record why they cannot validate.
+def test_state_action_schema_has_no_empty_ref() -> None:
+    """`actions.schema.json` shipped a malformed empty `$ref` from spec/v0.5.0
+    through spec/v1.0.0; upstream removed it in 1.1.0 (#580).
 
-    `actions.schema.json` has shipped a malformed empty `$ref` since spec/v0.5.0;
-    this test pins that fact so the day it is fixed upstream, we notice.
+    Validation stays per-definition regardless (`conformance/schemas.py`), so
+    this pins the fix rather than relying on it: a regression upstream shows up
+    here, not as a `PointerToNowhere` in some peer's suite.
     """
     schema = json.loads(
         (CORPUS_ROOT / "schema" / "actions.schema.json").read_text(encoding="utf-8")
     )
     one_of = schema["$defs"]["StateAction"]["oneOf"]
     malformed = [v for v in one_of if v.get("$ref", "").rstrip("/") == "#/$defs"]
-    assert len(malformed) == 1, (
-        "actions.schema.json's malformed empty $ref is gone -- upstream may have "
-        "fixed it. Re-evaluate the schema-validation gate in docs/plan.md §10."
-    )
+    assert malformed == [], "actions.schema.json ships an empty $ref again"
 
 
-def test_session_status_schema_is_a_closed_enum_that_rejects_real_values() -> None:
-    """The other reason we do not generate from the schemas. Pinned so a fix is noticed."""
+def test_session_status_schema_admits_every_real_value() -> None:
+    """`SessionStatus` was a closed `enum` that rejected values in upstream's own
+    corpora; since 1.1.0 (#581) it is an unsigned 32-bit integer. Pinned so a
+    regression to the enum is noticed."""
     schema = json.loads((CORPUS_ROOT / "schema" / "state.schema.json").read_text(encoding="utf-8"))
     declared = schema["$defs"]["SessionStatus"]
-    assert "enum" in declared, "SessionStatus is no longer a closed enum -- re-evaluate"
-    assert "Bitset" in declared.get("description", ""), "description no longer says bitset"
+    assert "enum" not in declared, "SessionStatus is a closed enum again -- re-evaluate"
+    assert declared["type"] == "integer"
+    assert declared["minimum"] == 0
+    assert declared["maximum"] == 2**32 - 1
     real_values = {1, 2, 8, 24, 33, 40, 56, 65, 72, 2147483720}
-    rejected = sorted(real_values - set(declared["enum"]))
-    assert rejected, "the enum now accepts every real value -- re-evaluate"
+    assert all(declared["minimum"] <= v <= declared["maximum"] for v in real_values)
 
 
 def test_empty_state_schema_admits_every_object() -> None:

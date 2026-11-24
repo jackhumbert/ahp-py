@@ -1146,6 +1146,121 @@ case(
     [{"type": "session/chatUpdated", "chat": "c", "changes": {"provider": None}}],
 )
 
+# ── session/customizationToggled reaching MCP-served skills (1.1.0) ─────────
+#
+# `toggleMcpServerSkill` writes the legacy `enabled` flag whatever the skill's
+# own `type`, a direct container child beats a skill with the same id, and the
+# first server serving the id wins.
+
+
+def _server(server_id: str, *skill_ids: Any) -> dict[str, Any]:
+    skills = [{"type": "skill", "id": skill_id} for skill_id in skill_ids]
+    return {"type": "mcpServer", "id": server_id, "name": server_id, "children": skills}
+
+
+_MCP_SKILLS = {
+    **_SESSION,
+    "customizations": [
+        {
+            "type": "mcpServer",
+            "id": "m",
+            "name": "m",
+            "children": [{"type": "skill", "id": "s1"}, {"type": "plugin", "id": "s2"}],
+        },
+        _server("empty"),
+        {
+            "type": "plugin",
+            "id": "p",
+            "children": [
+                _server("pm", "dup"),
+                {"type": "skill", "id": "dup"},
+                _server("pm2", "s3"),
+                _server("pm3", "s3"),
+            ],
+        },
+        _server("n", None),
+    ],
+}
+
+case(
+    "sess/customizationToggled-mcp-skill-null-enabled-defaults-true",
+    "session",
+    _MCP_SKILLS,
+    [
+        {
+            "type": "session/customizationToggled",
+            "id": "s1",
+            "enablement": [{"kind": "session", "enabled": None}],
+        }
+    ],
+)
+case(
+    "sess/customizationToggled-mcp-skill-plugin-typed-gets-enabled",
+    "session",
+    _MCP_SKILLS,
+    [
+        {
+            "type": "session/customizationToggled",
+            "id": "s2",
+            "enablement": [{"kind": "session", "enabled": False}],
+        }
+    ],
+)
+case(
+    "sess/customizationToggled-mcp-skill-empty-enablement-defaults-true",
+    "session",
+    _MCP_SKILLS,
+    [{"type": "session/customizationToggled", "id": "s1", "enablement": []}],
+)
+case(
+    "sess/customizationToggled-direct-child-beats-skill",
+    "session",
+    _MCP_SKILLS,
+    [
+        {
+            "type": "session/customizationToggled",
+            "id": "dup",
+            "enablement": [{"kind": "session", "enabled": False}],
+        }
+    ],
+)
+case(
+    "sess/customizationToggled-first-server-serving-skill-wins",
+    "session",
+    _MCP_SKILLS,
+    [
+        {
+            "type": "session/customizationToggled",
+            "id": "s3",
+            "enablement": [{"kind": "session", "enabled": False}],
+        }
+    ],
+)
+case(
+    "sess/customizationToggled-mcp-skill-null-id",
+    "session",
+    _MCP_SKILLS,
+    [
+        {
+            "type": "session/customizationToggled",
+            "id": None,
+            "enablement": [{"kind": "session", "enabled": False}],
+        }
+    ],
+)
+case(
+    "sess/customizationToggled-mcp-skill-unknown-id-no-op",
+    "session",
+    _MCP_SKILLS,
+    [
+        {
+            "type": "session/customizationToggled",
+            "id": "nope",
+            "enablement": [{"kind": "session", "enabled": False}],
+        }
+    ],
+)
+
 if __name__ == "__main__":
     for entry in CASES:
         sys.stdout.write(json.dumps(entry) + "\n")

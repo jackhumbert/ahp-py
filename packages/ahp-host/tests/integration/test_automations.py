@@ -249,6 +249,18 @@ class TestTheCatalogue:
                 ),
                 "no event trigger",
             ),
+            (
+                _definition(
+                    triggers=[{"id": "o", "kind": "oneTime", "runAt": "2030-01-01T09:00:00Z"}]
+                ),
+                "one-time",
+            ),
+            (_definition(target={"kind": "previousSession"}), "previousSession"),
+            (
+                _definition(target={"kind": "chat", "session": "s:/1", "chat": "ahp-chat:/1"}),
+                "'chat' run target",
+            ),
+            (_definition(target={"kind": "later"}), "unknown run target"),
             (_definition(triggers=[_schedule("* * * * *"), _schedule("0 * * * *")]), "share"),
             (_definition(session={"provider": "nope"}), "no agent"),
         ],
@@ -319,11 +331,25 @@ class TestTheCatalogue:
             definition = _entries(host)[0]["definition"]
             assert definition["enabled"] is False
             assert definition["message"]["text"] == "check the build"
+            # A patch may set the one target this host runs, and the definition
+            # keeps it, unknown members included (`@preserveUnknownMembers`).
+            await _dispatch(
+                client,
+                AUTOMATIONS_URI,
+                {
+                    "type": "automation/updateRequested",
+                    "resource": AUTOMATION,
+                    "changes": {"target": {"kind": "newSession", "future": 1}},
+                },
+                seq=3,
+            )
+            await _until(lambda: "target" in _entries(host)[0]["definition"])
+            assert _entries(host)[0]["definition"]["target"] == {"kind": "newSession", "future": 1}
             await _dispatch(
                 client,
                 AUTOMATIONS_URI,
                 {"type": "automation/removed", "resource": AUTOMATION},
-                seq=3,
+                seq=4,
             )
             await _until(lambda: not list(tmp_path.glob("*.json")))
             assert _entries(host) == []

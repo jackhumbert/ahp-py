@@ -21,11 +21,11 @@ be able to arrive as a patch upgrade.
 | Field | Value |
 |---|---|
 | Upstream | [`microsoft/agent-host-protocol`](https://github.com/microsoft/agent-host-protocol) (MIT) |
-| Spec ref | `main` — ahead of the `spec/v1.1.0` tag, which does not exist yet |
-| Spec commit | `c5628cd4b09f76cf143ebe655e872c0fb3f1b8d8` |
+| Spec ref | `main`, ten commits past the `spec/v1.1.0` tag; `main` declares `1.2.0` |
+| Spec commit | `e36b0a20747430694b761e7ea83463dcfa327157` |
 | Working revision read during research | `bd27d354b39c1b2090fbcc6db392d406b743280c` (2026-07-31) |
-| **Protocol version negotiated on the wire** | **`1.0.0`** (we offer `1.0.0, 0.9.0, 0.8.0, 0.7.0, 0.6.0`); a `1.1.0` offer is accepted under `^1.0.0` |
-| Conformance corpus | with the dependency, vendored there from `main` @ `c5628cd4` → `types/test-cases/` |
+| **Protocol version negotiated on the wire** | **`1.0.0`** (we offer `1.0.0, 0.9.0, 0.8.0, 0.7.0, 0.6.0`); a `1.1.0` or `1.2.0` offer is accepted under `^1.0.0` |
+| Conformance corpus | with the dependency, vendored there from `main` @ `e36b0a20` → `types/test-cases/` |
 | Reference client for interop tests | `@microsoft/agent-host-protocol@1.0.0` (npm, published 2026-10-02) |
 
 ### The interop client matches the wire version
@@ -79,10 +79,11 @@ What the host *publishes* is 0.9.0-shaped for everyone: errors as response
 parts, terminal `lifecycle`, session claims with `chat`, and a `failed`
 session lifecycle.
 
-### 1.1.0, ahead of its release
+### 1.1.0 and what `main` adds past it
 
 The dependency pins a commit on upstream `main` rather than a tag, because a
-client built from `main` offers `1.1.0` and the caret rule has every host here
+client built from `main` offers the newest version (`1.1.0` until its tag, `1.2.0`
+since) and the caret rule has every host here
 accept it. Answering "1.1.0" while reducing with 1.0.0 branches loses steering
 input, so the host absorbed the version instead. Unlike 1.0.0, it is **not**
 additive for the host: the pending-message drain had to change with the
@@ -97,6 +98,19 @@ tests still negotiate `1.0.0`.
 | `SessionModelInfo.vendor` | `ModelInfo.vendor`, passed through. Neither shipped provider sets it: their runtimes report none |
 | Windowed delivery (`flowControl`, `channel/*`) | Not offered: a `subscribe` or `reconnect` that asks gets ordinary delivery, which the spec allows |
 | TCP channel (`createTcpConnection`, `tcp/*`) | Declined: `tcpConnections` is never advertised and the command is answered `PermissionDenied` |
+
+Past the tag, `main` (declaring `1.2.0`) changes these for the host:
+
+| Change on `main` | Status |
+|---|---|
+| `CanvasState.url` renamed `uri` | Sent as `uri`. The Python field stays `Canvas.url`, still HTTP(S) only, and both keys are redacted from wire logs |
+| `session/customizationToggled` reaches an MCP server's skills | Reduced by the pinned reducer; nothing host-side |
+| `resourceRead` `position` / `length`, result `size` | Accepted and ignored: the whole resource is returned, which the spec allows |
+| `InitializeResult.environment.pathStyle` | Not sent; it is optional |
+| `AuthenticateParams.accountId` | Accepted; the host keeps one token per resource either way |
+| Messages from a non-user origin | Nothing to change: the host never restricted input to `User` |
+| Annotations resource as `ahp-annotations:/<uuid>` | Not adopted: the host keeps `<session>/annotations`, the URI VS Code reads |
+| Automation `oneTime` triggers and run `target` | Not advertised; a definition using a one-time trigger or a target other than `newSession` is refused by name rather than saved and run as something else |
 
 ## Vendoring moved out
 

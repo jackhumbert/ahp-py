@@ -49,8 +49,8 @@ def test_readme_names_every_reducer_it_claims() -> None:
 def test_readme_fixture_counts_match_the_vendored_corpus() -> None:
     reducers = sum(1 for _ in reducer_fixtures())
     round_trips = sum(1 for _ in round_trip_fixtures())
-    assert reducers == 346
-    assert round_trips == 104
+    assert reducers == 351
+    assert round_trips == 119
     assert f"**{reducers}**" in README
     assert f"**{round_trips}**" in README
 

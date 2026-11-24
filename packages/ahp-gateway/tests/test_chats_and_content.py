@@ -309,7 +309,7 @@ async def test_a_window_is_not_offered_on_the_surfaces_behalf() -> None:
     a = RecordingLink("a")
     conn = connection(a)
     conn.owners.claim("a", {"ahp-chat:/known"})
-    window = {"receive": {"windowBytes": 262144, "maximumFrameBytes": 16384}}
+    window = {"receive": {"windowBytes": 262144, "maxFrameBytes": 16384}}
     result = await conn._dispatch(
         "subscribe", {"channel": "ahp-chat:/known", "view": {"turns": 2}, "flowControl": window}, []
     )

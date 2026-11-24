@@ -138,7 +138,7 @@ async def test_a_windowed_subscribe_gets_ordinary_delivery() -> None:
             "subscribe",
             {
                 "channel": "echo:/windowed",
-                "flowControl": {"receive": {"windowBytes": 262144, "maximumFrameBytes": 16384}},
+                "flowControl": {"receive": {"windowBytes": 262144, "maxFrameBytes": 16384}},
             },
         )
         assert "flowControl" not in response["result"]

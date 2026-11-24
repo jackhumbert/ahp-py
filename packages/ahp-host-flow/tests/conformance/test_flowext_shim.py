@@ -98,7 +98,7 @@ async def test_flowext_shim_ahp_host_flow(tmp_path: Path, node_path: str) -> Non
                 "done": "rec: apply the plan",
             }
             (ref,) = state(fx.host, fx.chat)["canvases"]
-            assert state(fx.host, ref["resource"])["url"] == "https://example.com/run"
+            assert state(fx.host, ref["resource"])["uri"] == "https://example.com/run"
             (rec,) = RecordingProvider.instances
             assert len(rec.sessions) == 1
             assert [m.text for m in rec.sessions[0].messages] == [

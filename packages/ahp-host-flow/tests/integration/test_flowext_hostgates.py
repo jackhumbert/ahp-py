@@ -277,7 +277,7 @@ async def _canvas(tmp_path: Path, node: str, text: str) -> None:
         assert final_json(turn) == 1
         (reference,) = state(fx.host, fx.chat)["canvases"]
         canvas = state(fx.host, str(reference["resource"]))
-        assert canvas["url"] == "https://example.com/live"
+        assert canvas["uri"] == "https://example.com/live"
         assert canvas["title"] == "Live"
         assert canvas["extensionId"] == "ahp-py/flow"
     finally:

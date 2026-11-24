@@ -15,7 +15,7 @@ Microsoft's protocol for synchronized multi-client state over AI agent sessions.
 > ### ⚠️ Status: working, but pre-alpha.
 >
 > A real client can connect, create a session, and run a turn. **All ten
-> reducers pass upstream's whole 346-fixture corpus**, the v0.1 command set plus
+> reducers pass upstream's whole 351-fixture corpus**, the v0.1 command set plus
 > `fetchTurns` is implemented, and a WebSocket transport is in place.
 > Distributed from this repository — deliberately not on PyPI. API not stable,
 > single-trust-domain only.
@@ -225,7 +225,7 @@ with no adapter installed.
 Protocol **1.0.0, 0.9.0, 0.8.0, 0.7.0 and 0.6.0** on the wire, and **1.1.0** — upstream's
 unreleased next version, inside `^1.0.0`, whose reducers this host runs · **every channel** — root,
 session, chat, annotations, terminal, changeset, resource-watch, automation,
-automation-run and canvas, each detailed below · **all ten reducers**, gated on upstream's whole 346-fixture corpus
+automation-run and canvas, each detailed below · **all ten reducers**, gated on upstream's whole 351-fixture corpus
 · host-global sequencing with per-channel replay budgets · a pluggable agent
 provider with an offline echo implementation · WebSocket transport behind a
 transport abstraction.
@@ -886,10 +886,10 @@ a separate package this one depends on, so that a Python *client* can share them
 rather than fork them. Its conformance gates are listed here because they are
 what this host stands on:
 
-- Reducers are validated against **upstream's own 346-fixture corpus**, the same
+- Reducers are validated against **upstream's own 351-fixture corpus**, the same
   artifact the Rust, Go, Kotlin and Swift clients are gated on, consumed
-  unmodified. All 346, not a subset.
-- Wire types are validated against upstream's 104-fixture round-trip corpus.
+  unmodified. All 351, not a subset.
+- Wire types are validated against upstream's 119-fixture round-trip corpus.
 - **The corpus's own blind spot is covered separately.** Its comparator drops
   `null`-valued keys on both sides, so it cannot express the difference between
   an absent key and an explicit `null` — the single most common porting defect

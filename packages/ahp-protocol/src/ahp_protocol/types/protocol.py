@@ -323,6 +323,21 @@ def _is_duration(value: Any, path: str) -> list[str]:
     return [] if value >= 0 else [f"{path}: expected a non-negative duration, got {value!r}"]
 
 
+def _is_non_empty_string(value: Any, path: str) -> list[str]:
+    problems = is_string(value, path)
+    if problems:
+        return problems
+    return [] if value else [f"{path}: expected a non-empty string"]
+
+
+def _is_byte_count(value: Any, path: str) -> list[str]:
+    """A non-negative integer (`@integer @minimum 0`), as `resourceRead` ranges are."""
+    problems = is_int(value, path)
+    if problems:
+        return problems
+    return [] if value >= 0 else [f"{path}: expected a non-negative integer, got {value!r}"]
+
+
 _POSITION = ObjectSpec(
     "Position",
     (Field("line", True, is_int), Field("character", True, is_int)),
@@ -412,7 +427,16 @@ _INITIALIZE_RESULT = ObjectSpec(
         Field("tcpConnections", False, is_object),
         # 1.1.0: presence-only, `{}` is the capability.
         Field("multipleChatProviders", False, is_object),
+        # 1.1.0: the connection's default host environment, `pathStyle` today.
+        Field("environment", False, ref("HostEnvironment")),
     ),
+)
+
+#: `InitializeResult.environment` (1.1.0). `pathStyle` is `posix | windows`;
+#: absence means no environment metadata, never "the client's own".
+_HOST_ENVIRONMENT = ObjectSpec(
+    "HostEnvironment",
+    (Field("pathStyle", False, is_string),),
 )
 
 #: `string | { markdown: string }`.
@@ -468,6 +492,8 @@ _AUTHENTICATE_PARAMS = ObjectSpec(
         Field("expiresIn", False, is_int),
         Field("scopes", False, array_of(is_string)),
         Field("target", False, ref("AuthenticateTarget")),
+        # 1.1.0: an opaque, client-local account-selection hint (`@minLength 1`).
+        Field("accountId", False, _is_non_empty_string),
     ),
 )
 
@@ -713,7 +739,8 @@ _TOOL_CALL_RESULT = ObjectSpec(
 
 _CHANNEL_RECEIVE_LIMITS = ObjectSpec(
     "ChannelReceiveLimits",
-    (Field("windowBytes", True, is_int), Field("maximumFrameBytes", True, is_int)),
+    # `maxFrameBytes` since 1.1.0's release; `maximumFrameBytes` before it.
+    (Field("windowBytes", True, is_int), Field("maxFrameBytes", True, is_int)),
 )
 
 _SUBSCRIPTION_FLOW_CONTROL_OPTIONS = ObjectSpec(
@@ -830,6 +857,33 @@ _CHANNEL_CREDIT_PARAMS = ObjectSpec(
     (Field("channel", True, is_string), Field("consumedBytes", True, is_int)),
 )
 
+# ─── resourceRead ──────────────────────────────────────────────────────────────
+
+#: 1.1.0 adds an optional byte range. A receiver that does not honor it
+#: ignores `position` and `length` and returns the whole resource.
+_RESOURCE_READ_PARAMS = ObjectSpec(
+    "ResourceReadParams",
+    (
+        Field("channel", True, is_string),
+        Field("uri", True, is_string),
+        Field("encoding", False, is_string),
+        Field("position", False, _is_byte_count),
+        Field("length", False, _is_byte_count),
+    ),
+)
+
+#: `size` is present if and only if the receiver honored the range; a result
+#: without it is the whole resource.
+_RESOURCE_READ_RESULT = ObjectSpec(
+    "ResourceReadResult",
+    (
+        Field("data", True, is_string),
+        Field("encoding", True, is_string),
+        Field("contentType", False, is_string),
+        Field("size", False, _is_byte_count),
+    ),
+)
+
 # ─── TCP channel (1.1.0, experimental) ────────────────────────────────────────
 
 _CREATE_TCP_CONNECTION_PARAMS = ObjectSpec(
@@ -870,6 +924,7 @@ SPECS: Final[dict[str, Spec]] = {
         _CREATE_CHAT_PARAMS,
         _CREATE_TCP_CONNECTION_PARAMS,
         _CUSTOMIZATION,
+        _HOST_ENVIRONMENT,
         _IMPLEMENTATION,
         _INITIALIZE_RESULT,
         _JSON_RPC_MESSAGE,
@@ -879,6 +934,8 @@ SPECS: Final[dict[str, Spec]] = {
         _REASONING_RESPONSE_PART,
         _RECONNECT_PARAMS,
         _RECONNECT_RESULT,
+        _RESOURCE_READ_PARAMS,
+        _RESOURCE_READ_RESULT,
         _SESSION_ADDED_PARAMS,
         _SESSION_CHAT_SUMMARY,
         _SESSION_STATUS,

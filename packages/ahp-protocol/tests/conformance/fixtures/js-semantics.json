@@ -6013,6 +6013,1309 @@
      }
     ]
    }
+  },
+  {
+   "name": "sess/customizationToggled-mcp-skill-null-enabled-defaults-true",
+   "reducer": "session",
+   "initial": {
+    "provider": "p",
+    "title": "T",
+    "status": 1,
+    "lifecycle": "ready",
+    "activeClients": [],
+    "chats": [],
+    "customizations": [
+     {
+      "type": "mcpServer",
+      "id": "m",
+      "name": "m",
+      "children": [
+       {
+        "type": "skill",
+        "id": "s1"
+       },
+       {
+        "type": "plugin",
+        "id": "s2"
+       }
+      ]
+     },
+     {
+      "type": "mcpServer",
+      "id": "empty",
+      "name": "empty",
+      "children": []
+     },
+     {
+      "type": "plugin",
+      "id": "p",
+      "children": [
+       {
+        "type": "mcpServer",
+        "id": "pm",
+        "name": "pm",
+        "children": [
+         {
+          "type": "skill",
+          "id": "dup"
+         }
+        ]
+       },
+       {
+        "type": "skill",
+        "id": "dup"
+       },
+       {
+        "type": "mcpServer",
+        "id": "pm2",
+        "name": "pm2",
+        "children": [
+         {
+          "type": "skill",
+          "id": "s3"
+         }
+        ]
+       },
+       {
+        "type": "mcpServer",
+        "id": "pm3",
+        "name": "pm3",
+        "children": [
+         {
+          "type": "skill",
+          "id": "s3"
+         }
+        ]
+       }
+      ]
+     },
+     {
+      "type": "mcpServer",
+      "id": "n",
+      "name": "n",
+      "children": [
+       {
+        "type": "skill",
+        "id": null
+       }
+      ]
+     }
+    ]
+   },
+   "actions": [
+    {
+     "type": "session/customizationToggled",
+     "id": "s1",
+     "enablement": [
+      {
+       "kind": "session",
+       "enabled": null
+      }
+     ]
+    }
+   ],
+   "expected": {
+    "provider": "p",
+    "title": "T",
+    "status": 1,
+    "lifecycle": "ready",
+    "activeClients": [],
+    "chats": [],
+    "customizations": [
+     {
+      "type": "mcpServer",
+      "id": "m",
+      "name": "m",
+      "children": [
+       {
+        "type": "skill",
+        "id": "s1",
+        "enabled": true
+       },
+       {
+        "type": "plugin",
+        "id": "s2"
+       }
+      ]
+     },
+     {
+      "type": "mcpServer",
+      "id": "empty",
+      "name": "empty",
+      "children": []
+     },
+     {
+      "type": "plugin",
+      "id": "p",
+      "children": [
+       {
+        "type": "mcpServer",
+        "id": "pm",
+        "name": "pm",
+        "children": [
+         {
+          "type": "skill",
+          "id": "dup"
+         }
+        ]
+       },
+       {
+        "type": "skill",
+        "id": "dup"
+       },
+       {
+        "type": "mcpServer",
+        "id": "pm2",
+        "name": "pm2",
+        "children": [
+         {
+          "type": "skill",
+          "id": "s3"
+         }
+        ]
+       },
+       {
+        "type": "mcpServer",
+        "id": "pm3",
+        "name": "pm3",
+        "children": [
+         {
+          "type": "skill",
+          "id": "s3"
+         }
+        ]
+       }
+      ]
+     },
+     {
+      "type": "mcpServer",
+      "id": "n",
+      "name": "n",
+      "children": [
+       {
+        "type": "skill",
+        "id": null
+       }
+      ]
+     }
+    ]
+   }
+  },
+  {
+   "name": "sess/customizationToggled-mcp-skill-plugin-typed-gets-enabled",
+   "reducer": "session",
+   "initial": {
+    "provider": "p",
+    "title": "T",
+    "status": 1,
+    "lifecycle": "ready",
+    "activeClients": [],
+    "chats": [],
+    "customizations": [
+     {
+      "type": "mcpServer",
+      "id": "m",
+      "name": "m",
+      "children": [
+       {
+        "type": "skill",
+        "id": "s1"
+       },
+       {
+        "type": "plugin",
+        "id": "s2"
+       }
+      ]
+     },
+     {
+      "type": "mcpServer",
+      "id": "empty",
+      "name": "empty",
+      "children": []
+     },
+     {
+      "type": "plugin",
+      "id": "p",
+      "children": [
+       {
+        "type": "mcpServer",
+        "id": "pm",
+        "name": "pm",
+        "children": [
+         {
+          "type": "skill",
+          "id": "dup"
+         }
+        ]
+       },
+       {
+        "type": "skill",
+        "id": "dup"
+       },
+       {
+        "type": "mcpServer",
+        "id": "pm2",
+        "name": "pm2",
+        "children": [
+         {
+          "type": "skill",
+          "id": "s3"
+         }
+        ]
+       },
+       {
+        "type": "mcpServer",
+        "id": "pm3",
+        "name": "pm3",
+        "children": [
+         {
+          "type": "skill",
+          "id": "s3"
+         }
+        ]
+       }
+      ]
+     },
+     {
+      "type": "mcpServer",
+      "id": "n",
+      "name": "n",
+      "children": [
+       {
+        "type": "skill",
+        "id": null
+       }
+      ]
+     }
+    ]
+   },
+   "actions": [
+    {
+     "type": "session/customizationToggled",
+     "id": "s2",
+     "enablement": [
+      {
+       "kind": "session",
+       "enabled": false
+      }
+     ]
+    }
+   ],
+   "expected": {
+    "provider": "p",
+    "title": "T",
+    "status": 1,
+    "lifecycle": "ready",
+    "activeClients": [],
+    "chats": [],
+    "customizations": [
+     {
+      "type": "mcpServer",
+      "id": "m",
+      "name": "m",
+      "children": [
+       {
+        "type": "skill",
+        "id": "s1"
+       },
+       {
+        "type": "plugin",
+        "id": "s2",
+        "enabled": false
+       }
+      ]
+     },
+     {
+      "type": "mcpServer",
+      "id": "empty",
+      "name": "empty",
+      "children": []
+     },
+     {
+      "type": "plugin",
+      "id": "p",
+      "children": [
+       {
+        "type": "mcpServer",
+        "id": "pm",
+        "name": "pm",
+        "children": [
+         {
+          "type": "skill",
+          "id": "dup"
+         }
+        ]
+       },
+       {
+        "type": "skill",
+        "id": "dup"
+       },
+       {
+        "type": "mcpServer",
+        "id": "pm2",
+        "name": "pm2",
+        "children": [
+         {
+          "type": "skill",
+          "id": "s3"
+         }
+        ]
+       },
+       {
+        "type": "mcpServer",
+        "id": "pm3",
+        "name": "pm3",
+        "children": [
+         {
+          "type": "skill",
+          "id": "s3"
+         }
+        ]
+       }
+      ]
+     },
+     {
+      "type": "mcpServer",
+      "id": "n",
+      "name": "n",
+      "children": [
+       {
+        "type": "skill",
+        "id": null
+       }
+      ]
+     }
+    ]
+   }
+  },
+  {
+   "name": "sess/customizationToggled-mcp-skill-empty-enablement-defaults-true",
+   "reducer": "session",
+   "initial": {
+    "provider": "p",
+    "title": "T",
+    "status": 1,
+    "lifecycle": "ready",
+    "activeClients": [],
+    "chats": [],
+    "customizations": [
+     {
+      "type": "mcpServer",
+      "id": "m",
+      "name": "m",
+      "children": [
+       {
+        "type": "skill",
+        "id": "s1"
+       },
+       {
+        "type": "plugin",
+        "id": "s2"
+       }
+      ]
+     },
+     {
+      "type": "mcpServer",
+      "id": "empty",
+      "name": "empty",
+      "children": []
+     },
+     {
+      "type": "plugin",
+      "id": "p",
+      "children": [
+       {
+        "type": "mcpServer",
+        "id": "pm",
+        "name": "pm",
+        "children": [
+         {
+          "type": "skill",
+          "id": "dup"
+         }
+        ]
+       },
+       {
+        "type": "skill",
+        "id": "dup"
+       },
+       {
+        "type": "mcpServer",
+        "id": "pm2",
+        "name": "pm2",
+        "children": [
+         {
+          "type": "skill",
+          "id": "s3"
+         }
+        ]
+       },
+       {
+        "type": "mcpServer",
+        "id": "pm3",
+        "name": "pm3",
+        "children": [
+         {
+          "type": "skill",
+          "id": "s3"
+         }
+        ]
+       }
+      ]
+     },
+     {
+      "type": "mcpServer",
+      "id": "n",
+      "name": "n",
+      "children": [
+       {
+        "type": "skill",
+        "id": null
+       }
+      ]
+     }
+    ]
+   },
+   "actions": [
+    {
+     "type": "session/customizationToggled",
+     "id": "s1",
+     "enablement": []
+    }
+   ],
+   "expected": {
+    "provider": "p",
+    "title": "T",
+    "status": 1,
+    "lifecycle": "ready",
+    "activeClients": [],
+    "chats": [],
+    "customizations": [
+     {
+      "type": "mcpServer",
+      "id": "m",
+      "name": "m",
+      "children": [
+       {
+        "type": "skill",
+        "id": "s1",
+        "enabled": true
+       },
+       {
+        "type": "plugin",
+        "id": "s2"
+       }
+      ]
+     },
+     {
+      "type": "mcpServer",
+      "id": "empty",
+      "name": "empty",
+      "children": []
+     },
+     {
+      "type": "plugin",
+      "id": "p",
+      "children": [
+       {
+        "type": "mcpServer",
+        "id": "pm",
+        "name": "pm",
+        "children": [
+         {
+          "type": "skill",
+          "id": "dup"
+         }
+        ]
+       },
+       {
+        "type": "skill",
+        "id": "dup"
+       },
+       {
+        "type": "mcpServer",
+        "id": "pm2",
+        "name": "pm2",
+        "children": [
+         {
+          "type": "skill",
+          "id": "s3"
+         }
+        ]
+       },
+       {
+        "type": "mcpServer",
+        "id": "pm3",
+        "name": "pm3",
+        "children": [
+         {
+          "type": "skill",
+          "id": "s3"
+         }
+        ]
+       }
+      ]
+     },
+     {
+      "type": "mcpServer",
+      "id": "n",
+      "name": "n",
+      "children": [
+       {
+        "type": "skill",
+        "id": null
+       }
+      ]
+     }
+    ]
+   }
+  },
+  {
+   "name": "sess/customizationToggled-direct-child-beats-skill",
+   "reducer": "session",
+   "initial": {
+    "provider": "p",
+    "title": "T",
+    "status": 1,
+    "lifecycle": "ready",
+    "activeClients": [],
+    "chats": [],
+    "customizations": [
+     {
+      "type": "mcpServer",
+      "id": "m",
+      "name": "m",
+      "children": [
+       {
+        "type": "skill",
+        "id": "s1"
+       },
+       {
+        "type": "plugin",
+        "id": "s2"
+       }
+      ]
+     },
+     {
+      "type": "mcpServer",
+      "id": "empty",
+      "name": "empty",
+      "children": []
+     },
+     {
+      "type": "plugin",
+      "id": "p",
+      "children": [
+       {
+        "type": "mcpServer",
+        "id": "pm",
+        "name": "pm",
+        "children": [
+         {
+          "type": "skill",
+          "id": "dup"
+         }
+        ]
+       },
+       {
+        "type": "skill",
+        "id": "dup"
+       },
+       {
+        "type": "mcpServer",
+        "id": "pm2",
+        "name": "pm2",
+        "children": [
+         {
+          "type": "skill",
+          "id": "s3"
+         }
+        ]
+       },
+       {
+        "type": "mcpServer",
+        "id": "pm3",
+        "name": "pm3",
+        "children": [
+         {
+          "type": "skill",
+          "id": "s3"
+         }
+        ]
+       }
+      ]
+     },
+     {
+      "type": "mcpServer",
+      "id": "n",
+      "name": "n",
+      "children": [
+       {
+        "type": "skill",
+        "id": null
+       }
+      ]
+     }
+    ]
+   },
+   "actions": [
+    {
+     "type": "session/customizationToggled",
+     "id": "dup",
+     "enablement": [
+      {
+       "kind": "session",
+       "enabled": false
+      }
+     ]
+    }
+   ],
+   "expected": {
+    "provider": "p",
+    "title": "T",
+    "status": 1,
+    "lifecycle": "ready",
+    "activeClients": [],
+    "chats": [],
+    "customizations": [
+     {
+      "type": "mcpServer",
+      "id": "m",
+      "name": "m",
+      "children": [
+       {
+        "type": "skill",
+        "id": "s1"
+       },
+       {
+        "type": "plugin",
+        "id": "s2"
+       }
+      ]
+     },
+     {
+      "type": "mcpServer",
+      "id": "empty",
+      "name": "empty",
+      "children": []
+     },
+     {
+      "type": "plugin",
+      "id": "p",
+      "children": [
+       {
+        "type": "mcpServer",
+        "id": "pm",
+        "name": "pm",
+        "children": [
+         {
+          "type": "skill",
+          "id": "dup"
+         }
+        ]
+       },
+       {
+        "type": "skill",
+        "id": "dup",
+        "enabled": false
+       },
+       {
+        "type": "mcpServer",
+        "id": "pm2",
+        "name": "pm2",
+        "children": [
+         {
+          "type": "skill",
+          "id": "s3"
+         }
+        ]
+       },
+       {
+        "type": "mcpServer",
+        "id": "pm3",
+        "name": "pm3",
+        "children": [
+         {
+          "type": "skill",
+          "id": "s3"
+         }
+        ]
+       }
+      ]
+     },
+     {
+      "type": "mcpServer",
+      "id": "n",
+      "name": "n",
+      "children": [
+       {
+        "type": "skill",
+        "id": null
+       }
+      ]
+     }
+    ]
+   }
+  },
+  {
+   "name": "sess/customizationToggled-first-server-serving-skill-wins",
+   "reducer": "session",
+   "initial": {
+    "provider": "p",
+    "title": "T",
+    "status": 1,
+    "lifecycle": "ready",
+    "activeClients": [],
+    "chats": [],
+    "customizations": [
+     {
+      "type": "mcpServer",
+      "id": "m",
+      "name": "m",
+      "children": [
+       {
+        "type": "skill",
+        "id": "s1"
+       },
+       {
+        "type": "plugin",
+        "id": "s2"
+       }
+      ]
+     },
+     {
+      "type": "mcpServer",
+      "id": "empty",
+      "name": "empty",
+      "children": []
+     },
+     {
+      "type": "plugin",
+      "id": "p",
+      "children": [
+       {
+        "type": "mcpServer",
+        "id": "pm",
+        "name": "pm",
+        "children": [
+         {
+          "type": "skill",
+          "id": "dup"
+         }
+        ]
+       },
+       {
+        "type": "skill",
+        "id": "dup"
+       },
+       {
+        "type": "mcpServer",
+        "id": "pm2",
+        "name": "pm2",
+        "children": [
+         {
+          "type": "skill",
+          "id": "s3"
+         }
+        ]
+       },
+       {
+        "type": "mcpServer",
+        "id": "pm3",
+        "name": "pm3",
+        "children": [
+         {
+          "type": "skill",
+          "id": "s3"
+         }
+        ]
+       }
+      ]
+     },
+     {
+      "type": "mcpServer",
+      "id": "n",
+      "name": "n",
+      "children": [
+       {
+        "type": "skill",
+        "id": null
+       }
+      ]
+     }
+    ]
+   },
+   "actions": [
+    {
+     "type": "session/customizationToggled",
+     "id": "s3",
+     "enablement": [
+      {
+       "kind": "session",
+       "enabled": false
+      }
+     ]
+    }
+   ],
+   "expected": {
+    "provider": "p",
+    "title": "T",
+    "status": 1,
+    "lifecycle": "ready",
+    "activeClients": [],
+    "chats": [],
+    "customizations": [
+     {
+      "type": "mcpServer",
+      "id": "m",
+      "name": "m",
+      "children": [
+       {
+        "type": "skill",
+        "id": "s1"
+       },
+       {
+        "type": "plugin",
+        "id": "s2"
+       }
+      ]
+     },
+     {
+      "type": "mcpServer",
+      "id": "empty",
+      "name": "empty",
+      "children": []
+     },
+     {
+      "type": "plugin",
+      "id": "p",
+      "children": [
+       {
+        "type": "mcpServer",
+        "id": "pm",
+        "name": "pm",
+        "children": [
+         {
+          "type": "skill",
+          "id": "dup"
+         }
+        ]
+       },
+       {
+        "type": "skill",
+        "id": "dup"
+       },
+       {
+        "type": "mcpServer",
+        "id": "pm2",
+        "name": "pm2",
+        "children": [
+         {
+          "type": "skill",
+          "id": "s3",
+          "enabled": false
+         }
+        ]
+       },
+       {
+        "type": "mcpServer",
+        "id": "pm3",
+        "name": "pm3",
+        "children": [
+         {
+          "type": "skill",
+          "id": "s3"
+         }
+        ]
+       }
+      ]
+     },
+     {
+      "type": "mcpServer",
+      "id": "n",
+      "name": "n",
+      "children": [
+       {
+        "type": "skill",
+        "id": null
+       }
+      ]
+     }
+    ]
+   }
+  },
+  {
+   "name": "sess/customizationToggled-mcp-skill-null-id",
+   "reducer": "session",
+   "initial": {
+    "provider": "p",
+    "title": "T",
+    "status": 1,
+    "lifecycle": "ready",
+    "activeClients": [],
+    "chats": [],
+    "customizations": [
+     {
+      "type": "mcpServer",
+      "id": "m",
+      "name": "m",
+      "children": [
+       {
+        "type": "skill",
+        "id": "s1"
+       },
+       {
+        "type": "plugin",
+        "id": "s2"
+       }
+      ]
+     },
+     {
+      "type": "mcpServer",
+      "id": "empty",
+      "name": "empty",
+      "children": []
+     },
+     {
+      "type": "plugin",
+      "id": "p",
+      "children": [
+       {
+        "type": "mcpServer",
+        "id": "pm",
+        "name": "pm",
+        "children": [
+         {
+          "type": "skill",
+          "id": "dup"
+         }
+        ]
+       },
+       {
+        "type": "skill",
+        "id": "dup"
+       },
+       {
+        "type": "mcpServer",
+        "id": "pm2",
+        "name": "pm2",
+        "children": [
+         {
+          "type": "skill",
+          "id": "s3"
+         }
+        ]
+       },
+       {
+        "type": "mcpServer",
+        "id": "pm3",
+        "name": "pm3",
+        "children": [
+         {
+          "type": "skill",
+          "id": "s3"
+         }
+        ]
+       }
+      ]
+     },
+     {
+      "type": "mcpServer",
+      "id": "n",
+      "name": "n",
+      "children": [
+       {
+        "type": "skill",
+        "id": null
+       }
+      ]
+     }
+    ]
+   },
+   "actions": [
+    {
+     "type": "session/customizationToggled",
+     "id": null,
+     "enablement": [
+      {
+       "kind": "session",
+       "enabled": false
+      }
+     ]
+    }
+   ],
+   "expected": {
+    "provider": "p",
+    "title": "T",
+    "status": 1,
+    "lifecycle": "ready",
+    "activeClients": [],
+    "chats": [],
+    "customizations": [
+     {
+      "type": "mcpServer",
+      "id": "m",
+      "name": "m",
+      "children": [
+       {
+        "type": "skill",
+        "id": "s1"
+       },
+       {
+        "type": "plugin",
+        "id": "s2"
+       }
+      ]
+     },
+     {
+      "type": "mcpServer",
+      "id": "empty",
+      "name": "empty",
+      "children": []
+     },
+     {
+      "type": "plugin",
+      "id": "p",
+      "children": [
+       {
+        "type": "mcpServer",
+        "id": "pm",
+        "name": "pm",
+        "children": [
+         {
+          "type": "skill",
+          "id": "dup"
+         }
+        ]
+       },
+       {
+        "type": "skill",
+        "id": "dup"
+       },
+       {
+        "type": "mcpServer",
+        "id": "pm2",
+        "name": "pm2",
+        "children": [
+         {
+          "type": "skill",
+          "id": "s3"
+         }
+        ]
+       },
+       {
+        "type": "mcpServer",
+        "id": "pm3",
+        "name": "pm3",
+        "children": [
+         {
+          "type": "skill",
+          "id": "s3"
+         }
+        ]
+       }
+      ]
+     },
+     {
+      "type": "mcpServer",
+      "id": "n",
+      "name": "n",
+      "children": [
+       {
+        "type": "skill",
+        "id": null,
+        "enabled": false
+       }
+      ]
+     }
+    ]
+   }
+  },
+  {
+   "name": "sess/customizationToggled-mcp-skill-unknown-id-no-op",
+   "reducer": "session",
+   "initial": {
+    "provider": "p",
+    "title": "T",
+    "status": 1,
+    "lifecycle": "ready",
+    "activeClients": [],
+    "chats": [],
+    "customizations": [
+     {
+      "type": "mcpServer",
+      "id": "m",
+      "name": "m",
+      "children": [
+       {
+        "type": "skill",
+        "id": "s1"
+       },
+       {
+        "type": "plugin",
+        "id": "s2"
+       }
+      ]
+     },
+     {
+      "type": "mcpServer",
+      "id": "empty",
+      "name": "empty",
+      "children": []
+     },
+     {
+      "type": "plugin",
+      "id": "p",
+      "children": [
+       {
+        "type": "mcpServer",
+        "id": "pm",
+        "name": "pm",
+        "children": [
+         {
+          "type": "skill",
+          "id": "dup"
+         }
+        ]
+       },
+       {
+        "type": "skill",
+        "id": "dup"
+       },
+       {
+        "type": "mcpServer",
+        "id": "pm2",
+        "name": "pm2",
+        "children": [
+         {
+          "type": "skill",
+          "id": "s3"
+         }
+        ]
+       },
+       {
+        "type": "mcpServer",
+        "id": "pm3",
+        "name": "pm3",
+        "children": [
+         {
+          "type": "skill",
+          "id": "s3"
+         }
+        ]
+       }
+      ]
+     },
+     {
+      "type": "mcpServer",
+      "id": "n",
+      "name": "n",
+      "children": [
+       {
+        "type": "skill",
+        "id": null
+       }
+      ]
+     }
+    ]
+   },
+   "actions": [
+    {
+     "type": "session/customizationToggled",
+     "id": "nope",
+     "enablement": [
+      {
+       "kind": "session",
+       "enabled": false
+      }
+     ]
+    }
+   ],
+   "expected": {
+    "provider": "p",
+    "title": "T",
+    "status": 1,
+    "lifecycle": "ready",
+    "activeClients": [],
+    "chats": [],
+    "customizations": [
+     {
+      "type": "mcpServer",
+      "id": "m",
+      "name": "m",
+      "children": [
+       {
+        "type": "skill",
+        "id": "s1"
+       },
+       {
+        "type": "plugin",
+        "id": "s2"
+       }
+      ]
+     },
+     {
+      "type": "mcpServer",
+      "id": "empty",
+      "name": "empty",
+      "children": []
+     },
+     {
+      "type": "plugin",
+      "id": "p",
+      "children": [
+       {
+        "type": "mcpServer",
+        "id": "pm",
+        "name": "pm",
+        "children": [
+         {
+          "type": "skill",
+          "id": "dup"
+         }
+        ]
+       },
+       {
+        "type": "skill",
+        "id": "dup"
+       },
+       {
+        "type": "mcpServer",
+        "id": "pm2",
+        "name": "pm2",
+        "children": [
+         {
+          "type": "skill",
+          "id": "s3"
+         }
+        ]
+       },
+       {
+        "type": "mcpServer",
+        "id": "pm3",
+        "name": "pm3",
+        "children": [
+         {
+          "type": "skill",
+          "id": "s3"
+         }
+        ]
+       }
+      ]
+     },
+     {
+      "type": "mcpServer",
+      "id": "n",
+      "name": "n",
+      "children": [
+       {
+        "type": "skill",
+        "id": null
+       }
+      ]
+     }
+    ]
+   }
   }
  ]
 }

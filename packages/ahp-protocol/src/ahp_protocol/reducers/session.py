@@ -165,6 +165,11 @@ def _apply_customization_enablement(customization: Any, enablement: Any) -> Any:
             return _THROWS
         base.pop("enablement", None)
         return base
+    return {**base, "enabled": _legacy_enabled(enablement)}
+
+
+def _legacy_enabled(enablement: Any) -> Any:
+    """``enablement[0]?.enabled ?? true``, for a list already known not to be nullish."""
     if isinstance(enablement, list | tuple):
         first = enablement[0] if len(enablement) > 0 else UNDEFINED
     elif isinstance(enablement, Mapping):
@@ -174,7 +179,68 @@ def _apply_customization_enablement(customization: Any, enablement: Any) -> Any:
         # no index; either way `.enabled` is `undefined`.
         first = UNDEFINED
     enabled = get(first, "enabled")
-    return {**base, "enabled": True if enabled is UNDEFINED or enabled is None else enabled}
+    return True if enabled is UNDEFINED or enabled is None else enabled
+
+
+def _toggle_mcp_server_skill(server: Mapping[str, Any], target_id: Any, enablement: Any) -> Any:
+    """Port of `toggleMcpServerSkill` (1.1.0, MCP-served skills, SEP-2640).
+
+    Returns the server with one skill's legacy `enabled` flag set,
+    :data:`UNDEFINED` when the server serves no skill with that id, or
+    :data:`_THROWS` when upstream would throw (a nullish `enablement`).
+    A skill takes ``enablement[0]?.enabled ?? true`` whatever its own `type`:
+    upstream does not route it through `applyCustomizationEnablement`.
+    """
+    skills = server.get("children")
+    # `skills ? skills.findIndex(...) : -1` -- truthiness, so `[]` searches.
+    # A non-array would throw at `findIndex`; `index_of` answers -1 instead.
+    skill_index = index_of(skills, "id", target_id) if truthy(skills) else -1
+    if not isinstance(skills, list | tuple) or skill_index < 0:
+        return UNDEFINED
+    if enablement is UNDEFINED or enablement is None:
+        return _THROWS
+    skill = skills[skill_index]
+    new_skills = list(skills)
+    new_skills[skill_index] = {
+        **(skill if isinstance(skill, Mapping) else {}),
+        "enabled": _legacy_enabled(enablement),
+    }
+    return {**server, "children": new_skills}
+
+
+def _toggle_container_child(container: Mapping[str, Any], target_id: Any, enablement: Any) -> Any:
+    """Port of `toggleContainerChild` (1.1.0).
+
+    A direct child wins; failing that, the first MCP-server child that serves a
+    skill with the id. Returns :data:`UNDEFINED` when neither exists and
+    :data:`_THROWS` where upstream would throw.
+    """
+    children = container.get("children")
+    if not truthy(children) or not isinstance(children, list | tuple):
+        # `if (!children)`; a truthy non-array would throw at `findIndex`, and
+        # the old port skipped it as not found, which this keeps.
+        return UNDEFINED
+    child_index = index_of(children, "id", target_id)
+    if child_index >= 0:
+        child = _apply_customization_enablement(children[child_index], enablement)
+        if child is _THROWS:
+            return _THROWS
+        new_children = list(children)
+        new_children[child_index] = child
+        return {**container, "children": new_children}
+    for index, child in enumerate(children):
+        if not isinstance(child, Mapping) or not strict_equal(
+            child.get("type", UNDEFINED), _MCP_SERVER
+        ):
+            continue
+        toggled = _toggle_mcp_server_skill(child, target_id, enablement)
+        if toggled is _THROWS:
+            return _THROWS
+        if toggled is not UNDEFINED:
+            new_children = list(children)
+            new_children[index] = toggled
+            return {**container, "children": new_children}
+    return UNDEFINED
 
 
 def _without(items: Sequence[Any], index: int) -> list[Any]:
@@ -534,23 +600,21 @@ def session_reducer(state: Any, action: Mapping[str, Any]) -> Any:
             updated = list(customizations)
             updated[top_index] = entry
             return {**state, "customizations": updated}
+        # Since 1.1.0 an MCP server's `children` are the skills it serves, and
+        # a toggle reaches them at the top level or one container down.
         for index, container in enumerate(customizations):
-            if not isinstance(container, Mapping) or container.get("type") == _MCP_SERVER:
+            if not isinstance(container, Mapping):
                 continue
-            children = container.get("children")
-            if children is None:
-                continue
-            child_index = index_of(children, "id", target_id)
-            if child_index < 0:
-                continue
-            child = _apply_customization_enablement(children[child_index], enablement)
-            if child is _THROWS:
+            if strict_equal(container.get("type", UNDEFINED), _MCP_SERVER):
+                toggled = _toggle_mcp_server_skill(container, target_id, enablement)
+            else:
+                toggled = _toggle_container_child(container, target_id, enablement)
+            if toggled is _THROWS:
                 return state
-            new_children = list(children)
-            new_children[child_index] = child
-            updated = list(customizations)
-            updated[index] = {**container, "children": new_children}
-            return {**state, "customizations": updated}
+            if toggled is not UNDEFINED:
+                updated = list(customizations)
+                updated[index] = toggled
+                return {**state, "customizations": updated}
         return state
 
     if action_type == "session/customizationUpdated":

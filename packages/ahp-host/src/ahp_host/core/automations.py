@@ -279,6 +279,10 @@ def _trigger_rejection(trigger: Any) -> str | None:
     kind = trigger.get("kind")
     if kind == "event":
         return "this host defines no event trigger types"
+    if kind == "oneTime":
+        # 1.2.0 (unreleased): clients SHOULD NOT author one without
+        # `AutomationCapabilities.oneTime`, which this host does not advertise.
+        return "this host does not support one-time triggers"
     if kind != "schedule":
         return f"unknown trigger kind {kind!r}"
     schedule = trigger.get("schedule")
@@ -294,6 +298,24 @@ def _trigger_rejection(trigger: Any) -> str | None:
     if "misfirePolicy" in trigger and policy not in ("skip", "runOnce"):
         return f"trigger {trigger['id']!r}: unknown misfirePolicy {policy!r}"
     return None
+
+
+def _target_rejection(target: Any) -> str | None:
+    """`AutomationDefinition.target` (1.2.0, unreleased; absent means `newSession`).
+
+    This host advertises no `AutomationCapabilities.targets`, so every run
+    creates a session. Saving another target would accept a definition whose
+    runs then do something else, so it is refused by name instead. The kind
+    enum is `@nonexhaustive`: an unknown kind is one this host cannot honour.
+    """
+    if not isinstance(target, Mapping):
+        return "definition.target must be an object"
+    kind = target.get("kind")
+    if kind == "newSession":
+        return None
+    if kind in ("previousSession", "chat"):
+        return f"this host does not support the {kind!r} run target"
+    return f"unknown run target kind {kind!r}"
 
 
 def definition_rejection(definition: Any, providers: Collection[str]) -> str | None:
@@ -348,6 +370,10 @@ def definition_rejection(definition: Any, providers: Collection[str]) -> str | N
         seen.add(trigger["id"])
     if "_meta" in definition and not isinstance(definition.get("_meta"), Mapping):
         return "definition._meta must be an object"
+    if "target" in definition:
+        rejection = _target_rejection(definition["target"])
+        if rejection is not None:
+            return rejection
     if "disableConditions" in definition:
         return _disable_conditions_rejection(definition["disableConditions"])
     return None
@@ -473,6 +499,8 @@ _PATCHABLE: Final = (
     "triggers",
     "disableConditions",
     "_meta",
+    # 1.2.0 (unreleased): a patch may reset it to `newSession`.
+    "target",
 )
 
 

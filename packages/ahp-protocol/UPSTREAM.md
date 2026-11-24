@@ -17,11 +17,11 @@ suite, so a dependency bump that moves the spec under it fails loudly.
 | Field | Value |
 |---|---|
 | Upstream | [`microsoft/agent-host-protocol`](https://github.com/microsoft/agent-host-protocol) (MIT) |
-| Spec ref | `main` — ahead of any release; upstream's tree declares `1.1.0`, unreleased |
-| Spec commit | `c301d494e6f9bb358b1430125a979e79b2e5c333` |
-| Conformance corpus vendored from | `main` @ `c301d494` → `types/test-cases/` |
-| `UPSTREAM_PROTOCOL_VERSION` | `1.1.0` — upstream's development version at that commit |
-| `UPSTREAM_SUPPORTED_PROTOCOL_VERSIONS` | `1.0.0, 0.9.0` — what *upstream* declares |
+| Spec ref | `main` — past `spec/v1.1.0`; upstream's tree declares `1.2.0`, unreleased |
+| Spec commit | `e36b0a20747430694b761e7ea83463dcfa327157` |
+| Conformance corpus vendored from | `main` @ `e36b0a20` → `types/test-cases/` |
+| `UPSTREAM_PROTOCOL_VERSION` | `1.2.0` — upstream's development version at that commit |
+| `UPSTREAM_SUPPORTED_PROTOCOL_VERSIONS` | `1.0.0, 0.9.0` — what *upstream* declares (unchanged by the 1.1.0 release) |
 | `DEFAULT_SUPPORTED_VERSIONS` | `1.0.0, 0.9.0, 0.8.0, 0.7.0, 0.6.0` — what a peer built on this pin can honestly speak |
 
 **Those last two rows are different numbers and must stay different.** Upstream's
@@ -51,9 +51,65 @@ earlier one sits in the client's pending list for good.
 
 `scripts/vendor_upstream.sh` takes a branch as well as a tag for this. A tag
 must still resolve to the pinned commit; a branch moves, so the commit only has
-to be on it. Either way the archive is cut from the **commit**. When
-`spec/v1.1.0` is tagged, re-pin to it and diff every `reducer.ts` between
-`c301d494` and the tag — upstream may change 1.1.0 again before releasing it.
+to be on it. Either way the archive is cut from the **commit**.
+
+`spec/v1.1.0` was tagged on 2026-11-12 (`a501ea48`), and the very next commit
+moved `main` to `1.2.0`. The reasoning above holds one version up: upstream's
+TypeScript client built from `main` now offers `1.2.0`, so this pin stays on
+`main`, which contains the whole of `spec/v1.1.0` (every `reducer.ts` was
+diffed from `c301d494` through the tag to `e36b0a20`). The automations work in
+#603 and #604 is on `main` only.
+
+For the record, as of **2026-11-24**: `spec/v1.1.0` is the newest spec tag,
+and the pinned commit is upstream `main`'s head, 10 first-parent commits past
+it. Upstream's `CHANGELOG.md` has an empty `[1.2.0] — Unreleased` heading; the
+two change notes since the tag are in `docs/.changes/20261113-*.json`.
+
+The `main` @ `c301d494` → `main` @ `e36b0a20` absorb (2026-11-24). Sixty-seven
+upstream commits, across the `spec/v1.1.0` release; most are Rust, Swift, Go,
+.NET, Kotlin, CI and dependency changes that touch nothing here. One
+`reducer.ts` changed (`session`, diffed by hand); the other nine are
+byte-identical. Reducer fixtures 346 → 351 (chat 178 → 180, session 93 → 96),
+round-trips 104 → 119; all 142 pre-existing JS-semantics cases regenerate
+byte-identically and 7 new ones cover the branch below.
+`UPSTREAM_PROTOCOL_VERSION` moves to `1.2.0`; `DEFAULT_SUPPORTED_VERSIONS` does
+not move (step 8).
+
+- **`session/customizationToggled` reaches MCP-served skills** (#562, SEP-2640).
+  `McpServerCustomization.children` lists the skills a server serves. After the
+  top-level search, a toggle now looks inside an MCP server (top level) or an
+  MCP-server child of a container, after that container's direct children: a
+  direct child with the id wins over a skill with the same id, and the first
+  server serving the id wins. A skill takes the legacy `enabled` flag,
+  `enablement[0]?.enabled ?? true`, whatever its own `type` — it does not go
+  through `applyCustomizationEnablement`. Fixtures 327–329.
+- **Breaking renames in experimental types** (#596, "tidy 1.1.0 naming"):
+  `maximumFrameBytes` → `maxFrameBytes` on windowed-delivery limits,
+  `CanvasState.url` → `uri` (an absolute content URI, typically HTTP(S), that a
+  client which cannot load it reads with `resourceRead`), and
+  `ChangesetFile.isEditing` → `status`, a `ChangesetFileStatus` bitset
+  (`Editing = 1`). `createTcpConnection` returns `{}` rather than `null`, and a
+  changeset nonce mismatch MAY (no longer MUST) fail with `Conflict`.
+- **Non-user input through existing chat actions** (#551): the User-only
+  restriction on client-submitted messages in `chat/turnStarted` and
+  `chat/pendingMessageSet` is gone. No reducer branch changed; fixtures 324 and
+  325 pin that the reducer preserves non-user origins, and pass unchanged.
+- **Automations, `main` only** (#603, #604): one-time triggers
+  (`AutomationOneTimeTrigger`, `kind: "oneTime"`, `runAt`, advertised by
+  `AutomationCapabilities.oneTime`), and `AutomationDefinition.target`
+  (`newSession` | `previousSession` | `chat`, `@nonexhaustive`, gated by
+  `AutomationCapabilities.targets.previousSession` / `.chat`). No reducer
+  changed: `automation/set` and the patch actions replace these objects whole.
+  Patch objects are `@preserveUnknownMembers`, which plain dicts satisfy.
+- **wire, no reducer** — `ResourceReadParams.position` / `length` and
+  `ResourceReadResult.size` (#554, a byte range a receiver may ignore),
+  `InitializeResult.environment.pathStyle` (#476), `AuthenticateParams.accountId`
+  (#583, opaque), and `ahp-annotations:/<uuid>` as the documented annotations
+  channel URI (#593; clients are told to read `AnnotationsSummary.resource`
+  rather than derive it).
+- **Schema fixes** (#580, #581): `actions.schema.json` no longer ships the empty
+  `StateAction` `$ref`, and `SessionStatus` is an unsigned 32-bit integer
+  instead of a closed enum. See the defects table.
 
 For the record, as of **2026-11-03**: `spec/v1.0.0` (2026-10-02) is still the
 newest spec tag, and the pinned commit is upstream `main`'s head, 72 commits
@@ -197,8 +253,8 @@ mapped into the wheel at `ahp_protocol/conformance/_upstream/` by hatch's
 
 | Vendored | Source | Why not fetched at runtime |
 |---|---|---|
-| `types/test-cases/reducers/**` (346 fixtures) | git repository only | not published as a release asset |
-| `types/test-cases/round-trips/**` (104 fixtures) | git repository only | same |
+| `types/test-cases/reducers/**` (351 fixtures) | git repository only | not published as a release asset |
+| `types/test-cases/round-trips/**` (119 fixtures) | git repository only | same |
 | `types/test-cases/version-negotiation.json` (22 cases) | git repository only | same |
 | `schema/*.schema.json` (5 files) | release asset **or** git repository | asset exists, but must match the pinned commit |
 | `ts/` — `registry.ts`, `action-origin.generated.ts`, `actions.ts`, `errors.ts`, `session-state.ts` | git repository only | the codegen inputs for `_generated.py` |
@@ -250,8 +306,8 @@ Tracked so they can be removed when fixed upstream.
 |---|---|
 | Published `spec/v0.6.0` schemas mark `T \| undefined` properties as `required` (`ActionEnvelope.origin`, `Turn.usage`, `ActiveTurn.usage`, …). Fixed at 0.7.0. | Do not generate types from the 0.6.0 schemas. |
 | `errors.schema.json` omits `-32011 Conflict` — the generator hardcodes the enum. | Error codes are taken from `types/common/errors.ts`, not the schema. `errors.from_json` accepts any integer code for the same reason. |
-| `actions.schema.json` ships a malformed `{"$ref": "#/$defs/"}` as `StateAction.oneOf[0]` — present in **every** tag from `spec/v0.5.0` to `v1.0.0`. Causes `RecursionError` in `datamodel-code-generator` and `PointerToNowhere` in Python's `jsonschema`. | Validation is **per-definition** (`conformance/schemas.py` resolves one `#/$defs/<name>` at a time), which never touches the broken ref — but `validate_against('actions', 'StateAction', …)` or `'ActionEnvelope'` still hits `PointerToNowhere`, so those two definitions stay unvalidatable. No generation from schema. `tests/unit/test_generated_tables.py` pins the defect so a fix upstream is noticed. |
-| `SessionStatus` is a bitset emitted as a closed `enum: [1,2,8,24,32,64]`, which rejects `33, 40, 56, 65, 72, 2147483720` — values present in upstream's own conformance corpora. | Same. Pinned by a test. |
+| `actions.schema.json` ships a malformed `{"$ref": "#/$defs/"}` as `StateAction.oneOf[0]` — present in **every** tag from `spec/v0.5.0` to `v1.0.0`. **Fixed at 1.1.0 (#580).** Causes `RecursionError` in `datamodel-code-generator` and `PointerToNowhere` in Python's `jsonschema`. | Validation is **per-definition** (`conformance/schemas.py` resolves one `#/$defs/<name>` at a time), which never touches the broken ref — but `validate_against('actions', 'StateAction', …)` or `'ActionEnvelope'` still hits `PointerToNowhere`, so those two definitions were unvalidatable. No generation from schema. `tests/unit/test_generated_tables.py` now pins the fix, so a regression is noticed; validation stays per-definition. |
+| `SessionStatus` is a bitset emitted as a closed `enum: [1,2,8,24,32,64]`, which rejects `33, 40, 56, 65, 72, 2147483720` — values present in upstream's own conformance corpora. **Fixed at 1.1.0 (#581)**: an integer in `[0, 2**32 - 1]`. | Pinned by a test, as above. |
 | `chatReducer` read the wall clock in six places, so reducers were not pure. **Fixed at 0.9.0.** | The injectable clock stays for peers stamping `startedAt`; the harness still pins it to `9999`, which no 0.9.0 reducer reads. |
 | No unknown-action fixture exists for the `chat` reducer. | Covered by a local unit test instead. |
 | `ACTION_INTRODUCED_IN` (1.0.0) dates every new chat and session action `0.9.0`, though none is in the `spec/v0.9.0` tag, and dates `chat/canvasesChanged` and `canvas/stateChanged` `0.10.0`, a version that was never released. | Copied verbatim into `_generated.py`. Do not gate sending one of these on the negotiated version: a `0.9.0` peer would be told it has actions its reducers lack. Its reducer ignores them (invariant 3), so sending is harmless; withholding on these dates would be wrong. |

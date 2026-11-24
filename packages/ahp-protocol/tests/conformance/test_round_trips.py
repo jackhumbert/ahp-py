@@ -28,7 +28,7 @@ def _ids(fixtures: list[RoundTripFixture]) -> list[str]:
 
 
 def test_corpus_is_present() -> None:
-    assert len(FIXTURES) == 104, "vendored round-trip corpus changed; re-check the pin"
+    assert len(FIXTURES) == 119, "vendored round-trip corpus changed; re-check the pin"
 
 
 @pytest.mark.parametrize("fixture", FIXTURES, ids=_ids(FIXTURES))

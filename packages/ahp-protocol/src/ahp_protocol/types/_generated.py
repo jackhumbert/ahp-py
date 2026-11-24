@@ -2,7 +2,7 @@
 
 Regenerate with `python scripts/generate_tables.py`.
 
-Source: main (c301d494e6f9bb358b1430125a979e79b2e5c333)
+Source: main (e36b0a20747430694b761e7ea83463dcfa327157)
 """
 
 from __future__ import annotations
@@ -12,7 +12,7 @@ from typing import Final
 #: The protocol version upstream's own source tree declares at the pinned
 #: commit -- on a development branch, the version under development, not one
 #: that has been released. This is NOT what we speak -- see ahp_protocol.versions.
-UPSTREAM_PROTOCOL_VERSION: Final = '1.1.0'
+UPSTREAM_PROTOCOL_VERSION: Final = '1.2.0'
 
 #: Upstream's "released compatibility baselines, independent of the current
 #: development `PROTOCOL_VERSION`" (registry.ts) at the pinned commit. Not

@@ -90,14 +90,14 @@ try:
     trips = list(round_trip_fixtures())
     # Exact counts, not "more than zero": a loader that silently finds a
     # partial tree is the failure mode a truthy check would miss.
-    if len(reducers) != 346:
-        fail("346 reducer fixtures", f"found {len(reducers)}")
+    if len(reducers) != 351:
+        fail("351 reducer fixtures", f"found {len(reducers)}")
     else:
-        check("346 reducer fixtures")
-    if len(trips) != 104:
-        fail("104 round-trip fixtures", f"found {len(trips)}")
+        check("351 reducer fixtures")
+    if len(trips) != 119:
+        fail("119 round-trip fixtures", f"found {len(trips)}")
     else:
-        check("104 round-trip fixtures")
+        check("119 round-trip fixtures")
 
     spec = pin().get("specRef")
     check(f"PIN.json readable (spec {spec})")

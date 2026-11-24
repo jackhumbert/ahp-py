@@ -113,7 +113,7 @@ class TestCanvases:
         )
         assert await publisher.canvas_set(unavailable) == channel
         assert host.sequencer.state_of(channel) == unavailable.to_wire()
-        assert "url" not in (host.sequencer.state_of(channel) or {})
+        assert "uri" not in (host.sequencer.state_of(channel) or {})
         assert _references(host, chat) == [channel]
 
     async def test_removing_the_last_canvas_clears_the_list(self, host: Host) -> None:
@@ -144,7 +144,7 @@ def test_a_canvas_url_is_redacted_from_the_wire_log() -> None:
         "params": {"action": {"type": "canvas/stateChanged", "canvas": _PREVIEW.to_wire()}},
     }
     logged = redact(frame)
-    assert logged["params"]["action"]["canvas"]["url"] == REDACTED
+    assert logged["params"]["action"]["canvas"]["uri"] == REDACTED
     assert logged["params"]["action"]["canvas"]["title"] == "Preview"
     assert "example.com" not in json.dumps(logged)
     # A URL that is not a canvas source is ordinary data.

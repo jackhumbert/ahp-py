@@ -921,6 +921,11 @@ class Canvas:
     update the canvas. ``url`` is its current absolute HTTP(S) source; leave it
     ``None`` while the source is unavailable -- the spec requires clearing it
     then. It is never persisted and is redacted from wire logs.
+
+    On the wire it is `CanvasState.uri` (renamed from `url` in 1.1.0). The spec
+    now allows any absolute URI there, which a client that cannot load it reads
+    with `resourceRead`; this host does not serve those reads, so it keeps
+    publishing HTTP(S) sources only.
     """
 
     instance_id: str
@@ -943,7 +948,7 @@ class Canvas:
             ("extensionName", self.extension_name),
             ("title", self.title),
             ("status", self.status),
-            ("url", self.url),
+            ("uri", self.url),
         ):
             if value is not None:
                 wire[key] = value
