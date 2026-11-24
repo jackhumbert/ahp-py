@@ -59,7 +59,7 @@ from ahp_protocol.versions import (
 #: -- see :data:`UPSTREAM_PROTOCOL_VERSION` for the spec revision vendored here.
 #: The single source of truth. `pyproject.toml` reads it from here through
 #: hatchling's dynamic version, so there is no second place to forget.
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 __all__ = [
     "ACTION_INTRODUCED_IN",

@@ -81,7 +81,7 @@ class TestDefaults:
         assert set(UPSTREAM_SUPPORTED_PROTOCOL_VERSIONS) <= set(DEFAULT_SUPPORTED_VERSIONS)
 
     def test_defaults_lead_with_the_newest(self) -> None:
-        assert DEFAULT_SUPPORTED_VERSIONS[0] == "1.0.0"
+        assert DEFAULT_SUPPORTED_VERSIONS[0] == "1.1.0"
 
 
 class TestNegotiate:
@@ -92,10 +92,14 @@ class TestNegotiate:
     def test_a_0_9_client_still_negotiates(self) -> None:
         assert negotiate(["0.9.0"]) == "0.9.0"
 
-    def test_older_minors_are_kept_for_one_release(self) -> None:
-        """Upstream dropped them in 1.0.0; our default set still speaks them."""
-        assert negotiate(["0.7.0", "0.6.0", "0.5.2", "0.5.1"]) == "0.7.0"
-        assert negotiate(["0.6.0"]) == "0.6.0"
+    def test_older_minors_are_refused_after_their_grace(self) -> None:
+        """Upstream dropped them in 1.0.0; their one release of grace is over."""
+        assert negotiate(["0.7.0", "0.6.0", "0.5.2", "0.5.1"]) is None
+        assert negotiate(["0.8.0"]) is None
+        assert negotiate(["0.6.0"]) is None
+
+    def test_a_1_1_client_gets_1_1_0(self) -> None:
+        assert negotiate(["1.1.0", "1.0.0", "0.9.0"]) == "1.1.0"
 
     def test_ahpx_is_refused(self) -> None:
         """ahpx offers a single 0.5.x, which we deliberately do not speak."""

@@ -15,6 +15,11 @@ from VS Code doing something the spec's *examples* do not:
   ``registry.ts`` `SUPPORTED_PROTOCOL_VERSIONS` -- so only the most-preferred
   entry is guarded, and a faithful re-capture still passes.)
 
+0.7.0 is no longer offered (its one release of grace after upstream 1.0.0
+dropped it is over), so a VS Code this old is now refused at ``initialize``,
+which ``test_vscode_1_131_is_refused_by_version`` pins. The replays below offer
+``0.9.0`` in its place: the shapes they guard are not version-gated.
+
 Replaying shapes rather than the raw log on purpose: ids, UUIDs and VS Code's
 polling volume are noise, and a byte-exact replay would be brittle without
 testing anything more.
@@ -130,7 +135,35 @@ class TestCapturedShapes:
         assert "/Users/" not in FIXTURE.read_text(encoding="utf-8")
 
 
+def _replayable(entry: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+    """The entry's method and params, with `initialize` offering a version this
+    host still speaks in place of the capture's dropped `0.7.0`."""
+    method, params = entry["method"], dict(entry["params"])
+    if method == "initialize":
+        params["protocolVersions"] = ["0.9.0"]
+    return method, params
+
+
 class TestReplay:
+    async def test_vscode_1_131_is_refused_by_version(self) -> None:
+        """The capture's own offer, unchanged: refused with -32005 naming what
+        this host speaks, rather than accepted and reduced wrongly."""
+        import asyncio
+
+        from ahp_protocol.transport import memory_pair
+
+        host = Host(EchoProvider(), LoopbackSingleUserPolicy())
+        client_transport, server_transport = memory_pair()
+        serve = asyncio.create_task(host.serve(server_transport))
+        client = FakeClient(client_transport)
+        try:
+            response = await client.request("initialize", _request("initialize")["params"])
+            assert response["error"]["code"] == -32005
+            assert "0.9.0" in response["error"]["data"]["supportedVersions"]
+        finally:
+            serve.cancel()
+            await host.aclose()
+
     async def test_the_whole_captured_sequence_runs(self) -> None:
         """Replay every shape in order; nothing may fail except the known refusals."""
         host = Host(EchoProvider(), LoopbackSingleUserPolicy())
@@ -144,7 +177,7 @@ class TestReplay:
         try:
             unexpected: list[tuple[str, Any]] = []
             for entry in REQUESTS:
-                method, params = entry["method"], dict(entry["params"])
+                method, params = _replayable(entry)
                 if "id" not in entry:
                     await client.notify(method, params)
                     continue
@@ -180,7 +213,7 @@ class TestReplay:
         serve = asyncio.create_task(host.serve(server_transport))
         client = FakeClient(client_transport)
         try:
-            await client.request("initialize", _request("initialize")["params"])
+            await client.request(*_replayable(_request("initialize")))
 
             session_uri = _request("createSession")["params"]["channel"]
             await client.request("createSession", _request("createSession")["params"])

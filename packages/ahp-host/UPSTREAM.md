@@ -24,23 +24,26 @@ be able to arrive as a patch upgrade.
 | Spec ref | `main`, ten commits past the `spec/v1.1.0` tag; `main` declares `1.2.0` |
 | Spec commit | `e36b0a20747430694b761e7ea83463dcfa327157` |
 | Working revision read during research | `bd27d354b39c1b2090fbcc6db392d406b743280c` (2026-07-31) |
-| **Protocol version negotiated on the wire** | **`1.0.0`** (we offer `1.0.0, 0.9.0, 0.8.0, 0.7.0, 0.6.0`); a `1.1.0` or `1.2.0` offer is accepted under `^1.0.0` |
+| **Protocol version negotiated on the wire** | **`1.1.0`** (we offer `1.1.0, 1.0.0, 0.9.0`); a `1.2.0` offer is accepted under `^1.0.0` |
 | Conformance corpus | with the dependency, vendored there from `main` @ `e36b0a20` → `types/test-cases/` |
 | Reference client for interop tests | `@microsoft/agent-host-protocol@1.0.0` (npm, published 2026-10-02) |
 
-### The interop client matches the wire version
+### The interop client trails the wire version again
 
 Earlier revisions of this section recorded the interop client trailing the
-preferred wire version by a MINOR, until npm caught up with `spec/v0.7.0`.
-Since then they have moved together: this host prefers **`1.0.0`**, npm
-published `@microsoft/agent-host-protocol@1.0.0` from that same tag on
-2026-10-02, and `tests/interop/` drives it and negotiates `1.0.0`. Upstream
-1.0.0 advertises only `1.0.0` and `0.9.0`; `0.8.0`, `0.7.0` and `0.6.0` stay in
-the offered list for one more release and the negotiation tests still cover the
-downgrade path.
+preferred wire version by a MINOR, until npm caught up with `spec/v0.7.0`, and
+then the two moving together at `1.0.0`. With `spec/v1.1.0` tagged and covered
+by the pinned tables, this host prefers **`1.1.0`**, while
+`@microsoft/agent-host-protocol@1.0.0` is still the newest npm build, so
+`tests/interop/` negotiates `1.0.0`. Upstream advertises only `1.0.0` and
+`0.9.0`; `1.1.0` leads our list because the tables cover it. `0.8.0`, `0.7.0`
+and `0.6.0` had their one release of grace after upstream 1.0.0 dropped them
+and are no longer offered: a peer that offers only those is refused with
+`-32005`. That includes the VS Code 1.131 build in
+`tests/integration/test_vscode_trace.py`, which offered `0.7.0` alone.
 
 Negotiation follows the spec's caret rule since 1.0.0: the highest offered
-version inside `^1.0.0` or `^0.9.0` (or one of the older baselines) wins and
+version inside `^1.0.0` or `^0.9.0` wins and
 is returned verbatim, so a `1.4.0` client is accepted and told `1.4.0`. A
 malformed entry anywhere in `protocolVersions` is answered `-32602`.
 
@@ -49,11 +52,13 @@ some shape changes are breaking on the wire. This host deals with the ones a
 client *sends*:
 
 - `session/customizationToggled` carries `enablement` where it carried
-  `enabled` (0.8.0). An old-shape toggle is **rejected** rather than reduced to
+  `enabled` (0.8.0). An old-shape toggle, from a client that ignores the
+  negotiated version, is **rejected** rather than reduced to
   a silent no-op, so the client reverts instead of showing a toggle that never
   happened.
 - `createSession` lost session-level `fork` in 0.9.0. The host still honours
-  it, for the 0.7.0 and 0.8.0 peers — VS Code's `/fork` among them.
+  it, though the 0.7.0 and 0.8.0 peers that sent it (VS Code's `/fork` among
+  them) are no longer offered a version; it goes when that code is next touched.
 - `chat/turnResume` (0.9.0) is rejected: the host never marks an error part
   `resumable`, so there is nothing to reopen.
 

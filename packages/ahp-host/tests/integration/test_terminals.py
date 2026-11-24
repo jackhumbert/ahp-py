@@ -106,7 +106,7 @@ async def _client(host: Host) -> FakeClient:
         {
             "channel": ROOT_URI,
             "clientId": "c1",
-            "protocolVersions": ["0.7.0"],
+            "protocolVersions": ["0.9.0"],
             "initialSubscriptions": [ROOT_URI],
         },
     )
@@ -400,7 +400,7 @@ class TestClientActions:
             {
                 "channel": ROOT_URI,
                 "clientId": "intruder",
-                "protocolVersions": ["0.7.0"],
+                "protocolVersions": ["0.9.0"],
                 "initialSubscriptions": [ROOT_URI],
             },
         )
@@ -1016,7 +1016,7 @@ class TestStrictClaimGating:
                 {
                     "channel": ROOT_URI,
                     "clientId": "viewer",
-                    "protocolVersions": ["0.7.0"],
+                    "protocolVersions": ["0.9.0"],
                     "initialSubscriptions": [ROOT_URI],
                 },
             )

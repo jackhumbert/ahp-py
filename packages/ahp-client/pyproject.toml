@@ -33,7 +33,7 @@ classifiers = [
 # Compatible-release, not exact: a patch fix flows without a release here, while
 # a spec-shaped change is a deliberate upgrade. The spec breaks in MINOR bumps,
 # so a looser pin would be a trap.
-dependencies = ["ahp-protocol~=0.1.0"]
+dependencies = ["ahp-protocol~=0.2.0"]
 
 [project.optional-dependencies]
 # The core speaks to a `Transport`; a socket is one implementation of one. A

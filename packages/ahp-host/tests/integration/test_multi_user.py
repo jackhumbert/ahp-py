@@ -61,7 +61,7 @@ async def _initialize(client: FakeClient, client_id: str) -> dict[str, Any]:
         {
             "channel": ROOT_URI,
             "clientId": client_id,
-            "protocolVersions": ["0.7.0"],
+            "protocolVersions": ["0.9.0"],
             "initialSubscriptions": [ROOT_URI],
         },
     )

@@ -57,7 +57,7 @@ async def _serve(host: Host) -> tuple[FakeClient, asyncio.Task[None]]:
         {
             "channel": ROOT_URI,
             "clientId": "resources",
-            "protocolVersions": ["0.7.0"],
+            "protocolVersions": ["0.9.0"],
             "initialSubscriptions": [ROOT_URI],
         },
     )

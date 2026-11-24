@@ -43,7 +43,7 @@ classifiers = [
 # validates a StructuredOutput call's arguments against the schema the client
 # sent. It also still checks our wire output against the upstream JSON Schemas
 # in the tests.
-dependencies = ["ahp-protocol~=0.1.0", "jsonschema>=4.18", "tzdata; sys_platform == 'win32'"]
+dependencies = ["ahp-protocol~=0.2.0", "jsonschema>=4.18", "tzdata; sys_platform == 'win32'"]
 
 [project.optional-dependencies]
 ws = ["websockets>=13"]

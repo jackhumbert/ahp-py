@@ -12,6 +12,7 @@ from ahp_protocol import (
     DEFAULT_SUPPORTED_VERSIONS,
     UPSTREAM_PROTOCOL_VERSION,
     UPSTREAM_SUPPORTED_PROTOCOL_VERSIONS,
+    parse_version,
 )
 
 from ahp_client.client.client import ClientConfig
@@ -47,9 +48,12 @@ def test_every_offered_version_is_covered_by_the_pin() -> None:
     pin's own list must stay within what upstream declares, so a widened
     `DEFAULT_SUPPORTED_VERSIONS` is a vendoring decision, not a typo.
 
-    One named exception: upstream 1.0.0 dropped 0.8.0, 0.7.0 and 0.6.0, and
-    the protocol package keeps them for one release (its `UPSTREAM.md`, step
-    8). Listed exactly, so the next pin bump has to decide again."""
+    One named exception: `1.1.0` is tagged upstream and the pinned tables
+    are past it (`UPSTREAM_PROTOCOL_VERSION`), but upstream's own constant
+    still lists only `1.0.0` and `0.9.0`. Listed exactly, so the next pin
+    bump has to decide again."""
     assert set(ClientConfig().protocol_versions) <= set(DEFAULT_SUPPORTED_VERSIONS)
-    grace = {"0.8.0", "0.7.0", "0.6.0"}
-    assert set(DEFAULT_SUPPORTED_VERSIONS) - set(UPSTREAM_SUPPORTED_PROTOCOL_VERSIONS) == grace
+    ahead = {"1.1.0"}
+    assert set(DEFAULT_SUPPORTED_VERSIONS) - set(UPSTREAM_SUPPORTED_PROTOCOL_VERSIONS) == ahead
+    for version in ahead:
+        assert parse_version(version) <= parse_version(UPSTREAM_PROTOCOL_VERSION)

@@ -51,7 +51,7 @@ async def _attach(host: Host, client_id: str = "c1") -> FakeClient:
         {
             "channel": ROOT_URI,
             "clientId": client_id,
-            "protocolVersions": ["0.7.0"],
+            "protocolVersions": ["0.9.0"],
             "initialSubscriptions": [ROOT_URI],
         },
     )

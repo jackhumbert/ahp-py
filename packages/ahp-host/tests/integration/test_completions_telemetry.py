@@ -61,7 +61,7 @@ async def _ready(host: Host, uri: str) -> tuple[FakeClient, str]:
         {
             "channel": ROOT_URI,
             "clientId": "c1",
-            "protocolVersions": ["0.7.0"],
+            "protocolVersions": ["0.9.0"],
             "initialSubscriptions": [ROOT_URI],
         },
     )
@@ -146,7 +146,7 @@ class TestTelemetry:
         result = (
             await client.request(
                 "initialize",
-                {"channel": ROOT_URI, "clientId": "c", "protocolVersions": ["0.7.0"]},
+                {"channel": ROOT_URI, "clientId": "c", "protocolVersions": ["0.9.0"]},
             )
         )["result"]
         assert result["telemetry"] == _TELEMETRY
@@ -161,7 +161,7 @@ class TestTelemetry:
             result = (
                 await client.request(
                     "initialize",
-                    {"channel": ROOT_URI, "clientId": "c", "protocolVersions": ["0.7.0"]},
+                    {"channel": ROOT_URI, "clientId": "c", "protocolVersions": ["0.9.0"]},
                 )
             )["result"]
             assert "telemetry" not in result
@@ -174,7 +174,7 @@ class TestTelemetry:
         client = await _client(host)
         await client.request(
             "initialize",
-            {"channel": ROOT_URI, "clientId": "c", "protocolVersions": ["0.7.0"]},
+            {"channel": ROOT_URI, "clientId": "c", "protocolVersions": ["0.9.0"]},
         )
         await client.request("subscribe", {"channel": "ahp-otlp://logs"})
 
@@ -195,7 +195,7 @@ class TestTelemetry:
         client = await _client(host)
         await client.request(
             "initialize",
-            {"channel": ROOT_URI, "clientId": "c", "protocolVersions": ["0.7.0"]},
+            {"channel": ROOT_URI, "clientId": "c", "protocolVersions": ["0.9.0"]},
         )
         result = (await client.request("subscribe", {"channel": "ahp-otlp://traces"}))["result"]
         assert result == {}
@@ -206,7 +206,7 @@ class TestTelemetry:
         client = await _client(host)
         await client.request(
             "initialize",
-            {"channel": ROOT_URI, "clientId": "c", "protocolVersions": ["0.7.0"]},
+            {"channel": ROOT_URI, "clientId": "c", "protocolVersions": ["0.9.0"]},
         )
         await host.emit_telemetry("metrics", {"resourceMetrics": []})
         await client.collect(seconds=0.2)
@@ -218,7 +218,7 @@ class TestTelemetry:
         client = await _client(host)
         await client.request(
             "initialize",
-            {"channel": ROOT_URI, "clientId": "c", "protocolVersions": ["0.7.0"]},
+            {"channel": ROOT_URI, "clientId": "c", "protocolVersions": ["0.9.0"]},
         )
         await client.request("subscribe", {"channel": "ahp-otlp://logs"})
         await host.emit_telemetry("logs", {"resourceLogs": []})
@@ -321,7 +321,7 @@ class TestCompletionShape:
 
 _INIT = {
     "channel": ROOT_URI,
-    "protocolVersions": ["0.7.0"],
+    "protocolVersions": ["0.9.0"],
     "clientInfo": {"name": "shape", "version": "0"},
     "capabilities": {},
 }

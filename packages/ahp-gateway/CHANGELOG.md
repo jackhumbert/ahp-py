@@ -6,6 +6,11 @@ Every release states the protocol versions it speaks.
 
 ## [Unreleased]
 
+### Changed — `ahp-protocol ~= 0.2.0`: protocol 1.1.0 offered, 0.8.0 and older refused
+
+- The pin moves to `ahp-protocol ~= 0.2.0`, whose `DEFAULT_SUPPORTED_VERSIONS` is `1.1.0, 1.0.0,
+  0.9.0`. A client or host that offers only `0.8.0`, `0.7.0` or `0.6.0` is refused with `-32005`.
+
 ### Added — per-chat agents (upstream `c301d494`)
 
 - `InitializeResult.multipleChatProviders` is advertised to surfaces only when every connected

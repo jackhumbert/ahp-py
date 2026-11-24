@@ -156,7 +156,7 @@ async def test_a_root_uri_missing_a_slash_is_caught() -> None:
     host.on(
         "initialize",
         lambda _p: {
-            "protocolVersion": "0.7.0",
+            "protocolVersion": "0.9.0",
             "serverSeq": 1,
             "snapshots": [{"resource": "ahp-root:/", "state": {"agents": []}, "fromSeq": 1}],
         },
@@ -180,7 +180,7 @@ async def test_a_non_array_agents_is_caught_and_names_the_value() -> None:
     host.on(
         "initialize",
         lambda _p: {
-            "protocolVersion": "0.7.0",
+            "protocolVersion": "0.9.0",
             "serverSeq": 1,
             "snapshots": [
                 {"resource": "ahp-root://", "state": {"agents": {"copilot": {}}}, "fromSeq": 1}
@@ -216,7 +216,7 @@ async def test_a_version_we_never_offered_is_caught() -> None:
 
 async def test_a_missing_snapshots_array_is_caught() -> None:
     host = echo_host()
-    host.on("initialize", lambda _p: {"protocolVersion": "0.7.0", "serverSeq": 1})
+    host.on("initialize", lambda _p: {"protocolVersion": "0.9.0", "serverSeq": 1})
     await host.start()
     report = await diagnose(host.transport())
     assert any("snapshots is an array" in f.check for f in report.failures)
@@ -282,7 +282,7 @@ async def test_a_full_turn_against_the_sibling_python_host() -> None:
 
     try:
         async with connect(transport=client_side) as client:
-            assert client.protocol_version == "1.0.0"
+            assert client.protocol_version == "1.1.0"
             assert client.agents(), "the host published no agents"
 
             # `AgentInfo.provider`, not `.id` -- and the FakeHost's placeholder

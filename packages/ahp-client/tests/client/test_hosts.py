@@ -752,7 +752,7 @@ async def test_a_non_root_initial_subscription_survives_a_second_connection() ->
     first.on(
         "initialize",
         lambda _p: {
-            "protocolVersion": "0.7.0",
+            "protocolVersion": "0.9.0",
             "serverSeq": 3,
             "serverInfo": {"name": "FakeHost", "version": "0"},
             "snapshots": _snapshots(3),
@@ -791,7 +791,7 @@ async def test_a_stated_channel_kind_binds_a_snapshot_sniffing_would_decline() -
     host.on(
         "initialize",
         lambda _p: {
-            "protocolVersion": "0.7.0",
+            "protocolVersion": "0.9.0",
             "serverSeq": 0,
             "serverInfo": {"name": "FakeHost", "version": "0"},
             "snapshots": [{"resource": chat, "state": {}, "fromSeq": 0}],

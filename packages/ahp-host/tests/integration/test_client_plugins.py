@@ -115,7 +115,7 @@ async def _attach(host: Host) -> ServingClient:
         {
             "channel": ROOT_URI,
             "clientId": "vscode",
-            "protocolVersions": ["0.7.0"],
+            "protocolVersions": ["0.9.0"],
             "initialSubscriptions": [ROOT_URI],
         },
     )

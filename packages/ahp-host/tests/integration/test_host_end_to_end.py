@@ -137,7 +137,7 @@ async def _initialize(client: FakeClient, **overrides: Any) -> dict[str, Any]:
     params: dict[str, Any] = {
         "channel": ROOT_URI,
         "clientId": "test-client",
-        "protocolVersions": ["0.7.0", "0.6.0", "0.5.2", "0.5.1"],
+        "protocolVersions": ["1.0.0", "0.9.0"],
         "initialSubscriptions": [ROOT_URI],
     }
     params.update(overrides)
@@ -151,7 +151,7 @@ class TestHandshake:
         _, client = connected
         response = await _initialize(client)
         result = response["result"]
-        assert result["protocolVersion"] == "0.7.0"
+        assert result["protocolVersion"] == "1.0.0"
 
     async def test_snapshots_is_always_an_array(self, connected: tuple[Host, FakeClient]) -> None:
         """Omitting it puts MultiHostClient in an endless reconnect loop."""
@@ -176,7 +176,16 @@ class TestHandshake:
         assert response["error"]["code"] == -32005
         # `supportedVersions` is the schema's own name for this field, and this
         # assertion pinned the wrong one for as long as it existed.
-        assert "0.7.0" in response["error"]["data"]["supportedVersions"]
+        assert "1.0.0" in response["error"]["data"]["supportedVersions"]
+
+    async def test_a_client_offering_only_dropped_versions_is_refused(
+        self, connected: tuple[Host, FakeClient]
+    ) -> None:
+        """0.8.0, 0.7.0 and 0.6.0 had their one release of grace."""
+        _, client = connected
+        response = await _initialize(client, protocolVersions=["0.7.0", "0.6.0"])
+        assert response["error"]["code"] == -32005
+        assert response["error"]["data"]["supportedVersions"] == ["1.1.0", "1.0.0", "0.9.0"]
 
     async def test_a_malformed_offer_is_invalid_params_even_beside_a_good_one(
         self, connected: tuple[Host, FakeClient]

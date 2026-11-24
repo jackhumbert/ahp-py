@@ -90,7 +90,7 @@ class TestItReachesTheProvider:
                     "method": "initialize",
                     "params": {
                         "channel": "ahp-root://",
-                        "protocolVersions": ["0.7.0"],
+                        "protocolVersions": ["0.9.0"],
                         "clientId": "c1",
                         "clientInfo": {"name": "t", "version": "0"},
                         "capabilities": {},

@@ -278,7 +278,7 @@ async def test_the_transport_is_usable_by_the_client_end_to_end() -> None:
                         "jsonrpc": "2.0",
                         "id": request["id"],
                         "result": {
-                            "protocolVersion": "0.7.0",
+                            "protocolVersion": "0.9.0",
                             "serverSeq": 7,
                             "snapshots": [],
                         },
@@ -294,7 +294,7 @@ async def test_the_transport_is_usable_by_the_client_end_to_end() -> None:
         client = AhpClient(transport)
         await client.connect()
         result = await asyncio.wait_for(client.initialize(client_id="c1"), 3)
-        assert result["protocolVersion"] == "0.7.0"
+        assert result["protocolVersion"] == "0.9.0"
         assert client.last_seen_server_seq == 7
         await client.shutdown()
 

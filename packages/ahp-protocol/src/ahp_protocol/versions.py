@@ -45,11 +45,12 @@ __all__ = [
     "parse_version",
 ]
 
-#: Most-preferred first, mirroring the client-side convention. Upstream 1.0.0
-#: advertises only ``1.0.0`` and ``0.9.0``; the three older MINORs stay for one
-#: release after that drop (``UPSTREAM.md``, step 8) so a deployed client is not
-#: refused by a routine dependency bump.
-DEFAULT_SUPPORTED_VERSIONS: Final[tuple[str, ...]] = ("1.0.0", "0.9.0", "0.8.0", "0.7.0", "0.6.0")
+#: Most-preferred first, mirroring the client-side convention. ``1.1.0`` is
+#: tagged upstream and covered by the vendored tables, so it leads; ``1.0.0``
+#: and ``0.9.0`` are upstream's own supported set. The 0.8.0, 0.7.0 and 0.6.0
+#: baselines had their one release of grace after upstream dropped them
+#: (``UPSTREAM.md``, step 8) and are gone: a peer offering only those is refused.
+DEFAULT_SUPPORTED_VERSIONS: Final[tuple[str, ...]] = ("1.1.0", "1.0.0", "0.9.0")
 
 # No leading zeros, no pre-release or build metadata. Matched with `fullmatch`:
 # `$` would also match before a trailing newline, so `re.match` accepts

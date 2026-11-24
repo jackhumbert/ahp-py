@@ -22,7 +22,7 @@ suite, so a dependency bump that moves the spec under it fails loudly.
 | Conformance corpus vendored from | `main` @ `e36b0a20` → `types/test-cases/` |
 | `UPSTREAM_PROTOCOL_VERSION` | `1.2.0` — upstream's development version at that commit |
 | `UPSTREAM_SUPPORTED_PROTOCOL_VERSIONS` | `1.0.0, 0.9.0` — what *upstream* declares (unchanged by the 1.1.0 release) |
-| `DEFAULT_SUPPORTED_VERSIONS` | `1.0.0, 0.9.0, 0.8.0, 0.7.0, 0.6.0` — what a peer built on this pin can honestly speak |
+| `DEFAULT_SUPPORTED_VERSIONS` | `1.1.0, 1.0.0, 0.9.0` — what a peer built on this pin can honestly speak |
 
 **Those last two rows are different numbers and must stay different.** Upstream's
 constant is a fact about upstream; ours is a claim about what this package's
@@ -72,8 +72,11 @@ upstream commits, across the `spec/v1.1.0` release; most are Rust, Swift, Go,
 byte-identical. Reducer fixtures 346 → 351 (chat 178 → 180, session 93 → 96),
 round-trips 104 → 119; all 142 pre-existing JS-semantics cases regenerate
 byte-identically and 7 new ones cover the branch below.
-`UPSTREAM_PROTOCOL_VERSION` moves to `1.2.0`; `DEFAULT_SUPPORTED_VERSIONS` does
-not move (step 8).
+`UPSTREAM_PROTOCOL_VERSION` moves to `1.2.0`. `DEFAULT_SUPPORTED_VERSIONS`
+(step 8) widens to lead with `1.1.0`, which is tagged and which these tables
+cover, and narrows by `0.8.0`, `0.7.0` and `0.6.0`, whose one release of grace
+after upstream 1.0.0 dropped them is over. The distribution moves to `0.2.0`
+(step 9).
 
 - **`session/customizationToggled` reaches MCP-served skills** (#562, SEP-2640).
   `McpServerCustomization.children` lists the skills a server serves. After the

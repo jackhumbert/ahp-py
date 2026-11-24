@@ -222,7 +222,7 @@ with no adapter installed.
 
 ### Implemented
 
-Protocol **1.0.0, 0.9.0, 0.8.0, 0.7.0 and 0.6.0** on the wire, and **1.1.0** — upstream's
+Protocol **1.1.0, 1.0.0 and 0.9.0** on the wire, and **1.2.0** — upstream's
 unreleased next version, inside `^1.0.0`, whose reducers this host runs · **every channel** — root,
 session, chat, annotations, terminal, changeset, resource-watch, automation,
 automation-run and canvas, each detailed below · **all ten reducers**, gated on upstream's whole 351-fixture corpus

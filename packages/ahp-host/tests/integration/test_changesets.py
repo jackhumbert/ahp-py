@@ -110,7 +110,7 @@ async def _session(host: Host, uri: str) -> FakeClient:
         {
             "channel": ROOT_URI,
             "clientId": "c1",
-            "protocolVersions": ["0.7.0"],
+            "protocolVersions": ["0.9.0"],
             "initialSubscriptions": [ROOT_URI],
         },
     )

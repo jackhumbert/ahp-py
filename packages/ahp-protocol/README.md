@@ -307,7 +307,7 @@ Two constants, and they are not the same number:
 
 - `UPSTREAM_SUPPORTED_PROTOCOL_VERSIONS` — what upstream declares.
 - `DEFAULT_SUPPORTED_VERSIONS` — what a peer built on this pin can honestly
-  speak (`1.0.0`, `0.9.0`, `0.8.0`, `0.7.0`, `0.6.0`).
+  speak (`1.1.0`, `1.0.0`, `0.9.0`).
 
 Offer the second.
 

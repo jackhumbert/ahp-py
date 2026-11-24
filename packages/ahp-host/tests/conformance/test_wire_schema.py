@@ -187,7 +187,7 @@ async def recorder() -> AsyncIterator[tuple[Host, Recorder]]:
         {
             "channel": ROOT_URI,
             "clientId": "conformance",
-            "protocolVersions": ["0.7.0"],
+            "protocolVersions": ["0.9.0"],
             "initialSubscriptions": [ROOT_URI],
         },
     )
@@ -248,7 +248,7 @@ class TestTheWireMatchesTheSpec:
                 {
                     "channel": ROOT_URI,
                     "clientId": "c",
-                    "protocolVersions": ["0.7.0"],
+                    "protocolVersions": ["0.9.0"],
                     "initialSubscriptions": [ROOT_URI],
                 },
             )
@@ -356,7 +356,7 @@ class TestTheWireMatchesTheSpec:
                 {
                     "channel": ROOT_URI,
                     "clientId": "conformance",
-                    "protocolVersions": ["0.7.0"],
+                    "protocolVersions": ["0.9.0"],
                     "initialSubscriptions": [ROOT_URI],
                 },
             )
@@ -421,7 +421,7 @@ class TestTheWireMatchesTheSpec:
                 {
                     "channel": ROOT_URI,
                     "clientId": "c",
-                    "protocolVersions": ["0.7.0"],
+                    "protocolVersions": ["0.9.0"],
                     "initialSubscriptions": [ROOT_URI],
                 },
             )

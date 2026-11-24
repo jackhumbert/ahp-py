@@ -55,7 +55,7 @@ async def _connect(host: Host, client_id: str = "c1") -> FakeClient:
         {
             "channel": ROOT_URI,
             "clientId": client_id,
-            "protocolVersions": ["0.7.0"],
+            "protocolVersions": ["0.9.0"],
             "initialSubscriptions": [ROOT_URI],
         },
     )
@@ -288,7 +288,7 @@ class TestProtocolVersionsIsValidated:
             client = FakeClient(client_transport)
             response = await client.request(
                 "initialize",
-                {"channel": ROOT_URI, "clientId": "c", "protocolVersions": [1, "0.7.0"]},
+                {"channel": ROOT_URI, "clientId": "c", "protocolVersions": [1, "0.9.0"]},
             )
         finally:
             serve.cancel()

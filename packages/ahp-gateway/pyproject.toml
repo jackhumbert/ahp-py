@@ -37,7 +37,7 @@ classifiers = [
 # the spec lands breaking changes in MINOR bumps, so a looser pin would let a
 # spec break arrive as a patch upgrade.
 dependencies = [
-  "ahp-protocol~=0.1.0",
+  "ahp-protocol~=0.2.0",
   "ahp-host~=0.1.0",
   "ahp-client~=0.1.0",
 ]
