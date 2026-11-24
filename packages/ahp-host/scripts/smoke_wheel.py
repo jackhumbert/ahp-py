@@ -155,7 +155,7 @@ try:
                     "params": {
                         "channel": ROOT_URI,
                         "clientId": "smoke",
-                        "protocolVersions": ["0.7.0", "0.6.0"],
+                        "protocolVersions": ["1.0.0", "0.9.0"],
                         "initialSubscriptions": [ROOT_URI],
                     },
                 }
@@ -173,7 +173,7 @@ try:
             await host.aclose()
 
     negotiated = asyncio.run(_turn())
-    if negotiated in {"0.7.0", "0.6.0"}:
+    if negotiated in {"1.0.0", "0.9.0"}:
         check(f"a host serves a handshake (negotiated {negotiated})")
     else:
         fail("a host serves a handshake", f"negotiated {negotiated!r}")

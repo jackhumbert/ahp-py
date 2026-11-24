@@ -277,6 +277,17 @@ class RecordingSink:
         self.events.append(("contentRef", content_type))
         return part
 
+    async def content_ref(
+        self,
+        uri: str,
+        *,
+        content_type: str,
+        size_hint: int | None = None,
+        nonce: str | None = None,
+    ) -> Mapping[str, Any]:
+        self.events.append(("contentRef", content_type))
+        return {"kind": "contentRef", "uri": uri, "contentType": content_type}
+
     async def system_notification(
         self, text: str, *, markdown: bool = False, meta: Mapping[str, Any] | None = None
     ) -> None:
