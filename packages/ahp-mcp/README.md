@@ -23,17 +23,35 @@ Status: pre-alpha.
 | `start_session` | Start a session on a machine, in a folder, with a first prompt. |
 | `send_prompt` | Send another message to a session that is not mid-turn. |
 | `read_session` | A session's status, what it is waiting on, and its last turns. |
-| `wait_for_session` | Block (up to five minutes) until a session stops working. |
+| `wait_for_session` | Block (up to five minutes) until a session stops working, and ask you when it waits on you. |
 | `cancel_session` | Stop the turn a session is running. |
 
 A folder is a path relative to the machine's root, an absolute path on it, or a
 URI from a listing. Behind a gateway, naming the folder is what routes a new
 session to its machine.
 
-The tools never answer an approval. A session that asks for one waits for you in
-any AHP client (the iOS app, VS Code). How much a session may do without asking is
-the server's choice, not the model's: `--session-config '{"permissionMode": "auto"}'`
-gives every session it starts that config, and the model cannot change it.
+## When a session needs you
+
+A session can stop to ask permission to run a tool, to have a tool's result
+reviewed, or to ask a question. When the chat app supports MCP
+[elicitation](https://modelcontextprotocol.io/specification/2025-11-25/client/elicitation)
+(it says so when it connects), `wait_for_session` turns the request into a form
+in the app: the tool and its input with the session's own choices (or Allow and
+Deny), or the agent's questions as fields. What you pick goes back to the
+session as the AHP answer. Both ways an MCP revision carries the question work:
+a request mid call, and from 2026-07-28 a result that asks and is retried.
+
+The answer comes only from the app's form. No tool takes an answer as an
+argument, so the model can follow a session but cannot approve anything for
+you. Dismissing the form sends nothing, and the session keeps waiting.
+
+When the app cannot show a form, nothing changes: the session waits for you in
+any AHP client (the iOS app, VS Code), and the tools say so. A tool's sign-in,
+and a question that is only a link, are always left to an AHP client.
+
+How much a session may do without asking is the server's choice, not the
+model's: `--session-config '{"permissionMode": "auto"}'` gives every session it
+starts that config, and the model cannot change it.
 
 ## Sign-in
 

@@ -29,9 +29,9 @@ from ahp_mcp import Fleet, build_server
 DEV = frozenset({"dev"})
 
 
-def rooted_host(root: Path, *, delay: float = 0.0) -> Host:
+def rooted_host(root: Path, *, delay: float = 0.0, **echo: Any) -> Host:
     return Host(
-        EchoProvider(provider_id="claude", delay=delay),
+        EchoProvider(provider_id="claude", delay=delay, **echo),
         LoopbackSingleUserPolicy(),
         resources=RootedFilesystemResourceProvider(root),
         default_directory=root.resolve().as_uri(),
@@ -65,12 +65,16 @@ def _everyone(info: ConnectionInfo) -> Principal:
 class World:
     """Two machines, `node-a` and `node-b`, behind a gateway."""
 
-    def __init__(self, tmp: Path, *, delay: float = 0.0) -> None:
+    def __init__(self, tmp: Path, *, delay: float = 0.0, **echo: Any) -> None:
+        """*echo* goes to every host's echo agent: `elicit=True` makes it ask a
+        question, `confirm_tools=True` makes it ask before running a tool."""
         self.roots = {
             "node-a": tree(tmp, "a", ["app/main.py", "notes.txt"]),
             "node-b": tree(tmp, "b", ["game/play.py"]),
         }
-        self.hosts = {name: rooted_host(root, delay=delay) for name, root in self.roots.items()}
+        self.hosts = {
+            name: rooted_host(root, delay=delay, **echo) for name, root in self.roots.items()
+        }
         self.connector = _Connector(self.hosts)
         self.gateway = Gateway(
             StaticInventory([NodeRecord(n, f"mem://{n}", DEV) for n in self.hosts]),
@@ -107,9 +111,10 @@ class World:
 
 
 @contextlib.asynccontextmanager
-async def mcp_client(fleet: Fleet) -> AsyncIterator[McpClient]:
+async def mcp_client(fleet: Fleet, **options: Any) -> AsyncIterator[McpClient]:
+    """*options* go to the SDK's client: `elicitation_callback`, `mode`."""
     try:
-        async with McpClient(build_server(fleet)) as client:
+        async with McpClient(build_server(fleet), **options) as client:
             yield client
     finally:
         await fleet.aclose()

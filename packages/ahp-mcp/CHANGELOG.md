@@ -20,5 +20,9 @@ Every release states the protocol versions it speaks.
   sign-in page with a lockout, an optional redirect-URI allowlist, and state
   kept as token digests across restarts. Any `mcp` `TokenVerifier` can be used
   instead.
+- Approvals and questions through MCP elicitation: when the client can show a
+  form, `wait_for_session` asks the user for permission to run a tool, a review
+  of a tool's result, or the agent's questions, and sends the answer back to
+  the session. Without elicitation the session keeps waiting for an AHP client.
 - `ahp-mcp`, the command that serves it; secrets come from the environment or
   files only.

@@ -67,7 +67,7 @@ else:
     fail("py.typed is packaged", "absent")
 
 # 4. Every subpackage, by name.
-for sub in ("auth", "cli", "fleet", "server"):
+for sub in ("ask", "auth", "cli", "fleet", "server"):
     try:
         importlib.import_module(f"ahp_mcp.{sub}")
         check(f"ahp_mcp.{sub} is packaged")
