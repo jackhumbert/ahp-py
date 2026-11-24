@@ -941,6 +941,19 @@ class WindowsRootedFilesystemResourceProvider(RootedFilesystemResourceProvider):
             data=data, content_type=mimetypes.guess_type(resolved[-1] if resolved else "")[0]
         )
 
+    async def read_range(
+        self, uri: str, position: int, length: int | None
+    ) -> tuple[ResourceContent, int]:
+        """The whole file, sliced: the inherited POSIX walk must not run here,
+        and a seek over an NT handle is not worth a second code path yet."""
+        if position < 0 or (length is not None and length < 0):
+            raise errors.invalid_params("position and length must be non-negative")
+        content = await self.read(uri)
+        total = len(content.data)
+        end = total if length is None else min(total, position + length)
+        data = content.data[position:end] if position < total else b""
+        return ResourceContent(data=data, content_type=content.content_type), total
+
     async def list_dir(self, uri: str) -> Sequence[DirectoryEntry]:
         depth = self._win_ancestor(uri)
         if depth is not None:

@@ -240,8 +240,9 @@ class TestSymlinkedWrites:
 class TestReadSize:
     async def test_a_file_above_the_cap_is_refused(self, root: Path) -> None:
         """One unprivileged read of a 64 MiB file drove host RSS from 29 MB to
-        970 MB. `ResourceReadParams` has no offset or length, so there is no
-        partial read to degrade to -- the only conformant answer is a refusal.
+        970 MB. A whole read has no partial answer to degrade to, so the only
+        conformant one is a refusal; `tests/integration/test_resource_ranges.py`
+        reads the same file a slice at a time.
         """
         big = root / "big.bin"
         with big.open("wb") as handle:

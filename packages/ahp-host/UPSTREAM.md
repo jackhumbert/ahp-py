@@ -110,7 +110,7 @@ Past the tag, `main` (declaring `1.2.0`) changes these for the host:
 |---|---|
 | `CanvasState.url` renamed `uri` | Sent as `uri`. The Python field stays `Canvas.url`, still HTTP(S) only, and both keys are redacted from wire logs |
 | `session/customizationToggled` reaches an MCP server's skills | Reduced by the pinned reducer; nothing host-side |
-| `resourceRead` `position` / `length`, result `size` | Accepted and ignored: the whole resource is returned, which the spec allows |
+| `resourceRead` `position` / `length`, result `size` | Honoured on files and on content the host holds, with `size`; a range never splits a UTF-8 sequence. The read budget bounds the slice when the provider reads ranges (`RangedResourceProvider`, which the shipped jail is), and the whole file otherwise |
 | `InitializeResult.environment.pathStyle` | Not sent; it is optional |
 | `AuthenticateParams.accountId` | Accepted; the host keeps one token per resource either way |
 | Messages from a non-user origin | Nothing to change: the host never restricted input to `User` |

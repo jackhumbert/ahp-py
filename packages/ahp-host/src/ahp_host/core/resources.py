@@ -52,6 +52,7 @@ from ahp_protocol import errors
 __all__ = [
     "DirectoryEntry",
     "NullResourceProvider",
+    "RangedResourceProvider",
     "ResourceAccess",
     "ResourceContent",
     "ResourceInfo",
@@ -137,6 +138,25 @@ class ResourceProvider(Protocol):
     async def read(self, uri: str) -> ResourceContent: ...
 
     async def list_dir(self, uri: str) -> Sequence[DirectoryEntry]: ...
+
+
+@runtime_checkable
+class RangedResourceProvider(ResourceProvider, Protocol):
+    """A provider that can read part of a resource. Feature-detected.
+
+    Backs a ranged `resourceRead` (`position` / `length`, upstream 1.2.0) so a
+    large file is served a slice at a time without holding the whole of it. A
+    provider without this still gets ranged reads: the host reads the whole
+    resource and slices it, within the same read budget as an unranged read.
+    """
+
+    async def read_range(
+        self, uri: str, position: int, length: int | None
+    ) -> tuple[ResourceContent, int]:
+        """At most *length* bytes from *position* (``None``: to the end), and
+        the resource's total size. A *position* at or past the end yields no
+        bytes, not an error."""
+        ...
 
 
 @runtime_checkable
@@ -538,6 +558,35 @@ class RootedFilesystemResourceProvider:
         finally:
             os.close(fd)
         return ResourceContent(data=data, content_type=mimetypes.guess_type(resolved.name)[0])
+
+    async def read_range(
+        self, uri: str, position: int, length: int | None
+    ) -> tuple[ResourceContent, int]:
+        """`read`, but only the bytes asked for; the same walk and refusals.
+
+        The total is the size of the open file, taken from the same descriptor
+        the bytes come from, so it cannot describe a different file than the
+        one read.
+        """
+        if position < 0 or (length is not None and length < 0):
+            raise errors.invalid_params("position and length must be non-negative")
+        fd, stats, resolved = self._walk(self._relative(uri))
+        try:
+            if stat.S_ISDIR(stats.st_mode):
+                raise errors.invalid_params(f"{uri} is a directory")
+            if not stat.S_ISREG(stats.st_mode):
+                raise errors.AhpError(-32009, "Not a regular file")
+            with os.fdopen(os.dup(fd), "rb") as handle:
+                total = os.fstat(handle.fileno()).st_size
+                if position >= total:
+                    data = b""
+                else:
+                    handle.seek(position)
+                    data = handle.read(total - position if length is None else length)
+        finally:
+            os.close(fd)
+        content_type = mimetypes.guess_type(resolved.name)[0]
+        return ResourceContent(data=data, content_type=content_type), total
 
     async def list_dir(self, uri: str) -> Sequence[DirectoryEntry]:
         ancestor = self._strict_ancestor(uri)

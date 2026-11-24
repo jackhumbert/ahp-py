@@ -15,6 +15,18 @@ versions each release speaks.
 - The pin moves to `ahp-protocol ~= 0.2.0`, whose `DEFAULT_SUPPORTED_VERSIONS` is `1.1.0, 1.0.0,
   0.9.0`. A client that offers only `0.8.0`, `0.7.0` or `0.6.0` is refused with `-32005`, which includes VS Code 1.131.
 
+### Added — ranged `resourceRead`
+
+- `position` and `length` (upstream 1.2.0) are honoured: the result holds only those bytes and
+  carries `size`, the whole resource's size. A position at or past the end is empty, a bad range
+  is `-32602`, and a `utf-8` result never splits a sequence (a broken tail is dropped; a range
+  starting inside one goes as `base64`).
+- `RangedResourceProvider.read_range` lets a provider read only the slice.
+  `RootedFilesystemResourceProvider` implements it, and the read budget then bounds the slice, so
+  a file above `max_read_bytes` is readable a piece at a time. Through any other provider the
+  host reads the whole file, within the budget as before, and slices it.
+  `tests/integration/test_resource_ranges.py`.
+
 ### Changed — a canvas goes on the wire as `uri`
 
 - Upstream `main` renamed `CanvasState.url` to `uri`, and `Canvas.to_wire` sends the new key.

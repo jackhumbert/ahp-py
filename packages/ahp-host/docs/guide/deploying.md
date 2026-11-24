@@ -118,8 +118,10 @@ junctions (`SECURITY.md` has the race that remains).
 
 ### Reads are bounded
 
-`resourceRead` has no offset or length in the protocol, so a file that is too
-big to send cannot be sent in pieces — it can only be refused. The bound is a
+A whole `resourceRead` of a file that is too big to send is refused. Since
+upstream 1.2.0 a client may read a range (`position` / `length`) instead, and
+the bound then applies to the slice, so a large file can be read in pieces
+through the shipped jail (any `RangedResourceProvider`). The bound is a
 constructor argument, because an embedder serving large assets has to be able to
 lift it:
 

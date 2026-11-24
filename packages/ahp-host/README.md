@@ -511,9 +511,10 @@ On Windows the same class builds a separate, **read-only** jail over NT handles
 limits are in [`SECURITY.md`](SECURITY.md).
 
 Reads are bounded — 16 MiB by default, `Host(max_read_bytes=…)` to raise it and
-`None` to remove it. The protocol has no partial read (`resourceRead` takes no
-offset or length), so a file above the bound is refused rather than truncated:
-unbounded, one 64 MiB file took host memory from 29 MB to 970 MB.
+`None` to remove it. A whole read of a file above the bound is refused rather
+than truncated: unbounded, one 64 MiB file took host memory from 29 MB to
+970 MB. A ranged read (`position` / `length`) is bounded by the slice instead, so
+a large file is read in pieces; the jail reads only the slice from disk.
 
 ```bash
 python -m ahp_host --serve-directory ./workspace

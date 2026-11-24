@@ -120,6 +120,7 @@ from ahp_host.core.policy import PRINCIPAL_METADATA_KEY, Policy, TracksChannels
 from ahp_host.core.redaction import AUDIT_KIND, RedactionError, extensions_of, redacts_live
 from ahp_host.core.resources import (
     NullResourceProvider,
+    RangedResourceProvider,
     ResourceContent,
     ResourceInfo,
     ResourceProvider,
@@ -433,10 +434,11 @@ _UTF8: Final = "utf-8"
 #: picked as the fallback for a value the caller got wrong.
 _WRITE_MODES: Final = frozenset({"truncate", "append", "insert"})
 
-#: The largest file `resourceRead` will answer with, before base64 and JSON
-#: multiply it. There is no partial read in the protocol -- `ResourceReadParams`
-#: has no offset or length -- so this is a refusal, not a truncation, and an
-#: embedder serving large assets raises it. 16 MiB is roughly a 21 MiB base64
+#: The largest answer `resourceRead` will give, before base64 and JSON multiply
+#: it. It bounds the bytes returned: a ranged read (`position` / `length`,
+#: upstream 1.2.0) of a larger file is served when the slice fits and the
+#: provider reads ranges itself. Over the bound it is a refusal, not a
+#: truncation, and an embedder serving large assets raises it. 16 MiB is roughly a 21 MiB base64
 #: frame; the unbounded version turned one 64 MiB file into ~970 MB of RSS.
 DEFAULT_MAX_READ_BYTES: Final = 16 * 1024 * 1024
 
@@ -505,19 +507,98 @@ def _write_position(params: Mapping[str, Any]) -> int:
     silently floored. `True` is rejected before either -- it is an `int` in
     Python and JSON `true` is not an offset.
     """
-    if "position" not in params:
-        return 0
-    position = params["position"]
-    if isinstance(position, bool) or not isinstance(position, int | float):
-        raise errors.invalid_params(f"position must be a number, not {position!r}")
-    if isinstance(position, float) and not math.isfinite(position):
+    position = _byte_offset(params, "position")
+    return 0 if position is None else position
+
+
+def _byte_offset(params: Mapping[str, Any], key: str) -> int | None:
+    """A non-negative whole-number byte count at *key*, ``None`` when absent,
+    or `InvalidParams`. Shared by `resourceWrite.position` and the
+    `resourceRead` range, which the spec refuses the same way."""
+    if key not in params:
+        return None
+    value = params[key]
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        raise errors.invalid_params(f"{key} must be a number, not {value!r}")
+    if isinstance(value, float) and not math.isfinite(value):
         # `json.loads` accepts `Infinity` and `NaN` by default and `int()` raises
         # on both, so without this a peer picks which frames become
         # `InternalError` with a Python exception name attached.
-        raise errors.invalid_params(f"position must be finite: {position!r}")
-    if position != int(position) or position < 0:
-        raise errors.invalid_params(f"position must be a non-negative whole number: {position!r}")
-    return int(position)
+        raise errors.invalid_params(f"{key} must be finite: {value!r}")
+    if value != int(value) or value < 0:
+        raise errors.invalid_params(f"{key} must be a non-negative whole number: {value!r}")
+    return int(value)
+
+
+def _read_range(params: Mapping[str, Any]) -> tuple[int, int | None] | None:
+    """`ResourceReadParams.position` / `length` (upstream 1.2.0), or ``None``
+    for a whole read. Either alone asks for a range: `position` defaults to 0
+    and `length` to the rest of the resource."""
+    position = _byte_offset(params, "position")
+    length = _byte_offset(params, "length")
+    if position is None and length is None:
+        return None
+    return (0 if position is None else position), length
+
+
+def _slice(data: bytes, position: int, length: int | None) -> bytes:
+    """The bytes a range names; empty at or past the end, as the spec says."""
+    if position >= len(data):
+        return b""
+    return data[position:] if length is None else data[position : position + length]
+
+
+def _utf8_text(data: bytes, *, cut: bool) -> str | None:
+    """*data* as UTF-8, or ``None`` when it is not text.
+
+    "A ranged result MUST NOT split a UTF-8 sequence." When the range ends
+    inside the resource (*cut*), up to three trailing bytes of a sequence the
+    range broke are dropped, so the result is shorter than asked -- which
+    `length`, a maximum, allows -- and the next read starts on the sequence.
+    A range that starts inside a sequence cannot be fixed without returning
+    bytes outside it, so that one is not text and goes as `base64`.
+    """
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError:
+        if not cut:
+            return None
+    for trim in (1, 2, 3):
+        if len(data) <= trim:
+            break
+        try:
+            return data[:-trim].decode("utf-8")
+        except UnicodeDecodeError:
+            continue
+    return None
+
+
+def _ranged_read_result(content: Any, requested: Any, position: int, total: int) -> dict[str, Any]:
+    """`ResourceReadResult` for a range this host honoured: *content* holds
+    only the range's bytes, and `size` is the resource's *total*, which "MUST"
+    be present exactly when the range was honoured."""
+    result: dict[str, Any] = {}
+    if requested != _BASE64:
+        text = _utf8_text(content.data, cut=position + len(content.data) < total)
+        if text is not None:
+            result = {"data": text, "encoding": _UTF8}
+    if not result:
+        result = {"data": base64.b64encode(content.data).decode("ascii"), "encoding": _BASE64}
+    if content.content_type is not None:
+        result["contentType"] = content.content_type
+    result["size"] = total
+    return result
+
+
+def _ranged_from_whole(
+    content: Any, requested: Any, byte_range: tuple[int, int | None]
+) -> dict[str, Any]:
+    """A range served from bytes already held whole."""
+    position, length = byte_range
+    part = ResourceContent(
+        data=_slice(content.data, position, length), content_type=content.content_type
+    )
+    return _ranged_read_result(part, requested, position, len(content.data))
 
 
 def _read_result(content: Any, requested: Any) -> dict[str, Any]:
@@ -3729,12 +3810,15 @@ class Host:
         uri = params.get("uri")
         if not isinstance(uri, str):
             raise errors.invalid_params("uri is required")
+        # Validated before anything is looked up, so a bad range is
+        # `InvalidParams` whether or not the resource exists.
+        byte_range = _read_range(params) if method == "resourceRead" else None
 
         if method == "resourceRequest":
             return self._resource_request(connection, params, uri)
 
         if uri.startswith(COPY_SCHEME):
-            return self._serve_plugin_copy(connection, method, uri, params)
+            return self._serve_plugin_copy(connection, method, uri, params, byte_range)
 
         # Host-owned content is answered BEFORE the provider is consulted, so a
         # changeset renders on a host that exposes no filesystem at all. VS
@@ -3760,7 +3844,10 @@ class Host:
                 # `resourceList` on content, which is a file and not a
                 # directory. Same answer the filesystem provider gives.
                 raise errors.invalid_params(f"{uri} is not a directory")
-            return _read_result(owner.content.get(uri), params.get("encoding"))
+            held = owner.content.get(uri)
+            if byte_range is not None:
+                return _ranged_from_whole(held, params.get("encoding"), byte_range)
+            return _read_result(held, params.get("encoding"))
 
         if uri.startswith(CONTENT_SCHEME):
             # Host content no session holds (any more): not a path for the
@@ -3793,6 +3880,8 @@ class Host:
         if method == "resourceList":
             return {"entries": [e.to_wire() for e in await self.resources.list_dir(info.uri)]}
 
+        if byte_range is not None and isinstance(self.resources, RangedResourceProvider):
+            return await self._read_range(info, uri, byte_range, params.get("encoding"))
         self._within_read_budget(info.size, uri)
         content = await self.resources.read(info.uri)
         # Re-checked against what actually came back: `size` is advisory (a
@@ -3800,17 +3889,48 @@ class Host:
         # read), and this is still ahead of the base64/JSON amplification that
         # turned a 64 MiB file into ~970 MB of resident host memory.
         self._within_read_budget(len(content.data), uri)
+        if byte_range is not None:
+            # A provider that cannot read part of a file: read it whole, within
+            # the same budget as any read, and slice.
+            return _ranged_from_whole(content, params.get("encoding"), byte_range)
         return _read_result(content, params.get("encoding"))
+
+    async def _read_range(
+        self,
+        info: ResourceInfo,
+        uri: str,
+        byte_range: tuple[int, int | None],
+        encoding: Any,
+    ) -> dict[str, Any]:
+        """A ranged read through a provider that reads ranges itself.
+
+        The budget bounds the bytes returned, not the file, so a file above
+        `max_read_bytes` is readable a slice at a time. It is checked before
+        the read against what the range can return, and again on what came
+        back, for the same reason as an unranged read.
+        """
+        position, length = byte_range
+        provider = self.resources
+        assert isinstance(provider, RangedResourceProvider)
+        if length is not None:
+            self._within_read_budget(length, uri)
+        elif info.size is not None:
+            self._within_read_budget(max(info.size - position, 0), uri)
+        content, total = await provider.read_range(info.uri, position, length)
+        self._within_read_budget(len(content.data), uri)
+        return _ranged_read_result(content, encoding, position, total)
 
     def _within_read_budget(self, size: int | None, uri: str) -> None:
         """Refuse a read this host will not survive.
 
-        `ResourceReadParams` carries `channel`, `uri` and `encoding` and nothing
-        else -- **there is no offset or length in the protocol**, so there is no
-        partial read to fall back to and a file above the bound cannot be served
-        at all. One unprivileged read of a 64 MiB file drove host RSS from 29 MB
-        to 970 MB, which makes any served directory holding a video or a disk
-        image an OOM lever for a peer that has only completed `initialize`.
+        Since upstream 1.2.0 a read may name a range, and through a provider
+        that reads ranges (`RangedResourceProvider`) the bound applies to the
+        slice, so a large file is served in pieces. A whole read, or any read
+        through a provider without ranges, still holds the whole file, and
+        above the bound cannot be served at all. One unprivileged read of a
+        64 MiB file drove host RSS from 29 MB to 970 MB, which makes any
+        served directory holding a video or a disk image an OOM lever for a
+        peer that has only completed `initialize`.
 
         `PermissionDenied` because the spec has no size code (`AhpErrorCode` is
         -32001..-32011) and this is a refusal, not a malformed request or a
@@ -6430,7 +6550,12 @@ class Host:
         return principal if isinstance(principal, str) and principal else None
 
     def _serve_plugin_copy(
-        self, connection: Connection, method: str, uri: str, params: Mapping[str, Any]
+        self,
+        connection: Connection,
+        method: str,
+        uri: str,
+        params: Mapping[str, Any],
+        byte_range: tuple[int, int | None] | None = None,
     ) -> dict[str, Any]:
         """`resource*` on a captured automation plugin: "clients can browse
         [it] with `resourceRead`". Visible to whoever can see the catalogue."""
@@ -6451,6 +6576,10 @@ class Host:
                 raise errors.invalid_params(f"{uri} is not a directory")
             if method == "resourceResolve":
                 return ResourceInfo(uri=uri, type="file", size=len(data)).to_wire()
+            if byte_range is not None:
+                return _ranged_from_whole(
+                    ResourceContent(data=data), params.get("encoding"), byte_range
+                )
             return _read_result(ResourceContent(data=data), params.get("encoding"))
         listed = copy_.entries(path)
         if listed is None:

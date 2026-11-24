@@ -354,6 +354,14 @@ class NamedRootsResourceProvider:
         jail, real = self._jail_uri(uri)
         return await jail.read(real)
 
+    async def read_range(
+        self, uri: str, position: int, length: int | None
+    ) -> tuple[ResourceContent, int]:
+        if self._is_top(uri) and not self.roots.is_real:
+            raise errors.AhpError(-32009, "The list of folders is not a file")
+        jail, real = self._jail_uri(uri)
+        return await jail.read_range(real, position, length)
+
     async def list_dir(self, uri: str) -> Sequence[DirectoryEntry]:
         spine = self.roots.spine_children(uri)
         if spine is not None:
