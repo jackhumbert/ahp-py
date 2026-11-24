@@ -33,12 +33,26 @@ versions each release speaks.
   The Python field is still `Canvas.url` and still HTTP(S) only, so a provider changes nothing.
   Wire logs redact either key. `tests/integration/test_canvases.py`.
 
-### Added — automations refuse what this host cannot run
+### Added — one-time automation triggers and run targets
 
-- A definition with a `oneTime` trigger, or a `target` other than `newSession`, is refused with
-  a reason naming it. The host advertises neither, and saving one would run it as a new session
-  on a schedule instead. A patch may set `target`; unknown members of it are kept.
-  `tests/integration/test_automations.py`.
+- `kind: "oneTime"` triggers (upstream 1.2.0, advertised as `automations.oneTime`) start one run
+  at `runAt`, recorded as `origin.scheduledFor`. A `runAt` missed while the host was down
+  follows `misfirePolicy`; one already long past when it is saved never fires. The record keeps
+  which `runAt` each trigger has dealt with (`fired`), so re-saving the same time or restarting
+  does not fire it again, and moving `runAt` fires the new time.
+- `target` (advertised as `automations.targets`) is honoured. `previousSession` continues the
+  `primarySession` of the most recent run that had one (kept as `lastSession`, so pruning does not
+  lose it) while that session is usable, and otherwise creates one. `chat` sends every run to one
+  chat and never creates a session; a create or update naming a chat that does not exist, a
+  worker chat, or another owner's chat is refused, and the host sets `target.session` to the
+  chat's owner, also after `moveChat`.
+- A reused session gets the message as a queued pending message whose id is the run's URI. The
+  run is `pending` while it waits and follows the turn that starts from it. Cancelling it
+  withdraws the message or cancels only that turn, withdrawing the message cancels the run, and
+  archiving or removing the session (or disposing the chat) fails it. Runs of one automation
+  resolve their target in creation order, so overlapping runs share one session. A message left
+  queued by a process that stopped is withdrawn rather than run.
+  `tests/integration/test_automation_one_time.py`, `tests/integration/test_automation_targets.py`.
 
 ### Added — `TurnSink.content_ref`: show content that already exists
 

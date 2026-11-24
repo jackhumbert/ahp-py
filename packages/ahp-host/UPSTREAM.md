@@ -115,7 +115,8 @@ Past the tag, `main` (declaring `1.2.0`) changes these for the host:
 | `AuthenticateParams.accountId` | Accepted; the host keeps one token per resource either way |
 | Messages from a non-user origin | Nothing to change: the host never restricted input to `User` |
 | Annotations resource as `ahp-annotations:/<uuid>` | Not adopted: the host keeps `<session>/annotations`, the URI VS Code reads |
-| Automation `oneTime` triggers and run `target` | Not advertised; a definition using a one-time trigger or a target other than `newSession` is refused by name rather than saved and run as something else |
+| Automation `oneTime` triggers | Advertised (`automations.oneTime`) and run: once per `runAt`, with `misfirePolicy`, across updates and restarts |
+| Automation run `target` | Advertised (`automations.targets`) and honoured: `previousSession` continues the previous run's session while it is usable, and `chat` queues each run's message in one chat, with `target.session` kept on the chat's owner |
 
 ## Vendoring moved out
 

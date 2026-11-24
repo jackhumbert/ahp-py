@@ -84,6 +84,7 @@ from ahp_host.core.automations import (
     next_run_at,
     reset_cursors,
     run_count_after_update,
+    target_kind,
     template_customizations,
 )
 from ahp_host.core.changesets import (
@@ -1697,6 +1698,38 @@ class HostInfo:
 
 
 @dataclass
+class _Delivery:
+    """An automation run whose message waits in an existing chat's queue.
+
+    A `previousSession` run that reuses a session, and every `chat` run,
+    "adds `message` to the chat as a queued pending message", and the run's
+    lifecycle follows that message rather than the session: `pending` while it
+    waits, `running` once a turn starts from it, then that turn's outcome. The
+    pending message's id is the run's URI, so a queue entry left behind by a
+    process that stopped is recognisable as one (`_drain_queue`).
+
+    `outcome` resolves exactly once, to one of:
+
+    - ``("started", turn_id, task)`` -- `_drain_queue` started a turn from it;
+    - ``("cancelled", None, None)`` -- withdrawn, or the run was cancelled;
+    - ``("failed", reason, None)`` -- the session or chat went first.
+    """
+
+    run_uri: str
+    session_uri: str
+    chat_uri: str
+    outcome: asyncio.Future[tuple[str, Any, Any]]
+    #: The turn started from the message, once one has.
+    task: asyncio.Task[None] | None = None
+
+    def settle(self, kind: str, detail: Any = None, task: Any = None) -> bool:
+        if self.outcome.done():
+            return False
+        self.outcome.set_result((kind, detail, task))
+        return True
+
+
+@dataclass
 class _Session:
     uri: str
     #: The default chat. `SessionState.defaultChat`, and the one a session is
@@ -2368,6 +2401,13 @@ class Host:
         #: Runs a client asked to cancel. Read when the run's turn ends, so a
         #: turn cancelled on the run's behalf reads as the run cancelled.
         self._cancelled_runs: set[str] = set()
+        #: Run URI -> its message waiting in an existing chat (`_Delivery`).
+        self._deliveries: dict[str, _Delivery] = {}
+        #: Per automation, serialises resolving `previousSession` and `chat`
+        #: targets: "The host resolves targets and starts turns in run creation
+        #: order, so overlapping runs share one session instead of each
+        #: creating one."
+        self._target_locks: dict[str, asyncio.Lock] = {}
         #: Extra history pages `fetchAutomationRuns` has loaded, per automation.
         #: Display state shared by every subscriber, and not worth persisting.
         self._run_pages: dict[str, int] = {}
@@ -3387,6 +3427,11 @@ class Host:
                 "schedules": {},
                 "runCancellation": {},
                 "runHistoryLimit": self.automation_history,
+                # 1.2.0 (unreleased): `kind: "oneTime"` triggers fire once at
+                # `runAt` (`automations.due_occurrences`), and runs may continue
+                # the previous run's session or send to one chat.
+                "oneTime": {},
+                "targets": {"previousSession": {}, "chat": {}},
                 # 1.0.0: the host captures the template's client plugins when
                 # a definition is saved (`plugin_copies.py`).
                 "customizations": {},
@@ -5955,6 +6000,7 @@ class Host:
         # channel it must be answered on no longer exists. Cancelling first
         # ends the turn's pending scope, which is what retracts those entries
         # (`_run_turn`'s finally).
+        await self._abandon_deliveries({chat_uri}, "the automation's chat was disposed")
         await self._finish_reasoning(chat_uri)
         await self._cancel_turn(session, chat_uri, "chat disposed")
         # And SAID so, on the channel, while it still exists. Cancelling the
@@ -6196,6 +6242,7 @@ class Host:
         await self._mirror_summary(target)
         await self._persist(source)
         await self._persist(target)
+        await self._follow_moved_chats(moving, target.uri)
 
     def _agent_of(self, session: _Session, chat: str) -> str:
         """The provider id of the agent behind *chat*: its own if foreign, else its session's."""
@@ -8584,6 +8631,7 @@ class Host:
 
     async def _teardown(self, session: _Session) -> None:
         channel = session.uri
+        await self._abandon_deliveries(session.chat_uris, "the run's session was removed")
         # While each turn's sink is still there to ask: a cancelled task takes its
         # runner with it, and the open reasoning run's duration with that.
         for chat in sorted(session.chat_uris):
@@ -9180,6 +9228,13 @@ class Host:
             await self._start_turn(session, channel, action, resume=True)
         elif action_type == "chat/pendingMessageSet":
             await self._drain_queue(session, channel)
+        elif action_type == "chat/pendingMessageRemoved":
+            # "If its queued message is withdrawn without a turn starting from
+            # it, the run is `cancelled`."
+            identifier = action.get("id")
+            withdrawn = self._deliveries.get(identifier) if isinstance(identifier, str) else None
+            if withdrawn is not None and withdrawn.chat_uri == channel:
+                withdrawn.settle("cancelled")
         elif action_type == "chat/truncated":
             await self._react_to_truncate(session, channel, action)
         elif action_type == "chat/turnCancelled":
@@ -9827,6 +9882,12 @@ class Host:
                     channel,
                     {"type": "chat/pendingMessageRemoved", "kind": kind, "id": entry.get("id")},
                 )
+                identifier = entry.get("id")
+                withdrawn = (
+                    self._deliveries.get(identifier) if isinstance(identifier, str) else None
+                )
+                if withdrawn is not None:
+                    withdrawn.settle("failed", "the automation's chat does not take messages")
             return
         picked = next(
             (pair for pair in entries if pair[0] == _PENDING_STEERING),
@@ -9839,6 +9900,21 @@ class Host:
         if not isinstance(message, Mapping):
             return
         identifier = entry.get("id")
+        delivery = self._deliveries.get(identifier) if isinstance(identifier, str) else None
+        if (
+            delivery is None
+            and kind == _PENDING_QUEUED
+            and isinstance(identifier, str)
+            and identifier in self._run_records
+        ):
+            # A run's message left behind by a process that stopped while it
+            # waited. That run was failed on restore, so the message is
+            # withdrawn, not run as a turn no run follows.
+            await self.sequencer.publish(
+                channel, {"type": "chat/pendingMessageRemoved", "kind": kind, "id": identifier}
+            )
+            await self._drain_queue(session, channel)
+            return
         if isinstance(identifier, str):
             handed_off.add(identifier)
         # Removed BEFORE the turn starts, and awaited. The entry has to leave
@@ -9863,6 +9939,9 @@ class Host:
         # it a second time.
         await self.sequencer.publish(channel, started)
         await self._start_turn(session, channel, started)
+        if delivery is not None and delivery.chat_uri == channel:
+            delivery.task = session.turns.get(channel)
+            delivery.settle("started", started["turnId"], delivery.task)
 
     async def _steer(self, session: _Session, channel: str, entry: Mapping[str, Any]) -> bool:
         """Offer one steering message to the turn running on *channel*.
@@ -10064,6 +10143,8 @@ class Host:
         archived = action.get("isArchived")
         if session is None or not isinstance(archived, bool):
             return
+        if archived:
+            await self._abandon_deliveries(session.chat_uris, "the run's session was archived")
         for agent in self._all_agents(session):
             if not isinstance(agent, ArchivesSessions):
                 continue
@@ -10499,9 +10580,13 @@ class Host:
                 # A removed automation's URI stays its owner's: reusing it would
                 # re-point the owner's replayed history at someone else.
                 return no_such
-            return definition_rejection(
-                action.get("definition"), self.providers
-            ) or self._template_directories_rejection(connection, resource, action["definition"])
+            return (
+                definition_rejection(action.get("definition"), self.providers)
+                or self._template_directories_rejection(connection, resource, action["definition"])
+                or self._chat_target_rejection(
+                    connection, action["definition"], self._principal_of(connection)
+                )
+            )
         if record is None:
             # `automation/removed` of an unknown resource is specified as a
             # no-op; rejected rather than sequenced, so it cannot remove a
@@ -10517,10 +10602,66 @@ class Host:
             rejection = definition_rejection(patched, self.providers)
             if rejection is None and "session" in changes:
                 rejection = self._template_directories_rejection(connection, resource, patched)
+            if rejection is None and "target" in changes:
+                rejection = self._chat_target_rejection(connection, patched, record.principal)
             return rejection
         if action_type == "automation/removed":
             return None
         return f"{action_type} is not an action this host accepts"
+
+    def _chat_target_rejection(
+        self, connection: Connection, definition: Mapping[str, Any], principal: str | None
+    ) -> str | None:
+        """A `chat` target's chat: "The host MUST reject a create or update
+        request whose chat doesn't exist or that the automation may not drive."
+
+        Driving it takes both: the connection may see the chat (the policy), and
+        the automation's owner may send to its session (`_may_drive`). A worker
+        chat takes no messages but its agent's, so it is no target either.
+        """
+        if target_kind(definition) != "chat":
+            return None
+        target = definition.get("target")
+        chat = target.get("chat") if isinstance(target, Mapping) else None
+        session = self._session_for(chat) if isinstance(chat, str) else None
+        if (
+            not isinstance(chat, str)
+            or session is None
+            or chat not in session.chat_uris
+            or not self.policy.may_see_channel(connection.info, chat)
+        ):
+            return f"no chat {chat}"
+        if not self._may_drive(principal, session) or chat in session.provider_chats:
+            return f"this automation may not send to {chat}"
+        return None
+
+    def _pin_chat_target(self, definition: dict[str, Any]) -> None:
+        """Set a `chat` target's `session` to the chat's owner, "replacing any
+        submitted value, so clients can't write back an outdated session"."""
+        target = definition.get("target")
+        if target_kind(definition) != "chat" or not isinstance(target, dict):
+            return
+        chat = target.get("chat")
+        session = self._session_for(chat) if isinstance(chat, str) else None
+        if session is not None:
+            target["session"] = session.uri
+
+    async def _follow_moved_chats(self, chats: Collection[str], session_uri: str) -> None:
+        """Keep `chat` targets on the chat's owner: "When the chat moves to
+        another session, the host updates `session` and publishes the
+        definition with `automation/set`." """
+        for record in list(self._automations.values()):
+            target = record.definition.get("target")
+            if (
+                target_kind(record.definition) == "chat"
+                and isinstance(target, dict)
+                and target.get("chat") in chats
+                and target.get("session") != session_uri
+            ):
+                target["session"] = session_uri
+                record.modified_at = iso(datetime.now(UTC))
+                await self._save_automation(record)
+                await self._publish_automation(record)
 
     def _template_directories_rejection(
         self, connection: Connection, resource: str, definition: Mapping[str, Any]
@@ -10580,9 +10721,11 @@ class Host:
             if resource in self._automations or not isinstance(definition, Mapping):
                 return
             stamp = iso(now)
+            pinned = copy.deepcopy(dict(definition))
+            self._pin_chat_target(pinned)
             created = AutomationRecord(
                 resource=resource,
-                definition=copy.deepcopy(dict(definition)),
+                definition=pinned,
                 created_at=stamp,
                 modified_at=stamp,
                 run_count=0 if after_runs(definition) is not None else None,
@@ -10610,6 +10753,7 @@ class Host:
                 patched.get("enabled") is True and record.definition.get("enabled") is not True
             )
             record.run_count = run_count_after_update(record, patched)
+            self._pin_chat_target(patched)
             self._take_copies(record, patched, copies)
             record.definition = patched
             record.modified_at = iso(now)
@@ -10870,8 +11014,15 @@ class Host:
         )
 
     async def _execute_run(self, record: AutomationRecord, run_uri: str) -> None:
-        """One run: a fresh session from the template, the saved message as its
-        first turn, and the run's lifecycle following that turn to its end.
+        """One run, wherever its target sends it, followed to its end.
+
+        `newSession` (the default) creates a session from the template. A
+        `previousSession` run continues the session of the run before it when
+        that is still usable, and otherwise creates one; a `chat` run queues
+        its message in that chat and never creates a session. The last two are
+        resolved one run at a time per automation, in creation order: tasks
+        start in the order `_start_run` made them and reach the lock before
+        anything else is awaited, and `asyncio.Lock` wakes waiters in order.
 
         A turn that stops for a tool confirmation leaves the run `running`:
         "Linked `SessionState.status` and `SessionState.inputNeeded` remain
@@ -10881,132 +11032,362 @@ class Host:
             definition = copy.deepcopy(record.definition)
             template = definition.get("session")
             template = template if isinstance(template, Mapping) else {}
-            provider_id = template.get("provider", self.provider.agent.provider)
-            if provider_id not in self.providers:
-                # "The host revalidates every selection when the run starts."
-                await self._finish_run(
-                    record, run_uri, "failed", f"no agent for provider {provider_id!r}"
-                )
+            kind = target_kind(definition)
+            if kind not in ("previousSession", "chat"):
+                await self._run_in_new_session(record, run_uri, definition, template)
                 return
-            credentials: RunCredential | None = None
-            if self.run_credentials is not None:
-                lookup_failed = False
-                try:
-                    credentials = await self.run_credentials.for_run(record.principal, record)
-                except Exception:
-                    lookup_failed = True
-                    _log.warning("run_credentials.for_run failed; treating as none", exc_info=True)
-                if credentials is None:
-                    reason = (
-                        "credentials lookup failed" if lookup_failed else "no credentials for owner"
-                    )
-                    await self._finish_run(record, run_uri, "failed", reason)
+            lock = self._target_locks.setdefault(record.resource, asyncio.Lock())
+            await lock.acquire()
+            held = True
+
+            def release() -> None:
+                nonlocal held
+                if held:
+                    held = False
+                    lock.release()
+
+            try:
+                if kind == "chat":
+                    await self._run_in_chat(record, run_uri, definition, template, release)
                     return
-            params: dict[str, Any] = {
-                # Minted in the shape VS Code mints its own, `<provider>:/<uuid>`.
-                "channel": f"{provider_id}:/{uuid.uuid4()}",
-                "provider": provider_id,
-            }
-            for key in ("workingDirectories", "config"):
-                if key in template:
-                    params[key] = copy.deepcopy(template[key])
-            title = definition.get("title")
-            bring_up = await self._new_session(
-                None,
-                params,
-                origin={"kind": "automation", "automation": record.resource, "run": run_uri},
-                principal=record.principal,
-                title=title if isinstance(title, str) and title else None,
-                credentials=credentials,
-            )
-            session_uri = params["channel"]
-            await self._run_changed(
-                record, run_uri, {"type": "automationRun/sessionSet", "session": session_uri}
-            )
-            await self._run_changed(
-                record,
-                run_uri,
-                {"type": "automationRun/primarySessionChanged", "primarySession": session_uri},
-            )
-            await bring_up
-            session = self._sessions.get(session_uri)
-            state = self.sequencer.state_of(session_uri)
-            if (
-                session is None
-                or not isinstance(state, Mapping)
-                or state.get("lifecycle") != "ready"
-            ):
-                await self._finish_run(
-                    record, run_uri, "failed", "the run's session could not be created"
+                reused = self._reusable_session(record, template)
+                if reused is None:
+                    await self._run_in_new_session(
+                        record, run_uri, definition, template, on_turn=release
+                    )
+                    return
+                await self._deliver_run(
+                    record, run_uri, definition, template, reused, reused.chat_uri, release
                 )
-                return
-            if run_uri in self._cancelled_runs:
-                await self._finish_run(record, run_uri, "cancelled")
-                return
-            # "Every run session receives these plugins in
-            # `SessionState.customizations`, with the enablement from the
-            # matching template entry" -- before the turn, so the agent has
-            # them from its first message.
-            for entry in template_customizations(definition):
-                customization = self._copy_customization(record, entry)
-                if customization is None:
-                    continue
-                if isinstance(entry.get("enablement"), list):
-                    customization["enablement"] = copy.deepcopy(entry["enablement"])
-                session.contributed_customizations.add(str(customization["id"]))
-                await self.sequencer.publish(
-                    session_uri,
-                    {"type": "session/customizationUpdated", "customization": customization},
-                )
-            created = self.sequencer.state_of(run_uri)
-            previous = created.get("lifecycle") if isinstance(created, Mapping) else None
-            await self._run_changed(
-                record,
-                run_uri,
-                {
-                    "type": "automationRun/lifecycleChanged",
-                    "lifecycle": {
-                        "status": "running",
-                        "createdAt": previous.get("createdAt", now_iso())
-                        if isinstance(previous, Mapping)
-                        else now_iso(),
-                        "startedAt": now_iso(),
-                    },
-                },
-            )
-            message = copy.deepcopy(definition.get("message"))
-            if not isinstance(message, dict):
-                await self._finish_run(record, run_uri, "failed", "the automation has no message")
-                return
-            for key in ("model", "agent"):
-                # The template's selections ride on the message, which is where
-                # a turn carries them.
-                if key in template and key not in message:
-                    message[key] = copy.deepcopy(template[key])
-            if run_uri in self._cancelled_runs:
-                # Again, now that nothing is awaited before the turn starts: the
-                # check above was several awaits ago, and a cancel that arrived
-                # since found no turn to stop and left it to this method.
-                await self._finish_run(record, run_uri, "cancelled")
-                return
-            turn_id = str(uuid.uuid4())
-            started = {
-                "type": "chat/turnStarted",
-                "turnId": turn_id,
-                "startedAt": now_iso(),
-                "message": message,
-            }
-            await self.sequencer.publish(session.chat_uri, started)
-            await self._start_turn(session, session.chat_uri, started)
-            turn = session.turns.get(session.chat_uri)
-            if turn is not None:
-                await asyncio.wait({turn})
-            await self._settle_run(record, run_uri, session.chat_uri, turn_id)
+            finally:
+                release()
         except asyncio.CancelledError:
             raise
         except Exception as exc:
             _log.exception("automation run %s failed", run_uri)
             await self._finish_run(record, run_uri, "failed", f"{type(exc).__name__}: {exc}")
+
+    async def _run_in_new_session(
+        self,
+        record: AutomationRecord,
+        run_uri: str,
+        definition: Mapping[str, Any],
+        template: Mapping[str, Any],
+        *,
+        on_turn: Callable[[], None] | None = None,
+    ) -> None:
+        """A fresh session from the template, the saved message as its first
+        turn, and the run's lifecycle following that turn to its end.
+
+        *on_turn* is called once the turn has started: the moment a later
+        `previousSession` run may queue behind it. (Returning sooner releases
+        the caller's lock anyway.)
+        """
+        provider_id = template.get("provider", self.provider.agent.provider)
+        if provider_id not in self.providers:
+            # "The host revalidates every selection when the run starts."
+            await self._finish_run(
+                record, run_uri, "failed", f"no agent for provider {provider_id!r}"
+            )
+            return
+        credentials: RunCredential | None = None
+        if self.run_credentials is not None:
+            lookup_failed = False
+            try:
+                credentials = await self.run_credentials.for_run(record.principal, record)
+            except Exception:
+                lookup_failed = True
+                _log.warning("run_credentials.for_run failed; treating as none", exc_info=True)
+            if credentials is None:
+                reason = (
+                    "credentials lookup failed" if lookup_failed else "no credentials for owner"
+                )
+                await self._finish_run(record, run_uri, "failed", reason)
+                return
+        params: dict[str, Any] = {
+            # Minted in the shape VS Code mints its own, `<provider>:/<uuid>`.
+            "channel": f"{provider_id}:/{uuid.uuid4()}",
+            "provider": provider_id,
+        }
+        for key in ("workingDirectories", "config"):
+            if key in template:
+                params[key] = copy.deepcopy(template[key])
+        title = definition.get("title")
+        bring_up = await self._new_session(
+            None,
+            params,
+            origin={"kind": "automation", "automation": record.resource, "run": run_uri},
+            principal=record.principal,
+            title=title if isinstance(title, str) and title else None,
+            credentials=credentials,
+        )
+        session_uri = params["channel"]
+        await self._link_run(record, run_uri, session_uri)
+        await bring_up
+        session = self._sessions.get(session_uri)
+        state = self.sequencer.state_of(session_uri)
+        if session is None or not isinstance(state, Mapping) or state.get("lifecycle") != "ready":
+            await self._finish_run(
+                record, run_uri, "failed", "the run's session could not be created"
+            )
+            return
+        if run_uri in self._cancelled_runs:
+            await self._finish_run(record, run_uri, "cancelled")
+            return
+        # "Every run session receives these plugins in
+        # `SessionState.customizations`, with the enablement from the
+        # matching template entry" -- before the turn, so the agent has
+        # them from its first message.
+        for entry in template_customizations(definition):
+            customization = self._copy_customization(record, entry)
+            if customization is None:
+                continue
+            if isinstance(entry.get("enablement"), list):
+                customization["enablement"] = copy.deepcopy(entry["enablement"])
+            session.contributed_customizations.add(str(customization["id"]))
+            await self.sequencer.publish(
+                session_uri,
+                {"type": "session/customizationUpdated", "customization": customization},
+            )
+        await self._mark_running(record, run_uri)
+        message = self._run_message(definition, template)
+        if message is None:
+            await self._finish_run(record, run_uri, "failed", "the automation has no message")
+            return
+        if run_uri in self._cancelled_runs:
+            # Again, now that nothing is awaited before the turn starts: the
+            # check above was several awaits ago, and a cancel that arrived
+            # since found no turn to stop and left it to this method.
+            await self._finish_run(record, run_uri, "cancelled")
+            return
+        turn_id = str(uuid.uuid4())
+        started = {
+            "type": "chat/turnStarted",
+            "turnId": turn_id,
+            "startedAt": now_iso(),
+            "message": message,
+        }
+        await self.sequencer.publish(session.chat_uri, started)
+        await self._start_turn(session, session.chat_uri, started)
+        turn = session.turns.get(session.chat_uri)
+        if on_turn is not None:
+            on_turn()
+        if turn is not None:
+            await asyncio.wait({turn})
+        await self._settle_run(record, run_uri, session.chat_uri, turn_id)
+
+    async def _link_run(self, record: AutomationRecord, run_uri: str, session_uri: str) -> None:
+        """`automationRun/sessionSet`, then make it the run's primary session --
+        and remember it as the one a `previousSession` run continues."""
+        await self._run_changed(
+            record, run_uri, {"type": "automationRun/sessionSet", "session": session_uri}
+        )
+        record.last_session = session_uri
+        await self._run_changed(
+            record,
+            run_uri,
+            {"type": "automationRun/primarySessionChanged", "primarySession": session_uri},
+        )
+
+    async def _mark_running(self, record: AutomationRecord, run_uri: str) -> None:
+        created = self.sequencer.state_of(run_uri)
+        previous = created.get("lifecycle") if isinstance(created, Mapping) else None
+        await self._run_changed(
+            record,
+            run_uri,
+            {
+                "type": "automationRun/lifecycleChanged",
+                "lifecycle": {
+                    "status": "running",
+                    "createdAt": previous.get("createdAt", now_iso())
+                    if isinstance(previous, Mapping)
+                    else now_iso(),
+                    "startedAt": now_iso(),
+                },
+            },
+        )
+
+    @staticmethod
+    def _run_message(
+        definition: Mapping[str, Any], template: Mapping[str, Any]
+    ) -> dict[str, Any] | None:
+        """The message a run sends, with the template's `model` and `agent`
+        on it unless it names its own -- the message is where a turn carries
+        them, for a new session and a reused one alike."""
+        message = copy.deepcopy(definition.get("message"))
+        if not isinstance(message, dict):
+            return None
+        for key in ("model", "agent"):
+            if key in template and key not in message:
+                message[key] = copy.deepcopy(template[key])
+        return message
+
+    # ─── runs that send to an existing chat ─────────────────────────────────
+
+    def _may_drive(self, principal: str | None, session: _Session) -> bool:
+        """Whether an automation owned by *principal* may send to *session*.
+
+        A session with no principal is everyone's; one with a principal is
+        only its owner's, so an automation cannot be pointed at someone
+        else's conversation.
+        """
+        return session.principal is None or session.principal == principal
+
+    def _session_is_archived(self, session: _Session) -> bool:
+        state = self.sequencer.state_of(session.uri)
+        status = state.get("status") if isinstance(state, Mapping) else None
+        return isinstance(status, int) and bool(status & SessionStatus.IS_ARCHIVED)
+
+    def _reusable_session(
+        self, record: AutomationRecord, template: Mapping[str, Any]
+    ) -> _Session | None:
+        """The session a `previousSession` run continues, if it is still usable.
+
+        The previous run's session is the `primarySession` of the most recently
+        created earlier run that has one (`AutomationRecord.last_session`, or
+        the run history for a record written before that field). It is never
+        usable when it was removed or archived, has no default chat, or the
+        automation may no longer drive it; and this host also starts over when
+        the template now names another agent, since the session would keep the
+        old one.
+        """
+        uri = record.last_session or next(
+            (
+                str(run["primarySession"])
+                for run in record.runs
+                if isinstance(run.get("primarySession"), str)
+            ),
+            None,
+        )
+        session = self._sessions.get(uri) if uri is not None else None
+        if session is None:
+            return None
+        state = self.sequencer.state_of(session.uri)
+        if not isinstance(state, Mapping) or state.get("lifecycle") != "ready":
+            return None
+        if self._session_is_archived(session) or not isinstance(
+            self.sequencer.state_of(session.chat_uri), Mapping
+        ):
+            return None
+        if not self._may_drive(record.principal, session):
+            return None
+        provider_id = template.get("provider", self.provider.agent.provider)
+        if provider_id != session.provider_id:
+            return None
+        return session
+
+    async def _run_in_chat(
+        self,
+        record: AutomationRecord,
+        run_uri: str,
+        definition: Mapping[str, Any],
+        template: Mapping[str, Any],
+        release: Callable[[], None],
+    ) -> None:
+        """A `chat` run: the message queued in that chat. Never a new session."""
+        target = definition.get("target")
+        chat = target.get("chat") if isinstance(target, Mapping) else None
+        session = self._session_for(chat) if isinstance(chat, str) else None
+        if (
+            not isinstance(chat, str)
+            or session is None
+            or chat not in session.chat_uris
+            or not isinstance(self.sequencer.state_of(chat), Mapping)
+        ):
+            await self._finish_run(record, run_uri, "failed", "the automation's chat is gone")
+            return
+        if not self._may_drive(record.principal, session) or chat in session.provider_chats:
+            await self._finish_run(
+                record, run_uri, "failed", "the automation may no longer send to its chat"
+            )
+            return
+        await self._deliver_run(record, run_uri, definition, template, session, chat, release)
+
+    async def _deliver_run(
+        self,
+        record: AutomationRecord,
+        run_uri: str,
+        definition: Mapping[str, Any],
+        template: Mapping[str, Any],
+        session: _Session,
+        chat: str,
+        release: Callable[[], None],
+    ) -> None:
+        """Queue the run's message in *chat* and follow it to its end.
+
+        The session is linked first, then the message goes in as a **queued**
+        pending message -- "It never steers an active turn: a busy chat starts
+        it after the current turn, and an idle chat starts it right away" --
+        and *release* lets the next run of this automation resolve its target
+        behind it. Nothing of the template but `model` and `agent` is applied:
+        the session keeps its agent, configuration and folders.
+        """
+        message = self._run_message(definition, template)
+        if message is None:
+            await self._finish_run(record, run_uri, "failed", "the automation has no message")
+            return
+        await self._link_run(record, run_uri, session.uri)
+        if run_uri in self._cancelled_runs:
+            await self._finish_run(record, run_uri, "cancelled")
+            return
+        delivery = _Delivery(
+            run_uri=run_uri,
+            session_uri=session.uri,
+            chat_uri=chat,
+            outcome=asyncio.get_running_loop().create_future(),
+        )
+        self._deliveries[run_uri] = delivery
+        try:
+            await self.sequencer.publish(
+                chat,
+                {
+                    "type": "chat/pendingMessageSet",
+                    "kind": _PENDING_QUEUED,
+                    "id": run_uri,
+                    "message": message,
+                },
+            )
+            release()
+            await self._drain_queue(session, chat)
+            kind, detail, task = await delivery.outcome
+            if kind == "cancelled":
+                await self._finish_run(record, run_uri, "cancelled")
+                return
+            if kind == "failed":
+                await self._finish_run(record, run_uri, "failed", str(detail))
+                return
+            await self._mark_running(record, run_uri)
+            if task is not None:
+                await asyncio.wait({task})
+            await self._settle_run(record, run_uri, chat, str(detail))
+        finally:
+            self._deliveries.pop(run_uri, None)
+
+    async def _withdraw_delivery(self, delivery: _Delivery) -> None:
+        """Take a run's message back out of its chat's queue, if it is there."""
+        state = self.sequencer.state_of(delivery.chat_uri)
+        if any(
+            kind == _PENDING_QUEUED and entry.get("id") == delivery.run_uri
+            for kind, entry in _pending_entries(state)
+        ):
+            await self.sequencer.publish(
+                delivery.chat_uri,
+                {
+                    "type": "chat/pendingMessageRemoved",
+                    "kind": _PENDING_QUEUED,
+                    "id": delivery.run_uri,
+                },
+            )
+
+    async def _abandon_deliveries(self, chats: Collection[str], reason: str) -> None:
+        """Fail every run still waiting in one of *chats*: "If the session
+        becomes unusable before a turn starts from the message, the host
+        removes the queued message, if its chat still exists, and the run
+        fails." Called before the chat goes, so the removal still lands."""
+        for delivery in list(self._deliveries.values()):
+            if delivery.chat_uri in chats and not delivery.outcome.done():
+                await self._withdraw_delivery(delivery)
+                delivery.settle("failed", reason)
 
     async def _settle_run(
         self, record: AutomationRecord, run_uri: str, chat_uri: str, turn_id: str
@@ -11037,6 +11418,24 @@ class Host:
         if record is None:
             return
         self._cancelled_runs.add(run_uri)
+        delivery = self._deliveries.get(run_uri)
+        if delivery is not None:
+            # Its message waits in, or has started a turn in, a chat it shares
+            # with other turns: "Cancelling the run removes its queued
+            # message, or cancels its turn if the turn has started. It never
+            # affects other turns in the session."
+            if not delivery.outcome.done():
+                await self._withdraw_delivery(delivery)
+                delivery.settle("cancelled")
+                return
+            owner = self._sessions.get(delivery.session_uri) or self._session_for(delivery.chat_uri)
+            if (
+                owner is not None
+                and delivery.task is not None
+                and owner.turns.get(delivery.chat_uri) is delivery.task
+            ):
+                await self._cancel_turn(owner, delivery.chat_uri, "automation run cancelled")
+            return
         state = self.sequencer.state_of(run_uri)
         primary = state.get("primarySession") if isinstance(state, Mapping) else None
         session = self._sessions.get(primary) if isinstance(primary, str) else None
@@ -11072,15 +11471,16 @@ class Host:
                 # its date already gone.
                 await self._disable_automation(record, now)
                 continue
-            occurrences, cursors = due_occurrences(record, now)
-            if not cursors:
+            due = due_occurrences(record, now)
+            if not due:
                 continue
-            record.cursors.update(cursors)
-            if not occurrences:
+            record.cursors.update(due.cursors)
+            record.fired.update(due.fired)
+            if not due.occurrences:
                 # Skipped misfires still move `nextRunAt`.
                 await self._save_automation(record)
                 await self._publish_automation(record)
-            for occurrence in occurrences:
+            for occurrence in due.occurrences:
                 origin: dict[str, Any] = {
                     "kind": "trigger",
                     "triggerId": occurrence.trigger_id,

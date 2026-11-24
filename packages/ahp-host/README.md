@@ -409,6 +409,17 @@ are validated before they are saved, with the refusal echoed as
 trigger id, a message whose origin is not `automation`, an unknown provider.
 **Event triggers are refused** — their types are host-defined, and this host
 defines none, so `listAutomationTriggerDefinitions` answers an empty list.
+**One-time triggers** (`kind: "oneTime"`, advertised as `automations.oneTime`)
+fire once at `runAt`, under the same misfire rules; moving `runAt` moves the run,
+and re-saving the same time does not fire it twice. **Run targets** (advertised as
+`automations.targets`): a `previousSession` run continues the session of the run
+before it while that session is usable (not removed or archived, still the
+template's agent), and otherwise creates one; a `chat` run sends to one existing
+chat and never creates a session, and the host keeps `target.session` on the
+chat's owner, also after `moveChat`. Both queue the message in the chat rather
+than steer a running turn; the run is `pending` while it waits, follows the turn
+that starts from it, is `cancelled` if the message is withdrawn, and `failed` if
+the session or chat goes first.
 **The catalogue channel has URI-equivalent spellings.** A URI library may print
 `ahp-automations://` as `ahp-automations:`; the host treats that, and `ahp-root:`, as the same
 channel (`ahp_protocol.canonical_channel`) in `subscribe`, `unsubscribe`, `initialize`,

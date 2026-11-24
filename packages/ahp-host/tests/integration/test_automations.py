@@ -250,16 +250,28 @@ class TestTheCatalogue:
                 "no event trigger",
             ),
             (
-                _definition(
-                    triggers=[{"id": "o", "kind": "oneTime", "runAt": "2030-01-01T09:00:00Z"}]
-                ),
-                "one-time",
+                _definition(triggers=[{"id": "o", "kind": "oneTime", "runAt": "next tuesday"}]),
+                "runAt",
             ),
-            (_definition(target={"kind": "previousSession"}), "previousSession"),
+            (_definition(triggers=[{"id": "o", "kind": "oneTime"}]), "runAt"),
+            (
+                _definition(
+                    triggers=[
+                        {
+                            "id": "o",
+                            "kind": "oneTime",
+                            "runAt": "2030-01-01T09:00:00Z",
+                            "misfirePolicy": "later",
+                        }
+                    ]
+                ),
+                "misfire",
+            ),
             (
                 _definition(target={"kind": "chat", "session": "s:/1", "chat": "ahp-chat:/1"}),
-                "'chat' run target",
+                "no chat",
             ),
+            (_definition(target={"kind": "chat"}), "needs the chat"),
             (_definition(target={"kind": "later"}), "unknown run target"),
             (_definition(triggers=[_schedule("* * * * *"), _schedule("0 * * * *")]), "share"),
             (_definition(session={"provider": "nope"}), "no agent"),

@@ -1,8 +1,10 @@
 """Host-owned automations (AHP 0.9.0): the catalogue, its schedules, its records.
 
-An automation is a saved prompt plus a session template: every run creates a
-fresh session from the template and sends the saved message as its first turn.
-Runs start by hand (`runAutomation`) or from a schedule trigger evaluated here.
+An automation is a saved prompt plus a session template. By default every run
+creates a fresh session from the template and sends the saved message as its
+first turn; a `previousSession` or `chat` target (upstream 1.2.0, unreleased)
+queues the message in a session that already exists instead. Runs start by
+hand (`runAutomation`) or from a schedule or one-time trigger evaluated here.
 The host owns all of it -- "clients render this state and submit actions or
 commands; they never run a fallback scheduler for a host-owned definition"
 (`AutomationEntry`, state.schema.json).
@@ -22,7 +24,9 @@ tests, and an embedder who wants one passes it explicitly.
 **Event triggers are refused.** Their types are host-defined and discovered
 through `listAutomationTriggerDefinitions`; this host defines none, so that
 command answers an empty list and a definition carrying an `event` trigger is
-rejected rather than saved as a trigger that can never fire.
+rejected rather than saved as a trigger that can never fire. One-time triggers
+(`kind: "oneTime"`) fire once at their `runAt`, under the same misfire rules as
+a schedule.
 """
 
 from __future__ import annotations
@@ -49,6 +53,7 @@ __all__ = [
     "AutomationRecord",
     "AutomationStore",
     "CronExpression",
+    "Due",
     "FileAutomationStore",
     "InMemoryAutomationStore",
     "Occurrence",
@@ -62,6 +67,7 @@ __all__ = [
     "due_occurrences",
     "next_run_at",
     "run_count_after_update",
+    "target_kind",
     "template_customizations",
 ]
 
@@ -268,6 +274,18 @@ def _schedule_of(trigger: Mapping[str, Any]) -> tuple[CronExpression, ZoneInfo] 
         return None
 
 
+def _run_at_of(trigger: Mapping[str, Any]) -> datetime | None:
+    """A one-time trigger's `runAt`, or `None` for anything else.
+
+    A timestamp with no offset is read as UTC, as `parse_iso` reads every
+    other timestamp this host stores.
+    """
+    if trigger.get("kind") != "oneTime":
+        return None
+    run_at = trigger.get("runAt")
+    return parse_iso(run_at) if isinstance(run_at, str) else None
+
+
 # ─── validation ─────────────────────────────────────────────────────────────
 
 
@@ -280,9 +298,10 @@ def _trigger_rejection(trigger: Any) -> str | None:
     if kind == "event":
         return "this host defines no event trigger types"
     if kind == "oneTime":
-        # 1.2.0 (unreleased): clients SHOULD NOT author one without
-        # `AutomationCapabilities.oneTime`, which this host does not advertise.
-        return "this host does not support one-time triggers"
+        run_at = trigger.get("runAt")
+        if not isinstance(run_at, str) or _run_at_of(trigger) is None:
+            return f"trigger {trigger['id']!r}: runAt must be an ISO 8601 timestamp"
+        return _misfire_rejection(trigger)
     if kind != "schedule":
         return f"unknown trigger kind {kind!r}"
     schedule = trigger.get("schedule")
@@ -294,6 +313,10 @@ def _trigger_rejection(trigger: Any) -> str | None:
         _zone(schedule.get("timeZone"))
     except ValueError as exc:
         return f"trigger {trigger['id']!r}: {exc}"
+    return _misfire_rejection(trigger)
+
+
+def _misfire_rejection(trigger: Mapping[str, Any]) -> str | None:
     policy = trigger.get("misfirePolicy")
     if "misfirePolicy" in trigger and policy not in ("skip", "runOnce"):
         return f"trigger {trigger['id']!r}: unknown misfirePolicy {policy!r}"
@@ -303,19 +326,33 @@ def _trigger_rejection(trigger: Any) -> str | None:
 def _target_rejection(target: Any) -> str | None:
     """`AutomationDefinition.target` (1.2.0, unreleased; absent means `newSession`).
 
-    This host advertises no `AutomationCapabilities.targets`, so every run
-    creates a session. Saving another target would accept a definition whose
-    runs then do something else, so it is refused by name instead. The kind
-    enum is `@nonexhaustive`: an unknown kind is one this host cannot honour.
+    The shape only. Whether a `chat` target's chat exists, and whether the
+    automation may drive it, needs the host's sessions and the caller, so the
+    host asks that itself (`Host._chat_target_rejection`) -- and sets `session`
+    to the chat's owner, "replacing any submitted value", so a missing one is
+    no reason to refuse. The kind enum is `@nonexhaustive`: an unknown kind is
+    one this host cannot honour.
     """
     if not isinstance(target, Mapping):
         return "definition.target must be an object"
     kind = target.get("kind")
-    if kind == "newSession":
+    if kind in ("newSession", "previousSession"):
         return None
-    if kind in ("previousSession", "chat"):
-        return f"this host does not support the {kind!r} run target"
+    if kind == "chat":
+        chat = target.get("chat")
+        if not isinstance(chat, str) or not chat:
+            return "a chat run target needs the chat's URI"
+        if "session" in target and not isinstance(target.get("session"), str):
+            return "a chat run target's session must be a URI"
+        return None
     return f"unknown run target kind {kind!r}"
+
+
+def target_kind(definition: Mapping[str, Any]) -> str:
+    """The definition's `target.kind`; `newSession` when it has none."""
+    target = definition.get("target")
+    kind = target.get("kind") if isinstance(target, Mapping) else None
+    return kind if isinstance(kind, str) else "newSession"
 
 
 def definition_rejection(definition: Any, providers: Collection[str]) -> str | None:
@@ -550,6 +587,16 @@ class AutomationRecord:
     #: no principal (a single-user policy) and for one written before this field
     #: existed -- both are visible to, and manageable by, everyone.
     principal: str | None = None
+    #: Per one-time trigger, the `runAt` (as `iso` writes it) it has already
+    #: dealt with -- run, or dropped as a skipped misfire. "A `oneTime` trigger
+    #: fires at most once for a given `runAt`", across restarts, and a moved
+    #: `runAt` no longer matches, so the new time fires. Not cleared by
+    #: `reset_cursors`: re-saving the same `runAt` must not fire it twice.
+    fired: dict[str, str] = field(default_factory=dict)
+    #: The `primarySession` of the most recently created run that has one --
+    #: what a `previousSession` run continues, "even if that run was pruned
+    #: from `AutomationEntry.runs`", which is why it is its own field.
+    last_session: str | None = None
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -563,6 +610,8 @@ class AutomationRecord:
             "requests": self.requests,
             **({} if self.run_count is None else {"runCount": self.run_count}),
             **({} if self.principal is None else {"principal": self.principal}),
+            **({"fired": self.fired} if self.fired else {}),
+            **({} if self.last_session is None else {"lastSession": self.last_session}),
             **(
                 {"captures": {k: v.to_json() for k, v in self.captures.items()}}
                 if self.captures
@@ -584,6 +633,8 @@ class AutomationRecord:
         run_count = payload.get("runCount")
         stored = payload.get("captures")
         principal = payload.get("principal")
+        fired = payload.get("fired")
+        last_session = payload.get("lastSession")
         captures: dict[str, PluginCopy] = {}
         for key, value in stored.items() if isinstance(stored, Mapping) else ():
             copy_ = PluginCopy.from_json(value)
@@ -606,6 +657,10 @@ class AutomationRecord:
             else None,
             captures=captures,
             principal=principal if isinstance(principal, str) and principal else None,
+            fired={k: v for k, v in fired.items() if isinstance(v, str)}
+            if isinstance(fired, dict)
+            else {},
+            last_session=last_session if isinstance(last_session, str) and last_session else None,
         )
 
     def run(self, uri: str) -> dict[str, Any] | None:
@@ -735,25 +790,75 @@ class Occurrence:
     catch_up: bool
 
 
-def due_occurrences(
-    record: AutomationRecord, now: datetime
-) -> tuple[list[Occurrence], dict[str, str]]:
-    """The runs `record`'s schedules ask for at `now`, and the advanced cursors.
+@dataclass
+class Due:
+    """What `due_occurrences` found: the runs to start, and what to record so
+    the same occurrences are not found again."""
 
-    Per trigger: an occurrence within `ON_TIME_GRACE` of now is on time and
-    runs. Occurrences older than that were missed -- the host was down, asleep,
-    or the automation was just re-enabled -- and `misfirePolicy` decides:
-    `skip` drops them, `runOnce` ("Omission is equivalent to" it) collapses
-    them into one catch-up run, which an on-time run also satisfies.
+    occurrences: list[Occurrence] = field(default_factory=list)
+    #: Schedule triggers' advanced cursors, for `AutomationRecord.cursors`.
+    cursors: dict[str, str] = field(default_factory=dict)
+    #: One-time triggers now dealt with, for `AutomationRecord.fired`.
+    fired: dict[str, str] = field(default_factory=dict)
+
+    def __bool__(self) -> bool:
+        return bool(self.cursors or self.fired)
+
+
+def _one_time_pending(
+    record: AutomationRecord, trigger: Mapping[str, Any]
+) -> tuple[str, datetime] | None:
+    """A one-time trigger's id and `runAt`, if that `runAt` has not been dealt
+    with yet and was ever this automation's to fire.
+
+    A `runAt` already past when the trigger was saved (or the automation was
+    re-enabled) was never missed while "automatic execution [was]
+    unavailable" -- unless it is within `ON_TIME_GRACE`, which is a client
+    asking for "now" with a clock a little behind the host's.
+    """
+    run_at = _run_at_of(trigger)
+    if run_at is None:
+        return None
+    trigger_id = str(trigger.get("id"))
+    if record.fired.get(trigger_id) == iso(run_at):
+        return None
+    if run_at < _cursor(record, trigger_id) - ON_TIME_GRACE:
+        return None
+    return trigger_id, run_at
+
+
+def due_occurrences(record: AutomationRecord, now: datetime) -> Due:
+    """The runs `record`'s triggers ask for at `now`, and what to record.
+
+    Per schedule trigger: an occurrence within `ON_TIME_GRACE` of now is on
+    time and runs. Occurrences older than that were missed -- the host was
+    down, asleep, or the automation was just re-enabled -- and `misfirePolicy`
+    decides: `skip` drops them, `runOnce` ("Omission is equivalent to" it)
+    collapses them into one catch-up run, which an on-time run also satisfies.
+
+    A one-time trigger is the same with a single occurrence at `runAt`, which
+    is recorded as dealt with either way, so it is never found again.
     """
     definition = record.definition
     if definition.get("enabled") is not True:
-        return [], {}
-    occurrences: list[Occurrence] = []
-    cursors: dict[str, str] = {}
+        return Due()
+    due = Due()
+    occurrences = due.occurrences
+    cursors = due.cursors
     triggers = definition.get("triggers")
     for trigger in triggers if isinstance(triggers, list) else ():
         if not isinstance(trigger, Mapping):
+            continue
+        pending = _one_time_pending(record, trigger)
+        if pending is not None:
+            trigger_id, run_at = pending
+            if run_at > now:
+                continue
+            due.fired[trigger_id] = iso(run_at)
+            if run_at >= now - ON_TIME_GRACE:
+                occurrences.append(Occurrence(trigger_id, run_at, catch_up=False))
+            elif trigger.get("misfirePolicy", "runOnce") == "runOnce":
+                occurrences.append(Occurrence(trigger_id, run_at, catch_up=True))
             continue
         parsed = _schedule_of(trigger)
         if parsed is None:
@@ -771,12 +876,12 @@ def due_occurrences(
             # Everything due is older than the grace: one catch-up run, for the
             # most recent occurrence missed.
             occurrences.append(Occurrence(trigger_id, on_time or first, catch_up=True))
-    return occurrences, cursors
+    return due
 
 
 def next_run_at(record: AutomationRecord) -> datetime | None:
-    """`AutomationEntry.nextRunAt`: "Earliest schedule occurrence awaiting
-    evaluation ... It may be in the past while catch-up is pending."""
+    """`AutomationEntry.nextRunAt`: "Earliest schedule or one-time occurrence
+    awaiting evaluation ... It may be in the past while catch-up is pending."""
     if record.definition.get("enabled") is not True:
         return None
     limit = after_runs(record.definition)
@@ -787,11 +892,16 @@ def next_run_at(record: AutomationRecord) -> datetime | None:
     for trigger in triggers if isinstance(triggers, list) else ():
         if not isinstance(trigger, Mapping):
             continue
+        pending = _one_time_pending(record, trigger)
         parsed = _schedule_of(trigger)
-        if parsed is None:
+        upcoming: datetime | None
+        if pending is not None:
+            upcoming = pending[1]
+        elif parsed is not None:
+            cron, zone = parsed
+            upcoming = cron.next_after(_cursor(record, str(trigger.get("id"))), zone)
+        else:
             continue
-        cron, zone = parsed
-        upcoming = cron.next_after(_cursor(record, str(trigger.get("id"))), zone)
         if upcoming is not None and (earliest is None or upcoming < earliest):
             earliest = upcoming
     deadline = after_date(record.definition)
@@ -803,6 +913,17 @@ def next_run_at(record: AutomationRecord) -> datetime | None:
 
 def reset_cursors(record: AutomationRecord, now: datetime) -> None:
     """Forget what was missed. For a schedule that changed, or an automation
-    that was just enabled: neither should catch up on occurrences it never had."""
+    that was just enabled: neither should catch up on occurrences it never had.
+
+    `fired` is kept for the one-time triggers still there, so re-saving one
+    with the same `runAt` does not fire it again; a trigger that went takes its
+    marker with it."""
     record.cursors = {}
     record.modified_at = iso(now)
+    triggers = record.definition.get("triggers")
+    one_time = {
+        str(trigger.get("id"))
+        for trigger in (triggers if isinstance(triggers, list) else ())
+        if isinstance(trigger, Mapping) and trigger.get("kind") == "oneTime"
+    }
+    record.fired = {k: v for k, v in record.fired.items() if k in one_time}
