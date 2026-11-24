@@ -55,5 +55,9 @@ def test_every_offered_version_is_covered_by_the_pin() -> None:
     assert set(ClientConfig().protocol_versions) <= set(DEFAULT_SUPPORTED_VERSIONS)
     ahead = {"1.1.0"}
     assert set(DEFAULT_SUPPORTED_VERSIONS) - set(UPSTREAM_SUPPORTED_PROTOCOL_VERSIONS) == ahead
+    pinned = parse_version(UPSTREAM_PROTOCOL_VERSION)
+    assert pinned is not None
     for version in ahead:
-        assert parse_version(version) <= parse_version(UPSTREAM_PROTOCOL_VERSION)
+        offered = parse_version(version)
+        assert offered is not None
+        assert offered <= pinned
