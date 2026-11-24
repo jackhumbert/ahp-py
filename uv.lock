@@ -17,6 +17,7 @@ members = [
     "ahp-host-acp",
     "ahp-host-claude",
     "ahp-host-flow",
+    "ahp-mcp",
     "ahp-protocol",
 ]
 
@@ -276,6 +277,46 @@ dev = [
     { name = "pytest-asyncio", specifier = ">=0.24" },
     { name = "ruff", specifier = ">=0.6" },
     { name = "types-jsonschema" },
+]
+
+[[package]]
+name = "ahp-mcp"
+source = { editable = "packages/ahp-mcp" }
+dependencies = [
+    { name = "ahp-client", extra = ["ws"] },
+    { name = "ahp-protocol" },
+    { name = "mcp" },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "ahp-gateway" },
+    { name = "ahp-host" },
+    { name = "httpx" },
+    { name = "import-linter" },
+    { name = "mypy" },
+    { name = "pytest" },
+    { name = "pytest-asyncio" },
+    { name = "ruff" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "ahp-client", extras = ["ws"], editable = "packages/ahp-client" },
+    { name = "ahp-protocol", editable = "packages/ahp-protocol" },
+    { name = "mcp", specifier = ">=2.2,<3" },
+]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "ahp-gateway", editable = "packages/ahp-gateway" },
+    { name = "ahp-host", editable = "packages/ahp-host" },
+    { name = "httpx", specifier = ">=0.27" },
+    { name = "import-linter", specifier = ">=2" },
+    { name = "mypy", specifier = ">=1.11" },
+    { name = "pytest", specifier = ">=8" },
+    { name = "pytest-asyncio", specifier = ">=0.24" },
+    { name = "ruff", specifier = ">=0.6" },
 ]
 
 [[package]]

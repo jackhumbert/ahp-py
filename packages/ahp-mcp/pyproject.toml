@@ -1,0 +1,126 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "ahp-mcp"
+# The version lives in `src/ahp_mcp/__init__.py` as `__version__` and nowhere
+# else; hatch reads it from there.
+dynamic = ["version"]
+description = "A remote MCP server that drives Agent Host Protocol (AHP) sessions through a host or an ahp-gateway, with OAuth."
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.11"
+authors = [{ name = "ahp-mcp contributors" }]
+keywords = ["ahp", "agent-host-protocol", "mcp", "model-context-protocol", "oauth", "agent"]
+classifiers = [
+  "Development Status :: 2 - Pre-Alpha",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+  "Topic :: Software Development :: Libraries",
+  "Typing :: Typed",
+]
+
+# The AHP side is the client sibling and nothing else: this package is one more
+# AHP client of a gateway (or of a lone host). It never imports the gateway, so
+# a fleet is something it talks to, not something it is built from.
+#
+# `mcp` is the MCP Python SDK: the streamable HTTP transport and the OAuth
+# authorization-server routes (metadata, dynamic client registration, PKCE).
+# Its 2.x line is the one with `MCPServer`; 3.0 changes auth defaults.
+dependencies = [
+  "ahp-protocol~=0.1.0",
+  "ahp-client[ws]~=0.1.0",
+  "mcp>=2.2,<3",
+]
+
+[dependency-groups]
+dev = [
+  "pytest>=8",
+  "pytest-asyncio>=0.24",
+  "mypy>=1.11",
+  "ruff>=0.6",
+  "import-linter>=2",
+  "httpx>=0.27",
+  # Only the tests stand up a real fleet: stock hosts behind a real gateway.
+  "ahp-host~=0.1.0",
+  "ahp-gateway~=0.1.0",
+]
+
+[project.scripts]
+ahp-mcp = "ahp_mcp.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/jackhumbert/ahp-py/tree/main/packages/ahp-mcp"
+Repository = "https://github.com/jackhumbert/ahp-py/tree/main/packages/ahp-mcp"
+Issues = "https://github.com/jackhumbert/ahp-py/issues"
+Changelog = "https://github.com/jackhumbert/ahp-py/blob/main/packages/ahp-mcp/CHANGELOG.md"
+
+[tool.hatch.version]
+path = "src/ahp_mcp/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ahp_mcp"]
+
+# An allowlist, not an ignore list: hatchling's default sdist selection honours
+# only the root .gitignore.
+[tool.hatch.build.targets.sdist]
+include = [
+  "/src",
+  "/tests",
+  "/scripts",
+  "/AGENTS.md",
+  "/CHANGELOG.md",
+  "/LICENSE",
+  "/README.md",
+  "/RELEASING.md",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q --strict-markers"
+asyncio_mode = "auto"
+filterwarnings = ["error"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+files = ["src", "tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N", "UP", "B", "A", "C4", "PT", "RET", "SIM", "TID", "RUF"]
+
+[tool.importlinter]
+root_package = "ahp_mcp"
+include_external_packages = true
+
+# `fleet` speaks AHP and knows nothing of MCP; `auth` is OAuth and knows
+# nothing of AHP; `server` joins them. Keeping the two halves apart is what
+# lets either be replaced (another token verifier, another transport).
+[[tool.importlinter.contracts]]
+name = "fleet speaks AHP only"
+type = "forbidden"
+source_modules = ["ahp_mcp.fleet"]
+forbidden_modules = ["mcp", "ahp_mcp.auth", "ahp_mcp.server", "starlette"]
+
+[[tool.importlinter.contracts]]
+name = "auth knows nothing of AHP"
+type = "forbidden"
+source_modules = ["ahp_mcp.auth"]
+forbidden_modules = ["ahp_client", "ahp_protocol", "ahp_mcp.fleet", "ahp_mcp.server"]
+
+# A server built from this package must stay a client: never a host or a gateway.
+[[tool.importlinter.contracts]]
+name = "a client, never a host or a gateway"
+type = "forbidden"
+source_modules = ["ahp_mcp"]
+forbidden_modules = ["ahp_host", "ahp_gateway"]

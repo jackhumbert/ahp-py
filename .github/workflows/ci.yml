@@ -74,12 +74,12 @@ jobs:
         # Windows has its own path here: agents are often npm `.cmd` shims.
         working-directory: packages/ahp-host-acp
         run: uv run --no-sync pytest && uv run --no-sync python -m ahp_host_acp --help
-      - name: Protocol, client, gateway and ACP client
+      - name: Protocol, client, gateway, ACP client and MCP server
         # Every package runs even after one fails, so a failure never hides
         # the next one's.
         run: |
           status=0
-          for package in ahp-protocol ahp-client ahp-gateway ahp-acp; do
+          for package in ahp-protocol ahp-client ahp-gateway ahp-acp ahp-mcp; do
             (cd "packages/$package" && uv run --no-sync pytest) || status=1
           done
           exit $status
@@ -155,5 +155,5 @@ jobs:
           for script in "$GITHUB_WORKSPACE"/packages/*/scripts/smoke_wheel.py; do
             /tmp/fresh/bin/python "$script" || status=1
           done
-          /tmp/fresh/bin/python -c "import ahp_protocol, ahp_host, ahp_client, ahp_acp, ahp_gateway, ahp_host_claude, ahp_host_acp, ahp_host_flow" || status=1
+          /tmp/fresh/bin/python -c "import ahp_protocol, ahp_host, ahp_client, ahp_acp, ahp_gateway, ahp_host_claude, ahp_host_acp, ahp_host_flow, ahp_mcp" || status=1
           exit $status
