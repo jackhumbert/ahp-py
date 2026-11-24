@@ -22,6 +22,7 @@ RELEASE_ORDER = (
     "ahp-host-claude",
     "ahp-host-acp",
     "ahp-host-flow",
+    "ahp-mcp",
 )
 
 _REQUIREMENT = re.compile(r"^\s*([A-Za-z0-9_.-]+)\s*(\[[^\]]*\])?\s*(.*?)\s*$")

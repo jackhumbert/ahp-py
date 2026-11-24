@@ -13,12 +13,13 @@ sessions. One repository, several independently installable packages:
 | [`ahp-acp`](packages/ahp-acp) | A plain Agent Client Protocol client: spawn an agent, speak JSON-RPC over stdio. Standard library only; imports nothing here. |
 | [`ahp-client`](packages/ahp-client) | The client. |
 | [`ahp-gateway`](packages/ahp-gateway) | One endpoint and one login in front of many hosts: an AHP host to clients, an AHP client to each node. |
+| [`ahp-mcp`](packages/ahp-mcp) | A remote MCP server, with its own OAuth sign-in, whose tools start, prompt, read and stop sessions through a gateway or a host. An AHP client. |
 
 ```
                  ahp-protocol
                ▲      ▲      ▲
                │      │      │
-        ahp-host  ahp-gateway  ahp-client
+        ahp-host  ahp-gateway  ahp-client ◀── ahp-mcp
           ▲                  (host + client)
           │
   ahp-host-claude, ahp-host-acp ──▶ ahp-acp (standalone: imports nothing here)

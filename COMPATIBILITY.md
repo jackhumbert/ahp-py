@@ -12,3 +12,4 @@ One row per release tag. A tag listed here may not exist yet: tags are pushed by
 | `ahp-host-claude/v0.1.0` | ahp-host-claude | 0.1.0 | `~=0.2.0` (via ahp-host) | 1.1.0, 1.0.0, 0.9.0 | `e36b0a20` | ahp-host 0.1.0 |
 | `ahp-host-acp/v0.1.0` | ahp-host-acp | 0.1.0 | `~=0.2.0` (via ahp-host) | 1.1.0, 1.0.0, 0.9.0 | `e36b0a20` | ahp-host 0.1.0, ahp-acp 0.1.0 |
 | `ahp-host-flow/v0.1.0` | ahp-host-flow | 0.1.0 | `~=0.2.0` (via ahp-host) | 1.1.0, 1.0.0, 0.9.0 | `e36b0a20` | ahp-host 0.1.0, ahp-client 0.1.0, ahp-gateway 0.1.0, ahp-host-claude 0.1.0, ahp-host-acp 0.1.0 |
+| `ahp-mcp/v0.1.0` | ahp-mcp | 0.1.0 | `~=0.2.0` | 1.1.0, 1.0.0, 0.9.0 | `e36b0a20` | ahp-protocol 0.2.0, ahp-host 0.1.0, ahp-client 0.1.0, ahp-gateway 0.1.0 |
