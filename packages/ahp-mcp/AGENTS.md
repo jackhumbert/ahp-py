@@ -37,6 +37,8 @@ client. The README lists the tools.
 - **`auth`** is OAuth and knows nothing of AHP. It answers "who is this
   bearer", and nothing about what they may do on a machine: that is the
   endpoint's admission (the gateway's registry) and the machine's own policy.
+- **`ask`** turns what a session waits on into an MCP elicitation form, and the
+  user's answer back into the AHP answer, through `Fleet`.
 - **`server`** joins them: tool names, schemas and descriptions, and the HTTP app.
 - Nothing here imports `ahp_host` or `ahp_gateway`. They are dev dependencies,
   for the tests' in-process fleet only. Reading session state the way the
@@ -44,9 +46,11 @@ client. The README lists the tools.
 
 ## Invariants
 
-1. **No tool answers an approval.** A question a session raises waits for a
-   person in an AHP client. Adding a tool that approves would hand a chat
-   model the one decision the fleet keeps for people.
+1. **The model never answers for the user.** A question a session raises is
+   answered only by a person: in an AHP client, or in the MCP client's own
+   elicitation form, which `wait_for_session` asks through a resolver. No tool
+   takes an answer as an argument; adding one would hand a chat model the one
+   decision the fleet keeps for people.
 2. **The model cannot widen a session.** Its config is the server's
    `session_config`, set by the operator.
 3. **Secrets never travel as arguments**, are never logged, and tokens are

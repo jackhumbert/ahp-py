@@ -12,20 +12,28 @@ from __future__ import annotations
 
 import contextlib
 import json
-from collections.abc import AsyncIterator, Awaitable
-from typing import Any, Final
+from collections.abc import AsyncIterator, Awaitable, Mapping
+from typing import Annotated, Any, Final
 from urllib.parse import urlsplit
 
 from ahp_protocol import AhpError
 from mcp.server.auth.provider import TokenVerifier
 from mcp.server.auth.settings import AuthSettings, ClientRegistrationOptions, RevocationOptions
-from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver import (
+    AcceptedElicitation,
+    Context,
+    Elicit,
+    ElicitationResult,
+    MCPServer,
+    Resolve,
+)
 from mcp.server.mcpserver.exceptions import ToolError
 from mcp.server.transport_security import TransportSecuritySettings
 from mcp.types import ToolAnnotations
 from pydantic import AnyHttpUrl
 from starlette.applications import Starlette
 
+from ahp_mcp.ask import can_ask, forward, prompt_for
 from ahp_mcp.auth import OwnerAuthorizationServer
 from ahp_mcp.fleet import Fleet, FleetError
 
@@ -37,13 +45,21 @@ MCP_PATH: Final = "/mcp"
 INSTRUCTIONS: Final = (
     "These tools drive coding agent sessions on the user's own machines through the Agent "
     "Host Protocol. Start with list_hosts. A session runs on its own once started; check on "
-    "it with wait_for_session or read_session. A session that is waiting on the user needs "
-    "them to answer in one of their AHP apps: these tools cannot approve anything."
+    "it with wait_for_session or read_session. When a session waits on the user (permission "
+    "to run a tool, or a question), call wait_for_session: if this app can show the user a "
+    "form, they are asked there and their answer goes back to the session. You cannot answer "
+    "for them, and no tool takes an answer from you. Otherwise they answer in an AHP app."
 )
+
+#: What to tell the model about a session that waits on the user.
+_ASK_HERE: Final = "Call wait_for_session to ask the user here."
+_ASK_ELSEWHERE: Final = "The user can answer it in one of their AHP apps."
 
 _READ: Final = ToolAnnotations(read_only_hint=True, open_world_hint=False)
 _WRITE: Final = ToolAnnotations(read_only_hint=False, destructive_hint=False, open_world_hint=True)
 _STOP: Final = ToolAnnotations(read_only_hint=False, destructive_hint=True, idempotent_hint=True)
+#: Waiting can pass the user's answer to the session, so it is not read-only.
+_WAIT: Final = ToolAnnotations(read_only_hint=False, destructive_hint=False, open_world_hint=False)
 
 
 async def _run(operation: Awaitable[Any]) -> str:
@@ -54,6 +70,18 @@ async def _run(operation: Awaitable[Any]) -> str:
     except AhpError as exc:
         raise ToolError(exc.message) from exc
     return result if isinstance(result, str) else json.dumps(result, indent=2)
+
+
+class _Stopped:
+    """What the wait resolver hands the tool when there is nothing to ask."""
+
+    def __init__(self, result: dict[str, Any], next_step: str | None = None) -> None:
+        self.result = result
+        self.next_step = next_step
+
+
+def _waiting(result: Mapping[str, Any]) -> bool:
+    return result.get("status") == "waiting on the user"
 
 
 def build_server(
@@ -142,8 +170,8 @@ def _register(server: MCPServer[Any], fleet: Fleet) -> None:
 
         `folder` is where it works (as for list_folder; empty is the host's root).
         `agent` is one from list_hosts, needed when there is more than one.
-        The session runs on its own; anything it needs approved waits for the user in
-        their AHP app. Returns the session id for the other tools.
+        The session runs on its own; follow it with wait_for_session, which also asks
+        the user when it needs their permission or an answer. Returns the session id.
         """
         return await _run(
             fleet.start_session(
@@ -157,24 +185,94 @@ def _register(server: MCPServer[Any], fleet: Fleet) -> None:
         return await _run(fleet.send_prompt(session, prompt))
 
     @server.tool(title="Read session", annotations=_READ)
-    async def read_session(session: str, turns: int = 2) -> str:
+    async def read_session(session: str, ctx: Context[Any, Any], turns: int = 2) -> str:
         """Read a session: its status, what it is waiting on, and its last turns
         (each message, the agent's answer and a line per tool it used)."""
-        return await _run(fleet.read_session(session, turns))
+        result = json.loads(await _run(fleet.read_session(session, turns)))
+        if _waiting(result):
+            result["next"] = _ASK_HERE if can_ask(ctx) else _ASK_ELSEWHERE
+        return json.dumps(result, indent=2)
 
-    @server.tool(title="Wait for session", annotations=_READ)
-    async def wait_for_session(session: str, timeout_seconds: float = 60) -> str:
+    async def stop_point(
+        session: str, timeout_seconds: float, ctx: Context[Any, Any]
+    ) -> Elicit[Any] | _Stopped:
+        """Wait for the session to stop; if it stopped to ask the user, ask them here.
+
+        A resolver, so the question reaches the client whichever way its protocol
+        revision carries one, and the tool's own arguments never carry an answer.
+        """
+        try:
+            result = await fleet.wait_for_session(session, timeout_seconds)
+            if not _waiting(result):
+                return _Stopped(result)
+            if not can_ask(ctx):
+                return _Stopped(result, _ASK_ELSEWHERE)
+            for entry in await fleet.waiting(session):
+                prompt = prompt_for(entry, session_title=str(result.get("title") or ""))
+                if prompt is not None:
+                    return Elicit(prompt.message, prompt.schema)
+            return _Stopped(result, _ASK_ELSEWHERE)
+        except FleetError as exc:
+            raise ToolError(str(exc)) from exc
+        except AhpError as exc:
+            raise ToolError(exc.message) from exc
+
+    async def wait_for_session(
+        session: str,
+        asked: ElicitationResult[Any],
+        timeout_seconds: float = 60,
+    ) -> str:
         """Wait until a session stops working: done, failed, stopped, or waiting on the user.
 
-        Returns its status, with `timed_out` true if it was still working at the timeout
-        (at most 300 seconds). Read it afterwards for what it said.
+        When it waits on the user and this app can show them a form, they are asked
+        here, and their answer goes back to the session; call this again to follow it.
+        Returns the status, with `timed_out` true if it was still working at the
+        timeout (at most 300 seconds). Read it afterwards for what it said.
         """
-        return await _run(fleet.wait_for_session(session, timeout_seconds))
+        if not isinstance(asked, AcceptedElicitation):
+            # The user dismissed the prompt; nothing was sent.
+            result = await _run(fleet.wait_for_session(session, 0))
+            note = (
+                "The user declined to answer here."
+                if asked.action == "decline"
+                else "The user closed the prompt without answering."
+            )
+            return _with(result, f"{note} The session still waits on them.")
+        if isinstance(asked.data, _Stopped):
+            stopped = asked.data
+            text = json.dumps(stopped.result, indent=2)
+            return _with(text, stopped.next_step) if stopped.next_step else text
+        prompt = getattr(type(asked.data), "prompt", None)
+        if prompt is None:
+            raise ToolError("the answer form was not recognised")
+        try:
+            said = await forward(fleet, session, prompt, asked.data)
+        except FleetError as exc:
+            raise ToolError(str(exc)) from exc
+        except AhpError as exc:
+            raise ToolError(exc.message) from exc
+        result = await _run(fleet.wait_for_session(session, 0))
+        return _with(result, f"{said} Call wait_for_session again to follow the session.")
+
+    # The marker names a resolver local to this server, which a string annotation
+    # (this module defers them) cannot reach; so it is set as an object.
+    wait_for_session.__annotations__["asked"] = Annotated[
+        ElicitationResult[Any], Resolve(stop_point)
+    ]
+    server.tool(title="Wait for session", annotations=_WAIT)(wait_for_session)
 
     @server.tool(title="Cancel session", annotations=_STOP)
     async def cancel_session(session: str) -> str:
         """Stop the turn a session is running. The session stays and can be prompted again."""
         return await _run(fleet.cancel_session(session))
+
+
+def _with(result_json: str, next_step: str | None) -> str:
+    """A status, with a line for the model on what happened or what to do next."""
+    result = json.loads(result_json)
+    if next_step:
+        result["next"] = next_step
+    return json.dumps(result, indent=2)
 
 
 def http_app(

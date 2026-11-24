@@ -35,7 +35,7 @@ from ahp_client.api import ClientContext
 from ahp_client.client import actions
 from ahp_protocol import AhpError
 
-__all__ = ["LONE_HOST", "Fleet", "FleetError", "folder_uri"]
+__all__ = ["LONE_HOST", "Fleet", "FleetError", "describe", "folder_uri", "plain"]
 
 #: What a lone host (no gateway in front) is called in the tools.
 LONE_HOST: Final = "host"
@@ -284,6 +284,71 @@ class Fleet:
         await chat.cancel()
         return f"Cancelled the turn {uri} was running."
 
+    # ─── what a session waits on, and answering it ───────────────────────
+    #
+    # These answer for the user. The server calls them only with what the user
+    # gave in the MCP client's own prompt; no tool takes an answer from the
+    # model.
+
+    async def waiting(self, uri: str) -> list[dict[str, Any]]:
+        """The session's open requests that need a person, in the order raised."""
+        _, session = await self._session(uri)
+        return [dict(e) for e in session.pending_inputs() if _awaits_person(e)]
+
+    async def _open(self, uri: str, entry_id: str) -> tuple[Session, dict[str, Any]] | None:
+        _, session = await self._session(uri)
+        for entry in session.pending_inputs():
+            if str(entry.get("id", "")) == entry_id:
+                return session, dict(entry)
+        return None
+
+    async def confirm_tool(
+        self,
+        uri: str,
+        entry_id: str,
+        *,
+        approved: bool,
+        option_id: str | None = None,
+        note: str | None = None,
+    ) -> bool:
+        """Approve or deny a tool call. False when it was no longer open."""
+        found = await self._open(uri, entry_id)
+        if found is None:
+            return False
+        session, entry = found
+        session.responder.confirm_tool(
+            entry,
+            approved=approved,
+            option_id=option_id,
+            reason_message=note or None,
+        )
+        return True
+
+    async def confirm_result(self, uri: str, entry_id: str, *, approved: bool) -> bool:
+        """Keep or discard a tool's result. False when it was no longer open."""
+        found = await self._open(uri, entry_id)
+        if found is None:
+            return False
+        session, entry = found
+        session.responder.confirm_result(entry, approved=approved)
+        return True
+
+    async def answer_input(self, uri: str, entry_id: str, answers: Mapping[str, Any]) -> bool:
+        """Answer an agent's question. False when it was no longer open."""
+        found = await self._open(uri, entry_id)
+        if found is None:
+            return False
+        session, entry = found
+        session.responder.answer(entry, answers=answers)
+        return True
+
+    async def settled(self, uri: str, entry_id: str, timeout: float = 2.0) -> None:
+        """Give the host a moment to take an answered request off the session."""
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
+        while loop.time() < deadline and await self._open(uri, entry_id) is not None:
+            await asyncio.sleep(_POLL_SECONDS)
+
 
 # ─── reading the mirror ──────────────────────────────────────────────────
 #
@@ -304,11 +369,12 @@ def status(client: Client, session_uri: str) -> dict[str, Any]:
     session = client.mirror.state(session_uri)
     session = session if isinstance(session, Mapping) else {}
     chat = _chat_state(client, session_uri)
-    waiting = [
-        str(entry.get("kind"))
+    open_requests = [
+        entry
         for entry in session.get("inputNeeded") or []
-        if isinstance(entry, Mapping)
+        if isinstance(entry, Mapping) and _awaits_person(entry)
     ]
+    waiting = [str(entry.get("kind")) for entry in open_requests]
     turns = chat.get("turns") or []
     last = turns[-1] if turns and isinstance(turns[-1], Mapping) else {}
     if waiting:
@@ -327,7 +393,43 @@ def status(client: Client, session_uri: str) -> dict[str, Any]:
         entry["title"] = title
     if waiting:
         entry["waiting_on"] = waiting
+        entry["asks"] = describe(open_requests[0])
     return entry
+
+
+def _awaits_person(entry: Mapping[str, Any]) -> bool:
+    """`toolClientExecution` asks a client to run a tool; it waits on nobody."""
+    return entry.get("kind") != "toolClientExecution"
+
+
+def plain(value: Any) -> str:
+    """A `StringOrMarkdown` as text."""
+    if isinstance(value, Mapping):
+        value = value.get("markdown")
+    return value.strip() if isinstance(value, str) else ""
+
+
+def describe(entry: Mapping[str, Any]) -> str:
+    """One line on what an open request asks, for the model to pass on."""
+    kind = entry.get("kind")
+    if kind == "chatInput":
+        request = entry.get("request")
+        request = request if isinstance(request, Mapping) else {}
+        questions = [q for q in request.get("questions") or [] if isinstance(q, Mapping)]
+        text = plain(request.get("message"))
+        if not text and questions:
+            text = plain(questions[0].get("message"))
+        return f"a question: {text}" if text else "a question"
+    call = entry.get("toolCall")
+    call = call if isinstance(call, Mapping) else {}
+    name = plain(call.get("confirmationTitle")) or plain(call.get("displayName"))
+    name = name or str(call.get("toolName") or "a tool")
+    if kind == "toolAuthentication":
+        return f"a sign-in for {name}"
+    if call.get("status") == "pending-result-confirmation":
+        return f"a review of the result of {name}"
+    action = plain(call.get("invocationMessage"))
+    return f"permission to run {name}" + (f": {action}" if action else "")
 
 
 def transcript(turn: Mapping[str, Any]) -> list[str]:
